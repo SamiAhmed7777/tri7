@@ -1,0 +1,8 @@
+[Unit]
+Description=tri7d healthcheck: stale-state gate, restarts tri7d on failure
+# The follower rewrites tipstate.json every 30s while alive; if the write age
+# exceeds --max-write-age (or state unreadable) the follower is wedged or dead
+# -> restart it. Runs on a timer (tri7d-health.timer, every 5 min).
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7 --max-write-age 600 > /dev/null 2>&1 || { echo "tri7d healthcheck FAILED (rc=$?) — restarting tri7d"; systemctl try-restart tri7d.service; exit 1; }'

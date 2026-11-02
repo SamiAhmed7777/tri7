@@ -54,8 +54,8 @@ use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 
 use tri7_core::consensus::{
-    block_is_proof_of_stake, check_pos_block_signature, check_pow_block_signature,
-    max_time_drift, tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
+    block_is_proof_of_stake, check_pos_block_signature, check_pow_block_signature, max_time_drift,
+    tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
 };
 use tri7_core::difficulty::{get_next_target_required, set_compact};
 use tri7_core::kernel::{
@@ -87,7 +87,12 @@ fn now_secs() -> u64 {
 }
 
 fn now_iso() -> String {
-    let secs = now_secs() as i64;
+    iso_from_secs(now_secs() as i64)
+}
+
+/// Civil-from-days UTC formatting for an arbitrary unix timestamp (used by
+/// --status to report the tipstate file's on-disk mtime as filesystem truth).
+fn iso_from_secs(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -139,7 +144,10 @@ impl Rpc {
         Rpc {
             host: host.to_string(),
             port,
-            auth_basic: format!("Basic {}", base64_encode(format!("{}:{}", user, pass).as_bytes())),
+            auth_basic: format!(
+                "Basic {}",
+                base64_encode(format!("{}:{}", user, pass).as_bytes())
+            ),
         }
     }
 
@@ -264,6 +272,8 @@ struct TipStateFile {
     height: u64,
     blockhash: String, // display hex — required keys {height, blockhash}
     updated_utc: String,
+    #[serde(default)]
+    last_advance_utc: String, // bumped ONLY on a real tip-height advance; "" = pre-5a state (unknown)
     window_base: u64,
     entries: Vec<EntryRec>,
     blocks: Vec<BlockRec>,
@@ -349,6 +359,12 @@ struct ChainState {
     pending_headers: HashMap<Hash, Block>, // announced headers awaiting blocks
     tip_height: u64,
     tip_hash: Hash,
+    /// last observed daemon tip (getblockcount); refreshed each poll tick,
+    /// persisted on every state write so --status can report it offline
+    daemon_tip: Option<i64>,
+    /// wall clock of the last REAL tip-height advance; the periodic 30s state
+    /// writes deliberately do NOT bump this (updated_utc/mtime do)
+    last_advance_utc: String,
 }
 
 impl ChainState {
@@ -413,15 +429,15 @@ impl ChainState {
             self.records.drain(..excess_rec);
         }
         let tip_rel = self.rel(self.tip_height);
-        self.utxo
-            .trim(tip_rel.saturating_sub(WINDOW_BLOCKS + 200));
+        self.utxo.trim(tip_rel.saturating_sub(WINDOW_BLOCKS + 200));
     }
 
-    fn to_file(&self, daemon_tip: Option<i64>) -> TipStateFile {
+    fn to_file(&self) -> TipStateFile {
         TipStateFile {
             height: self.tip_height,
             blockhash: tri7_core::p2p::internal_to_display(&self.tip_hash),
             updated_utc: now_iso(),
+            last_advance_utc: self.last_advance_utc.clone(),
             window_base: self.base,
             entries: self
                 .entries
@@ -442,7 +458,7 @@ impl ChainState {
                 })
                 .collect(),
             blocks: self.records.clone(),
-            daemon_tip,
+            daemon_tip: self.daemon_tip,
         }
     }
 
@@ -456,7 +472,10 @@ impl ChainState {
                 && tx.vin[0].prev_n == u32::MAX;
             if !coinbase {
                 for vin in &tx.vin {
-                    spends.push((tri7_core::p2p::internal_to_display(&vin.prev_hash), vin.prev_n));
+                    spends.push((
+                        tri7_core::p2p::internal_to_display(&vin.prev_hash),
+                        vin.prev_n,
+                    ));
                 }
             }
             for (n, vout) in tx.vout.iter().enumerate() {
@@ -494,6 +513,9 @@ struct Config {
     backfill_headers: usize,
     backfill_blocks: usize,
     reseed: bool,
+    forever: bool,
+    status: bool,
+    max_write_age: u64,
     summary_out: Option<PathBuf>,
 }
 
@@ -501,7 +523,17 @@ fn usage() -> ! {
     eprintln!(
         "usage: follow_tip [--daemon IP:PORT] [--rpc-port N] [--conf PATH]\n\
          [--archive PATH] [--state-dir DIR] [--seconds N] [--backfill N]\n\
-         [--backfill-blocks N] [--reseed] [--summary PATH]"
+         [--backfill-blocks N] [--reseed] [--forever] [--status]\n\
+         [--max-write-age SECS] [--summary PATH]\n\
+         \n\
+         --forever: run the follow loop with no deadline (daemon mode; systemd\n\
+         restarts on failure).\n\
+         --status: healthcheck — print tip height + advance/write times as JSON.\n\
+         No network, no conf needed. Exit 0 healthy; 3 when the state file is\n\
+         unreadable OR stale (state-write age > --max-write-age, default 600:\n\
+         the loop rewrites tipstate.json every 30s while alive, so a big age\n\
+         means the follower is wedged or dead). last_advance_utc bumps only on\n\
+         real tip-height advances; updated_utc/state mtime bump every write."
     );
     std::process::exit(EXIT_USAGE);
 }
@@ -518,6 +550,9 @@ fn parse_args() -> Config {
         backfill_headers: 3000,
         backfill_blocks: 100,
         reseed: false,
+        forever: false,
+        status: false,
+        max_write_age: 600,
         summary_out: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -541,6 +576,11 @@ fn parse_args() -> Config {
                 cfg.backfill_blocks = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
             }
             "--reseed" => cfg.reseed = true,
+            "--forever" => cfg.forever = true,
+            "--status" => cfg.status = true,
+            "--max-write-age" => {
+                cfg.max_write_age = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
             "--summary" => cfg.summary_out = Some(PathBuf::from(need(&mut i, &args))),
             _ => usage(),
         }
@@ -550,8 +590,12 @@ fn parse_args() -> Config {
 }
 
 fn read_rpc_creds(cfg: &Config) -> (String, String) {
-    let text = std::fs::read_to_string(&cfg.conf_path)
-        .unwrap_or_else(|e| die(EXIT_USAGE, &format!("read conf {}: {}", cfg.conf_path.display(), e)));
+    let text = std::fs::read_to_string(&cfg.conf_path).unwrap_or_else(|e| {
+        die(
+            EXIT_USAGE,
+            &format!("read conf {}: {}", cfg.conf_path.display(), e),
+        )
+    });
     let mut user = String::new();
     let mut pass = String::new();
     for line in text.lines() {
@@ -580,6 +624,15 @@ fn write_state_atomic(cfg: &Config, st: &TipStateFile) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(st).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, text).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    // the state file holds no secrets but is nobody's business but the
+    // service's: pin 0600 on the tmp BEFORE the rename, or the default
+    // 0644 from fs::write clobbers the mode on every atomic swap
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {}: {}", tmp.display(), e))?;
+    }
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename state: {}", e))?;
     Ok(())
 }
@@ -667,12 +720,7 @@ impl Session {
         })
     }
 
-    fn send(
-        &mut self,
-        command: &str,
-        payload: &[u8],
-        stats: &mut Stats,
-    ) -> Result<(), String> {
+    fn send(&mut self, command: &str, payload: &[u8], stats: &mut Stats) -> Result<(), String> {
         let frame = tri7_core::p2p::encode_message(command, payload)?;
         self.stream
             .write_all(&frame)
@@ -731,8 +779,14 @@ fn handshake(
         port.parse().map_err(|_| "bad daemon port")?,
         tri7_core::p2p::NODE_NETWORK,
     );
-    let addr_me =
-        tri7_core::p2p::WireAddr::ipv4(127, 0, 0, 1, tri7_core::p2p::DEFAULT_PORT, tri7_core::p2p::NODE_NETWORK);
+    let addr_me = tri7_core::p2p::WireAddr::ipv4(
+        127,
+        0,
+        0,
+        1,
+        tri7_core::p2p::DEFAULT_PORT,
+        tri7_core::p2p::NODE_NETWORK,
+    );
     let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
     let vp = tri7_core::p2p::VersionPayload {
         version: tri7_core::p2p::PROTOCOL_VERSION,
@@ -835,11 +889,21 @@ fn rpc_seed_window(
     while idx < hashes_display.len() {
         let end = (idx + BATCH).min(hashes_display.len());
         let calls: Vec<_> = (idx as u64..end as u64)
-            .map(|i| (i, "getblock", serde_json::json!([hashes_display[i as usize]])))
+            .map(|i| {
+                (
+                    i,
+                    "getblock",
+                    serde_json::json!([hashes_display[i as usize]]),
+                )
+            })
             .collect();
         let items = rpc.call_batch(calls)?;
         if items.len() != end - idx {
-            return Err(format!("batch size mismatch {} != {}", items.len(), end - idx));
+            return Err(format!(
+                "batch size mismatch {} != {}",
+                items.len(),
+                end - idx
+            ));
         }
         for (slot, item) in items.iter().enumerate() {
             let i = idx + slot;
@@ -850,12 +914,10 @@ fn rpc_seed_window(
             // the daemon flag string carries "stake-modifier" when the block
             // generated a new modifier (main.h GetFlagStr)
             let generated = flags.contains("stake-modifier");
-            let modifier =
-                u64::from_str_radix(b["modifier"].as_str().unwrap_or(""), 16)
-                    .map_err(|e| format!("h{}: modifier hex: {}", h, e))?;
-            let checksum =
-                u32::from_str_radix(b["modifierchecksum"].as_str().unwrap_or(""), 16)
-                    .map_err(|e| format!("h{}: checksum hex: {}", h, e))?;
+            let modifier = u64::from_str_radix(b["modifier"].as_str().unwrap_or(""), 16)
+                .map_err(|e| format!("h{}: modifier hex: {}", h, e))?;
+            let checksum = u32::from_str_radix(b["modifierchecksum"].as_str().unwrap_or(""), 16)
+                .map_err(|e| format!("h{}: checksum hex: {}", h, e))?;
             let proof = if is_pos {
                 tri7_core::p2p::display_to_internal(b["proofhash"].as_str().unwrap_or(""))
                     .map_err(|e| format!("h{}: proofhash: {}", h, e))?
@@ -864,7 +926,10 @@ fn rpc_seed_window(
             };
             let rt = b["time"].as_i64().unwrap_or(-1);
             if rt != times[i] as i64 {
-                return Err(format!("h{}: rpc time {} != p2p-verified time {}", h, rt, times[i]));
+                return Err(format!(
+                    "h{}: rpc time {} != p2p-verified time {}",
+                    h, rt, times[i]
+                ));
             }
             if !anchored {
                 if checksum != 0 {
@@ -900,7 +965,9 @@ fn rpc_seed_window(
         idx = end;
     }
     if !anchored {
-        return Err("no non-zero modifier checksum in window — cannot anchor the chain".to_string());
+        return Err(
+            "no non-zero modifier checksum in window — cannot anchor the chain".to_string(),
+        );
     }
     log(&format!(
         "rpc seed: checksum-chain anchored at h{}, {} steps verified to the tip",
@@ -1067,8 +1134,10 @@ fn validate_block(
                 stats.kernel_enforced += 1;
             }
             None => {
-                let info =
-                    rpc.call("getblock", serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]))?;
+                let info = rpc.call(
+                    "getblock",
+                    serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]),
+                )?;
                 let ph = info["proofhash"]
                     .as_str()
                     .ok_or_else(|| format!("h{}: no proofhash in rpc", h))?;
@@ -1143,12 +1212,20 @@ fn advance_with_block(
             .map_err(|e| format!("h{}: modifier computation: {}", h, e))?;
     let entropy = hash[0] & 1;
     let flags = index_flags(is_pos, entropy, generated);
-    let prev_cs = *st.checksums.last().ok_or("empty checksum chain in advance")?;
+    let prev_cs = *st
+        .checksums
+        .last()
+        .ok_or("empty checksum chain in advance")?;
     let cs = stake_modifier_checksum(Some(prev_cs), flags, &outcome.proof, modifier);
 
-    let info = rpc.call("getblock", serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]))?;
+    let info = rpc.call(
+        "getblock",
+        serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]),
+    )?;
     let daemon_cs = u32::from_str_radix(
-        info["modifierchecksum"].as_str().ok_or("no modifierchecksum")?,
+        info["modifierchecksum"]
+            .as_str()
+            .ok_or("no modifierchecksum")?,
         16,
     )
     .map_err(|e| e.to_string())?;
@@ -1176,6 +1253,10 @@ fn advance_with_block(
         hash_proof_of_stake: outcome.proof,
     });
     st.checksums.push(cs);
+    if h > st.tip_height {
+        // real tip advance — distinct from the periodic 30s state writes
+        st.last_advance_utc = now_iso();
+    }
     st.tip_height = h;
     st.tip_hash = hash;
     st.trim();
@@ -1263,6 +1344,10 @@ fn load_state(cfg: &Config) -> Result<ChainState, String> {
         pending_headers: HashMap::new(),
         tip_height,
         tip_hash,
+        daemon_tip: f.daemon_tip,
+        // "" (pre-5a file) stays "" until the first real advance bumps it —
+        // honest: no advance observed since this state was created
+        last_advance_utc: f.last_advance_utc,
     })
 }
 
@@ -1327,7 +1412,10 @@ fn seed_from_network(
         for i in next_i..chunk_end {
             awaiting.insert(expect_hashes[i], i);
         }
-        let inv: Vec<(u32, Hash)> = awaiting.keys().map(|h| (tri7_core::p2p::MSG_BLOCK, *h)).collect();
+        let inv: Vec<(u32, Hash)> = awaiting
+            .keys()
+            .map(|h| (tri7_core::p2p::MSG_BLOCK, *h))
+            .collect();
         sess.send("getdata", &tri7_core::p2p::build_getdata(&inv), stats)?;
         let mut got: HashMap<usize, Block> = HashMap::new();
         let deadline = Instant::now() + Duration::from_secs(90);
@@ -1362,7 +1450,12 @@ fn seed_from_network(
         for i in next_i..chunk_end {
             let b = match got.remove(&i) {
                 Some(b) => b,
-                None => return Err(format!("seed: block h{} missing from batch", base + i as u64)),
+                None => {
+                    return Err(format!(
+                        "seed: block h{} missing from batch",
+                        base + i as u64
+                    ))
+                }
             };
             let h_abs = base + i as u64;
             if b.hash() != expect_hashes[i] {
@@ -1373,7 +1466,11 @@ fn seed_from_network(
                     hashes_display[i + 1]
                 ));
             }
-            let want_prev = if i == 0 { link_prev } else { expect_hashes[i - 1] };
+            let want_prev = if i == 0 {
+                link_prev
+            } else {
+                expect_hashes[i - 1]
+            };
             if b.prev_hash != want_prev {
                 return Err(format!(
                     "seed h{}: linkage broken (prev {} want {})",
@@ -1389,7 +1486,11 @@ fn seed_from_network(
         }
         next_i = chunk_end;
         if next_i % 1000 == 0 || next_i == expect_hashes.len() {
-            log(&format!("seed: {}/{} blocks fetched+verified via P2P", next_i, expect_hashes.len()));
+            log(&format!(
+                "seed: {}/{} blocks fetched+verified via P2P",
+                next_i,
+                expect_hashes.len()
+            ));
         }
     }
 
@@ -1482,8 +1583,10 @@ fn seed_from_network(
         pending_headers: HashMap::new(),
         tip_height: tip,
         tip_hash: expect_hashes[expect_hashes.len() - 1],
+        daemon_tip: Some(daemon_tip),
+        last_advance_utc: now_iso(), // seeding anchored/advanced the tip
     };
-    let file = st.to_file(Some(daemon_tip));
+    let file = st.to_file();
     Ok((st, file))
 }
 
@@ -1590,7 +1693,10 @@ fn run_backfill(
     }
     log(&format!("backfill: requesting {} full blocks", picks.len()));
     for chunk in picks.chunks(GETDATA_BATCH) {
-        let inv: Vec<(u32, Hash)> = chunk.iter().map(|(h, _)| (tri7_core::p2p::MSG_BLOCK, *h)).collect();
+        let inv: Vec<(u32, Hash)> = chunk
+            .iter()
+            .map(|(h, _)| (tri7_core::p2p::MSG_BLOCK, *h))
+            .collect();
         sess.send("getdata", &tri7_core::p2p::build_getdata(&inv), stats)?;
     }
     let mut want: HashMap<Hash, u64> = picks.into_iter().collect();
@@ -1604,7 +1710,8 @@ fn run_backfill(
                     stats.blocks_received += 1;
                     let mut r = Reader::new(&msg.payload);
                     let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
-                    r.expect_done().map_err(|e| format!("block trailing: {}", e))?;
+                    r.expect_done()
+                        .map_err(|e| format!("block trailing: {}", e))?;
                     let hash = b.hash();
                     let height = match want.remove(&hash) {
                         Some(h) => h,
@@ -1739,7 +1846,8 @@ fn handle_message(
             stats.blocks_received += 1;
             let mut r = Reader::new(&msg.payload);
             let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
-            r.expect_done().map_err(|e| format!("block trailing: {}", e))?;
+            r.expect_done()
+                .map_err(|e| format!("block trailing: {}", e))?;
             let hash = b.hash();
             let links_tip = b.prev_hash == st.tip_hash;
             let height_abs = if links_tip { st.tip_height + 1 } else { 0 };
@@ -1761,13 +1869,17 @@ fn handle_message(
                 advance_with_block(st, rpc, stats, &b, &paths)?;
                 stats.blocks_validated_live += 1;
                 outstanding.remove(&hash);
-                let file = st.to_file(None);
+                let file = st.to_file();
                 write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
                 log(&format!(
                     "TIP ADVANCE → h{} {} (kernel {})",
                     st.tip_height,
                     tri7_core::p2p::internal_to_display(&st.tip_hash),
-                    if paths.kernel_enforced { "enforced" } else { "seeded" }
+                    if paths.kernel_enforced {
+                        "enforced"
+                    } else {
+                        "seeded"
+                    }
                 ));
             } else if outstanding.contains_key(&hash) {
                 // requested block that no longer extends the tip — skip
@@ -1795,8 +1907,69 @@ fn handle_message(
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
+/// --status: healthcheck — tip height + advance/write times as JSON.
+/// Pure file read: no RPC creds, no P2P session, no conf access.
+/// Exit 0 healthy; 3 (EXIT_VALIDATE) when the state file is unreadable OR
+/// stale (state-write age > --max-write-age). Two distinct clocks:
+///   - last_advance_utc: bumped ONLY on a real tip-height advance (null here
+///     on a static chain or pre-5a state — honest "never advanced")
+///   - updated_utc / state_mtime_utc: bumped by the loop's periodic 30s
+///     writes; staleness of THIS clock is the liveness signal
+fn status_exit(cfg: &Config) -> ! {
+    let path = state_path(cfg);
+    let read = || -> Result<serde_json::Value, String> {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let f: TipStateFile = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let mtime = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .modified()
+            .map_err(|e| e.to_string())?;
+        let mtime_secs = mtime
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64;
+        let age = now_secs() as i64 - mtime_secs;
+        // future-dated mtime (clock skew, restored backup) is not healthy —
+        // treat any negative age as stale too
+        let stale = age < 0 || age > cfg.max_write_age as i64;
+        let last_advance = if f.last_advance_utc.is_empty() {
+            None
+        } else {
+            Some(f.last_advance_utc.clone())
+        };
+        Ok(serde_json::json!({
+            "height": f.height,
+            "blockhash": f.blockhash,
+            "updated_utc": f.updated_utc,
+            "last_advance_utc": last_advance,
+            "state_mtime_utc": iso_from_secs(mtime_secs),
+            "seconds_since_state_write": age,
+            "max_write_age": cfg.max_write_age,
+            "stale": stale,
+            "window_base": f.window_base,
+            "window_entries": f.entries.len(),
+            "daemon_tip": f.daemon_tip,
+            "at_daemon_tip": f.daemon_tip.map_or(false, |dt| dt >= 0 && f.height == dt as u64),
+        }))
+    };
+    match read() {
+        Ok(v) => {
+            let stale = v.get("stale").and_then(|s| s.as_bool()).unwrap_or(true);
+            println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            std::process::exit(if stale { EXIT_VALIDATE } else { 0 });
+        }
+        Err(e) => {
+            eprintln!("status: {}: {}", path.display(), e);
+            std::process::exit(EXIT_VALIDATE);
+        }
+    }
+}
+
 fn main() {
     let cfg = parse_args();
+    if cfg.status {
+        status_exit(&cfg); // early: no conf read, no network
+    }
     let (user, pass) = read_rpc_creds(&cfg);
     let rpc = tri7_rpc(&cfg, &user, &pass);
     let mut stats = Stats::default();
@@ -1839,6 +2012,9 @@ fn main() {
         .ok()
         .and_then(|v| v.as_i64())
         .unwrap_or(-1);
+    if daemon_tip >= 0 {
+        st.daemon_tip = Some(daemon_tip); // persisted on every state write
+    }
     log(&format!(
         "state: tip h{} {} · daemon getblockcount {}",
         st.tip_height,
@@ -1850,12 +2026,23 @@ fn main() {
     if cfg.backfill_headers > 0 {
         if let Err(e) = run_backfill(&mut sess, &st, &rpc, &mut stats, &cfg) {
             sess.shutdown();
-            finish(&cfg, &st, &stats, &rpc, EXIT_PROTOCOL, &format!("backfill: {}", e));
+            finish(
+                &cfg,
+                &st,
+                &stats,
+                &rpc,
+                EXIT_PROTOCOL,
+                &format!("backfill: {}", e),
+            );
         }
     }
 
     // 4. live follow loop
-    let deadline = Instant::now() + Duration::from_secs(cfg.seconds);
+    let deadline = if cfg.forever {
+        None // daemon mode: no deadline, run until signalled (systemd restarts on failure)
+    } else {
+        Some(Instant::now() + Duration::from_secs(cfg.seconds))
+    };
     let mut last_poll = Instant::now() - Duration::from_secs(POLL_SECS);
     let mut last_traffic = Instant::now();
     let mut poll_parity = false;
@@ -1864,7 +2051,7 @@ fn main() {
     let mut last_state_write = Instant::now();
 
     loop {
-        if Instant::now() >= deadline {
+        if deadline.map_or(false, |d| Instant::now() >= d) {
             break;
         }
 
@@ -1895,6 +2082,15 @@ fn main() {
                 continue;
             }
             stats.polls += 1;
+            // refresh the observed daemon tip each poll so persisted state
+            // carries it (--status reads it back with no network access)
+            if let Ok(v) = rpc.call("getblockcount", serde_json::json!([])) {
+                if let Some(dt) = v.as_i64() {
+                    if dt >= 0 {
+                        st.daemon_tip = Some(dt);
+                    }
+                }
+            }
             log(&format!(
                 "poll #{}: tip h{} · rx={} msgs tx={} msgs · blocks {}/{} received+{} hist validated · kernels {}/{} enforced/seeded",
                 stats.polls,
@@ -1925,7 +2121,11 @@ fn main() {
                 }
             }
             if !batch.is_empty() {
-                if let Err(e) = sess.send("getdata", &tri7_core::p2p::build_getdata(&batch), &mut stats) {
+                if let Err(e) = sess.send(
+                    "getdata",
+                    &tri7_core::p2p::build_getdata(&batch),
+                    &mut stats,
+                ) {
                     log(&format!("send getdata failed: {} — reconnecting", e));
                     sess.shutdown();
                     stats.reconnects += 1;
@@ -1998,7 +2198,7 @@ fn main() {
 
         // persist tip state periodically
         if last_state_write.elapsed() >= Duration::from_secs(30) {
-            let file = st.to_file(None);
+            let file = st.to_file();
             write_state_atomic(&cfg, &file)
                 .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
             last_state_write = Instant::now();
@@ -2008,7 +2208,7 @@ fn main() {
     }
 
     sess.shutdown();
-    let file = st.to_file(None);
+    let file = st.to_file();
     write_state_atomic(&cfg, &file)
         .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
     finish(&cfg, &st, &stats, &rpc, 0, "run complete");

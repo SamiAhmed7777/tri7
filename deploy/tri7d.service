@@ -1,0 +1,41 @@
+[Unit]
+Description=tri7 tip-follower daemon (follow_tip, read-only P2P client)
+Documentation=file:/root/tri7/HANDOFF.md
+After=network-online.target trianglesd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tri7
+Group=tri7
+ExecStart=/opt/tri7/bin/follow_tip --daemon 127.0.0.1:24113 --rpc-port 19112 --conf /etc/tri7/triangles.conf --state-dir /var/lib/tri7 --forever
+# Healthcheck (manual/cron):
+#   /opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7
+#     JSON: tip height, last_advance_utc (real tip advances only),
+#     state-write age, daemon_tip, at_daemon_tip.
+#     exit 0 healthy; 3 unreadable state OR stale (write age > --max-write-age,
+#     default 600s -- the loop rewrites tipstate.json every 30s while alive).
+Restart=on-failure
+# Note: any non-zero exit (2 usage / 3 validation / 4 protocol / 5 seed) and
+# signal death trigger this restart; `systemctl stop` stays stopped.
+RestartSec=30
+# Footprint bound: measured peak RSS 12.7 MB (90s live run, 2026-11-02,
+# /usr/bin/time -v, full backfill + follow loop). 256M = ~20x headroom,
+# well under the 512M target and ~6x under the legacy 1.5 GB trianglesd.
+MemoryMax=256M
+# Hardening: outbound-only loopback P2P + RPC client; needs write access only
+# to its state dir; conf copy (not /root/.triangles) for RPC creds.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tri7
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

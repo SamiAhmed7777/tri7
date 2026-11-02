@@ -1,8 +1,38 @@
-# tri7 modern-client loop — session handoff (2026-11-02, phase 4)
+# tri7 modern-client loop — session handoff (2026-11-02, phase 5a)
 
 ## State
-Repo: /root/tri7 (Rust, phase 1a..2 committed; phase 3+4 UNCOMMITTED — do not commit without the codex gate).
+Repo: /root/tri7 (Rust, phases 1a..4 committed; phase 5a deploy — see below).
 Live chain ref: /root/.triangles (DNS2 daemon v6.2.6.7, RPC 19112, P2P 24113, tip 2204064 static since 2026-09-24, staking=0).
+
+## Phase 5a (2026-11-02): tri7d systemd packaging on DNS2 — DONE, judge grade B
+- follow_tip packaged as tri7d.service, RUNNING on DNS2: `systemctl enable --now` 2026-11-02 10:25 PST.
+  Unit /etc/systemd/system/tri7d.service (source-of-truth copy in deploy/): User=tri7 (system, nologin, uid 983),
+  ExecStart=/opt/tri7/bin/follow_tip --daemon 127.0.0.1:24113 --rpc-port 19112 --conf /etc/tri7/triangles.conf
+  --state-dir /var/lib/tri7 --forever, Restart=on-failure RestartSec=30, MemoryMax=256M, ProtectSystem=strict +
+  ProtectHome=yes + ReadWritePaths=/var/lib/tri7 + PrivateTmp + kernel guards. Outbound-only loopback P2P+RPC;
+  no staking, no broadcast, no listening sockets.
+- Layout: /opt/tri7/bin/follow_tip (root 0755, sha256 9f131ec75189a50a…b3); /var/lib/tri7/tipstate.json
+  (tri7 0600, seeded from /root/tri7/tipstate.json @h2204064, window_base 2199465); /etc/tri7/triangles.conf
+  (root:tri7 0640 FULL conf copy — tri7 has NO /root access; archive arg unused by follow_tip). Idempotent
+  installer deploy/install_tri7d.sh; deploy/ holds unit copies + evidence + notes.
+- follow_tip.rs changes: --status healthcheck (file-only, JSON: height, last_advance_utc, state-write age,
+  daemon_tip, at_daemon_tip; exit 0 healthy / 3 unreadable-or-stale via --max-write-age default 600 — the 30s
+  write cadence is the liveness signal on a static chain; last_advance_utc bumps ONLY on real tip advances,
+  serde(default) back-compat), --forever (no run deadline — required for Restart=on-failure semantics),
+  daemon_tip persisted on every write (refreshed each poll tick), atomic write pins 0600 on tmp before rename
+  (v1 bug: fs::write 0644 clobbered mode every 30s), negative-age guard. 102/102 tests, rustfmt clean.
+- Wired healthcheck: tri7d-health.timer fires tri7d-health.service every 5 min; failed check →
+  `systemctl try-restart tri7d` (wedged-but-running follower auto-recovered). First fire 10:30 Result=success.
+- Verification: active/running, NRestarts 0; tipstate mtime 10:26:22 → 10:27:22 (60s-apart checks), write age ≤30s
+  throughout, height 2204064 == daemon getblockcount (at_daemon_tip true — chain static, staking off, so height
+  CANNOT advance; state refresh + polls #1..#5+ = liveness evidence); RSS 10.4 MB current / 13.5 MB peak
+  (vs MemoryMax 256M; legacy trianglesd 1494 MB); legacy trianglesd UNAFFECTED — same PID 3315888 (running since
+  05:44:51, before any tri7d work), RSS/ports (24113/19112) unchanged, api/bootstrap/explorer services active.
+- Codex gate (kind=deploy): v1 grade C (status semantics conflated advance vs write clocks, no staleness exit,
+  daemon_tip null) → v2 grade D (judge-sandbox uid-mapping artifact claimed perms broken [real perms were fine —
+  see deploy/tri7d_deploy_evidence.txt numeric ids]; REAL: 0600 clobber + no recurring health wiring) →
+  v3 grade B, URN urn:ump:gexqh6ra3uag4qmylgpjxvoc7vzwifrgtzs5dbnlja46chjt5fwa. Judge sandbox note: codex exec
+  user-namespace maps uid 983→nobody and can't read 0700 dirs — attach verbatim numeric-id evidence files.
 
 ## Phase 4 (2026-11-02): staking mint (coinstake creation) — DONE, dry-run only, no network
 - src/stake.rs: exact port of the mint stack — CreateCoinStake (wallet.cpp:2225-2441: min-age coin filter vs block time, backward per-second probes n<min(searchInterval,60) over CheckStakeKernelHash with the fixed-600s modifier walk from the INPUT's block, Solver key resolution (P2PK kernel reuses the kernel script, P2PKH pays bare-P2PK of the wallet key), split rule nStakeSplitAge=10800 (vout==3 → cent-rounded half), combine pass nStakeCombineThreshold=20*COIN keyed on PREV-TX-time weights, coin-age reward GetCoinAge main.cpp:3082-3140 (cent-seconds per input, containing-BLOCK-time min-age skip), GetProofOfStakeReward main.cpp:1539-1560 (CBigNum order: (nCoinAge*330000/365)/COIN + fees), per-input SignSignature via spend::, size cap MAX_BLOCK_SIZE_GEN/5), CreateNewBlock PoS template (coinbase height scriptSig push_script_int64 minimal-signed-LE + empty COINBASE_FLAGS, SetEmpty output, nBits=GetNextTargetRequired(prev,true), nNonce=0), SignBlock timestamp protocol (coinstake.nTime >= max(MTP+1, PastDrift), block time == coinstake time, future-tx erase, vtx[1] insert), vchBlockSig = bare DER ECDSA over the Hash9 header with the coinstake output key, and validate_dryrun_block — the full local acceptance path (link/structure/merkle/MTP+drift/nBits/kernel via check_proof_of_stake/block sig/finality/ConnectBlock reward gate/size).
@@ -45,9 +75,9 @@ Live chain ref: /root/.triangles (DNS2 daemon v6.2.6.7, RPC 19112, P2P 24113, ti
 ## Next (in order)
 2 ✅ P2P follower (committed 614236f grade B).
 3 ✅ wallet spend (committed ba35f06 grade B): spend.rs (SignatureHash 0.1.6 scheme + FindAndDelete + DER + Solver builders + ConnectInputs checks), 799/799 historical sigs verified, corpus fixture in-repo, real-UTXO dry-run signed+verified broadcast=false, PUSHDATA boundary tests.
-4 ✅ staking mint (committed? NO — uncommitted; stake.rs + stake_mint.rs, dry-run self-validated, MAX_TRI_PROOF_OF_STAKE 100× bug fixed and chain-verified).
-5: tri7d daemon packaging (systemd unit running follow_tip loop on DNS2) + staged deploys sami-pc → DNS3 → laptop.
-Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B — all codex-gated.
+4 ✅ staking mint dry-run (committed 1d1a982 grade B): stake.rs CreateCoinStake/SignBlock/GetCoinAge/reward ports; LATENT BUG fixed (MAX_TRI_PROOF_OF_STAKE 33,000,000→330,000, chain-verified 1038/1038 live coinstakes); kernel SOLVED at live tip (362 attempts), candidate block fd5e471d… self-validated; 102/102 tests.
+5 ✅ DNS2 packaging (this phase, grade B). Remaining: staged deploys sami-pc → DNS3 → laptop. LIVE STAKING (broadcasting minted blocks) = Sami's explicit go/no-go.
+Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
 
 ## Gotchas
 - Kimi CLI: `kimi -p` works; --auto/--yolo cannot combine with -p.
