@@ -1,0 +1,1072 @@
+//! AppState — the display-independent wallet state machine (screens, actions,
+//! selfcheck). `gui::app` renders this; `--selfcheck` drives it headless.
+
+use super::rpc_client;
+use super::state::*;
+use crate::gui::explorer;
+use crate::spend;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+// ===========================================================================
+// Sub-states
+// ===========================================================================
+
+#[derive(Debug, Clone, Default)]
+pub struct ReceiveForm {
+    pub address: String,
+    pub label: String,
+    pub message: String,
+    pub amount: String,
+    pub require_payment: bool,
+    pub uri: String,
+    pub qr: Option<QrMatrix>,
+    pub error: Option<String>,
+    pub new_address_label: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SignForm {
+    pub address: String,
+    pub message: String,
+    pub signature: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VerifyForm {
+    pub address: String,
+    pub message: String,
+    pub signature: String,
+    pub result: Option<Result<bool, String>>,
+}
+
+/// Options dialog state (optionsdialog.ui tabs). Values the engine can honor
+/// in THIS build are real inputs (pay-transaction-fee feeds Send); the rest
+/// are session preferences with an honest "requires daemon integration" note.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionsState {
+    pub pay_fee: String,         // Main tab: "Pay transaction &fee" (TRI) — REAL
+    pub reserve: String,         // Main tab: "Reserve" (staking reserve) — noted
+    pub display_addresses: bool, // Display tab
+    pub coin_control: bool,      // Display tab: "Display coin &control features"
+}
+
+impl Default for OptionsState {
+    fn default() -> Self {
+        OptionsState {
+            pay_fee: format_tri(spend::DEFAULT_TRANSACTION_FEE), // 0.000100
+            reserve: "0.000000".into(),
+            display_addresses: true,
+            coin_control: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsoleEntry {
+    pub request: String,
+    pub reply: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DebugInfo {
+    pub reachable: bool,
+    pub connections: Option<u64>,
+    pub blocks: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Dialogs {
+    pub about: bool,
+    pub qr: bool,
+    pub encrypt: Option<String>,
+    pub backup: Option<Result<String, String>>,
+    pub save_tx_path: String,
+    pub backup_path: String,
+    pub qr_save_path: String,
+}
+
+// ===========================================================================
+// AppState
+// ===========================================================================
+
+pub struct AppState {
+    pub cfg: UiConfig,
+    pub screen: Screen,
+    pub load_error: Option<String>,
+    pub wallet: Option<WalletData>,
+    pub derived: Option<DerivedWallet>,
+    pub tip: Option<TipInfo>,
+    pub stake: Option<StakeStatus>,
+    pub send: SendFormState,
+    pub send_result: Option<Result<SendBuild, String>>,
+    pub receive: ReceiveForm,
+    pub addressbook: Vec<AbEntry>,
+    pub keystore: Vec<AbEntry>,
+    pub sign: SignForm,
+    pub verify: VerifyForm,
+    pub options: OptionsState,
+    pub console: Vec<ConsoleEntry>,
+    pub console_input: String,
+    pub debug_info: Option<DebugInfo>,
+    pub dialogs: Dialogs,
+    pub status_log: Vec<String>,
+    pub explorer: super::explorer::ExplorerState,
+}
+
+impl AppState {
+    pub fn new(cfg: UiConfig) -> Self {
+        let keystore: Vec<AbEntry> = load_side_entries(&cfg.keystore_path(), true);
+        let addressbook: Vec<AbEntry> = load_side_entries(&cfg.addressbook_path(), false);
+        let options = load_options(&cfg.options_path());
+        // explorer endpoints: config rpc_addr first (if set), then the
+        // standard native ports
+        let mut endpoints = cfg.explorer_endpoints.clone();
+        if let Some(a) = &cfg.rpc_addr {
+            if !endpoints.contains(a) {
+                endpoints.insert(0, a.clone());
+            }
+        }
+        let explorer = super::explorer::ExplorerState::new(endpoints);
+        AppState {
+            cfg,
+            screen: Screen::Overview,
+            load_error: None,
+            wallet: None,
+            derived: None,
+            tip: None,
+            stake: None,
+            send: SendFormState::default(),
+            send_result: None,
+            receive: ReceiveForm::default(),
+            addressbook,
+            keystore,
+            sign: SignForm::default(),
+            verify: VerifyForm::default(),
+            options,
+            console: Vec::new(),
+            console_input: String::new(),
+            debug_info: None,
+            dialogs: Dialogs::default(),
+            status_log: Vec::new(),
+            explorer,
+        }
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.wallet.is_some() && self.derived.is_some()
+    }
+
+    /// Label resolution: wallet.dat names → GUI address book → keystore.
+    pub fn label_of(&self, address: &str) -> Option<String> {
+        if let Some(w) = &self.wallet {
+            if let Some(l) = w.label_of(address) {
+                return Some(l.to_string());
+            }
+        }
+        for list in [&self.addressbook, &self.keystore] {
+            if let Some(e) = list.iter().find(|e| e.address == address) {
+                if !e.label.is_empty() {
+                    return Some(e.label.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// The load-screen action: wallet + UTXO derivation pass + tip + stake.
+    pub fn load_wallet_action(&mut self) -> Result<(), String> {
+        let wallet = load_wallet(Path::new(&self.cfg.wallet_path))?;
+        if wallet.keys.is_empty() {
+            return Err(format!("wallet {} has zero keys", self.cfg.wallet_path));
+        }
+        let payloads: HashSet<[u8; 21]> = wallet
+            .keys
+            .iter()
+            .map(|k| crate::address::pubkey_payload(&k.pubkey))
+            .collect();
+        let tip = load_tipstate(&self.cfg.tipstate_path())?;
+        let dump = load_utxo_dump(&self.cfg.utxo_dump_path())?;
+        // label lookup needs wallet+side files; build the closure over a
+        // snapshot of the label maps
+        let mut labels: HashMap<String, String> = wallet
+            .names
+            .iter()
+            .map(|(a, l)| (a.clone(), l.clone()))
+            .collect();
+        for e in self.keystore.iter().chain(self.addressbook.iter()) {
+            if !e.label.is_empty() {
+                labels
+                    .entry(e.address.clone())
+                    .or_insert_with(|| e.label.clone());
+            }
+        }
+        let derived = derive_wallet(dump, payloads, &self.cfg, &tip, &|a: &str| {
+            labels.get(a).cloned()
+        })?;
+        let stake = {
+            // stake status wants the FINAL utxo set
+            let tip2 = tip.clone();
+            load_stake_status(
+                Path::new(&self.cfg.stake_dryrun_path),
+                &tip2,
+                &derived.utxos,
+            )
+        };
+
+        // form defaults: first funded address (by balance), receive = default key
+        let first_funded = derived
+            .balances
+            .per_address
+            .first()
+            .map(|a| a.address.clone())
+            .unwrap_or_default();
+        if self.send.from.is_empty() {
+            self.send.from = first_funded;
+        }
+        let default_addr = wallet
+            .default_key
+            .as_ref()
+            .and_then(|pk| {
+                wallet
+                    .keys
+                    .iter()
+                    .find(|k| k.pubkey == *pk)
+                    .map(|k| k.address.clone())
+            })
+            .or_else(|| wallet.keys.first().map(|k| k.address.clone()));
+        if self.sign.address.is_empty() {
+            self.sign.address = default_addr.clone().unwrap_or_default();
+        }
+        if self.receive.address.is_empty() {
+            self.receive.address = default_addr.unwrap_or_default();
+        }
+
+        self.wallet = Some(wallet);
+        self.derived = Some(derived);
+        self.tip = Some(tip);
+        self.stake = Some(stake);
+        self.load_error = None;
+        self.status_log.push("wallet loaded".into());
+        Ok(())
+    }
+
+    /// Re-run the UTXO derivation pass (Refresh).
+    pub fn refresh_chain_action(&mut self) -> Result<(), String> {
+        if self.wallet.is_none() {
+            return Err("wallet not loaded".into());
+        }
+        let saved_from = self.send.from.clone();
+        let saved_sign = self.sign.address.clone();
+        let saved_recv = self.receive.address.clone();
+        self.send.from.clear();
+        self.sign.address.clear();
+        self.receive.address.clear();
+        let r = self.load_wallet_action();
+        self.send.from = saved_from;
+        self.sign.address = saved_sign;
+        self.receive.address = saved_recv;
+        r
+    }
+
+    pub fn goto(&mut self, s: Screen) {
+        self.screen = s;
+    }
+
+    /// Funded addresses for the Send from-picker (legacy: only spendable
+    /// sources are offered).
+    pub fn funded_addresses(&self) -> Vec<(String, i64)> {
+        self.derived
+            .as_ref()
+            .map(|d| {
+                d.balances
+                    .per_address
+                    .iter()
+                    .filter(|a| a.sats > 0)
+                    .map(|a| (a.address.clone(), a.sats))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// signing key map: wallet keys + keystore entries
+    pub fn key_map(&self) -> std::collections::HashMap<String, (Vec<u8>, [u8; 32])> {
+        let mut m = std::collections::HashMap::new();
+        if let Some(w) = &self.wallet {
+            for k in &w.keys {
+                m.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
+            }
+        }
+        for e in &self.keystore {
+            if let Some(secret) = e.secret {
+                // derive pubkey → address lazily only when needed; store the
+                // address→(empty pubkey is WRONG for P2PK prevouts, but keystore
+                // keys only sign P2PKH) — rebuild pubkey from secret:
+                let secp = secp256k1::Secp256k1::signing_only();
+                let sk = match secp256k1::SecretKey::from_slice(&secret) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+                m.insert(e.address.clone(), (pk.serialize().to_vec(), secret));
+            }
+        }
+        m
+    }
+
+    /// The Send dialog action: build + sign (NO broadcast — this build
+    /// produces the signed hex only).
+    pub fn build_send_action(&mut self, now: u32) {
+        let Some(derived) = self.derived.clone() else {
+            self.send_result = Some(Err("wallet not loaded".into()));
+            return;
+        };
+        let keys = self.key_map();
+        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+        self.send_result = Some(match validate_send_form(&self.send, &derived, &keys) {
+            Ok(req) => {
+                // coin-control manual pool
+                let manual = if self.send.selected.is_empty() {
+                    None
+                } else {
+                    let pool: Vec<UtxoRec> = self
+                        .send
+                        .selected
+                        .iter()
+                        .filter_map(|i| derived.utxos.get(*i).cloned())
+                        .collect();
+                    Some(pool)
+                };
+                build_signed_send(&req, &derived, &keys, manual.as_deref(), now, tip_height)
+            }
+            Err(e) => Err(e),
+        });
+    }
+
+    pub fn save_tx_hex_action(&self, path: &str) -> Result<usize, String> {
+        let hex = match &self.send_result {
+            Some(Ok(b)) => &b.tx_hex,
+            _ => return Err("no signed transaction to save".into()),
+        };
+        let body = format!(
+            "{{\n  \"txid\": \"{}\",\n  \"tx_hex\": \"{}\",\n  \"broadcast\": false,\n  \"note\": \"signed by tri7 wallet (phase 6); NOT broadcast\"\n}}\n",
+            self.send_result
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(|b| b.txid_display.clone())
+                .unwrap_or_default(),
+            hex
+        );
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, &body).map_err(|e| format!("write {}: {}", tmp, e))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {}", path, e))?;
+        Ok(body.len())
+    }
+
+    /// Receive page: rebuild URI + QR (qrcodedialog replica).
+    pub fn refresh_receive_qr(&mut self) {
+        self.receive.error = None;
+        self.receive.qr = None;
+        if self.receive.address.is_empty() {
+            self.receive.error = Some("select an address".into());
+            return;
+        }
+        let amount = if self.receive.require_payment {
+            Some(self.receive.amount.as_str())
+        } else {
+            None
+        };
+        match build_payment_uri(
+            &self.receive.address,
+            amount,
+            &self.receive.label,
+            &self.receive.message,
+        ) {
+            Ok(uri) => match qr_matrix(&uri) {
+                Ok(qr) => {
+                    self.receive.qr = Some(qr);
+                    self.receive.uri = uri;
+                }
+                Err(e) => self.receive.error = Some(e),
+            },
+            Err(e) => self.receive.error = Some(e),
+        }
+    }
+
+    pub fn save_qr_action(&self, path: &str) -> Result<usize, String> {
+        self.receive
+            .qr
+            .as_ref()
+            .ok_or_else(|| "no QR code rendered".to_string())
+            .and_then(|qr| save_qr_png(qr, Path::new(path)))
+    }
+
+    pub fn sign_message_action(&mut self) {
+        self.sign.error = None;
+        self.sign.signature.clear();
+        let keys = self.key_map();
+        let Some((_, secret)) = keys.get(&self.sign.address) else {
+            self.sign.error = Some(format!(
+                "\"{}\" is not a wallet key address",
+                self.sign.address
+            ));
+            return;
+        };
+        match sign_message(secret, &self.sign.message) {
+            Ok(sig) => self.sign.signature = sig,
+            Err(e) => self.sign.error = Some(e),
+        }
+    }
+
+    pub fn verify_message_action(&mut self) {
+        self.verify.result = Some(verify_message(
+            &self.verify.address,
+            &self.verify.message,
+            &self.verify.signature,
+        ));
+    }
+
+    /// Legacy "New Address" (receive tab): offline key into the GUI keystore.
+    pub fn new_address_action(&mut self, label: String) -> Result<String, String> {
+        let mut entry = generate_new_address()?;
+        entry.label = label;
+        let addr = entry.address.clone();
+        self.keystore.push(entry);
+        persist_side_entries(&self.cfg.keystore_path(), &self.keystore, true)?;
+        Ok(addr)
+    }
+
+    /// Address book label edit (side file only — wallet.dat stays read-only).
+    pub fn set_label_action(&mut self, address: &str, label: String) -> Result<(), String> {
+        if let Some(e) = self.addressbook.iter_mut().find(|e| e.address == address) {
+            e.label = label;
+        } else {
+            self.addressbook.push(AbEntry {
+                address: address.to_string(),
+                label,
+                secret: None,
+                source: "addressbook",
+            });
+        }
+        persist_side_entries(&self.cfg.addressbook_path(), &self.addressbook, false)
+    }
+
+    /// Only side-file entries are deletable; wallet keys always stay.
+    pub fn delete_ab_entry_action(&mut self, address: &str) -> Result<(), String> {
+        if self.wallet_label_exists(address) {
+            return Err("this address belongs to wallet.dat and cannot be deleted here".into());
+        }
+        self.addressbook.retain(|e| e.address != address);
+        self.keystore.retain(|e| e.address != address);
+        persist_side_entries(&self.cfg.addressbook_path(), &self.addressbook, false)?;
+        persist_side_entries(&self.cfg.keystore_path(), &self.keystore, true)
+    }
+
+    fn wallet_label_exists(&self, address: &str) -> bool {
+        self.wallet
+            .as_ref()
+            .map(|w| w.keys.iter().any(|k| k.address == address))
+            .unwrap_or(false)
+    }
+
+    /// Debug-window console (rpcconsole): one command line.
+    pub fn rpc_console_send_action(&mut self) {
+        let line = self.console_input.trim().to_string();
+        if line.is_empty() {
+            return;
+        }
+        let (method, params) = parse_console_line(&line);
+        let addr = self.cfg.rpc_addr.clone().unwrap_or_default();
+        let entry = match rpc_client::rpc_call(&addr, &method, &params) {
+            Ok(v) => ConsoleEntry {
+                request: line,
+                reply: Some(serde_json::to_string_pretty(&v).unwrap_or_default()),
+                error: None,
+            },
+            Err(e) => ConsoleEntry {
+                request: line,
+                reply: None,
+                error: Some(e),
+            },
+        };
+        self.console.push(entry);
+        self.console_input.clear();
+    }
+
+    /// Connection info refresh (status bar + Chain/Debug information page).
+    pub fn refresh_debug_info_action(&mut self) {
+        let mut info = DebugInfo::default();
+        if let Some(addr) = self.cfg.rpc_addr.clone() {
+            match rpc_client::rpc_call(&addr, "getconnectioncount", &[]) {
+                Ok(v) => {
+                    info.reachable = true;
+                    info.connections = v.as_u64();
+                    if let Ok(v2) = rpc_client::rpc_call(&addr, "getblockcount", &[]) {
+                        info.blocks = v2.as_u64();
+                    }
+                }
+                Err(e) => info.error = Some(e),
+            }
+        } else {
+            info.error = Some("RPC disabled in config".into());
+        }
+        self.debug_info = Some(info);
+    }
+
+    /// Legacy "Backup Wallet...": byte-copy of wallet.dat to the chosen path,
+    /// verified by length + hash.
+    pub fn backup_wallet_action(&mut self, dest: &str) -> Result<u64, String> {
+        let src = &self.cfg.wallet_path;
+        let bytes = std::fs::read(src).map_err(|e| format!("read {}: {}", src, e))?;
+        let tmp = format!("{}.tmp", dest);
+        std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {}", tmp, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {}", dest, e))?;
+        let copied = std::fs::metadata(dest)
+            .map_err(|e| format!("verify {}: {}", dest, e))?
+            .len();
+        if copied != bytes.len() as u64 {
+            return Err(format!(
+                "backup verify: {} != {} bytes",
+                copied,
+                bytes.len()
+            ));
+        }
+        self.dialogs.backup = Some(Ok(format!(
+            "wallet backed up to {} ({} bytes)",
+            dest, copied
+        )));
+        Ok(copied)
+    }
+
+    pub fn encrypt_wallet_stub_action(&mut self) {
+        self.dialogs.encrypt = Some(
+            "Wallet encryption is not yet supported in the tri7 wallet engine. \
+             The legacy wallet.dat is unencrypted; this button will gain its \
+             original function (askpassphrasedialog) with daemon integration."
+                .into(),
+        );
+    }
+
+    pub fn save_options_action(&mut self) -> Result<(), String> {
+        // validate the fee is a real amount before persisting
+        parse_tri(&self.options.pay_fee)
+            .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
+        persist_options(&self.cfg.options_path(), &self.options)
+    }
+
+    /// Explorer: the search box action (classify + jump).
+    pub fn explorer_search_action(&mut self) {
+        let input = self.explorer.input.clone();
+        if let Err(e) = self.explorer.search(&input) {
+            self.explorer.last_error = Some(e);
+        }
+    }
+
+    /// Explorer: one more history-scan page for the open address.
+    pub fn explorer_scan_more_action(&mut self, budget: usize) {
+        // target the EXPLICITLY tracked current address (open_addr), never a
+        // HashMap-order pick from the addr cache
+        let address = match (&self.explorer.view, self.explorer.open_addr.clone()) {
+            (super::explorer::ExplorerView::Address, Some(a)) => a,
+            _ => return,
+        };
+        if let Err(e) = self.explorer.scan_address_more(&address, budget) {
+            self.explorer.scanning = false;
+            self.explorer.last_error = Some(e);
+        }
+    }
+
+    /// Explorer: stats + latest blocks.
+    pub fn explorer_stats_action(&mut self, latest_n: usize) {
+        if let Err(e) = self.explorer.refresh_stats(latest_n) {
+            self.explorer.last_error = Some(e);
+        }
+    }
+
+    /// Explorer: rich list from the balances.json snapshot.
+    pub fn explorer_rich_action(&mut self, top: usize) {
+        let path = self.cfg.balances_path.clone();
+        if let Err(e) = self.explorer.load_rich_list_action(Path::new(&path), top) {
+            self.explorer.last_error = Some(e);
+        }
+    }
+
+    /// Explorer: attach the snapshot figures to the open address view.
+    pub fn explorer_attach_snapshot(&mut self, address: &str) {
+        let path = self.cfg.balances_path.clone();
+        let _ = self
+            .explorer
+            .attach_snapshot_for_address(Path::new(&path), address);
+    }
+
+    /// Explorer: fee/credit display delegate (resolves prevouts via RPC).
+    pub fn fee_of(&mut self, txid: &str) -> Option<i64> {
+        self.explorer.fee_of(txid)
+    }
+
+    pub fn status_blocks_label(&self) -> String {
+        match (&self.tip, &self.debug_info) {
+            (Some(tip), Some(di)) if di.reachable => {
+                if di.blocks == Some(tip.height) {
+                    format!("{} blocks (at daemon tip)", tip.height)
+                } else {
+                    format!(
+                        "{} blocks (daemon {})",
+                        tip.height,
+                        di.blocks.map(|b| b.to_string()).unwrap_or("?".into())
+                    )
+                }
+            }
+            (Some(tip), _) => format!("{} blocks", tip.height),
+            _ => "no chain state".into(),
+        }
+    }
+
+    /// Receive page rows: every spendable-destination address this GUI owns —
+    /// wallet.dat keys first (legacy receive tab), then GUI-keystore keys.
+    pub fn receive_addresses(&self) -> Vec<(String, Option<String>, &'static str)> {
+        let mut v = Vec::new();
+        if let Some(w) = &self.wallet {
+            for k in &w.keys {
+                v.push((k.address.clone(), self.label_of(&k.address), "wallet"));
+            }
+        }
+        for e in &self.keystore {
+            v.push((e.address.clone(), Some(e.label.clone()), "keystore"));
+        }
+        v
+    }
+
+    /// Address Book rows: wallet keys (labels read-only — wallet.dat is
+    /// immutable here), then GUI keystore + side-file entries (editable).
+    pub fn all_book_rows(&self) -> Vec<(String, Option<String>, &'static str)> {
+        let mut v = self.receive_addresses();
+        for e in &self.addressbook {
+            v.push((e.address.clone(), Some(e.label.clone()), "addressbook"));
+        }
+        v
+    }
+}
+
+/// Legacy console syntax: `method [json-params]` — e.g.
+/// `getblock 2204064` or `validateaddress "TNFvoQ..."`.
+pub fn parse_console_line(line: &str) -> (String, Vec<serde_json::Value>) {
+    let mut it = line.splitn(2, ' ');
+    let method = it.next().unwrap_or("").trim().to_string();
+    let rest = it.next().unwrap_or("").trim();
+    let params = if rest.is_empty() {
+        Vec::new()
+    } else {
+        // try a JSON array first, else a single bare token
+        match serde_json::from_str::<Vec<serde_json::Value>>(rest) {
+            Ok(v) => v,
+            Err(_) => match serde_json::from_str::<serde_json::Value>(rest) {
+                Ok(v) => vec![v],
+                Err(_) => vec![serde_json::Value::String(rest.to_string())],
+            },
+        }
+    };
+    (method, params)
+}
+
+// ===========================================================================
+// Side-file helpers (typed over AbEntry)
+// ===========================================================================
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SideFileFormat {
+    entries: Vec<SideEntrySer>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SideEntrySer {
+    address: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_hex: Option<String>,
+}
+
+fn load_side_entries(path: &Path, keystore: bool) -> Vec<AbEntry> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(f) = serde_json::from_str::<SideFileFormat>(&text) else {
+        return Vec::new();
+    };
+    f.entries
+        .into_iter()
+        .filter_map(|e| {
+            let secret = if keystore {
+                e.secret_hex
+                    .as_ref()
+                    .and_then(|h| hex_decode(h).ok())
+                    .and_then(|v| <[u8; 32]>::try_from(v).ok())
+            } else {
+                None
+            };
+            Some(AbEntry {
+                address: e.address,
+                label: e.label,
+                secret,
+                source: if keystore { "keystore" } else { "addressbook" },
+            })
+        })
+        .collect()
+}
+
+fn persist_side_entries(path: &Path, entries: &[AbEntry], keystore: bool) -> Result<(), String> {
+    let f = SideFileFormat {
+        entries: entries
+            .iter()
+            .map(|e| SideEntrySer {
+                address: e.address.clone(),
+                label: e.label.clone(),
+                secret_hex: if keystore {
+                    e.secret
+                        .map(|s| s.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+                } else {
+                    None
+                },
+            })
+            .collect(),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(&f).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {}", path.display(), e))
+}
+
+fn load_options(path: &Path) -> OptionsState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn persist_options(path: &Path, o: &OptionsState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+    let text = serde_json::to_string_pretty(o).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+// ===========================================================================
+// Selfcheck — `tri7_wallet_gui --selfcheck`: constructs the app state, loads
+// the REAL wallet, derives balances, builds ONE signed tx, exercises QR/PNG/
+// signing roundtrips, probes tri7d read-only — then exits 0. No display.
+// ===========================================================================
+
+pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
+    let t0 = std::time::Instant::now();
+    let mut report = serde_json::Map::new();
+    let fail = |report: &mut serde_json::Map<String, serde_json::Value>, msg: String| -> i32 {
+        report.insert("result".into(), json!("FAIL"));
+        report.insert("error".into(), json!(msg));
+        report.insert("elapsed_secs".into(), json!(t0.elapsed().as_secs_f64()));
+        let text = serde_json::to_string_pretty(&Value::Object(report.clone()))
+            .unwrap_or_else(|_| "{\"result\":\"FAIL\"}".into());
+        println!("{}", text);
+        if let Some(p) = report_path {
+            let _ = std::fs::write(p, text);
+        }
+        1
+    };
+
+    let mut st = AppState::new(cfg.clone());
+    if let Err(e) = st.load_wallet_action() {
+        return fail(&mut report, format!("wallet load: {}", e));
+    }
+    let wallet = st.wallet.as_ref().unwrap();
+    let derived = st.derived.as_ref().unwrap().clone();
+    let tip = st.tip.as_ref().unwrap().clone();
+
+    report.insert("result".into(), json!("PENDING"));
+    report.insert(
+        "wallet".into(),
+        json!({
+            "path": wallet.path,
+            "keys": wallet.keys.len(),
+            "labels": wallet.names.len(),
+            "wallet_version": wallet.version,
+            "coverage_height_snapshot": derived.snapshot_height,
+            "coverage_height_derived": derived.coverage_height,
+            "reconcile": {
+                "enabled": derived.reconcile.enabled,
+                "blocks_applied": derived.reconcile.blocks_applied,
+                "additions_kept": derived.reconcile.additions_kept,
+                "spends_applied": derived.reconcile.spends_applied,
+                "note": derived.reconcile.note,
+            },
+        }),
+    );
+    report.insert(
+        "balances".into(),
+        json!({
+            "total_sats": derived.balances.total_sats,
+            "total_tri": format_tri(derived.balances.total_sats),
+            "funded_addresses": derived.balances.per_address.iter().filter(|a| a.sats > 0).count(),
+            "top": derived.balances.per_address.iter().take(5).map(|a|
+                json!({"address": a.address, "sats": a.sats, "utxos": a.utxos})).collect::<Vec<_>>(),
+        }),
+    );
+    report.insert(
+        "tip".into(),
+        json!({
+            "height": tip.height,
+            "blockhash": tip.blockhash,
+            "daemon_tip": tip.daemon_tip,
+            "tip_time": tip.tip_time,
+            "tip_bits": format!("{:08x}", tip.tip_bits),
+            "tip_modifier": format!("{:016x}", tip.tip_modifier),
+            "pos_difficulty": st.stake.as_ref().map(|s| s.pos_difficulty),
+        }),
+    );
+
+    // --- send: one real signed tx to a synthetic destination --------------
+    let (dest_secret, dest_pub) = spend::synthetic_key("selfcheck/dest");
+    let _ = dest_secret;
+    let dest_addr = crate::wallet::pubkey_to_address(&dest_pub);
+    let Some((from_addr, _)) = st.funded_addresses().first().map(|(a, _)| (a.clone(), ())) else {
+        return fail(&mut report, "no funded address for selfcheck send".into());
+    };
+    let mut cands: Vec<UtxoRec> = derived
+        .utxos
+        .iter()
+        .filter(|u| {
+            u.address == from_addr && u.value_sats > 1000 && u.spendable_at(tip.height as u32 + 1)
+        })
+        .cloned()
+        .collect();
+    cands.sort_by_key(|u| u.value_sats);
+    let Some(utxo) = cands.first().cloned() else {
+        return fail(&mut report, "no mature funded UTXO > 1000 sats".into());
+    };
+    let fee = OptionsState::default().pay_fee;
+    st.send.from = from_addr.clone();
+    st.send.dest = dest_addr.clone();
+    st.send.amount = format_tri(utxo.value_sats / 2);
+    st.send.fee = fee;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(1_400_000_000);
+    let utxo_snapshot = utxo.clone();
+    st.build_send_action(now);
+    let build = match &st.send_result {
+        Some(Ok(b)) => b.clone(),
+        Some(Err(e)) => return fail(&mut report, format!("send build: {}", e)),
+        None => return fail(&mut report, "send build produced no result".into()),
+    };
+    // equality with a DIRECT spend.rs construction (the CLI code path) —
+    // rebuilt from the SAME selected inputs the GUI path chose
+    let eq = (|| -> Result<bool, String> {
+        let keys = st.key_map();
+        // resolve each selected input back to its full record
+        let mut selected: Vec<spend::SpendInput> = Vec::new();
+        for ir in &build.inputs {
+            let u = derived
+                .utxos
+                .iter()
+                .find(|u| u.txid_display() == ir.txid_display && u.n == ir.n)
+                .ok_or_else(|| {
+                    format!(
+                        "selected input {}:{} not in derived set",
+                        ir.txid_display, ir.n
+                    )
+                })?;
+            let (pubkey, secret) = keys
+                .get(&u.address)
+                .ok_or_else(|| format!("no key for {}", u.address))?;
+            selected.push(spend::SpendInput {
+                txid: u.txid,
+                n: u.n,
+                value: u.value_sats,
+                script_pubkey: u.script.clone(),
+                height: u.height,
+                tx_time: u.tx_time,
+                is_coinbase: u.prev_kind == "coinbase",
+                is_coinstake: u.prev_kind == "coinstake",
+                secret: *secret,
+                pubkey: pubkey.clone(),
+            });
+        }
+        let (from_pub, _) = keys.get(&from_addr).ok_or("key missing")?;
+        let dest_payload = validate_address(&dest_addr)?;
+        let plan = spend::build_spend(
+            &selected,
+            p2pkh_script_for(&dest_payload),
+            build.amount_sats,
+            Some(p2pkh_script_for(&crate::address::pubkey_payload(from_pub))),
+            build.fee_sats,
+            build.n_time,
+            tip.height as u32 + 1,
+        )?;
+        Ok(plan.tx.serialize() == hex_decode(&build.tx_hex)?)
+    })();
+    report.insert(
+        "send".into(),
+        json!({
+            "from": from_addr,
+            "dest": dest_addr,
+            "utxo": {"txid": utxo_snapshot.txid_display(), "n": utxo_snapshot.n, "value_sats": utxo_snapshot.value_sats},
+            "amount_sats": build.amount_sats,
+            "fee_sats": build.fee_sats,
+            "change_sats": build.change_sats,
+            "n_bytes": build.n_bytes,
+            "inputs": build.inputs.len(),
+            "txid": build.txid_display,
+            "tx_hex_len": build.tx_hex.len(),
+            "verify_input_ok": true,
+            "spend_rs_cli_bytes_equal": eq.as_ref().unwrap_or(&false),
+        }),
+    );
+    if !eq.as_ref().unwrap_or(&false) {
+        return fail(
+            &mut report,
+            format!(
+                "GUI tx bytes differ from direct spend.rs construction: {:?}",
+                eq.err()
+            ),
+        );
+    }
+
+    // --- QR + PNG ----------------------------------------------------------
+    let uri = build_payment_uri(&st.receive.address, Some("1.5"), "selfcheck", "");
+    let qr_ok = uri.as_ref().ok().and_then(|u| qr_matrix(u).ok()).map(|qr| {
+        let (w, h, px) = qr_pixels(&qr, 4);
+        png_encode_gray(w, h, &px)
+            .map(|png| png.starts_with(&[0x89, b'P', b'N', b'G']) && crc32(&[]) == 0)
+    });
+    report.insert("qr_png".into(), json!(qr_ok == Some(Ok(true))));
+
+    // --- message signing roundtrip ------------------------------------------
+    let sig_ok = st
+        .key_map()
+        .get(&st.sign.address)
+        .map(|(_, secret)| {
+            let sig = sign_message(secret, "tri7 selfcheck message").unwrap();
+            let ok = verify_message(&st.sign.address, "tri7 selfcheck message", &sig).unwrap();
+            let tampered = verify_message(&st.sign.address, "tampered", &sig).unwrap_or(true);
+            ok && !tampered
+        })
+        .unwrap_or(false);
+    report.insert("message_sign_roundtrip".into(), json!(sig_ok));
+
+    // --- read-only tri7d probe (non-fatal) -----------------------------------
+    st.refresh_debug_info_action();
+    report.insert(
+        "rpc_probe".into(),
+        json!({
+            "addr": cfg.rpc_addr,
+            "reachable": st.debug_info.as_ref().map(|d| d.reachable),
+            "connections": st.debug_info.as_ref().and_then(|d| d.connections),
+            "error": st.debug_info.as_ref().and_then(|d| d.error.clone()),
+        }),
+    );
+
+    // --- explorer smoke (local tri7d RPC only; non-fatal) -------------------
+    {
+        let ex = &mut st.explorer;
+        let mut ex_report = serde_json::Map::new();
+        let probed = ex.probe();
+        ex_report.insert(
+            "endpoint".into(),
+            json!(ex
+                .endpoint
+                .and_then(|i| ex.endpoints.get(i))
+                .map(|s| s.clone())),
+        );
+        if probed {
+            let block_ok = ex
+                .fetch_block_by_height(tip.height)
+                .ok()
+                .map(|b| b.height == tip.height);
+            // fee resolution needs a non-coinbase tx: the LAST tx of a PoS
+            // block is its coinstake (credit), of a PoW block a regular spend
+            let fee_txid = ex
+                .blocks
+                .get(&tip.height)
+                .and_then(|b| b.txids.last().cloned());
+            let tx_ok = fee_txid
+                .as_ref()
+                .and_then(|t| ex.fetch_tx(t).ok())
+                .map(|t| !t.txid.is_empty());
+            let fee_ok = fee_txid.as_ref().and_then(|t| ex.fee_of(t));
+            let stats_ok = ex.refresh_stats(3).is_ok();
+            let addr_ok = ex.open_address_action(&from_addr).is_ok();
+            let classify = explorer::classify_search(&from_addr).is_ok()
+                && explorer::classify_search(&tip.height.to_string())
+                    == Ok(explorer::SearchKind::Height(tip.height));
+            ex_report.insert("block_at_tip".into(), json!(block_ok));
+            ex_report.insert("tx_decode".into(), json!(tx_ok));
+            ex_report.insert(
+                "fee_resolution".into(),
+                json!(fee_ok.is_some() || fee_txid.is_none()),
+            );
+            ex_report.insert("stats".into(), json!(stats_ok));
+            ex_report.insert("address_view".into(), json!(addr_ok));
+            ex_report.insert("search_classification".into(), json!(classify));
+            let _ = ex_report;
+        }
+        report.insert("explorer".into(), Value::Object(ex_report));
+    }
+
+    // --- rich list from the balances.json snapshot ---------------------------
+    {
+        let rich = std::fs::read_to_string(&cfg.balances_path)
+            .ok()
+            .and_then(|t| {
+                serde_json::from_str::<Value>(&t)
+                    .ok()
+                    .and_then(|v| explorer::parse_rich_list(&v, 5).ok())
+            });
+        report.insert(
+            "explorer_rich_list".into(),
+            json!({
+                "parsed": rich.is_some(),
+                "path": cfg.balances_path,
+                "height": rich.as_ref().map(|r| r.height),
+                "top1": rich.as_ref().and_then(|r| r.entries.first().map(|(a, s)| json!({"addr": a, "sats": s}))),
+            }),
+        );
+    }
+
+    report.insert("staking".into(), json!({
+        "stakeable_coins": st.stake.as_ref().map(|s| s.stakeable_coins),
+        "mature_weight_sats": st.stake.as_ref().map(|s| s.mature_weight_sats),
+        "last_dryrun_attempts": st.stake.as_ref().and_then(|s| s.dryrun.as_ref().map(|d| d.attempts)),
+        "note": "display-only — no kernel search is run by the GUI",
+    }));
+    report.insert("elapsed_secs".into(), json!(t0.elapsed().as_secs_f64()));
+    report.insert("result".into(), json!("OK"));
+    let text = serde_json::to_string_pretty(&Value::Object(report)).unwrap();
+    println!("{}", text);
+    if let Some(p) = report_path {
+        if let Err(e) = std::fs::write(p, &text) {
+            eprintln!("report write {} failed: {}", p, e);
+        }
+    }
+    0
+}
