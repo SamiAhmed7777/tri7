@@ -1,0 +1,88 @@
+{
+  "block": {
+    "bits": "2000ffff",
+    "block_sig_len": 70,
+    "coinbase_scriptsig_hex": "03a1a121",
+    "hash": "fd5e471df5e9f385cd1404340960bf7b3c6731420285b7895a112ada2b752f19",
+    "merkle": "fba5c03b7065072f33da50a5a0ed6f76c885f9a81c6f27dc8a98d366d6fea22b",
+    "nonce": 0,
+    "prev": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "time": 1793642570,
+    "vtx": 2
+  },
+  "coinstake": {
+    "coin_age_sat_days": "534535937",
+    "coin_day_weight": "6",
+    "credit_sats": 12493745,
+    "hash_proof_of_stake": "00a0ad5bcee5a7cb609f5d031c4975074fe2a116723ec4d083451e633119407f",
+    "inputs": [
+      {
+        "height": 2203769,
+        "n": 2,
+        "txid": "1c3fba13e28e5b4bb4a2f294a13551b69b4a75fe940b149be71d6c342e482d27",
+        "value_sats": 12010466
+      }
+    ],
+    "kernel_block_height": 2203769,
+    "kernel_block_time": 1789797265,
+    "kernel_coin_sats": 12010466,
+    "kernel_n": 2,
+    "kernel_tx_offset": 149,
+    "kernel_txid": "1c3fba13e28e5b4bb4a2f294a13551b69b4a75fe940b149be71d6c342e482d27",
+    "modifier": "0000000000000000",
+    "n_time": 1793642570,
+    "reward_sats": 483279,
+    "seconds_back": 20,
+    "split": false
+  },
+  "kernel_search": {
+    "attempts": 381,
+    "coins_considered": 7,
+    "coins_meeting_min_age": 7,
+    "credit_over_balance_aborts": 0,
+    "kernel_hits": 1,
+    "search_secs": 60,
+    "search_time": 1793642590,
+    "zero_reward_aborts": 0
+  },
+  "mode": "dry-run — no network, nothing broadcast, daemon untouched",
+  "modifier_oracle": {
+    "archive_prefix_blocks": 2199465,
+    "archive_window_blocks_reconstructed": 4600,
+    "checksum_steps_verified": 140,
+    "genesis_checksum_ok": true,
+    "window_heights_checked": 4600
+  },
+  "n_bits": "2000ffff",
+  "next_height": 2204065,
+  "note": "candidate block validated but NOT broadcast — dry run only",
+  "self_validation": {
+    "coin_age_sat_days": "534535937",
+    "coinstake_input_sigs_verified": 1,
+    "finality_ok": true,
+    "kernel_meets_target": true,
+    "link_ok": true,
+    "merkle_ok": true,
+    "n_bits_ok": true,
+    "reward_ok": true,
+    "signature_ok": true,
+    "size_ok": true,
+    "stake_reward_calculated": 483279,
+    "stake_reward_paid": 483279,
+    "structure_ok": true,
+    "time_ok": true,
+    "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path"
+  },
+  "solution_found": true,
+  "tip": {
+    "blockhash": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "height": 2204064,
+    "time": 1790239305
+  },
+  "wallet": {
+    "balance_sats": 3078788707,
+    "candidates": 178,
+    "keys": 248,
+    "live_utxos": 178
+  }
+}

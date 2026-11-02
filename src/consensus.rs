@@ -26,7 +26,7 @@ pub const TARGET_TIMESPAN: u32 = 1800;
 pub const STAKE_MIN_AGE: u32 = 3600;
 pub const STAKE_MAX_AGE: u32 = 43_200;
 pub const MODIFIER_INTERVAL: u32 = 300;
-pub const MAX_TRI_PROOF_OF_STAKE: i64 = 33_000_000; // 0.33 * COIN
+pub const MAX_TRI_PROOF_OF_STAKE: i64 = 330_000; // 0.33 * COIN (main.h:62 — chain-verified: 48/48 live coinstake rewards match 330000/365/COIN per coin-year)
 pub const COIN: i64 = 1_000_000;
 /// Last hardcoded mainnet checkpoint height (checkpoints.cpp); assume-valid
 /// boundary and block-signature requirement boundary.

@@ -13,6 +13,7 @@ pub mod blkfile;
 pub mod p2p;
 pub mod replay;
 pub mod spend;
+pub mod stake;
 pub mod wallet;
 
 pub use legacy::{Block, Tx, Vin, Vout};

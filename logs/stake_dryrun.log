@@ -1,0 +1,20 @@
+[stake_mint] tipstate: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · window h2199465..h2204064 (4600 entries)
+[stake_mint] wallet: 248 keys read (248 distinct addresses), encrypted=false
+[stake_mint] utxo dump: 177 wallet UTXOs / 3036990591 sats live at h2201090 (snapshot)
+[stake_mint] archive scan: 500000 frames (22s) — prefix 499999, tail 0
+[stake_mint] archive scan: 1000000 frames (43s) — prefix 999999, tail 0
+[stake_mint] archive scan: 1500000 frames (64s) — prefix 1499999, tail 0
+[stake_mint] archive scan: 2000000 frames (86s) — prefix 1999999, tail 0
+[stake_mint] checksum chain anchored at h2203924 (bea74517 adopted — daemon FastImport boundary)
+[stake_mint] archive scan complete: 2210692 frames read, prefix 2199465 blocks (genesis..h2199464), window 4600 blocks reconstructed (94.5s)
+[stake_mint] modifier oracle: 4600/4600 window heights matched the daemon-anchored state, 140 checksum steps verified — any mismatch exited above
+[stake_mint] live wallet at tip h2204064: 178 UTXOs / 3078788707 sats (172 tail additions kept of 4004 found, 4003 tail spends applied)
+[stake_mint] candidates: 178 staking-eligible UTXOs (0 non-standard, 0 key-unresolved, 0 unlocated)
+[stake_mint] next target for h2204065 (PoS): 2000ffff · tip time 1790239305 · MTP 1790238475
+[stake_mint] kernel search: 178 coins × up to 60 backward seconds from nTime=1793642306 …
+[stake_mint] search done in 0.0s: coins considered 7 (min-age 7), attempts 380, kernel hits 1, zero-reward aborts 0, credit-aborts 0
+[stake_mint] KERNEL SOLVED: coin 1c3fba13e28e5b4bb4a2f294a13551b69b4a75fe940b149be71d6c342e482d27:2 (12010466 sats, h2203769), nTime 1793642287 (-19 s), modifier 0000000000000000, coinDays 6, hashProof 0568b9a177b342a6f7ea996055469546a9b97720117830b2c869bdac2ee647e0
+[stake_mint] candidate block: 8673348439529e0bc66e026d8b4a7afe4853c2726420a343ff60837e30b83dcd (vtx 2, time 1793642287, bits 2000ffff, sig 70 B)
+[stake_mint] SELF-VALIDATION PASSED: kernel meets target (coinDays 6), reward paid 483243 == calculated 483243 (coin age 534496597 sat-days), sig verified, nBits 2000ffff exact
+report -> /root/tri7/stake_dryrun.json
+[stake_mint] RESULT: kernel solution found and self-validated — candidate block 8673348439529e0bc66e026d8b4a7afe4853c2726420a343ff60837e30b83dcd
