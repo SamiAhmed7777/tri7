@@ -1,0 +1,15 @@
+[package]
+name = "tri7-core"
+version = "0.1.0"
+edition = "2021"
+description = "Modern full-node core for the Triangles chain — replays the legacy chain byte-for-byte"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
