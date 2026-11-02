@@ -1,0 +1,35 @@
+[2026-11-02T15:01:09Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:01:09Z] no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …
+[2026-11-02T15:01:10Z] seed: 4600 expected hashes fetched (h2199465..h2204064)
+[2026-11-02T15:01:11Z] seed: 1000/4600 blocks fetched+verified via P2P
+[2026-11-02T15:01:12Z] seed: 2000/4600 blocks fetched+verified via P2P
+[2026-11-02T15:01:13Z] seed: 3000/4600 blocks fetched+verified via P2P
+[2026-11-02T15:01:14Z] seed: 4000/4600 blocks fetched+verified via P2P
+[2026-11-02T15:01:15Z] seed: 4600/4600 blocks fetched+verified via P2P
+[2026-11-02T15:01:15Z] seed: rpc-seeding 4600 window entries (batched getblock) …
+[2026-11-02T15:01:17Z] rpc seed: checksum-chain anchored at h2203924, 140 steps verified to the tip
+[2026-11-02T15:01:17Z] seeded: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc (window base 2199465)
+[2026-11-02T15:01:17Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:01:18Z] state: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · daemon getblockcount 2204064
+[2026-11-02T15:01:18Z] backfill: requesting headers from h2201064 (locator a6f3af62df0b45f20cd9d40809dc6e90d8b05df3509b33509eface6fd93b244d)
+[2026-11-02T15:01:19Z] backfill: validated 3000 headers linking h2201065 → h2204064 (hash9 + linkage, daemon-served)
+[2026-11-02T15:01:19Z] backfill: requesting 100 full blocks
+[2026-11-02T15:01:19Z] backfill: 10 blocks fully validated so far
+[2026-11-02T15:01:19Z] backfill: 20 blocks fully validated so far
+[2026-11-02T15:01:19Z] backfill: 30 blocks fully validated so far
+[2026-11-02T15:01:19Z] backfill: 40 blocks fully validated so far
+[2026-11-02T15:01:19Z] backfill: 50 blocks fully validated so far
+[2026-11-02T15:01:20Z] backfill: 60 blocks fully validated so far
+[2026-11-02T15:01:20Z] backfill: 70 blocks fully validated so far
+[2026-11-02T15:01:21Z] backfill: 80 blocks fully validated so far
+[2026-11-02T15:01:21Z] backfill: 90 blocks fully validated so far
+[2026-11-02T15:01:22Z] backfill: 100 blocks fully validated so far
+[2026-11-02T15:01:22Z] backfill: 100 blocks fully validated (kernel enforced 0 / seeded 200)
+[2026-11-02T15:01:22Z] poll #1: tip h2204064 · rx=4717 msgs tx=59 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:01:52Z] poll #2: tip h2204064 · rx=4718 msgs tx=60 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:02:22Z] poll #3: tip h2204064 · rx=4720 msgs tx=61 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:02:53Z] poll #4: tip h2204064 · rx=4722 msgs tx=62 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:03:23Z] poll #5: tip h2204064 · rx=4762 msgs tx=102 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:03:53Z] poll #6: tip h2204064 · rx=5052 msgs tx=391 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:04:23Z] poll #7: tip h2204064 · rx=5334 msgs tx=672 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded
+[2026-11-02T15:04:53Z] poll #8: tip h2204064 · rx=5629 msgs tx=967 msgs · blocks 0/4700 received+100 hist validated · kernels 0/200 enforced/seeded

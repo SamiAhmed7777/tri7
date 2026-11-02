@@ -1,0 +1,24 @@
+[2026-11-02T15:05:40Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:05:40Z] loading tipstate.json …
+[2026-11-02T15:05:41Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:05:42Z] state: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · daemon getblockcount 2204064
+[2026-11-02T15:05:42Z] backfill: requesting headers from h2201064 (locator a6f3af62df0b45f20cd9d40809dc6e90d8b05df3509b33509eface6fd93b244d)
+[2026-11-02T15:05:43Z] backfill: validated 3000 headers linking h2201065 → h2204064 (hash9 + linkage, daemon-served)
+[2026-11-02T15:05:43Z] backfill: requesting 100 full blocks
+[2026-11-02T15:05:43Z] backfill: 10 blocks fully validated so far
+[2026-11-02T15:05:43Z] backfill: 20 blocks fully validated so far
+[2026-11-02T15:05:43Z] backfill: 30 blocks fully validated so far
+[2026-11-02T15:05:43Z] backfill: 40 blocks fully validated so far
+[2026-11-02T15:05:44Z] backfill: 50 blocks fully validated so far
+[2026-11-02T15:05:44Z] backfill: 60 blocks fully validated so far
+[2026-11-02T15:05:44Z] backfill: 70 blocks fully validated so far
+[2026-11-02T15:05:45Z] backfill: 80 blocks fully validated so far
+[2026-11-02T15:05:46Z] backfill: 90 blocks fully validated so far
+[2026-11-02T15:05:46Z] backfill: 100 blocks fully validated so far
+[2026-11-02T15:05:46Z] backfill: 100 blocks fully validated (kernel enforced 92 / seeded 108)
+[2026-11-02T15:05:46Z] poll #1: tip h2204064 · rx=115 msgs tx=13 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded
+[2026-11-02T15:06:17Z] poll #2: tip h2204064 · rx=116 msgs tx=14 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded
+[2026-11-02T15:06:47Z] poll #3: tip h2204064 · rx=118 msgs tx=15 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded
+[2026-11-02T15:07:17Z] poll #4: tip h2204064 · rx=120 msgs tx=16 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded
+[2026-11-02T15:07:47Z] poll #5: tip h2204064 · rx=185 msgs tx=81 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded
+[2026-11-02T15:08:17Z] poll #6: tip h2204064 · rx=474 msgs tx=369 msgs · blocks 0/100 received+100 hist validated · kernels 92/108 enforced/seeded

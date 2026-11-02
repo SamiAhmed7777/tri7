@@ -1,0 +1,75 @@
+[2026-11-02T14:53:49Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T14:53:49Z] no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …
+[2026-11-02T14:53:50Z] seed: 4600 expected hashes fetched (h2199465..h2204064)
+[2026-11-02T14:53:51Z] seed: 1000/4600 blocks fetched+verified via P2P
+[2026-11-02T14:53:52Z] seed: 2000/4600 blocks fetched+verified via P2P
+[2026-11-02T14:53:53Z] seed: 3000/4600 blocks fetched+verified via P2P
+[2026-11-02T14:53:54Z] seed: 4000/4600 blocks fetched+verified via P2P
+[2026-11-02T14:53:55Z] seed: 4600/4600 blocks fetched+verified via P2P
+[2026-11-02T14:53:55Z] seed: rpc-seeding 4600 window entries (batched getblock) …
+[2026-11-02T14:53:55Z] rpc seed: checksum-chain anchored at h2203924, 140 steps verified to the tip
+[2026-11-02T14:53:55Z] seeded: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc (window base 2199465)
+[2026-11-02T14:53:55Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T14:53:57Z] state: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · daemon getblockcount 2204064
+[2026-11-02T14:53:57Z] backfill: requesting headers from h2201064 (locator a6f3af62df0b45f20cd9d40809dc6e90d8b05df3509b33509eface6fd93b244d)
+[2026-11-02T14:53:57Z] backfill: validated 3000 headers linking h2201065 → h2204064 (hash9 + linkage, daemon-served)
+[2026-11-02T14:53:57Z] backfill: requesting 100 full blocks
+SUMMARY
+{
+  "exit_code": 4,
+  "messages": {
+    "blocks_received": 4601,
+    "blocks_validated_hist": 0,
+    "blocks_validated_live": 0,
+    "checksums_verified": 0,
+    "handshakes": 2,
+    "headers_backfilled": 3000,
+    "headers_new": 0,
+    "headers_processed": 3000,
+    "kernel_enforced": 0,
+    "kernel_seeded": 0,
+    "nbits_checked": 0,
+    "parse_failures": 0,
+    "polls": 0,
+    "reconnects": 1,
+    "recv": {
+      "addr": 1,
+      "block": 4601,
+      "getaddr": 2,
+      "getblocks": 3,
+      "headers": 2,
+      "sendcmpct": 2,
+      "sendheaders": 2,
+      "smsgPing": 2,
+      "verack": 2,
+      "version": 2
+    },
+    "sent": {
+      "getdata": 50,
+      "getheaders": 2,
+      "sendheaders": 2,
+      "verack": 2,
+      "version": 2
+    },
+    "sigs_checked": 0
+  },
+  "note": "backfill: h2201065: NBITS FAIL block=1f055e47 expected=207fffff",
+  "protocol": {
+    "daemon_endpoint": "127.0.0.1:24113",
+    "magic": "70352205",
+    "protocol_version": 70206,
+    "user_agent": "/tri7:0.2.0/"
+  },
+  "tip": {
+    "at_daemon_tip": true,
+    "blockhash": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "daemon_getblockcount": 2204064,
+    "height": 2204064
+  },
+  "window": {
+    "base": 2199465,
+    "entries": 4600,
+    "untracked_edge_spends": 163,
+    "utxo_tracked": 182
+  }
+}

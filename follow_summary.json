@@ -1,0 +1,58 @@
+{
+  "exit_code": 0,
+  "messages": {
+    "blocks_received": 100,
+    "blocks_validated_hist": 100,
+    "blocks_validated_live": 0,
+    "checksums_verified": 0,
+    "handshakes": 2,
+    "headers_backfilled": 3000,
+    "headers_new": 0,
+    "headers_processed": 3012,
+    "kernel_enforced": 46,
+    "kernel_seeded": 54,
+    "nbits_checked": 100,
+    "parse_failures": 0,
+    "polls": 24,
+    "reconnects": 1,
+    "recv": {
+      "block": 100,
+      "getaddr": 2,
+      "getblocks": 17,
+      "headers": 26,
+      "ping": 5556,
+      "sendcmpct": 2,
+      "sendheaders": 2,
+      "smsgPing": 1,
+      "verack": 2,
+      "version": 2
+    },
+    "sent": {
+      "getdata": 4,
+      "getheaders": 26,
+      "pong": 5556,
+      "sendheaders": 2,
+      "verack": 2,
+      "version": 2
+    },
+    "sigs_checked": 100
+  },
+  "note": "run complete",
+  "protocol": {
+    "daemon_endpoint": "127.0.0.1:24113",
+    "magic": "70352205",
+    "protocol_version": 70206,
+    "user_agent": "/tri7:0.2.0/"
+  },
+  "tip": {
+    "at_daemon_tip": true,
+    "blockhash": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "daemon_getblockcount": 2204064,
+    "height": 2204064
+  },
+  "window": {
+    "base": 2199465,
+    "entries": 4600,
+    "utxo_tracked": 2008
+  }
+}

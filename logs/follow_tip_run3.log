@@ -1,0 +1,56 @@
+[2026-11-02T14:58:13Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T14:58:13Z] loading tipstate.json …
+[2026-11-02T14:58:13Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T14:58:14Z] state: tip h4599 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · daemon getblockcount 2204064
+SUMMARY
+{
+  "exit_code": 4,
+  "messages": {
+    "blocks_received": 0,
+    "blocks_validated_hist": 0,
+    "blocks_validated_live": 0,
+    "checksums_verified": 0,
+    "handshakes": 2,
+    "headers_backfilled": 0,
+    "headers_new": 0,
+    "headers_processed": 0,
+    "kernel_enforced": 0,
+    "kernel_seeded": 0,
+    "nbits_checked": 0,
+    "parse_failures": 0,
+    "polls": 0,
+    "reconnects": 1,
+    "recv": {
+      "getaddr": 2,
+      "sendcmpct": 1,
+      "sendheaders": 1,
+      "verack": 2,
+      "version": 2
+    },
+    "sent": {
+      "sendheaders": 2,
+      "verack": 2,
+      "version": 2
+    },
+    "sigs_checked": 0
+  },
+  "note": "backfill: backfill: start height outside window",
+  "protocol": {
+    "daemon_endpoint": "127.0.0.1:24113",
+    "magic": "70352205",
+    "protocol_version": 70206,
+    "user_agent": "/tri7:0.2.0/"
+  },
+  "tip": {
+    "at_daemon_tip": false,
+    "blockhash": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "daemon_getblockcount": 2204064,
+    "height": 4599
+  },
+  "window": {
+    "base": 2199465,
+    "entries": 4600,
+    "untracked_edge_spends": 177,
+    "utxo_tracked": 172
+  }
+}

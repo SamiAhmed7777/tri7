@@ -1,0 +1,119 @@
+[2026-11-02T14:41:30Z] no usable state — seeding from the local archive (Hash9 + link every frame) …
+[2026-11-02T14:42:23Z] archive seam at height 2201091: frame prev 7bb067982c20314929431de98a901455ba3ae0ded29efa8b3686d318b0576c96 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 192 stale frames (height 2201091)
+[2026-11-02T14:42:23Z] archive seam at height 2201092: frame prev 33ec701be65cfe547d3c8dcca916b7943a15e56a3d5a91c46ae52f5fc575f84e does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 24 stale frames (height 2201092)
+[2026-11-02T14:42:23Z] archive seam at height 2201093: frame prev b7e47905142371d4d733a9c6a12b1a89ab5cb7fb1a830dad8b9b14b1c84d3d11 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 165 stale frames (height 2201093)
+[2026-11-02T14:42:23Z] archive seam at height 2201107: frame prev a298167970798958aad553fe23cae4cfdf4762e20964663efd6b4a593a9961cb does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 86 stale frames (height 2201107)
+[2026-11-02T14:42:23Z] archive seam at height 2201108: frame prev cdbd5ee5ed311c574dafe8a1252b6a3c925c474b11038738028ee0eefcd81a0d does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 186 stale frames (height 2201108)
+[2026-11-02T14:42:23Z] archive seam at height 2201109: frame prev 9961eebd3dae394179cf1b2add90004e08f70e6b7d4440fcd11e05bd05a1eb67 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 1033 stale frames (height 2201109)
+[2026-11-02T14:42:23Z] archive seam at height 2201110: frame prev a56a4bb3458788491242bda885c08da9ed1c0151104cd57423a0bad2e99a2bd7 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 8 stale frames (height 2201110)
+[2026-11-02T14:42:23Z] archive seam at height 2201111: frame prev c84d889e50fdb8dd31401dd368df54b4c197abc93d05316e386dd41444ca8010 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 72 stale frames (height 2201111)
+[2026-11-02T14:42:23Z] archive seam at height 2201112: frame prev 6d2c2769360b23068d0d1ee9cf8b6df5b7f1c69329a99c0b8055c8b4d5dda709 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 137 stale frames (height 2201112)
+[2026-11-02T14:42:23Z] archive seam at height 2201113: frame prev 5334ac3bf85b120feafe9738b8812e8869b26e7ab3f7d71da8962ff9495575a9 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 140 stale frames (height 2201113)
+[2026-11-02T14:42:23Z] archive seam at height 2201114: frame prev 33a8b944b97d54188775dd37c12df2a7fe66f2e806fa94ae7fcc5f764c37f2ed does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 64 stale frames (height 2201114)
+[2026-11-02T14:42:23Z] archive seam at height 2201115: frame prev e00a32ef2f0c1e20eab16c9abdcf6ba0f69e18e026a053cd6b6c4aeba600f6a2 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 1296 stale frames (height 2201115)
+[2026-11-02T14:42:23Z] archive seam at height 2201116: frame prev a837b79c3aa5ebc97ffffeda7beb253fbc53d7e5c443cce716f67974504d256a does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 239 stale frames (height 2201116)
+[2026-11-02T14:42:23Z] archive seam at height 2201119: frame prev b37d64d042095db46005d2cfcbff93acc9e4eb2fcef9a15a3787274d4ff9da07 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 190 stale frames (height 2201119)
+[2026-11-02T14:42:23Z] archive seam at height 2201120: frame prev be84d014c2965384d35811948e41253f91a91fbf540dadb47f1c2de7370de53c does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 30 stale frames (height 2201120)
+[2026-11-02T14:42:23Z] archive seam at height 2201121: frame prev 57de9d159234b1e191de021dc3abbd7257927d6e2e14b18a4e5ca3c014c0cc34 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 397 stale frames (height 2201121)
+[2026-11-02T14:42:23Z] archive seam at height 2201122: frame prev 4cb9ac56cb7ccbaf3e92f120b66f97776e2296ffdff92805242c41e27c246ef4 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 349 stale frames (height 2201122)
+[2026-11-02T14:42:23Z] archive seam at height 2201124: frame prev fd6addcab09d564ab5717e96f4fb5e22945427da46614cda109ffbec23f2a639 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 275 stale frames (height 2201124)
+[2026-11-02T14:42:23Z] archive seam at height 2201125: frame prev 80cf0299112debefff99cc300f4356945413eb4809a2ed5a5fbc6d7119a1b4cd does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 116 stale frames (height 2201125)
+[2026-11-02T14:42:23Z] archive seam at height 2201129: frame prev 95df71c1f3f21620e5152f73af73871395933452a6f05d3b54d56fb8eb0dbafa does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 39 stale frames (height 2201129)
+[2026-11-02T14:42:23Z] archive seam at height 2201130: frame prev 63e4e64b15dbdc027321a8222432ab1329ec3c8cb3b52c492951d20a24d9b7ef does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 29 stale frames (height 2201130)
+[2026-11-02T14:42:23Z] archive seam at height 2201131: frame prev 28a53b224359256dc9152b599a4c4c9c08460c8b5ce146408687b3f06e249bca does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 125 stale frames (height 2201131)
+[2026-11-02T14:42:23Z] archive seam at height 2201132: frame prev 68355633053c95e31650cc070d62037f1e05b5125ae195b66ab31dd20ab52d21 does not chain; hunting for the live branch
+[2026-11-02T14:42:23Z] live branch resumes after 128 stale frames (height 2201132)
+[2026-11-02T14:42:23Z] archive seam at height 2201133: frame prev 16fe63531b798d8a2c61ad29a4aa7eaf6366697d1e70504a896f398ee6145d77 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 167 stale frames (height 2201133)
+[2026-11-02T14:42:24Z] archive seam at height 2201134: frame prev 0a4b8d50a6b324550253a5371336252a449880f9c32907b397f1b10f82ab2c91 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 228 stale frames (height 2201134)
+[2026-11-02T14:42:24Z] archive seam at height 2201142: frame prev 0f544acf1235fd63103ebfc463ae7f49cba308fcc2515120c748ba509dd100cd does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 340 stale frames (height 2201142)
+[2026-11-02T14:42:24Z] archive seam at height 2201143: frame prev db7da7a569ad0b7d044c0d140e25c518e0fce7189eabf04c26d3a14a97f6868f does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 41 stale frames (height 2201143)
+[2026-11-02T14:42:24Z] archive seam at height 2201147: frame prev 6276cd0a11d69107629d12275b44d410843258e9fa169ed480a31021d296eb95 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 50 stale frames (height 2201147)
+[2026-11-02T14:42:24Z] archive seam at height 2201180: frame prev 14ff5d501b83994e003aace70e1898ac97319309d8a65ee1427c219d124f5a44 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 7 stale frames (height 2201180)
+[2026-11-02T14:42:24Z] archive seam at height 2201199: frame prev 72b41c6ddc1d8fc9061db0e9149c1455d238792d07db6088abca4c22fe8c1785 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 40 stale frames (height 2201199)
+[2026-11-02T14:42:24Z] archive seam at height 2201204: frame prev 74b52914fabc85934aa9bd0432e065a4d01df06856b68037846f7ed5433b170e does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 32 stale frames (height 2201204)
+[2026-11-02T14:42:24Z] archive seam at height 2201212: frame prev 97085b9c9757d1a106306261620f942e70cdfd560c0e668c82db46265c5e40c8 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 14 stale frames (height 2201212)
+[2026-11-02T14:42:24Z] archive seam at height 2201245: frame prev 2d215233337545fe24453f0bbb65836abe954acb7f6d872fe5aad7d25a2d0ef0 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 69 stale frames (height 2201245)
+[2026-11-02T14:42:24Z] archive seam at height 2201246: frame prev fed3e240dc43932ee4fbb554c91a533891ba088cbe2eeb80257017de2967b5f6 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 7 stale frames (height 2201246)
+[2026-11-02T14:42:24Z] archive seam at height 2201254: frame prev dfe4d5c4860e229ff0cecc919d96d2d3d4fc1e4f361d9b8439fe11be7289cf33 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 22 stale frames (height 2201254)
+[2026-11-02T14:42:24Z] archive seam at height 2201258: frame prev e79aa3d686e2e4661f0e5d5a8c359b71a901be150465ff25d7d50a6b9b6bf80b does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 13 stale frames (height 2201258)
+[2026-11-02T14:42:24Z] archive seam at height 2201259: frame prev d65491945c81851d1f57a6869bd5d44cfa60cb62e93562e91ea244753251e182 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 12 stale frames (height 2201259)
+[2026-11-02T14:42:24Z] archive seam at height 2201261: frame prev 47d78507c3d2dfc4c7b94f5e9193190e6974d50fc44b476266680ac9872e90ee does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201261)
+[2026-11-02T14:42:24Z] archive seam at height 2201265: frame prev ae24655ccbc175b716de0eb1926fe5159a6338a14bfec8722dc3c489449950f9 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 2 stale frames (height 2201265)
+[2026-11-02T14:42:24Z] archive seam at height 2201266: frame prev 5f5b574a1a80e6baeb3d1bf681d1c668df2111b879c60a021cd7625b92361350 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201266)
+[2026-11-02T14:42:24Z] archive seam at height 2201283: frame prev 374e609ba5fed5bbca64b76a4bb0dbcc31ec487a1638f13146b57bef30eef1ae does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 6 stale frames (height 2201283)
+[2026-11-02T14:42:24Z] archive seam at height 2201291: frame prev 2b85ed4904fce42286ce0d1eb016937c0a1603eabbd48494b37b57bd232cd257 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 2 stale frames (height 2201291)
+[2026-11-02T14:42:24Z] archive seam at height 2201299: frame prev 244b6f26a28b973f794ea16c0994b7d4584a25216108e76747ca4020a773262f does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201299)
+[2026-11-02T14:42:24Z] archive seam at height 2201304: frame prev eb6db7028dbd051f338df76fc1f883affa96007439ed37961c1a26911b872e3c does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 22 stale frames (height 2201304)
+[2026-11-02T14:42:24Z] archive seam at height 2201323: frame prev 339ad0ad72e12f6cb36a6d247b759bb9dfa76ce0408c3256182181aa5c2cb65a does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201323)
+[2026-11-02T14:42:24Z] archive seam at height 2201401: frame prev 0f4e386330c1e8e421469ed958649c22616bc166c60ddae80b5df3606acc8147 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 2 stale frames (height 2201401)
+[2026-11-02T14:42:24Z] archive seam at height 2201591: frame prev f94efec02eac03c5eee2e96832458b48abf770f16e5f2469e6a6c7d39a33f3f7 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201591)
+[2026-11-02T14:42:24Z] archive seam at height 2201630: frame prev 65343ff121814e3cf5df71e6325aa81a594cda1c6a3236139176220362dc84b0 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 2 stale frames (height 2201630)
+[2026-11-02T14:42:24Z] archive seam at height 2201635: frame prev 8cf4f02f651c9a0b2e272f785a39d30a8a9e396a1b0fb8ce32a6382e61b38127 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 4 stale frames (height 2201635)
+[2026-11-02T14:42:24Z] archive seam at height 2201636: frame prev 6181043cffb4249dd018e66acc8d2881f9fa126a3d574b4f918173c177da03e8 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 26 stale frames (height 2201636)
+[2026-11-02T14:42:24Z] archive seam at height 2201637: frame prev e40d1bb1a45def903dc707165e95a9bdb26f18f6479ebf7f15d956a7a2bb98da does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 7 stale frames (height 2201637)
+[2026-11-02T14:42:24Z] archive seam at height 2201638: frame prev 38aed92e80b7aaf8d7424716ec9c36d4aaf739fd92a01187aebabd3810ca6c60 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 12 stale frames (height 2201638)
+[2026-11-02T14:42:24Z] archive seam at height 2201644: frame prev c58997bfe66fed1df5b76b87b082d21e5a75f3cafe55891d0be68bb72be0d594 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 6 stale frames (height 2201644)
+[2026-11-02T14:42:24Z] archive seam at height 2201674: frame prev 2a1894007595acaa5d303554253b3c328ebc870f248ffebf83e09a4c8156a78f does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 2 stale frames (height 2201674)
+[2026-11-02T14:42:24Z] archive seam at height 2201689: frame prev 0044088edd0c31672e9a002e9fffdbdf5bc085391515de2fbecd6ee9089974b4 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201689)
+[2026-11-02T14:42:24Z] archive seam at height 2201698: frame prev 5c08728f04d72c63bb7e87b95257341c097a397c6f3f24c821687a77af593417 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201698)
+[2026-11-02T14:42:24Z] archive seam at height 2201703: frame prev 5c08728f04d72c63bb7e87b95257341c097a397c6f3f24c821687a77af593417 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] live branch resumes after 1 stale frames (height 2201703)
+[2026-11-02T14:42:24Z] archive seam at height 2201750: frame prev 1cc8ac54aa08451993bbcfeb16c8b6f3d7427204b378f8ee3e204f41a9ce7c75 does not chain; hunting for the live branch
+[2026-11-02T14:42:24Z] archive scan done: live tail h2201750 (58 reorg seams), 4800 frames buffered for full parse
+[2026-11-02T14:42:24Z] rpc-seeding 4600 window entries (batched getblock) …
+FAIL(5): rpc seed: h2197150: stake-modifier checksum chain mismatch: computed 92dd7ca4 daemon 00000000 (generated=false pos=true)

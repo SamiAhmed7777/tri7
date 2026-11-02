@@ -10,6 +10,7 @@ pub mod difficulty;
 pub mod kernel;
 pub mod legacy;
 pub mod blkfile;
+pub mod p2p;
 pub mod replay;
 pub mod wallet;
 

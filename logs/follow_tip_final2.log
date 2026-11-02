@@ -1,0 +1,101 @@
+[2026-11-02T15:09:18Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:09:18Z] loading tipstate.json …
+[2026-11-02T15:09:19Z] handshake ok (attempt 1): peer version 70206 ("/Cryptographic Triangles:6.2.6.7/") start height 2204064 services 3
+[2026-11-02T15:09:20Z] state: tip h2204064 e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc · daemon getblockcount 2204064
+[2026-11-02T15:09:20Z] backfill: requesting headers from h2201064 (locator a6f3af62df0b45f20cd9d40809dc6e90d8b05df3509b33509eface6fd93b244d)
+[2026-11-02T15:09:20Z] backfill: validated 3000 headers linking h2201065 → h2204064 (hash9 + linkage, daemon-served)
+[2026-11-02T15:09:20Z] backfill: requesting 100 full blocks
+[2026-11-02T15:09:21Z] backfill: 10 blocks fully validated so far
+[2026-11-02T15:09:21Z] backfill: 20 blocks fully validated so far
+[2026-11-02T15:09:21Z] backfill: 30 blocks fully validated so far
+[2026-11-02T15:09:21Z] backfill: 40 blocks fully validated so far
+[2026-11-02T15:09:21Z] backfill: 50 blocks fully validated so far
+[2026-11-02T15:09:22Z] backfill: 60 blocks fully validated so far
+[2026-11-02T15:09:22Z] backfill: 70 blocks fully validated so far
+[2026-11-02T15:09:23Z] backfill: 80 blocks fully validated so far
+[2026-11-02T15:09:23Z] backfill: 90 blocks fully validated so far
+[2026-11-02T15:09:24Z] backfill: 100 blocks fully validated so far
+[2026-11-02T15:09:24Z] backfill: 100 blocks fully validated (kernel enforced 46 / seeded 54)
+[2026-11-02T15:09:24Z] poll #1: tip h2204064 · rx=115 msgs tx=13 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:09:54Z] poll #2: tip h2204064 · rx=116 msgs tx=14 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:10:24Z] poll #3: tip h2204064 · rx=118 msgs tx=15 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:10:54Z] poll #4: tip h2204064 · rx=120 msgs tx=16 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:11:24Z] poll #5: tip h2204064 · rx=178 msgs tx=74 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:11:54Z] poll #6: tip h2204064 · rx=455 msgs tx=350 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:12:24Z] poll #7: tip h2204064 · rx=750 msgs tx=644 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:12:55Z] poll #8: tip h2204064 · rx=1032 msgs tx=926 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:13:25Z] poll #9: tip h2204064 · rx=1327 msgs tx=1220 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:13:55Z] poll #10: tip h2204064 · rx=1609 msgs tx=1502 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:14:25Z] poll #11: tip h2204064 · rx=1908 msgs tx=1800 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:14:55Z] poll #12: tip h2204064 · rx=2186 msgs tx=2077 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:15:25Z] poll #13: tip h2204064 · rx=2483 msgs tx=2374 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:15:55Z] poll #14: tip h2204064 · rx=2760 msgs tx=2650 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:16:25Z] poll #15: tip h2204064 · rx=3055 msgs tx=2944 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:16:56Z] poll #16: tip h2204064 · rx=3337 msgs tx=3226 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:17:26Z] poll #17: tip h2204064 · rx=3629 msgs tx=3517 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:17:56Z] poll #18: tip h2204064 · rx=3906 msgs tx=3793 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:18:26Z] poll #19: tip h2204064 · rx=4206 msgs tx=4093 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:18:56Z] poll #20: tip h2204064 · rx=4483 msgs tx=4369 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:19:26Z] poll #21: tip h2204064 · rx=4778 msgs tx=4663 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:19:56Z] poll #22: tip h2204064 · rx=5060 msgs tx=4945 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:20:26Z] poll #23: tip h2204064 · rx=5354 msgs tx=5238 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+[2026-11-02T15:20:56Z] poll #24: tip h2204064 · rx=5631 msgs tx=5514 msgs · blocks 0/100 received+100 hist validated · kernels 46/54 enforced/seeded
+SUMMARY
+{
+  "exit_code": 0,
+  "messages": {
+    "blocks_received": 100,
+    "blocks_validated_hist": 100,
+    "blocks_validated_live": 0,
+    "checksums_verified": 0,
+    "handshakes": 2,
+    "headers_backfilled": 3000,
+    "headers_new": 0,
+    "headers_processed": 3012,
+    "kernel_enforced": 46,
+    "kernel_seeded": 54,
+    "nbits_checked": 100,
+    "parse_failures": 0,
+    "polls": 24,
+    "reconnects": 1,
+    "recv": {
+      "block": 100,
+      "getaddr": 2,
+      "getblocks": 17,
+      "headers": 26,
+      "ping": 5556,
+      "sendcmpct": 2,
+      "sendheaders": 2,
+      "smsgPing": 1,
+      "verack": 2,
+      "version": 2
+    },
+    "sent": {
+      "getdata": 4,
+      "getheaders": 26,
+      "pong": 5556,
+      "sendheaders": 2,
+      "verack": 2,
+      "version": 2
+    },
+    "sigs_checked": 100
+  },
+  "note": "run complete",
+  "protocol": {
+    "daemon_endpoint": "127.0.0.1:24113",
+    "magic": "70352205",
+    "protocol_version": 70206,
+    "user_agent": "/tri7:0.2.0/"
+  },
+  "tip": {
+    "at_daemon_tip": true,
+    "blockhash": "e4935197cc59b5480d553b8fce29515328a4d7d90cd419546b2394d3e49eddcc",
+    "daemon_getblockcount": 2204064,
+    "height": 2204064
+  },
+  "window": {
+    "base": 2199465,
+    "entries": 4600,
+    "utxo_tracked": 2008
+  }
+}
