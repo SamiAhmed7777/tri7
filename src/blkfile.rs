@@ -74,7 +74,10 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, String>
     while got < buf.len() {
         match r.read(&mut buf[got..]) {
             Ok(0) => {
-                return if got == 0 {
+                // A partial header that is entirely NUL padding (preallocated
+                // file tail not aligned to the 8-byte header) is clean EOF,
+                // matching the zero-padding tolerance of the loop below.
+                return if got == 0 || buf[..got].iter().all(|&b| b == 0) {
                     Ok(false)
                 } else {
                     Err("EOF mid-frame-header".into())
