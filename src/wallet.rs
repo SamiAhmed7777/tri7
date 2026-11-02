@@ -102,7 +102,6 @@ pub fn pubkey_to_address(pubkey: &[u8]) -> String {
     let mut payload = vec![0x41u8]; // PUBKEY_ADDRESS mainnet
     payload.extend_from_slice(&h);
     // base58check
-    use sha2::Digest as _;
     let cs = &Sha256::digest(&Sha256::digest(&payload))[..4];
     payload.extend_from_slice(cs);
     bs58_encode(&payload)

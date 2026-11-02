@@ -5,8 +5,10 @@
 //! so that the same bytes produce the same hashes and the same chain.
 
 pub mod consensus;
+pub mod difficulty;
 pub mod legacy;
 pub mod blkfile;
+pub mod replay;
 pub mod wallet;
 
 pub use legacy::{Block, Tx, Vin, Vout};
