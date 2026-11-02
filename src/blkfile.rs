@@ -81,7 +81,7 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, String>
                     Ok(false)
                 } else {
                     Err("EOF mid-frame-header".into())
-                }
+                };
             }
             Ok(n) => got += n,
             Err(e) => return Err(format!("frame header read: {}", e)),

@@ -164,7 +164,11 @@ fn main() {
                         }
                         match spend::verify_input(tx, vin_idx, script) {
                             Ok(v) => {
-                                let prev_kind = if prev.is_coinstake { "coinstake" } else { "regular" };
+                                let prev_kind = if prev.is_coinstake {
+                                    "coinstake"
+                                } else {
+                                    "regular"
+                                };
                                 if v.der_mode == "strict" {
                                     sigs_total += 1;
                                     match *kind {
@@ -204,8 +208,11 @@ fn main() {
                                             "... target reached: {} strict historical signatures \
                                              over {} distinct spending txs at height {} \
                                              (p2pk-prev {}, p2pkh-prev {})",
-                                            sigs_total, distinct_spends, height,
-                                            sigs_p2pk_prev, sigs_p2pkh_prev
+                                            sigs_total,
+                                            distinct_spends,
+                                            height,
+                                            sigs_p2pk_prev,
+                                            sigs_p2pkh_prev
                                         );
                                         reached_stop = true;
                                     }
@@ -324,24 +331,44 @@ fn main() {
         ));
     }
     if !reached_stop {
-        check_coverage(stale_at, covered_to, max_height, false)
-            .unwrap_or_else(|e| die(&format!("incomplete walk: {} ({} sigs verified)", e, sigs_total)));
+        check_coverage(stale_at, covered_to, max_height, false).unwrap_or_else(|e| {
+            die(&format!(
+                "incomplete walk: {} ({} sigs verified)",
+                e, sigs_total
+            ))
+        });
     }
 
     // ---- corpus JSON ---------------------------------------------------------
     let mut j = String::with_capacity(1 << 20);
     j.push_str("{\n");
     j.push_str(&format!("  \"blk_file\": \"{}\",\n", path));
-    j.push_str(&format!("  \"heights_scanned\": [{}, {}],\n", start_height, covered_to));
+    j.push_str(&format!(
+        "  \"heights_scanned\": [{}, {}],\n",
+        start_height, covered_to
+    ));
     j.push_str("  \"note\": \"");
-    j.push_str("regular txs carry zero bare-P2PK outputs on this chain (sig_probe full-archive pass); ");
-    j.push_str("p2pk-prev entries spend coinstake bare-pubkey outputs; spenders are always regular txs");
+    j.push_str(
+        "regular txs carry zero bare-P2PK outputs on this chain (sig_probe full-archive pass); ",
+    );
+    j.push_str(
+        "p2pk-prev entries spend coinstake bare-pubkey outputs; spenders are always regular txs",
+    );
     j.push_str("\",\n");
     j.push_str(&format!("  \"strict_verified\": {},\n", sigs_total));
-    j.push_str(&format!("  \"strict_verified_p2pk_prev\": {},\n", sigs_p2pk_prev));
-    j.push_str(&format!("  \"strict_verified_p2pkh_prev\": {},\n", sigs_p2pkh_prev));
+    j.push_str(&format!(
+        "  \"strict_verified_p2pk_prev\": {},\n",
+        sigs_p2pk_prev
+    ));
+    j.push_str(&format!(
+        "  \"strict_verified_p2pkh_prev\": {},\n",
+        sigs_p2pkh_prev
+    ));
     j.push_str(&format!("  \"lax_verified\": {},\n", lax_verified));
-    j.push_str(&format!("  \"unverifiable_skipped\": {},\n", unverifiable_skipped));
+    j.push_str(&format!(
+        "  \"unverifiable_skipped\": {},\n",
+        unverifiable_skipped
+    ));
     j.push_str(&format!("  \"hard_failures\": {},\n", hard_failures));
     j.push_str(&format!(
         "  \"broken_era_failures\": {},\n",
@@ -354,8 +381,14 @@ fn main() {
     j.push_str("  \"broken_era_samples\": [\n");
     j.push_str(&debug_samples.join(",\n"));
     j.push_str("\n  ],\n");
-    j.push_str(&format!("  \"candidate_single_sig_inputs\": {},\n", candidates_seen));
-    j.push_str(&format!("  \"prevouts_not_cached\": {},\n", prevs_not_cached));
+    j.push_str(&format!(
+        "  \"candidate_single_sig_inputs\": {},\n",
+        candidates_seen
+    ));
+    j.push_str(&format!(
+        "  \"prevouts_not_cached\": {},\n",
+        prevs_not_cached
+    ));
     j.push_str("  \"signatures\": [\n");
     j.push_str(&corpus.join(",\n"));
     j.push_str("\n  ]\n}\n");
@@ -363,13 +396,21 @@ fn main() {
         .unwrap_or_else(|e| die(&format!("mkdir: {}", e)));
     let tmp = format!("{}.tmp", out_path);
     std::fs::write(&tmp, &j).unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));
-    std::fs::rename(&tmp, &out_path).unwrap_or_else(|e| die(&format!("rename {}: {}", out_path, e)));
+    std::fs::rename(&tmp, &out_path)
+        .unwrap_or_else(|e| die(&format!("rename {}: {}", out_path, e)));
 
     println!(
         "verified: {} strict (+{} lax) historical signatures over heights {}..{} \
          (p2pk-prev {}, p2pkh-prev {}), {} hard failures, {} unverifiable skipped, corpus → {}",
-        sigs_total, lax_verified, start_height, covered_to, sigs_p2pk_prev,
-        sigs_p2pkh_prev, hard_failures, unverifiable_skipped, out_path
+        sigs_total,
+        lax_verified,
+        start_height,
+        covered_to,
+        sigs_p2pk_prev,
+        sigs_p2pkh_prev,
+        hard_failures,
+        unverifiable_skipped,
+        out_path
     );
     println!("HISTORICAL SIGNATURE CORPUS PASSED");
 }

@@ -62,7 +62,7 @@ ls -ln ids, runuser return codes) for cross-checking.
 ## Unit contract (tri7d.service)
 - `Restart=on-failure`, `RestartSec=30`: any non-zero exit (2/3/4/5) or signal
   death → restart after 30s; `systemctl stop` stays stopped.
-- `MemoryMax=256M`: measured peak RSS **12.7 MB** (90s live run as tri7 via
+- `MemoryMax=512M`: measured peak RSS **12.7 MB** (90s live run as tri7 via
   `/usr/bin/time -v`, full state re-verify + 3000-header backfill + 100-block
   backfill + follow loop). ~20x headroom, well under the 512M target, vs legacy
   trianglesd ~1.5 GB.

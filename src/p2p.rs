@@ -84,7 +84,10 @@ pub fn encode_message(command: &str, payload: &[u8]) -> Result<Vec<u8>, String> 
     }
     for &b in cb {
         if !(0x20..=0x7e).contains(&b) {
-            return Err(format!("command {:?} has non-printable byte {:#x}", command, b));
+            return Err(format!(
+                "command {:?} has non-printable byte {:#x}",
+                command, b
+            ));
         }
     }
     if payload.len() as u64 > MAX_PAYLOAD as u64 {
@@ -168,12 +171,8 @@ impl MessageDecoder {
                 }
                 _ => return Err("empty command field".into()),
             };
-            let len = u32::from_le_bytes([
-                self.buf[16],
-                self.buf[17],
-                self.buf[18],
-                self.buf[19],
-            ]) as usize;
+            let len = u32::from_le_bytes([self.buf[16], self.buf[17], self.buf[18], self.buf[19]])
+                as usize;
             if len as u64 > MAX_PAYLOAD as u64 {
                 return Err(format!("payload length {} > MAX_SIZE", len));
             }
@@ -183,12 +182,7 @@ impl MessageDecoder {
             let payload_start = HEADER_SIZE;
             let payload_end = HEADER_SIZE + len;
             let expect = checksum(&self.buf[payload_start..payload_end]);
-            let got = u32::from_le_bytes([
-                self.buf[20],
-                self.buf[21],
-                self.buf[22],
-                self.buf[23],
-            ]);
+            let got = u32::from_le_bytes([self.buf[20], self.buf[21], self.buf[22], self.buf[23]]);
             if got != expect {
                 return Err(format!(
                     "checksum mismatch for {:?}: hdr {:08x} want {:08x}",
@@ -509,7 +503,7 @@ mod tests {
         // height lock (lt < 500M): final iff lt < height (STRICT)
         assert!(is_final(1000, 1001, 9_999_999, false));
         assert!(!is_final(1000, 1000, 9_999_999, false)); // equal = NOT final
-        // timestamp lock (lt >= 500M): final iff lt < block_time (STRICT)
+                                                          // timestamp lock (lt >= 500M): final iff lt < block_time (STRICT)
         assert!(is_final(600_000_000, 0, 600_000_001, false));
         assert!(!is_final(600_000_000, 0, 600_000_000, false));
         // sequence: unsatisfied locktime + ALL inputs final ⇒ final
@@ -617,11 +611,13 @@ mod tests {
         let msgs = MessageDecoder::new().feed(&frame).unwrap();
         assert_eq!(parse_version(&msgs[0].payload).unwrap(), v);
 
-        let hashes: Vec<Hash> = (0..300u32).map(|i| {
-            let mut h = [0u8; 32];
-            h[0..4].copy_from_slice(&i.to_le_bytes());
-            h
-        }).collect();
+        let hashes: Vec<Hash> = (0..300u32)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0..4].copy_from_slice(&i.to_le_bytes());
+                h
+            })
+            .collect();
         let payload = build_getheaders(&hashes, &[9u8; 32]);
         // locator body = 4 (version) + 3 (0xfd compactsize) + 300*32 + 32 stop
         assert_eq!(payload.len(), 4 + 3 + 300 * 32 + 32);
@@ -670,25 +666,36 @@ mod tests {
     #[test]
     fn inv_and_ping_roundtrip() {
         let inv = vec![
-            (MSG_BLOCK, display_to_internal("7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021").unwrap()),
+            (
+                MSG_BLOCK,
+                display_to_internal(
+                    "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021",
+                )
+                .unwrap(),
+            ),
             (MSG_TX, [7u8; 32]),
         ];
         let payload = build_getdata(&inv);
         assert_eq!(parse_inv(&payload).unwrap(), inv);
-        assert_eq!(parse_ping(&build_pong(0xdead_beef_cafe_1234)).unwrap(), 0xdead_beef_cafe_1234);
+        assert_eq!(
+            parse_ping(&build_pong(0xdead_beef_cafe_1234)).unwrap(),
+            0xdead_beef_cafe_1234
+        );
         assert_eq!(parse_ping(&[]).unwrap(), 0);
     }
 
     #[test]
     fn genesis_display_hash_converts_to_internal_order() {
-        let internal = display_to_internal(
-            "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021",
-        )
-        .unwrap();
+        let internal =
+            display_to_internal("7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021")
+                .unwrap();
         // display order is the byte-reverse of internal order
         assert_eq!(internal[0], 0x21);
         assert_eq!(internal[31], 0x7e);
-        assert_eq!(internal_to_display(&internal), "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021");
+        assert_eq!(
+            internal_to_display(&internal),
+            "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021"
+        );
     }
 
     #[test]

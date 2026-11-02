@@ -1,8 +1,66 @@
-# tri7 modern-client loop — session handoff (2026-11-02, phase 5a)
+# tri7 modern-client loop — session handoff (2026-11-02, phase 5b)
 
 ## State
-Repo: /root/tri7 (Rust, phases 1a..4 committed; phase 5a deploy — see below).
+Repo: /root/tri7 (Rust, phases 1a..4 committed; phase 5a+5b deployed — see below).
 Live chain ref: /root/.triangles (DNS2 daemon v6.2.6.7, RPC 19112, P2P 24113, tip 2204064 static since 2026-09-24, staking=0).
+
+## Phase 5b (2026-11-02): tri7d native RPC surface — DONE, live on DNS2 (port 19114)
+- src/rpc.rs (HTTP/JSON-RPC server + dispatch, loopback-only, 1MB cap, per-conn threads,
+  Connection:close) + src/blockindex.rs (disk-backed indexes) wired into follow_tip as an
+  in-process listener thread — design choice: single state owner (ChainState behind
+  Arc<Mutex>, RPC takes short per-call locks), reuse of the legacy Rpc creds, one systemd
+  unit. NOT committed yet (no git commit per instructions).
+- NATIVE methods (envelope tagged "source":"tri7"): gettip getblockcount getblockhash
+  getblock(hash|height) getrawtransaction getinfo getdifficulty getconnectioncount
+  getstakemodifier getbalance listunspent listwalletaddresses getreceivedbyaddress
+  validateaddress health. Proxy fallback ONLY as transitional ("source":"legacy-proxy"):
+  warming/out-of-index misses + daemon-only reads (getrawmempool, getmempoolinfo,
+  gettransaction, getstakinginfo, getnetworkhashps, getwalletinfo). Wallet-write methods
+  NEVER forwarded (-32601).
+- Blockindex: hash→offset (24B/frame) + seq→height + height→offset + txid→offset
+  (16B/tx) built by scanning blk0001.dat in a background thread (~90s cold, cache-first
+  on restart: /var/lib/tri7/index/{blockidx,txidx}.bin ≈ 143MB, loads <1s). 2,210,692
+  frames / 4,500,210 txs. Heights BELOW window base = frame-order chaining (proven by
+  anchor rule: window-region accepts REQUIRE the daemon-anchored hashes — reached-base
+  check proves the whole prefix); heights IN window = authoritative tipstate hashes;
+  heights_ok=true verified. Key = first-8-bytes truncation, ALWAYS verified by full
+  hash re-read (hash9/sha256d).
+- Wallet RPCs serve the replay SNAPSHOTS (balances.json + wallet_utxos.json copied to
+  /var/lib/tri7 root:tri7 0640) — NO live UTXO set (footprint: RSS 165MB steady,
+  ~300MB peak first build; MemoryMax bumped 256M→512M).
+- blk file access for user tri7: HARDLINK /root/.triangles/blk0001.dat →
+  /var/lib/tri7/blk0001.dat (same inode 267185, file mode 0605 → world-readable inode;
+  /root itself is 0700 so traversal is impossible — the hardlink is the only clean path).
+  ln -f keeps it in sync with daemon appends (same inode).
+- **CHAIN UNIT FACT (empirical, daemon-verified): COIN = 1e6, NOT 1e8.** Daemon doubles
+  (getbalance/getreceivedbyaddress/getrawtransaction vout/getinfo moneysupply) = raw
+  units / 1e6. consensus.rs COIN=1_000_000 confirmed. rpc.rs sats_to_tri divides by 1e6.
+  getbalance = 3036.990591 (= balances.json wallet total 3,036,990,591 / 1e6). Daemon
+  getbalance (2921.8) is ITS spendable view — the task pins balances.json total.
+- Daemon-parity details: getdifficulty/getinfo difficulty = {proof-of-work,
+  proof-of-stake} object; PoS = GetDifficulty(last block nBits) via the daemon's own
+  double formula (0x0000ffff/(bits&0xffffff) × 256^(29-shift)) — BIT-EXACT vs daemon
+  (8.147741845052824e-08 @tip); PoW = window-based next-target (daemon walks its full
+  index for PoW blocks — impossible from the window, note field explains). Verbose tx
+  "time" = containing BLOCK time (daemon semantics), tx nTime rides as "tx_time".
+  getreceivedbyaddress is WALLET-SCOPED (non-wallet addresses → 0, daemon parity:
+  23/23 exact).
+- PORT REALITY: 19113 on DNS2 is held by an autossh tunnel (→ sami-pc:19112, live node
+  consumer attached — DO NOT KILL). tri7d listens on **19114** until cutover. Full
+  steps in deploy/tri7d_rpc_cutover.md.
+- Live validation: gettip==daemon tip (at_daemon_tip true); getblockhash 23/23 heights
+  match daemon (incl. seam region 2201698/2201750, fork boundaries 17651/17692/2186941/
+  2186942); getblock hash+height native byte-identical JSON vs daemon (modifier/
+  checksum/proofhash from window entries); getrawtransaction hex/time/meta/asm/values
+  full parity; getreceivedbyaddress 23/23 + non-wallet 0; getbalance 3036.990591;
+  listunspent 177 UTXOs / 3036990591; listwalletaddresses 248; batch works; oversize
+  → HTTP 413; sendtoaddress → -32601 never forwarded. tests 136/136 (91 lib: 57 old
+  + 34 new rpc/blockindex).
+- Files: src/rpc.rs, src/blockindex.rs (new), src/lib.rs, src/legacy.rs (Reader::pos/
+  skip), src/bin/follow_tip.rs (Arc<Mutex> refactor + adapters + listener), Cargo.toml
+  (serde_json float_roundtrip feature — amount doubles must round-trip bit-exactly),
+  deploy/tri7d.service (new ExecStart flags + MemoryMax 512M),
+  deploy/install_tri7d.sh (step 5b: snapshots + hardlink), deploy/tri7d_rpc_cutover.md.
 
 ## Phase 5a (2026-11-02): tri7d systemd packaging on DNS2 — DONE, judge grade B
 - follow_tip packaged as tri7d.service, RUNNING on DNS2: `systemctl enable --now` 2026-11-02 10:25 PST.

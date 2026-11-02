@@ -205,11 +205,11 @@ pub fn check_pos_block_signature(block: &Block) -> Result<(), String> {
     }
     let sig = secp256k1::ecdsa::Signature::from_der(&block.block_sig)
         .map_err(|e| format!("bad DER signature: {}", e))?;
-    let pk = secp256k1::PublicKey::from_slice(pubkey)
-        .map_err(|e| format!("bad pubkey: {}", e))?;
+    let pk = secp256k1::PublicKey::from_slice(pubkey).map_err(|e| format!("bad pubkey: {}", e))?;
     let msg = secp256k1::Message::from_digest(block.hash());
     let secp = secp256k1::Secp256k1::verification_only();
-    secp.verify_ecdsa(&msg, &sig, &pk).map_err(|e| e.to_string())
+    secp.verify_ecdsa(&msg, &sig, &pk)
+        .map_err(|e| e.to_string())
 }
 
 /// PoW blocks must carry an EMPTY signature (spec §6).

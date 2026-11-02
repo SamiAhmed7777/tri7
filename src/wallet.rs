@@ -100,11 +100,8 @@ pub fn pubkey_to_address(pubkey: &[u8]) -> String {
 
 /// Open a wallet file read-only and extract everything a spendable wallet needs.
 pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| format!("open sqlite: {}", e))?;
+    let conn = rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open sqlite: {}", e))?;
 
     // Container validation (spec §2).
     let app_id: i32 = conn
@@ -117,9 +114,7 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
     let mut stmt = conn
         .prepare("SELECT key, value FROM main")
         .map_err(|e| format!("select: {}", e))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("query: {}", e))?;
+    let mut rows = stmt.query([]).map_err(|e| format!("query: {}", e))?;
 
     let mut w = WalletKeys {
         keys: Vec::new(),

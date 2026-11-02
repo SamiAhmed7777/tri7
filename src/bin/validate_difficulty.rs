@@ -67,9 +67,7 @@ fn main() {
         //               rule (MTP-based, 11s effective) produced 1e0a22ae —
         //               plain EMA gives 2000ffff-clamp/207fffff instead
         const ERA_BOUNDARY: [usize; 3] = [17692, 17693, 2186941];
-        if height > consensus::CRAPCHAIN_CUTOFF_BLOCK
-            && !ERA_BOUNDARY.contains(&height)
-        {
+        if height > consensus::CRAPCHAIN_CUTOFF_BLOCK && !ERA_BOUNDARY.contains(&height) {
             let expected = difficulty::get_next_target_required(&idx, is_pos);
             if block.bits != expected {
                 eprintln!(
@@ -102,7 +100,10 @@ fn main() {
         prev = Some(hash);
         height += 1;
         if checked % 100_000 == 0 {
-            println!("... {} blocks ({} nBits enforced)", checked, enforced_checked);
+            println!(
+                "... {} blocks ({} nBits enforced)",
+                checked, enforced_checked
+            );
         }
     }
 
@@ -133,7 +134,10 @@ fn main() {
 
     println!(
         "replay: {} blocks total, {} nBits enforced + matched ({}..{})",
-        checked, enforced_checked, consensus::CRAPCHAIN_CUTOFF_BLOCK + 1, height
+        checked,
+        enforced_checked,
+        consensus::CRAPCHAIN_CUTOFF_BLOCK + 1,
+        height
     );
     println!("ALL DIFFICULTY CHECKS PASSED");
 }

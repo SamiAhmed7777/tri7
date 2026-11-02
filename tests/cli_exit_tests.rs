@@ -25,8 +25,7 @@ fn verify_sigs_zero_coverage_fails() {
     }
     // take just the first frame (magic + len + genesis block)
     let raw = genesis.unwrap();
-    let len =
-        u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+    let len = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
     data.extend_from_slice(&raw[..8 + len]);
     std::fs::write(&path, &data).unwrap();
     let out = Command::new(bin)
@@ -45,7 +44,10 @@ fn verify_sigs_eof_before_end_fails() {
     let path = dir.join("short.dat");
     let raw = std::fs::read("/root/.triangles/blk0001.dat");
     if raw.is_err() {
-        eprintln!("SKIP: live archive absent ({}); contract not exercised here", path.to_string_lossy());
+        eprintln!(
+            "SKIP: live archive absent ({}); contract not exercised here",
+            path.to_string_lossy()
+        );
         return;
     }
     let raw = raw.unwrap();
@@ -110,11 +112,8 @@ fn synth_wallet(
     let mut kvalue = Vec::new();
     push_cs(&mut kvalue, der.len() as u64);
     kvalue.extend_from_slice(&der);
-    conn.execute(
-        "INSERT INTO main VALUES (?1, ?2)",
-        [kkey, kvalue],
-    )
-    .unwrap();
+    conn.execute("INSERT INTO main VALUES (?1, ?2)", [kkey, kvalue])
+        .unwrap();
 
     if with_bestblock {
         let mut bkey = vec![9u8];

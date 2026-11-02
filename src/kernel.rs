@@ -37,8 +37,7 @@ pub const KERNEL_SELECTION_INTERVAL: i64 = 2 * MODIFIER_INTERVAL as i64;
 /// GetStakeModifierSelectionIntervalSection(nSection) for a given interval.
 pub fn selection_interval_section_with(n_section: usize, interval: u32) -> i64 {
     assert!(n_section < 64);
-    interval as i64 * 63
-        / (63 + ((63 - n_section as i64) * (MODIFIER_INTERVAL_RATIO - 1)))
+    interval as i64 * 63 / (63 + ((63 - n_section as i64) * (MODIFIER_INTERVAL_RATIO - 1)))
 }
 
 /// GetStakeModifierSelectionIntervalSection(nSection) at 300 s (current).
@@ -48,7 +47,9 @@ pub fn selection_interval_section(n_section: usize) -> i64 {
 
 /// GetStakeModifierSelectionInterval() — sum of the 64 sections.
 pub fn selection_interval_with(interval: u32) -> i64 {
-    (0..64).map(|n| selection_interval_section_with(n, interval)).sum()
+    (0..64)
+        .map(|n| selection_interval_section_with(n, interval))
+        .sum()
 }
 
 /// GetStakeModifierSelectionInterval() at 300 s (current).
@@ -241,7 +242,10 @@ pub fn compute_next_stake_modifier_era(
             };
         }
         let (_, bi) = best.ok_or_else(|| {
-            format!("ComputeNextStakeModifier: unable to select block at round {}", round)
+            format!(
+                "ComputeNextStakeModifier: unable to select block at round {}",
+                round
+            )
         })?;
         // Entropy bit of the selected block (kernel.cpp:195).
         let sel_height = cands[bi].2;
@@ -260,7 +264,10 @@ pub fn compute_next_stake_modifier_era(
 /// block where the walk stopped (every block above the compute gate stores the
 /// current modifier — generated or reused — so this reproduces
 /// `pindex->nStakeModifier` exactly).
-pub fn get_kernel_stake_modifier(idx: &ReplayIndex, block_from_height: usize) -> Result<u64, String> {
+pub fn get_kernel_stake_modifier(
+    idx: &ReplayIndex,
+    block_from_height: usize,
+) -> Result<u64, String> {
     get_kernel_stake_modifier_with(idx, block_from_height, KERNEL_SELECTION_INTERVAL)
 }
 
@@ -757,14 +764,12 @@ mod tests {
         // kernel.cpp:73-78: 300*63 / (63 + (63-n)*(ratio-1)); ratio 3.
         assert_eq!(selection_interval_section(0), 18_900 / 189); // 100
         assert_eq!(selection_interval_section(63), 18_900 / 63); // 300
-        // strictly increasing
+                                                                 // strictly increasing
         for n in 1..64 {
             assert!(selection_interval_section(n) > selection_interval_section(n - 1));
         }
         // total selection interval is the exact sum of the 64 sections
-        let manual: i64 = (0..64)
-            .map(|n| 300 * 63 / (63 + (63 - n) * 2))
-            .sum();
+        let manual: i64 = (0..64).map(|n| 300 * 63 / (63 + (63 - n) * 2)).sum();
         assert_eq!(selection_interval(), manual);
         // kernel window (kernel.cpp:249-250) is FIXED at 2 * nModifierInterval
         assert_eq!(KERNEL_SELECTION_INTERVAL, 600);
@@ -783,12 +788,26 @@ mod tests {
         s.extend_from_slice(&1_400_004_000u32.to_le_bytes()); // nTimeTx
         let expected = sha256d(&s);
         assert_eq!(
-            stake_kernel_hash(0x0e00_670b, 1_400_000_000, 123_456, 1_399_999_000, 3, 1_400_004_000),
+            stake_kernel_hash(
+                0x0e00_670b,
+                1_400_000_000,
+                123_456,
+                1_399_999_000,
+                3,
+                1_400_004_000
+            ),
             expected
         );
         // different fields must change the hash
         assert_ne!(
-            stake_kernel_hash(0x0e00_670c, 1_400_000_000, 123_456, 1_399_999_000, 3, 1_400_004_000),
+            stake_kernel_hash(
+                0x0e00_670c,
+                1_400_000_000,
+                123_456,
+                1_399_999_000,
+                3,
+                1_400_004_000
+            ),
             expected
         );
     }
@@ -808,8 +827,14 @@ mod tests {
                 sequence: u32::MAX,
             }],
             vout: vec![
-                Vout { value: 0, script_pubkey: vec![] }, // IsEmpty marker
-                Vout { value: 5_000_000, script_pubkey: vec![0xac] },
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                }, // IsEmpty marker
+                Vout {
+                    value: 5_000_000,
+                    script_pubkey: vec![0xac],
+                },
             ],
             locktime: 0,
         };
@@ -826,7 +851,10 @@ mod tests {
         set.apply_block(&blk, 0).expect("apply");
         // marker output not tracked, real output tracked
         let txid = fund.hash();
-        assert!(set.get(&(txid, 0)).is_none(), "IsEmpty output must not be tracked");
+        assert!(
+            set.get(&(txid, 0)).is_none(),
+            "IsEmpty output must not be tracked"
+        );
         let meta = set.get(&(txid, 1)).expect("real output tracked");
         assert_eq!(meta.value, 5_000_000);
         assert_eq!(meta.height, 0);
@@ -843,17 +871,44 @@ mod tests {
                 sequence: u32::MAX,
             }],
             vout: vec![
-                Vout { value: 0, script_pubkey: vec![] },
-                Vout { value: 5_000_000, script_pubkey: vec![0xac] },
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                },
+                Vout {
+                    value: 5_000_000,
+                    script_pubkey: vec![0xac],
+                },
             ],
             locktime: 0,
         };
-        let blk2 = Block { version: 1, prev_hash: [1u8; 32], merkle_root: [0u8; 32], time: 1_400_004_000, bits: 0x207f_ffff, nonce: 0, vtx: vec![spend.clone()], block_sig: vec![] };
+        let blk2 = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_400_004_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+            vtx: vec![spend.clone()],
+            block_sig: vec![],
+        };
         set.apply_block(&blk2, 1).expect("apply spend");
         assert!(set.get(&(txid, 1)).is_none(), "spent output removed");
         // double-spend detection
-        let blk3 = Block { version: 1, prev_hash: [2u8; 32], merkle_root: [0u8; 32], time: 1_400_008_000, bits: 0x207f_ffff, nonce: 0, vtx: vec![spend.clone()], block_sig: vec![] };
-        assert!(set.apply_block(&blk3, 2).is_err(), "double spend must error");
+        let blk3 = Block {
+            version: 1,
+            prev_hash: [2u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_400_008_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+            vtx: vec![spend.clone()],
+            block_sig: vec![],
+        };
+        assert!(
+            set.apply_block(&blk3, 2).is_err(),
+            "double spend must error"
+        );
     }
 
     #[test]
@@ -875,9 +930,18 @@ mod tests {
                 sequence: u32::MAX,
             }],
             vout: vec![
-                Vout { value: 700, script_pubkey: p2pkh.clone() },
-                Vout { value: 11, script_pubkey: vec![0x6a, 0x01, 0xaa] }, // OP_RETURN junk
-                Vout { value: 0, script_pubkey: vec![] },                  // IsEmpty marker
+                Vout {
+                    value: 700,
+                    script_pubkey: p2pkh.clone(),
+                },
+                Vout {
+                    value: 11,
+                    script_pubkey: vec![0x6a, 0x01, 0xaa],
+                }, // OP_RETURN junk
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                }, // IsEmpty marker
             ],
             locktime: 0,
         };
@@ -894,8 +958,16 @@ mod tests {
         set.apply_block(&blk, 0).expect("apply");
         let txid = fund.hash();
         assert_eq!(set.address_payload_of(&(txid, 0)), Some(expect_payload));
-        assert_eq!(set.address_payload_of(&(txid, 1)), None, "non-standard script unattributed");
-        assert_eq!(set.address_payload_of(&(txid, 2)), None, "IsEmpty marker untracked");
+        assert_eq!(
+            set.address_payload_of(&(txid, 1)),
+            None,
+            "non-standard script unattributed"
+        );
+        assert_eq!(
+            set.address_payload_of(&(txid, 2)),
+            None,
+            "IsEmpty marker untracked"
+        );
         let totals = set.address_balances();
         assert_eq!(totals.per_address.get(&expect_payload), Some(&(700, 1)));
         assert_eq!(totals.unattributed_sats, 11);
@@ -910,7 +982,10 @@ mod tests {
                 script_sig: vec![],
                 sequence: u32::MAX,
             }],
-            vout: vec![Vout { value: 700, script_pubkey: p2pkh }],
+            vout: vec![Vout {
+                value: 700,
+                script_pubkey: p2pkh,
+            }],
             locktime: 0,
         };
         let blk2 = Block {
@@ -936,7 +1011,9 @@ mod tests {
 
     /// The payload a P2PKH script must map to, computed via the public API.
     fn tri7_payload(p2pkh_script: &[u8]) -> [u8; 21] {
-        crate::address::script_to_dest(p2pkh_script).expect("parse").payload()
+        crate::address::script_to_dest(p2pkh_script)
+            .expect("parse")
+            .payload()
     }
 
     #[test]
@@ -954,10 +1031,12 @@ mod tests {
         assert_eq!(m, 0, "genesis modifier is 0");
         assert!(!g, "same bucket must reuse, not regenerate");
         // Past the bucket boundary -> full 64-round generation
-        let (m2, g2) =
-            compute_next_stake_modifier(&idx, Some(1500)).expect("generation path");
+        let (m2, g2) = compute_next_stake_modifier(&idx, Some(1500)).expect("generation path");
         assert!(g2, "new bucket must generate");
-        assert_ne!(m2, 0, "64 entropy rounds producing all-zero is astronomically unlikely");
+        assert_ne!(
+            m2, 0,
+            "64 entropy rounds producing all-zero is astronomically unlikely"
+        );
         // Deterministic
         let (m2b, _) = compute_next_stake_modifier(&idx, Some(1500)).unwrap();
         assert_eq!(m2, m2b);
@@ -1071,7 +1150,10 @@ mod tests {
                 script_sig: vec![1],
                 sequence: u32::MAX,
             }],
-            vout: vec![Vout { value, script_pubkey: pk }],
+            vout: vec![Vout {
+                value,
+                script_pubkey: pk,
+            }],
             locktime: 0,
         };
         let mut set = UtxoSet::new();
@@ -1107,7 +1189,10 @@ mod tests {
                 script_sig: vec![],
                 sequence: u32::MAX,
             }],
-            vout: vec![Vout { value: 10, script_pubkey: vec![0xac] }],
+            vout: vec![Vout {
+                value: 10,
+                script_pubkey: vec![0xac],
+            }],
             locktime: 0,
         };
         let blk2 = Block {
@@ -1123,8 +1208,14 @@ mod tests {
         let rep = set.apply_block_reported(&blk2, 2);
         assert_eq!(rep.untracked_spends, 1);
         let y = bad_spend.hash();
-        assert!(set.get(&(y, 0)).is_some(), "outputs of a bad-spend tx are still created");
-        assert!(set.get(&(x, 0)).is_some(), "untracked input must not remove anything");
+        assert!(
+            set.get(&(y, 0)).is_some(),
+            "outputs of a bad-spend tx are still created"
+        );
+        assert!(
+            set.get(&(x, 0)).is_some(),
+            "untracked input must not remove anything"
+        );
     }
 
     #[test]
@@ -1147,8 +1238,14 @@ mod tests {
                 sequence: u32::MAX,
             }],
             vout: vec![
-                Vout { value: 0, script_pubkey: vec![] },
-                Vout { value: 5_000_000, script_pubkey: vec![0xac] },
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                },
+                Vout {
+                    value: 5_000_000,
+                    script_pubkey: vec![0xac],
+                },
             ],
             locktime: 0,
         };
@@ -1175,8 +1272,14 @@ mod tests {
                 sequence: u32::MAX,
             }],
             vout: vec![
-                Vout { value: 0, script_pubkey: vec![] },
-                Vout { value: 5_000_000, script_pubkey: vec![0xac] },
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                },
+                Vout {
+                    value: 5_000_000,
+                    script_pubkey: vec![0xac],
+                },
             ],
             locktime: 0,
         };
@@ -1187,17 +1290,23 @@ mod tests {
             time: stake.time,
             bits: 0x207f_ffff,
             nonce: 0,
-            vtx: vec![{
-                let mut cb = stake.clone();
-                cb.vin = vec![Vin {
-                    prev_hash: [0u8; 32],
-                    prev_n: u32::MAX,
-                    script_sig: vec![1],
-                    sequence: u32::MAX,
-                }];
-                cb.vout = vec![Vout { value: 0, script_pubkey: vec![] }];
-                cb
-            }, stake.clone()],
+            vtx: vec![
+                {
+                    let mut cb = stake.clone();
+                    cb.vin = vec![Vin {
+                        prev_hash: [0u8; 32],
+                        prev_n: u32::MAX,
+                        script_sig: vec![1],
+                        sequence: u32::MAX,
+                    }];
+                    cb.vout = vec![Vout {
+                        value: 0,
+                        script_pubkey: vec![],
+                    }];
+                    cb
+                },
+                stake.clone(),
+            ],
             block_sig: vec![],
         };
         // nTime violation: kernel tx time before the stake output's tx time
@@ -1210,7 +1319,8 @@ mod tests {
         assert!(err.contains("min age violation"), "got: {}", err);
         // exactly at min age the guards pass and the kernel is computed
         let b = mk_block(&coinstake(t_fund + 3600));
-        let res = check_proof_of_stake(&idx, &b, &utxos, 0x207f_ffff, 0).expect("guards pass at min age");
+        let res =
+            check_proof_of_stake(&idx, &b, &utxos, 0x207f_ffff, 0).expect("guards pass at min age");
         let _ = res.hash_proof_of_stake;
     }
 }

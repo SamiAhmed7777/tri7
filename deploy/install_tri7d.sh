@@ -24,6 +24,16 @@ if [[ ! -f /var/lib/tri7/tipstate.json ]]; then
   install -m 0600 -o tri7 -g tri7 /root/tri7/tipstate.json /var/lib/tri7/tipstate.json
 fi
 
+# 5b. phase-5b RPC surface inputs:
+#  - replay snapshots (balances.json / wallet_utxos.json) — refresh these by
+#    re-running the balances bin and re-copying when the replay is redone
+install -m 0640 -o root -g tri7 /root/tri7/balances.json /var/lib/tri7/balances.json
+install -m 0640 -o root -g tri7 /root/tri7/wallet_utxos.json /var/lib/tri7/wallet_utxos.json
+#  - blocks file for the native block/tx index: HARDLINK (same inode, zero
+#    disk cost, follows daemon appends; blk0001.dat is 0605 so tri7 can read
+#    the inode). Re-run this line if the daemon ever recreates the file.
+ln -f /root/.triangles/blk0001.dat /var/lib/tri7/blk0001.dat
+
 # 6. units (daemon + health service/timer)
 install -m 0644 /root/tri7/deploy/tri7d.service /etc/systemd/system/tri7d.service
 install -m 0644 /root/tri7/deploy/tri7d-health.service /etc/systemd/system/tri7d-health.service

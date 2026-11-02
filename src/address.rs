@@ -161,7 +161,8 @@ mod tests {
     // Daemon-confirmed vector (validateaddress: isvalid=true, ismine=true):
     // this wallet pubkey's address. Both the bare-pubkey form and the P2PKH
     // form of this key must encode to exactly this string.
-    const WALLET_PUBKEY: &str = "020a3299ffe18ff4abd4e8c4e4a62235dcb6099f23990f75c1de6e19699f4b5314";
+    const WALLET_PUBKEY: &str =
+        "020a3299ffe18ff4abd4e8c4e4a62235dcb6099f23990f75c1de6e19699f4b5314";
     const WALLET_ADDRESS: &str = "TZ4v4GkyNtv2hPxGHtQMfews7Hpj1REgs5";
     // Daemon-confirmed P2SH vector (validateaddress: isvalid=true) for
     // hash160 00112233445566778899aabbccddeeff00112233 at version 28.
@@ -206,12 +207,18 @@ mod tests {
         let dest = script_to_dest(&script).expect("p2sh must parse");
         assert!(!dest.is_pubkey_hash());
         let payload = dest.payload();
-        assert_eq!(payload[0], SCRIPT_ADDRESS, "P2SH version byte must be 28/0x1c");
+        assert_eq!(
+            payload[0], SCRIPT_ADDRESS,
+            "P2SH version byte must be 28/0x1c"
+        );
         assert_eq!(&payload[1..], &h[..]);
         assert_eq!(payload_to_address(&payload), P2SH_ADDRESS);
         // the same hash at the pubkey version encodes differently
         let h_arr: [u8; 20] = h.as_slice().try_into().unwrap();
-        assert_ne!(payload_to_address(&payload_for(PUBKEY_ADDRESS, &h_arr)), P2SH_ADDRESS);
+        assert_ne!(
+            payload_to_address(&payload_for(PUBKEY_ADDRESS, &h_arr)),
+            P2SH_ADDRESS
+        );
     }
 
     #[test]
@@ -234,7 +241,10 @@ mod tests {
         script.extend_from_slice(&uncompressed);
         script.push(0xac);
         let dest = script_to_dest(&script).expect("bare uncompressed key must parse");
-        assert_eq!(payload_to_address(&dest.payload()), WALLET_PUBKEY_UNCOMPRESSED_ADDRESS);
+        assert_eq!(
+            payload_to_address(&dest.payload()),
+            WALLET_PUBKEY_UNCOMPRESSED_ADDRESS
+        );
     }
 
     #[test]
@@ -247,11 +257,19 @@ mod tests {
         // 0x88 tail without the mandatory OP_CHECKSIG
         let mut s = vec![0x76, 0xa9, 0x14];
         s.extend_from_slice(&h);
-        assert_eq!(script_to_dest(&s), None, "missing OP_EQUALVERIFY/OP_CHECKSIG tail");
+        assert_eq!(
+            script_to_dest(&s),
+            None,
+            "missing OP_EQUALVERIFY/OP_CHECKSIG tail"
+        );
         let mut s = vec![0x76, 0xa9, 0x14];
         s.extend_from_slice(&h);
         s.push(0x88);
-        assert_eq!(script_to_dest(&s), None, "OP_EQUALVERIFY alone is not P2PKH");
+        assert_eq!(
+            script_to_dest(&s),
+            None,
+            "OP_EQUALVERIFY alone is not P2PKH"
+        );
         let mut s = vec![0x76, 0xa9, 0x13];
         s.extend_from_slice(&h[..19]);
         s.extend_from_slice(&[0x88]);
@@ -266,7 +284,11 @@ mod tests {
         let mut s = vec![0x21u8];
         s.extend_from_slice(&[2u8; 33]);
         s.extend_from_slice(&[0x88]);
-        assert_eq!(script_to_dest(&s), None, "pubkey push must end in OP_CHECKSIG");
+        assert_eq!(
+            script_to_dest(&s),
+            None,
+            "pubkey push must end in OP_CHECKSIG"
+        );
         let mut s = vec![0x21u8];
         s.extend_from_slice(&[5u8; 33]); // invalid key prefix
         s.extend_from_slice(&[0xac]);

@@ -15,11 +15,7 @@ fn make_tx(vout0_value: i64, vout0_script: &[u8], prev_null: bool) -> Tx {
         version: 1,
         time: 1_700_000_000,
         vin: vec![tri7_core::Vin {
-            prev_hash: if prev_null {
-                [0u8; 32]
-            } else {
-                [1u8; 32]
-            },
+            prev_hash: if prev_null { [0u8; 32] } else { [1u8; 32] },
             prev_n: if prev_null { u32::MAX } else { 0 },
             script_sig: vec![],
             sequence: u32::MAX,
@@ -133,7 +129,10 @@ fn stake_weight_respects_min_and_max_age() {
     assert_eq!(stake_weight(1_000_000, 1_000_000, 0), 0); // younger than min age
     assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600, 0), 0); // exactly min age -> 0
     assert_eq!(stake_weight(1_000_000, 1_000_000 + 3601, 0), 1);
-    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600 + 43_200, 0), 43_200); // capped
+    assert_eq!(
+        stake_weight(1_000_000, 1_000_000 + 3600 + 43_200, 0),
+        43_200
+    ); // capped
     assert_eq!(stake_weight(1_000_000, 1_000_000 + 100_000, 0), 43_200);
     // v5-era validating tip -> uncapped (fork gate, kernel.cpp:37-39)
     assert_eq!(stake_weight(1_000_000, 1_000_000 + 100_000, 17_651), 96_400);
@@ -284,6 +283,53 @@ fn make_wallet_file(path: &std::path::Path, keys_first: bool) -> (Vec<u8>, secp2
             .unwrap();
     }
     (pk_ser.to_vec(), sk)
+}
+
+#[test]
+fn decode_address_rejects_foreign_versions() {
+    // checksum-valid addresses with unsupported versions must NOT validate:
+    // version 111 = testnet-style pubkey; 65 (pubkey) and 28 (script) are supported
+    fn bs58check(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut p = data.to_vec();
+        p.extend_from_slice(&Sha256::digest(&Sha256::digest(&p))[..4]);
+        let mut zeros = 0usize;
+        while zeros < p.len() && p[zeros] == 0 {
+            zeros += 1;
+        }
+        let mut out = Vec::new();
+        for &byte in &p[zeros..] {
+            let mut carry = byte as usize;
+            for ch in out.iter_mut() {
+                carry += (*ch as usize) << 8;
+                *ch = (carry % 58) as u8;
+                carry /= 58;
+            }
+            while carry > 0 {
+                out.push((carry % 58) as u8);
+                carry /= 58;
+            }
+        }
+        let mut s = String::new();
+        for _ in 0..zeros {
+            s.push('1');
+        }
+        for ch in out.iter().rev() {
+            s.push(ALPHABET[*ch as usize] as char);
+        }
+        s
+    }
+    // version 111 (foreign/testnet-style): checksum-valid but unsupported
+    let mut p111 = vec![111u8];
+    p111.extend_from_slice(&[0x11u8; 20]);
+    let addr111 = bs58check(&p111);
+    assert!(tri7_core::rpc::decode_address(&addr111).is_none());
+    // version 65 (mainnet pubkey): supported
+    let mut p65 = vec![65u8];
+    p65.extend_from_slice(&[0x22u8; 20]);
+    let addr65 = bs58check(&p65);
+    assert!(tri7_core::rpc::decode_address(&addr65).is_some());
 }
 
 #[test]

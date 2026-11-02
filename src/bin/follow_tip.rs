@@ -48,11 +48,15 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use tri7_core::blockindex::{BlockStore, BuildOracle, StoreStatus};
 use tri7_core::consensus::{
     block_is_proof_of_stake, check_pos_block_signature, check_pow_block_signature, max_time_drift,
     tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
@@ -64,6 +68,11 @@ use tri7_core::kernel::{
 };
 use tri7_core::legacy::{hash_to_display, Block, Hash, Reader};
 use tri7_core::replay::{IndexEntry, ReplayIndex};
+use tri7_core::rpc;
+use tri7_core::rpc::{
+    load_balances_snap, load_utxos_snap, BlockDataProvider, EntryView, Proxy, SnapshotWallet,
+    TipProvider, TipView,
+};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -517,6 +526,17 @@ struct Config {
     status: bool,
     max_write_age: u64,
     summary_out: Option<PathBuf>,
+    // ---- phase 5b: RPC surface ----
+    rpc_enabled: bool,
+    rpc_bind: String,
+    rpc_listen_port: u16,
+    rpc_max_body: usize,
+    rpc_debug: bool,
+    proxy_timeout_secs: u64,
+    blocks_file: Option<PathBuf>,
+    balances_path: PathBuf,
+    wallet_utxos_path: PathBuf,
+    index_dir: PathBuf,
 }
 
 fn usage() -> ! {
@@ -533,7 +553,25 @@ fn usage() -> ! {
          unreadable OR stale (state-write age > --max-write-age, default 600:\n\
          the loop rewrites tipstate.json every 30s while alive, so a big age\n\
          means the follower is wedged or dead). last_advance_utc bumps only on\n\
-         real tip-height advances; updated_utc/state mtime bump every write."
+         real tip-height advances; updated_utc/state mtime bump every write.\n\
+         \n\
+         RPC surface (phase 5b, daemon-replacement build):\n\
+         --rpc-port N        JSON-RPC listener port (default 19113; legacy\n\
+                             daemon owns 19112 — never bind it here)\n\
+         --rpc-bind ADDR     loopback-only bind, default 127.0.0.1 (non-loopback\n\
+                             addresses are refused)\n\
+         --no-rpc            disable the RPC listener\n\
+         --rpc-max-body N    request cap, default 1048576 (1 MB)\n\
+         --rpc-debug         debug-level per-call logging to stderr\n\
+         --proxy-timeout S   legacy-RPC fallback timeout, default 10\n\
+         --blocks-file PATH  blk0001.dat for the native getblock/getraw-\n\
+                             transaction index (default: <state-dir>/blk0001.dat\n\
+                             then /root/.triangles/blk0001.dat). The index is\n\
+                             built in a background thread and cached under\n\
+                             <state-dir>/index/.\n\
+         --balances PATH     replay-derived balances snapshot (balances.json)\n\
+         --wallet-utxos PATH replay-derived wallet UTXO snapshot\n\
+         --index-dir DIR     where index caches live (default <state-dir>/index)"
     );
     std::process::exit(EXIT_USAGE);
 }
@@ -554,7 +592,20 @@ fn parse_args() -> Config {
         status: false,
         max_write_age: 600,
         summary_out: None,
+        rpc_enabled: true,
+        rpc_bind: "127.0.0.1".into(),
+        rpc_listen_port: 19113,
+        rpc_max_body: 1_048_576,
+        rpc_debug: false,
+        proxy_timeout_secs: 10,
+        blocks_file: None,             // resolved against state_dir / archive below
+        balances_path: PathBuf::new(), // defaults filled below
+        wallet_utxos_path: PathBuf::new(),
+        index_dir: PathBuf::new(),
     };
+    cfg.balances_path = cfg.state_dir.join("balances.json");
+    cfg.wallet_utxos_path = cfg.state_dir.join("wallet_utxos.json");
+    cfg.index_dir = cfg.state_dir.join("index");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -564,10 +615,18 @@ fn parse_args() -> Config {
         };
         match args[i].as_str() {
             "--daemon" => cfg.daemon = need(&mut i, &args),
-            "--rpc-port" => cfg.rpc_port = need(&mut i, &args).parse().unwrap_or_else(|_| usage()),
+            "--rpc-port" => {
+                cfg.rpc_listen_port = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
             "--conf" => cfg.conf_path = PathBuf::from(need(&mut i, &args)),
             "--archive" => cfg.archive = need(&mut i, &args),
-            "--state-dir" => cfg.state_dir = PathBuf::from(need(&mut i, &args)),
+            "--state-dir" => {
+                cfg.state_dir = PathBuf::from(need(&mut i, &args));
+                // path-relative defaults move with the state dir unless set explicitly
+                cfg.balances_path = cfg.state_dir.join("balances.json");
+                cfg.wallet_utxos_path = cfg.state_dir.join("wallet_utxos.json");
+                cfg.index_dir = cfg.state_dir.join("index");
+            }
             "--seconds" => cfg.seconds = need(&mut i, &args).parse().unwrap_or_else(|_| usage()),
             "--backfill" => {
                 cfg.backfill_headers = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
@@ -582,6 +641,19 @@ fn parse_args() -> Config {
                 cfg.max_write_age = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
             }
             "--summary" => cfg.summary_out = Some(PathBuf::from(need(&mut i, &args))),
+            "--rpc-bind" => cfg.rpc_bind = need(&mut i, &args),
+            "--no-rpc" => cfg.rpc_enabled = false,
+            "--rpc-max-body" => {
+                cfg.rpc_max_body = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
+            "--rpc-debug" => cfg.rpc_debug = true,
+            "--proxy-timeout" => {
+                cfg.proxy_timeout_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
+            "--blocks-file" => cfg.blocks_file = Some(PathBuf::from(need(&mut i, &args))),
+            "--balances" => cfg.balances_path = PathBuf::from(need(&mut i, &args)),
+            "--wallet-utxos" => cfg.wallet_utxos_path = PathBuf::from(need(&mut i, &args)),
+            "--index-dir" => cfg.index_dir = PathBuf::from(need(&mut i, &args)),
             _ => usage(),
         }
         i += 1;
@@ -1905,6 +1977,210 @@ fn handle_message(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5b — RPC surface data sources
+//
+// Design (Sami's directive): tri7d is the daemon REPLACEMENT, so the everyday
+// wallet/chain queries are served NATIVELY from tri7's own small-footprint
+// state; the legacy-RPC proxy is a TRANSITIONAL fallback only and every
+// response carries a "source" field ("tri7" | "legacy-proxy") so cutover
+// progress is measurable. Sources per method (mirrored in rpc.rs docs):
+//   gettip/getblockcount/getstakemodifier/getdifficulty  → tipstate (window)
+//   getblock/getrawtransaction/getblockhash              → blockindex over
+//     the blocks file (hash→offset / txid→offset / height→offset, cached)
+//   getbalance/listunspent/listwalletaddresses/getreceivedbyaddress → replay
+//     snapshots (balances.json + wallet_utxos.json — the phase-1e pattern)
+//   validateaddress                                      → pure address codec
+//   getinfo/getconnectioncount/health                    → composite of the above
+// ---------------------------------------------------------------------------
+
+/// Shared tip/window state: the follow loop owns ChainState behind this mutex;
+/// RPC threads take short locks per call.
+type SharedState = Arc<Mutex<ChainState>>;
+
+struct LiveTip {
+    st: SharedState,
+    started: Instant,
+    last_write: Arc<Mutex<Instant>>,
+    peers: Arc<AtomicU32>,
+}
+
+/// Window entry → the rpc::EntryView shape (shared by both adapters).
+fn entry_view(st: &ChainState, h: u64) -> Option<EntryView> {
+    let e = st.entry_abs(h)?;
+    Some(EntryView {
+        height: h,
+        hash: tri7_core::p2p::internal_to_display(&e.hash),
+        modifier: e.stake_modifier,
+        generated: e.generated_stake_modifier,
+        checksum: *st.checksums.get(st.rel(h)).unwrap_or(&0),
+        pos: e.is_proof_of_stake,
+        proof: tri7_core::p2p::internal_to_display(&e.hash_proof_of_stake),
+        entropy: e.entropy_bit,
+        time: e.time,
+        bits: e.bits,
+    })
+}
+
+impl TipProvider for LiveTip {
+    fn tip(&self) -> TipView {
+        let g = self.st.lock().unwrap();
+        TipView {
+            height: g.tip_height,
+            blockhash: tri7_core::p2p::internal_to_display(&g.tip_hash),
+            daemon_tip: g.daemon_tip,
+        }
+    }
+
+    fn window(&self) -> (u64, usize) {
+        let g = self.st.lock().unwrap();
+        (g.base, g.entries.len())
+    }
+
+    fn entry_at(&self, h: u64) -> Option<EntryView> {
+        let g = self.st.lock().unwrap();
+        entry_view(&g, h)
+    }
+
+    fn last_bits(&self) -> Option<u32> {
+        let g = self.st.lock().unwrap();
+        g.entries.last().map(|e| e.bits)
+    }
+
+    fn next_target_bits(&self, pos: bool) -> Option<u32> {
+        let g = self.st.lock().unwrap();
+        get_next_target_required(&g.rel_index(), pos).into() // Option<u32>
+    }
+
+    fn peers(&self) -> u32 {
+        self.peers.load(Ordering::Relaxed)
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    fn state_write_age_secs(&self) -> Option<u64> {
+        Some(self.last_write.lock().unwrap().elapsed().as_secs())
+    }
+}
+
+// ---- disk-backed block index adapter ----
+
+struct StoreAdapter {
+    store: Arc<BlockStore>,
+    tip: SharedState,
+}
+
+fn format_block_from_store(adapter: &StoreAdapter, hit: tri7_core::blockindex::BlockHit) -> Value {
+    let tip_height = adapter.tip.lock().unwrap().tip_height;
+    let next_hash = match hit.height {
+        Some(h) => adapter.store.hash_at_height(h + 1).ok().flatten(),
+        None => None,
+    };
+    let entry = hit.height.and_then(|h| {
+        let g = adapter.tip.lock().unwrap();
+        entry_view(&g, h)
+    });
+    rpc::format_block_json(&hit, tip_height, next_hash, entry)
+}
+
+impl BlockDataProvider for StoreAdapter {
+    fn ready(&self) -> bool {
+        matches!(self.store.status(), StoreStatus::Ready { .. })
+    }
+
+    fn status_json(&self) -> Value {
+        match self.store.status() {
+            StoreStatus::Ready {
+                frames,
+                txs_indexed,
+                heights_ok,
+                threaded_tip,
+                build_secs,
+            } => serde_json::json!({
+                "state": "ready",
+                "frames": frames,
+                "txs_indexed": txs_indexed,
+                "heights_ok": heights_ok,
+                "threaded_tip": threaded_tip,
+                "build_secs": build_secs,
+            }),
+            StoreStatus::Building { frames_done } => serde_json::json!({
+                "state": "building",
+                "frames_done": frames_done,
+            }),
+            StoreStatus::Failed(e) => serde_json::json!({"state": "failed", "error": e}),
+            StoreStatus::Unconfigured => serde_json::json!({"state": "unconfigured"}),
+        }
+    }
+
+    fn block_by_hash(&self, hash_display: &str) -> Result<Option<Value>, String> {
+        let hash = tri7_core::p2p::display_to_internal(hash_display)?;
+        let hit = self.store.block_by_hash(&hash)?;
+        Ok(hit.map(|h| format_block_from_store(self, h)))
+    }
+
+    fn block_by_height(&self, h: u64) -> Result<Option<Value>, String> {
+        let hit = self.store.block_by_height(h)?;
+        Ok(hit.map(|b| format_block_from_store(self, b)))
+    }
+
+    fn tx(&self, txid_display: &str, verbose: bool) -> Result<Option<Value>, String> {
+        let txid = tri7_core::p2p::display_to_internal(txid_display)?;
+        let hit = self.store.tx_by_id(&txid)?;
+        let Some(hit) = hit else { return Ok(None) };
+        let tip_height = self.tip.lock().unwrap().tip_height;
+        let (obj, hex) = rpc::format_tx_json(&hit, tip_height);
+        Ok(Some(if verbose { obj } else { Value::String(hex) }))
+    }
+
+    fn hash_at(&self, h: u64) -> Result<Option<String>, String> {
+        self.store.hash_at_height(h)
+    }
+}
+
+// ---- transitional legacy proxy ----
+
+struct LegacyProxyAdapter {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    timeout: Duration,
+}
+
+impl LegacyProxyAdapter {
+    fn call_legacy(&self, body: &str, timeout: Duration) -> Result<(u16, String), String> {
+        rpc::legacy_post(&self.host, self.port, &self.user, &self.pass, body, timeout)
+    }
+}
+
+impl Proxy for LegacyProxyAdapter {
+    fn forward(&self, req: &Value) -> Result<(u16, Value), String> {
+        let body = serde_json::to_string(req).map_err(|e| e.to_string())?;
+        let (status, text) = self.call_legacy(&body, self.timeout)?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("legacy returned non-JSON body (HTTP {}): {}", status, e))?;
+        Ok((status, v))
+    }
+
+    fn describe(&self) -> String {
+        format!("legacy {}:{} (transitional fallback)", self.host, self.port)
+    }
+
+    fn probe(&self) -> bool {
+        let body = serde_json::json!({"jsonrpc": "1.0", "id": "tri7-probe", "method": "getblockcount", "params": []});
+        matches!(
+            self.call_legacy(&body.to_string(), Duration::from_secs(2)),
+            Ok((_, text)) if serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["result"].as_i64())
+                .is_some()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 /// --status: healthcheck — tip height + advance/write times as JSON.
@@ -2037,6 +2313,77 @@ fn main() {
         }
     }
 
+    // 3.5 phase 5b: shared state + RPC surface + background block-index build.
+    // The follow loop keeps exclusive ownership via the mutex; RPC threads take
+    // short per-call locks (no lock is held across the 40 ms sleep).
+    let st_shared: SharedState = Arc::new(Mutex::new(st));
+    let last_write_shared = Arc::new(Mutex::new(Instant::now()));
+    let peers_shared = Arc::new(AtomicU32::new(1)); // follower is connected here
+    let balances_snap = load_balances_snap(&cfg.balances_path);
+    let utxos_snap = load_utxos_snap(&cfg.wallet_utxos_path);
+    let blocks_file = resolve_blocks_file(&cfg);
+    let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+    {
+        // chain-threading oracle: the daemon-anchored window hashes
+        let oracle = {
+            let g = st_shared.lock().unwrap();
+            BuildOracle {
+                base: g.base,
+                hashes: g.entries.iter().map(|e| e.hash).collect(),
+                tip: g.tip_height,
+            }
+        };
+        if blocks_file.is_some() {
+            store.spawn_build(Some(oracle));
+            log("rpc: block index build started (background thread, cache-first)");
+        } else {
+            log(
+                "rpc: no blocks file — getblock/getrawtransaction/getblockhash will \
+                 use the legacy proxy fallback",
+            );
+        }
+    }
+    if cfg.rpc_enabled {
+        let deps = Arc::new(rpc::ServerDeps {
+            tip: Arc::new(LiveTip {
+                st: Arc::clone(&st_shared),
+                started: Instant::now(),
+                last_write: Arc::clone(&last_write_shared),
+                peers: Arc::clone(&peers_shared),
+            }),
+            wallet: Arc::new(SnapshotWallet {
+                balances: balances_snap,
+                utxos: utxos_snap,
+            }),
+            blocks: Arc::new(StoreAdapter {
+                store: Arc::clone(&store),
+                tip: Arc::clone(&st_shared),
+            }),
+            proxy: Some(Arc::new(LegacyProxyAdapter {
+                host: cfg.rpc_host.clone(),
+                port: cfg.rpc_port,
+                user: user.clone(),
+                pass: pass.clone(),
+                timeout: Duration::from_secs(cfg.proxy_timeout_secs),
+            })),
+            http: rpc::HttpServerConfig {
+                debug: cfg.rpc_debug,
+                max_body: cfg.rpc_max_body,
+                read_timeout: Duration::from_secs(15),
+            },
+        });
+        let listener = rpc::bind_loopback(&cfg.rpc_bind, cfg.rpc_listen_port)
+            .unwrap_or_else(|e| die(EXIT_USAGE, &format!("rpc listener: {}", e)));
+        log(&format!(
+            "rpc: listening on {}:{} (loopback-only; native surface + transitional legacy-proxy fallback)",
+            cfg.rpc_bind, cfg.rpc_listen_port
+        ));
+        std::thread::Builder::new()
+            .name("rpc".into())
+            .spawn(move || rpc::serve(deps, listener))
+            .expect("spawn rpc thread");
+    }
+
     // 4. live follow loop
     let deadline = if cfg.forever {
         None // daemon mode: no deadline, run until signalled (systemd restarts on failure)
@@ -2058,6 +2405,7 @@ fn main() {
         // poll tick — getheaders with an alternating locator (the daemon
         // silently drops a consecutive duplicate getheaders request)
         if last_poll.elapsed() >= Duration::from_secs(POLL_SECS) {
+            let mut st = st_shared.lock().unwrap();
             poll_parity = !poll_parity;
             let locator: Vec<Hash> = if poll_parity {
                 vec![st.tip_hash]
@@ -2077,7 +2425,9 @@ fn main() {
                 log(&format!("send getheaders failed: {} — reconnecting", e));
                 sess.shutdown();
                 stats.reconnects += 1;
+                peers_shared.store(0, Ordering::Relaxed);
                 sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
+                peers_shared.store(1, Ordering::Relaxed);
                 last_poll = Instant::now();
                 continue;
             }
@@ -2129,7 +2479,10 @@ fn main() {
                     log(&format!("send getdata failed: {} — reconnecting", e));
                     sess.shutdown();
                     stats.reconnects += 1;
-                    sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
+                    peers_shared.store(0, Ordering::Relaxed);
+                    let height = st_shared.lock().unwrap().tip_height;
+                    sess = connect_and_handshake(&cfg, &mut stats, height);
+                    peers_shared.store(1, Ordering::Relaxed);
                     continue;
                 }
             }
@@ -2143,6 +2496,7 @@ fn main() {
                 sess.shutdown();
                 stats.parse_failures += 1;
                 if stats.parse_failures >= 3 {
+                    let st = st_shared.lock().unwrap();
                     finish(
                         &cfg,
                         &st,
@@ -2153,7 +2507,10 @@ fn main() {
                     );
                 }
                 stats.reconnects += 1;
-                sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
+                peers_shared.store(0, Ordering::Relaxed);
+                let height = st_shared.lock().unwrap().tip_height;
+                sess = connect_and_handshake(&cfg, &mut stats, height);
+                peers_shared.store(1, Ordering::Relaxed);
                 last_traffic = Instant::now();
                 continue;
             }
@@ -2165,26 +2522,30 @@ fn main() {
         }
 
         let mut fatal: Option<String> = None;
-        for msg in msgs.drain(..) {
-            stats.note_recv(&msg.command);
-            let res = handle_message(
-                &mut sess,
-                &mut st,
-                &rpc,
-                &mut stats,
-                &cfg,
-                msg,
-                &mut outstanding,
-                &mut pending_from_headers,
-            );
-            if let Err(e) = res {
-                fatal = Some(e);
-                break;
+        {
+            let mut st = st_shared.lock().unwrap();
+            for msg in msgs.drain(..) {
+                stats.note_recv(&msg.command);
+                let res = handle_message(
+                    &mut sess,
+                    &mut st,
+                    &rpc,
+                    &mut stats,
+                    &cfg,
+                    msg,
+                    &mut outstanding,
+                    &mut pending_from_headers,
+                );
+                if let Err(e) = res {
+                    fatal = Some(e);
+                    break;
+                }
             }
         }
         if let Some(e) = fatal {
             log(&format!("validation failure: {} — clean disconnect", e));
             sess.shutdown();
+            let st = st_shared.lock().unwrap();
             finish(&cfg, &st, &stats, &rpc, EXIT_VALIDATE, &e);
         }
 
@@ -2192,15 +2553,22 @@ fn main() {
             log("no traffic for 90 s — clean reconnect");
             sess.shutdown();
             stats.reconnects += 1;
-            sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
+            peers_shared.store(0, Ordering::Relaxed);
+            let height = st_shared.lock().unwrap().tip_height;
+            sess = connect_and_handshake(&cfg, &mut stats, height);
+            peers_shared.store(1, Ordering::Relaxed);
             last_traffic = Instant::now();
         }
 
         // persist tip state periodically
         if last_state_write.elapsed() >= Duration::from_secs(30) {
-            let file = st.to_file();
+            let file = {
+                let st = st_shared.lock().unwrap();
+                st.to_file()
+            };
             write_state_atomic(&cfg, &file)
                 .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
+            *last_write_shared.lock().unwrap() = Instant::now();
             last_state_write = Instant::now();
         }
 
@@ -2208,14 +2576,35 @@ fn main() {
     }
 
     sess.shutdown();
-    let file = st.to_file();
+    let file = {
+        let st = st_shared.lock().unwrap();
+        st.to_file()
+    };
     write_state_atomic(&cfg, &file)
         .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
+    let st = st_shared.lock().unwrap();
     finish(&cfg, &st, &stats, &rpc, 0, "run complete");
 }
 
 fn tri7_rpc(cfg: &Config, user: &str, pass: &str) -> Rpc {
     Rpc::new(&cfg.rpc_host, cfg.rpc_port, user, pass)
+}
+
+/// Blocks-file resolution for the native block index: explicit flag wins,
+/// then <state-dir>/blk0001.dat (the service path — hardlink to the daemon's
+/// file), then the archive default. None = index disabled (proxy fallback).
+fn resolve_blocks_file(cfg: &Config) -> Option<PathBuf> {
+    if let Some(p) = &cfg.blocks_file {
+        return Some(p.clone());
+    }
+    let cand = cfg.state_dir.join("blk0001.dat");
+    if cand.exists() {
+        return Some(cand);
+    }
+    if std::path::Path::new(&cfg.archive).exists() {
+        return Some(PathBuf::from(&cfg.archive));
+    }
+    None
 }
 
 fn connect_and_handshake(cfg: &Config, stats: &mut Stats, height: u64) -> Session {

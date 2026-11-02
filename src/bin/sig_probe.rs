@@ -101,10 +101,7 @@ fn main() {
             }
             if !kinds.is_empty() {
                 let txid = tx.hash();
-                if cache
-                    .insert(txid, kinds)
-                    .is_none()
-                {
+                if cache.insert(txid, kinds).is_none() {
                     order.push_back(txid);
                     while order.len() > CACHE_CAP {
                         if let Some(old) = order.pop_front() {
@@ -118,8 +115,17 @@ fn main() {
 
     println!(
         "{:>10} {:>8} {:>8} {:>9} {:>9} {:>8} | {:>8} {:>8} | {:>8} {:>8} {:>8}",
-        "bucket", "blocks", "reg_txs", "out_p2pk", "out_p2pkh", "out_oth",
-        "in1push", "in2push", "hit_p2pk", "hit_p2pkh", "miss"
+        "bucket",
+        "blocks",
+        "reg_txs",
+        "out_p2pk",
+        "out_p2pkh",
+        "out_oth",
+        "in1push",
+        "in2push",
+        "hit_p2pk",
+        "hit_p2pkh",
+        "miss"
     );
     for (i, b) in buckets.iter().enumerate() {
         if b.blocks == 0 {

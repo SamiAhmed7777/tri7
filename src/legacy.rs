@@ -59,6 +59,26 @@ impl<'a> Reader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// Cursor position (bytes consumed so far) — used by the block-index tx
+    /// range walker to record (start, end) spans.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Advance the cursor n bytes without materializing them (hot path skip).
+    pub fn skip(&mut self, n: usize) -> Result<(), String> {
+        if self.remaining() < n {
+            return Err(format!(
+                "short skip: want {} bytes, have {} at offset {}",
+                n,
+                self.remaining(),
+                self.pos
+            ));
+        }
+        self.pos += n;
+        Ok(())
+    }
+
     pub fn expect_done(&self) -> Result<(), String> {
         if self.pos == self.buf.len() {
             Ok(())
@@ -333,7 +353,11 @@ impl Block {
             let mut i = 0;
             while i < level.len() {
                 let a = &level[i];
-                let b = if i + 1 < level.len() { &level[i + 1] } else { &level[i] };
+                let b = if i + 1 < level.len() {
+                    &level[i + 1]
+                } else {
+                    &level[i]
+                };
                 let mut cat = Vec::with_capacity(64);
                 cat.extend_from_slice(a);
                 cat.extend_from_slice(b);

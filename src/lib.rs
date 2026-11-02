@@ -5,13 +5,15 @@
 //! so that the same bytes produce the same hashes and the same chain.
 
 pub mod address;
+pub mod blkfile;
+pub mod blockindex;
 pub mod consensus;
 pub mod difficulty;
 pub mod kernel;
 pub mod legacy;
-pub mod blkfile;
 pub mod p2p;
 pub mod replay;
+pub mod rpc;
 pub mod spend;
 pub mod stake;
 pub mod wallet;

@@ -145,7 +145,9 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
     }
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
+        .collect()
 }
 
 fn script_hex(v: &[u8]) -> String {
@@ -165,7 +167,9 @@ fn main() {
     while i < args.len() {
         let need = |i: &mut usize, args: &[String]| -> String {
             *i += 1;
-            args.get(*i).cloned().unwrap_or_else(|| die(EXIT_USAGE, "missing arg value"))
+            args.get(*i)
+                .cloned()
+                .unwrap_or_else(|| die(EXIT_USAGE, "missing arg value"))
         };
         match args[i].as_str() {
             "--state-dir" => state_dir = need(&mut i, &args),
@@ -174,26 +178,32 @@ fn main() {
             "--archive" => archive = need(&mut i, &args),
             "--out" => out_path = need(&mut i, &args),
             "--search-secs" => {
-                search_secs =
-                    need(&mut i, &args).parse().unwrap_or_else(|_| die(EXIT_USAGE, "--search-secs"))
+                search_secs = need(&mut i, &args)
+                    .parse()
+                    .unwrap_or_else(|_| die(EXIT_USAGE, "--search-secs"))
             }
             "--max-coins" => {
-                max_coins = need(&mut i, &args).parse().unwrap_or_else(|_| die(EXIT_USAGE, "--max-coins"))
+                max_coins = need(&mut i, &args)
+                    .parse()
+                    .unwrap_or_else(|_| die(EXIT_USAGE, "--max-coins"))
             }
             _ => die(EXIT_USAGE, &format!("unknown arg {}", args[i])),
         }
         i += 1;
     }
     if !(1..=60).contains(&search_secs) {
-        die(EXIT_USAGE, "--search-secs must be 1..=60 (nMaxStakeSearchInterval=60)");
+        die(
+            EXIT_USAGE,
+            "--search-secs must be 1..=60 (nMaxStakeSearchInterval=60)",
+        );
     }
 
     // ---- 1. tipstate --------------------------------------------------------
     let tip_path = format!("{}/tipstate.json", state_dir);
     let text = std::fs::read_to_string(&tip_path)
         .unwrap_or_else(|e| die(EXIT_INPUT, &format!("read {}: {}", tip_path, e)));
-    let tip: TipStateFile =
-        serde_json::from_str(&text).unwrap_or_else(|e| die(EXIT_INPUT, &format!("parse tipstate: {}", e)));
+    let tip: TipStateFile = serde_json::from_str(&text)
+        .unwrap_or_else(|e| die(EXIT_INPUT, &format!("parse tipstate: {}", e)));
     if tip.entries.is_empty() {
         die(EXIT_INPUT, "tipstate has no entries");
     }
@@ -239,8 +249,8 @@ fn main() {
     // ---- 3. utxo dump ---------------------------------------------------------
     let dump_text = std::fs::read_to_string(&dump_path)
         .unwrap_or_else(|e| die(EXIT_INPUT, &format!("read {}: {}", dump_path, e)));
-    let dump: UtxoDump =
-        serde_json::from_str(&dump_text).unwrap_or_else(|e| die(EXIT_INPUT, &format!("parse utxo dump: {}", e)));
+    let dump: UtxoDump = serde_json::from_str(&dump_text)
+        .unwrap_or_else(|e| die(EXIT_INPUT, &format!("parse utxo dump: {}", e)));
     log(&format!(
         "utxo dump: {} wallet UTXOs / {} sats live at h{} (snapshot)",
         dump.count, dump.total_value_sats, dump.height
@@ -249,8 +259,11 @@ fn main() {
     let wallet_payloads: HashSet<[u8; 21]> = key_by_payload.keys().copied().collect();
 
     // candidate txids to locate in the archive (dump txids; grown by tail adds)
-    let mut wanted_txids: HashSet<Hash> =
-        dump.utxos.iter().map(|u| hex_to_internal(&u.txid)).collect();
+    let mut wanted_txids: HashSet<Hash> = dump
+        .utxos
+        .iter()
+        .map(|u| hex_to_internal(&u.txid))
+        .collect();
 
     // ---- 4. archive scan --------------------------------------------------------
     let mut rp = Replay {
@@ -275,7 +288,10 @@ fn main() {
         &mut rp,
     );
     if !rp.genesis_checksum_ok {
-        die(EXIT_CHAIN, "genesis modifier checksum did not match 0x0e00670b");
+        die(
+            EXIT_CHAIN,
+            "genesis modifier checksum did not match 0x0e00670b",
+        );
     }
     if rp.idx.tip().map(|t| t.height as u64) != Some(tip_height_abs) {
         die(
@@ -527,8 +543,9 @@ fn main() {
             // coinstake's own input scriptSigs must ECDSA-verify against their
             // prevout scripts (the block-signature check is separate).
             for (i, input) in plan.inputs.iter().enumerate() {
-                tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey)
-                    .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("coinstake input {} sig: {}", i, e)));
+                tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey).unwrap_or_else(
+                    |e| die(EXIT_VALIDATE, &format!("coinstake input {} sig: {}", i, e)),
+                );
             }
             log(&format!(
                 "SELF-VALIDATION PASSED: kernel meets target (coinDays {}), reward paid {} == calculated {} (coin age {} sat-days), sig verified, nBits {:08x} exact",
@@ -589,7 +606,8 @@ fn main() {
                 "coinstake_input_sigs_verified": plan.inputs.len(),
                 "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path",
             });
-            report["note"] = serde_json::json!("candidate block validated but NOT broadcast — dry run only");
+            report["note"] =
+                serde_json::json!("candidate block validated but NOT broadcast — dry run only");
             write_report(&out_path, &report);
             log(&format!(
                 "RESULT: kernel solution found and self-validated — candidate block {}",
@@ -656,8 +674,8 @@ fn scan_archive(
     dump_height: u32,
     rp: &mut Replay,
 ) {
-    use tri7_core::blkfile::BlkFileReader;
     use std::io::Write as _;
+    use tri7_core::blkfile::BlkFileReader;
 
     let mut rdr = BlkFileReader::open(path)
         .unwrap_or_else(|e| die(EXIT_INPUT, &format!("open archive: {}", e)));
@@ -701,7 +719,10 @@ fn scan_archive(
             }
             let abs = window_base + wh as u64;
             if b.hash() != hdr_hash || b.prev_hash != window[wh].1 {
-                die(EXIT_CHAIN, &format!("window block h{} linkage/hash mismatch", abs));
+                die(
+                    EXIT_CHAIN,
+                    &format!("window block h{} linkage/hash mismatch", abs),
+                );
             }
             collect_tx_locations(&b, abs as usize, wanted_txids, rp);
             tail_blocks.insert(wh, b);
@@ -765,7 +786,10 @@ fn scan_archive(
             );
         };
         if b.prev_hash != prev || b.hash() != h {
-            die(EXIT_CHAIN, &format!("window block h{} linkage broken", rec.height));
+            die(
+                EXIT_CHAIN,
+                &format!("window block h{} linkage broken", rec.height),
+            );
         }
         let height_abs = rec.height as usize;
         // modifier for this height (era interval, validate_pos rules)
@@ -794,7 +818,8 @@ fn scan_archive(
         let entropy = h[0] & 1;
         let flags = tri7_core::kernel::index_flags(rec.pos, entropy, generated);
         let proof = hex_to_internal(&rec.proof);
-        let expect_cs = tri7_core::kernel::stake_modifier_checksum(prev_cs, flags, &proof, modifier);
+        let expect_cs =
+            tri7_core::kernel::stake_modifier_checksum(prev_cs, flags, &proof, modifier);
         if rec.checksum != 0 && !anchored {
             anchored = true;
             prev_cs = Some(rec.checksum); // adopt the daemon's anchor
@@ -834,7 +859,10 @@ fn scan_archive(
         rp.window_blocks += 1;
     }
     if rp.window_blocks != window.len() {
-        die(EXIT_CHAIN, &format!("window coverage {} != {}", rp.window_blocks, window.len()));
+        die(
+            EXIT_CHAIN,
+            &format!("window coverage {} != {}", rp.window_blocks, window.len()),
+        );
     }
 
     // genesis modifier checkpoint (kernel.cpp:20-21) — the anchor of the whole
@@ -845,7 +873,10 @@ fn scan_archive(
     let cs = tri7_core::kernel::stake_modifier_checksum(None, flags, &[0u8; 32], g.stake_modifier);
     rp.genesis_checksum_ok = cs == tri7_core::kernel::GENESIS_MODIFIER_CHECKSUM;
     if !rp.genesis_checksum_ok {
-        die(EXIT_CHAIN, &format!("genesis modifier checksum {:08x} != 0x0e00670b", cs));
+        die(
+            EXIT_CHAIN,
+            &format!("genesis modifier checksum {:08x} != 0x0e00670b", cs),
+        );
     }
 
     log(&format!(
@@ -890,7 +921,12 @@ fn push_prefix_block(b: &Block, hash: Hash, wanted_txids: &mut HashSet<Hash>, rp
 
 /// Record (txid → block height, tx offset) for every tx we may need as a
 /// kernel prevout.
-fn collect_tx_locations(b: &Block, height: usize, wanted_txids: &mut HashSet<Hash>, rp: &mut Replay) {
+fn collect_tx_locations(
+    b: &Block,
+    height: usize,
+    wanted_txids: &mut HashSet<Hash>,
+    rp: &mut Replay,
+) {
     let mut offset = (80 + compact_size_len(b.vtx.len() as u64)) as u32;
     for tx in &b.vtx {
         let txid = tx.hash();
@@ -940,7 +976,11 @@ fn apply_tail_bookkeeping(
                 txid: hash_to_display(&txid),
                 n: n as u32,
                 value_sats: vout.value,
-                script_hex: vout.script_pubkey.iter().map(|b| format!("{:02x}", b)).collect(),
+                script_hex: vout
+                    .script_pubkey
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect(),
                 address: String::new(),
                 height: height_abs,
                 tx_time: tx.time,

@@ -93,9 +93,9 @@ fn main() {
     let mut idx = tri7_core::replay::ReplayIndex::new();
     let mut outputs = kernel::OutputIndex::new();
     let mut stale_at: Option<usize> = None;
-    let mut dump: Option<std::io::BufWriter<std::fs::File>> = dump_path.as_ref().map(|p| {
-        std::io::BufWriter::new(std::fs::File::create(p).expect("create dump file"))
-    });
+    let mut dump: Option<std::io::BufWriter<std::fs::File>> = dump_path
+        .as_ref()
+        .map(|p| std::io::BufWriter::new(std::fs::File::create(p).expect("create dump file")));
     use std::io::Write as _;
 
     // counters
@@ -170,10 +170,7 @@ fn main() {
                     ),
                 };
                 match res {
-                    Err(e) => die(&format!(
-                        "KERNEL GUARD FAIL at height {}: {}",
-                        height, e
-                    )),
+                    Err(e) => die(&format!("KERNEL GUARD FAIL at height {}: {}", height, e)),
                     Ok(res) => {
                         stored_proof = res.hash_proof_of_stake;
                         kernel_enforced_checked += 1;
@@ -324,7 +321,11 @@ fn main() {
     );
     println!(
         "genesis stake modifier checkpoint 0x0e00670b: {}",
-        if genesis_checksum_ok { "MATCH" } else { "NOT REACHED" }
+        if genesis_checksum_ok {
+            "MATCH"
+        } else {
+            "NOT REACHED"
+        }
     );
     println!("ALL POS CHECKS PASSED");
 }

@@ -85,7 +85,11 @@ fn historical_corpus_all_verify() {
         assert!(!consensus::tx_is_coin_stake(&spend), "spender is coinstake");
         assert!(!consensus::tx_is_coin_base(&prev), "prev is coinbase");
         // the vin must reference exactly this prevout
-        assert_eq!(spend.vin[vin_index].prev_hash, prev.hash(), "prevout txid mismatch");
+        assert_eq!(
+            spend.vin[vin_index].prev_hash,
+            prev.hash(),
+            "prevout txid mismatch"
+        );
         assert!(prev_n < prev.vout.len(), "prev_n out of range");
 
         // scriptCode = the previous output's scriptPubKey, byte-consistent

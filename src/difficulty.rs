@@ -86,10 +86,7 @@ pub fn era_limit_compact(_next_height: usize) -> u32 {
 }
 
 /// GetNextTargetRequired port (main.cpp:1595-1662 + FORK_HEIGHT_V5 reset).
-pub fn get_next_target_required(
-    index: &ReplayIndex,
-    f_proof_of_stake: bool,
-) -> u32 {
+pub fn get_next_target_required(index: &ReplayIndex, f_proof_of_stake: bool) -> u32 {
     let tip_height = index.tip_height();
     // At fork heights, reset PoS difficulty to minimum so staking can restart
     // (v5 reset main.cpp:1655-1661; the v5.4 boundary shows the same reset —
@@ -112,11 +109,10 @@ pub fn get_next_target_required(
     if pindex_prev.height == 0 {
         return TARGET_LIMIT_COMPACT; // first block of this type
     }
-    let pindex_prev_prev =
-        match last_block_index(index, pindex_prev.height - 1, f_proof_of_stake) {
-            Some(p) => p,
-            None => return TARGET_LIMIT_COMPACT,
-        };
+    let pindex_prev_prev = match last_block_index(index, pindex_prev.height - 1, f_proof_of_stake) {
+        Some(p) => p,
+        None => return TARGET_LIMIT_COMPACT,
+    };
     if pindex_prev_prev.height == 0 {
         return TARGET_LIMIT_COMPACT; // second block
     }
@@ -180,9 +176,9 @@ mod tests {
         // GetCompact is asserted only for the exact-roundtrip cases.
         let decode: [(u32, &str); 5] = [
             (0x0000_0000, "0"),
-            (0x0112_3400, "18"),      // 0x12
-            (0x0212_3456, "4660"),    // 0x1234
-            (0x0312_3456, "1193046"), // 0x123456
+            (0x0112_3400, "18"),        // 0x12
+            (0x0212_3456, "4660"),      // 0x1234
+            (0x0312_3456, "1193046"),   // 0x123456
             (0x0412_3456, "305419776"), // 0x12345600
         ];
         for (compact, dec) in decode {

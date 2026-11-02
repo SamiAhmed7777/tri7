@@ -172,8 +172,8 @@ pub fn coin_age_of(inputs: &[(i64, u32, u32)], n_time: u32) -> Result<u64, Strin
             continue; // only count coins meeting min age requirement
         }
         // bnCentSecond += CBigNum(nValueIn) * (nTime - utxo.nTxTime) / CENT
-        cent_seconds += (value as i128 * (n_time as i64 - tx_time as i64) as i128)
-            / crate::spend::CENT as i128;
+        cent_seconds +=
+            (value as i128 * (n_time as i64 - tx_time as i64) as i128) / crate::spend::CENT as i128;
     }
     // bnCoinDay = bnCentSecond * CENT / (24 * 60 * 60)  (main.cpp:3132)
     let coin_day = cent_seconds * crate::spend::CENT as i128 / 86_400i128;
@@ -251,8 +251,7 @@ pub fn create_coinstake(
             rep.attempts += 1;
             // Weight + target (kernel.cpp:322-327), era from next_height.
             let weight = stake_weight_era(coin.tx_time, tx_time, next_height);
-            let coin_day_weight =
-                (coin.value as i128 * weight as i128) / COIN as i128 / 86_400i128;
+            let coin_day_weight = (coin.value as i128 * weight as i128) / COIN as i128 / 86_400i128;
             let target = U512::from(coin_day_weight as u128) * U512::from(target_per_coin_day);
             let hash = crate::consensus::stake_kernel_hash(
                 modifier,
@@ -318,11 +317,20 @@ pub fn create_coinstake(
         let split = stake_weight_era(coin.block_time, tx_time, next_height) < STAKE_SPLIT_AGE;
         let mut inputs: Vec<StakeCandidate> = vec![coin.clone()];
         let mut vout: Vec<Vout> = vec![
-            Vout { value: 0, script_pubkey: Vec::new() }, // IsCoinStake marker
-            Vout { value: 0, script_pubkey: script_pub_key_out.clone() },
+            Vout {
+                value: 0,
+                script_pubkey: Vec::new(),
+            }, // IsCoinStake marker
+            Vout {
+                value: 0,
+                script_pubkey: script_pub_key_out.clone(),
+            },
         ];
         if split {
-            vout.push(Vout { value: 0, script_pubkey: script_pub_key_out.clone() });
+            vout.push(Vout {
+                value: 0,
+                script_pubkey: script_pub_key_out.clone(),
+            });
         }
 
         // wallet.cpp:2372-2401 — combine pass: more inputs of the SAME key,
@@ -487,7 +495,10 @@ pub fn assemble_pos_block(
             script_sig,
             sequence: u32::MAX,
         }],
-        vout: vec![Vout { value: 0, script_pubkey: Vec::new() }],
+        vout: vec![Vout {
+            value: 0,
+            script_pubkey: Vec::new(),
+        }],
         locktime: 0,
     };
     if !tx_is_coin_base(&coinbase) {
@@ -619,7 +630,8 @@ pub fn validate_dryrun_block<R: KernelOutputResolver>(
         || !block.vtx[0].vout[0].script_pubkey.is_empty()
         || block.vtx[0].vin[0].script_sig.len() < 2 // CheckTransaction coinbase scriptSig 2..100
         || block.vtx[0].vin[0].script_sig.len() > 100
-        || block.vtx[1].time != block.time // CheckCoinStakeTimestamp (main.cpp:3341-3343)
+        || block.vtx[1].time != block.time
+    // CheckCoinStakeTimestamp (main.cpp:3341-3343)
     {
         return Err("validate: PoS structure failure".into());
     }
@@ -636,8 +648,10 @@ pub fn validate_dryrun_block<R: KernelOutputResolver>(
     if tip_height + 1 < 11 {
         return Err("validate: index too short for MTP".into());
     }
-    let mut times: Vec<u32> =
-        idx.entries[tip_height + 1 - 11..=tip_height].iter().map(|e| e.time).collect();
+    let mut times: Vec<u32> = idx.entries[tip_height + 1 - 11..=tip_height]
+        .iter()
+        .map(|e| e.time)
+        .collect();
     times.sort_unstable();
     let median_time_past = times[5];
     let drift = max_time_drift(next_height);
@@ -703,13 +717,15 @@ pub fn validate_dryrun_block<R: KernelOutputResolver>(
     let mut value_in = 0i64;
     let mut age_inputs: Vec<(i64, u32, u32)> = Vec::new();
     for vin in &stake_tx.vin {
-        let meta = outputs.kernel_meta(&(vin.prev_hash, vin.prev_n)).ok_or_else(|| {
-            format!(
-                "validate: stake input {}:{} unresolved for the reward gate",
-                hash_to_display(&vin.prev_hash),
-                vin.prev_n
-            )
-        })?;
+        let meta = outputs
+            .kernel_meta(&(vin.prev_hash, vin.prev_n))
+            .ok_or_else(|| {
+                format!(
+                    "validate: stake input {}:{} unresolved for the reward gate",
+                    hash_to_display(&vin.prev_hash),
+                    vin.prev_n
+                )
+            })?;
         let block_time = idx.entries[meta.height].time;
         value_in += meta.value;
         age_inputs.push((meta.value, meta.tx_time, block_time));
@@ -824,7 +840,13 @@ mod tests {
     const IMPOSSIBLE_BITS: u32 = 0x0100_0100; // target ≈ 2^8: nothing lands under it
     const BLOCK_TIME: u32 = 1_400_000_520; // time of synthetic h1
 
-    fn make_coin(_label: &str, txid_byte: u8, value: i64, secret: [u8; 32], pubkey: &[u8]) -> StakeCandidate {
+    fn make_coin(
+        _label: &str,
+        txid_byte: u8,
+        value: i64,
+        secret: [u8; 32],
+        pubkey: &[u8],
+    ) -> StakeCandidate {
         StakeCandidate {
             txid: [txid_byte; 32],
             n: 0,
@@ -883,7 +905,10 @@ mod tests {
         assert!(rep.attempts >= 1);
         assert_eq!(rep.kernel_hits, 1);
         assert_eq!(rep.coins_meeting_min_age, 1);
-        assert!(tx_is_coin_stake(&plan.tx), "coinstake must satisfy IsCoinStake");
+        assert!(
+            tx_is_coin_stake(&plan.tx),
+            "coinstake must satisfy IsCoinStake"
+        );
         assert_eq!(plan.tx.time, search_time - plan.kernel.seconds_back as u32);
         // stake output pays credit (= value + reward) back to the staking key
         assert_eq!(plan.tx.vout[1].script_pubkey, coin.script_pubkey);
@@ -895,9 +920,14 @@ mod tests {
         assert!(!plan.tx.vin[0].script_sig.is_empty());
         // Full self-validation through the real validator path.
         let outputs = point_outputs_for(&[coin]);
-        let mut block =
-            assemble_pos_block(idx.tip().unwrap(), median_of_last_11(&idx), &plan.tx, &[], EASY_BITS)
-                .expect("assemble");
+        let mut block = assemble_pos_block(
+            idx.tip().unwrap(),
+            median_of_last_11(&idx),
+            &plan.tx,
+            &[],
+            EASY_BITS,
+        )
+        .expect("assemble");
         sign_block(&mut block, &plan.signer.secret).expect("sign");
         let val = validate_dryrun_block(&idx, &outputs, &block, i64::MAX / 2).expect("validate");
         assert!(val.link_ok && val.structure_ok && val.merkle_ok && val.time_ok);
@@ -961,22 +991,45 @@ mod tests {
         let good = Tx {
             version: 1,
             time: 1_400_004_000,
-            vin: vec![Vin { prev_hash: [1u8; 32], prev_n: 0, script_sig: vec![], sequence: u32::MAX }],
+            vin: vec![Vin {
+                prev_hash: [1u8; 32],
+                prev_n: 0,
+                script_sig: vec![],
+                sequence: u32::MAX,
+            }],
             vout: vec![
-                Vout { value: 0, script_pubkey: vec![] },
-                Vout { value: 1000, script_pubkey: script },
+                Vout {
+                    value: 0,
+                    script_pubkey: vec![],
+                },
+                Vout {
+                    value: 1000,
+                    script_pubkey: script,
+                },
             ],
             locktime: 0,
         };
         assert!(tx_is_coin_stake(&good));
         // marker value nonzero → not a coinstake (IsEmpty needs value==0)
-        let bad = { let mut t = good.clone(); t.vout[0].value = -1; t };
+        let bad = {
+            let mut t = good.clone();
+            t.vout[0].value = -1;
+            t
+        };
         assert!(!tx_is_coin_stake(&bad));
         // marker script non-empty → not a coinstake
-        let bad2 = { let mut t = good.clone(); t.vout[0].script_pubkey = vec![0xac]; t };
+        let bad2 = {
+            let mut t = good.clone();
+            t.vout[0].script_pubkey = vec![0xac];
+            t
+        };
         assert!(!tx_is_coin_stake(&bad2));
         // single output → not a coinstake
-        let bad3 = { let mut t = good.clone(); t.vout.truncate(1); t };
+        let bad3 = {
+            let mut t = good.clone();
+            t.vout.truncate(1);
+            t
+        };
         assert!(!tx_is_coin_stake(&bad3));
         // null prevout (coinbase-shaped) → not a coinstake
         let bad4 = {
@@ -999,14 +1052,25 @@ mod tests {
             bn.as_u128() as i64 + fees
         };
         let mut cases: Vec<u64> = vec![
-            0, 1, 364, 365, 366, 1104, 1105, 86_400, 1 << 20, (1 << 40) + 7,
-            u32::MAX as u64, 26_620_370, // a value produced by the coin-age tests
+            0,
+            1,
+            364,
+            365,
+            366,
+            1104,
+            1105,
+            86_400,
+            1 << 20,
+            (1 << 40) + 7,
+            u32::MAX as u64,
+            26_620_370, // a value produced by the coin-age tests
         ];
         for shift in [41u32, 48, 55, 60, 63] {
             cases.push((1u64 << shift) | 0xdead_beef);
         }
         for &age in &cases {
-            if age as u128 * MAX_TRI_PROOF_OF_STAKE as u128 / 365 / COIN as u128 > i64::MAX as u128 {
+            if age as u128 * MAX_TRI_PROOF_OF_STAKE as u128 / 365 / COIN as u128 > i64::MAX as u128
+            {
                 continue; // outside the C++ getuint64 → int64 domain
             }
             for fees in [0i64, 1, 100, 123_456] {
@@ -1019,8 +1083,17 @@ mod tests {
         // (input coin age in sat-days, paid stake reward). Derived from real
         // coinstakes — nStakeReward = Σvout − Σvin of vtx[1], nFees = 0 — so
         // the constant and the CBigNum division order can never drift.
-        for (coin_age, paid) in [(2_115_931u64, 1_913i64), (3_501_519, 3_165), (2_756_844, 2_492)] {
-            assert_eq!(stake_reward(coin_age, 0), paid, "live chain vector {}", coin_age);
+        for (coin_age, paid) in [
+            (2_115_931u64, 1_913i64),
+            (3_501_519, 3_165),
+            (2_756_844, 2_492),
+        ] {
+            assert_eq!(
+                stake_reward(coin_age, 0),
+                paid,
+                "live chain vector {}",
+                coin_age
+            );
         }
         // the C++ groups MULTIPLY before divide (nCoinAge *= 330000; /= 365;
         // /= COIN) — a divide-first implementation rounds differently. Find the
@@ -1084,17 +1157,8 @@ mod tests {
         };
         // probe exactly at block_time + 3600 + 1000 → weight 1000 < 10800
         let tx_time = BLOCK_TIME + 3600 + 1000;
-        let (res, _) = create_coinstake(
-            &idx,
-            &[young],
-            EASY_BITS,
-            0,
-            tx_time,
-            1,
-            501 * COIN,
-            41,
-        )
-        .expect("search");
+        let (res, _) = create_coinstake(&idx, &[young], EASY_BITS, 0, tx_time, 1, 501 * COIN, 41)
+            .expect("search");
         let plan = res.expect("young coin must solve on the easy target");
         assert!(plan.split, "weight below nStakeSplitAge must split");
         assert_eq!(plan.tx.vout.len(), 3);
@@ -1143,11 +1207,16 @@ mod tests {
         // kernel coin 12 TRI; 5 TRI combines; 25 TRI is "significant" and is
         // skipped; 3 TRI combines. Credit lands exactly on the 20 TRI
         // threshold (further adds would break there).
-        let coins = vec![mk(0x21, 12 * COIN), mk(0x22, 5 * COIN), mk(0x23, 25 * COIN), mk(0x24, 3 * COIN)];
+        let coins = vec![
+            mk(0x21, 12 * COIN),
+            mk(0x22, 5 * COIN),
+            mk(0x23, 25 * COIN),
+            mk(0x24, 3 * COIN),
+        ];
         let balance: i64 = coins.iter().map(|c| c.value).sum();
         let tx_time = BLOCK_TIME + 12 * 3600;
-        let (res, _) = create_coinstake(&idx, &coins, EASY_BITS, 0, tx_time, 1, balance, 41)
-            .expect("search");
+        let (res, _) =
+            create_coinstake(&idx, &coins, EASY_BITS, 0, tx_time, 1, balance, 41).expect("search");
         let plan = res.expect("easy target");
         assert_eq!(plan.inputs.len(), 3, "kernel + 5TRI + 3TRI; 25TRI skipped");
         assert_eq!(plan.inputs[0].txid, [0x21; 32]);
@@ -1173,14 +1242,22 @@ mod tests {
         let (res, _) = create_coinstake(&idx, &[coin], EASY_BITS, 0, tx_time, 1, 11 * COIN, 41)
             .expect("search");
         let plan = res.expect("solve");
-        let mut block =
-            assemble_pos_block(idx.tip().unwrap(), median_of_last_11(&idx), &plan.tx, &[], EASY_BITS)
-                .expect("assemble");
+        let mut block = assemble_pos_block(
+            idx.tip().unwrap(),
+            median_of_last_11(&idx),
+            &plan.tx,
+            &[],
+            EASY_BITS,
+        )
+        .expect("assemble");
         assert!(block.block_sig.is_empty());
         assert_eq!(block.time, plan.tx.time, "block time == coinstake time");
         assert_eq!(block.vtx.len(), 2);
         // vout[1] pays to the signer's bare P2PK script
-        assert_eq!(block.vtx[1].vout[1].script_pubkey, plan.tx.vout[1].script_pubkey);
+        assert_eq!(
+            block.vtx[1].vout[1].script_pubkey,
+            plan.tx.vout[1].script_pubkey
+        );
         sign_block(&mut block, &plan.signer.secret).expect("sign");
         assert!(!block.block_sig.is_empty());
         crate::consensus::check_pos_block_signature(&block).expect("sign/verify roundtrip");
@@ -1218,9 +1295,14 @@ mod tests {
         .expect("search");
         let mut plan = res.expect("solve");
         plan.tx.time = 1_400_000_000; // below any floor of the synthetic chain
-        let err =
-            assemble_pos_block(idx.tip().unwrap(), median_of_last_11(&idx), &plan.tx, &[], EASY_BITS)
-                .unwrap_err();
+        let err = assemble_pos_block(
+            idx.tip().unwrap(),
+            median_of_last_11(&idx),
+            &plan.tx,
+            &[],
+            EASY_BITS,
+        )
+        .unwrap_err();
         assert!(err.contains("timestamp floor"), "got: {}", err);
     }
 
@@ -1233,9 +1315,9 @@ mod tests {
         let mut w = Vec::new();
         push_script_int64(&mut w, 0);
         assert_eq!(w, vec![0x00]); // OP_0
-        // minimal signed LE derived independently: u32 LE bytes with trailing
-        // (high-order) zero bytes trimmed, sign byte appended when the top
-        // bit of the last byte is set, then the push frame.
+                                   // minimal signed LE derived independently: u32 LE bytes with trailing
+                                   // (high-order) zero bytes trimmed, sign byte appended when the top
+                                   // bit of the last byte is set, then the push frame.
         let expect_min = |v: u32| -> Vec<u8> {
             let le = v.to_le_bytes();
             let len = le.iter().rposition(|&b| b != 0).map(|p| p + 1).unwrap_or(1);

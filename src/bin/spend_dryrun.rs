@@ -87,35 +87,41 @@ fn main() {
         secret: src_secret,
         pubkey: src_pk.clone(),
     };
-    let prev_p2pk = mk_prev("p2pk", spend::script_pubkey_p2pk(&src_pk).unwrap(), 1_000_000);
+    let prev_p2pk = mk_prev(
+        "p2pk",
+        spend::script_pubkey_p2pk(&src_pk).unwrap(),
+        1_000_000,
+    );
     let prev_p2pkh = mk_prev("p2pkh", spend::script_pubkey_p2pkh(&src_pk), 700_000);
 
     let mut checks_passed = 0usize;
     let mut checks_failed = 0usize;
     let mut report: Vec<String> = Vec::new();
 
-    let expect_ok =
-        |r: Result<spend::SpendPlan, String>, what: &str, checks: &mut (usize, usize), rep: &mut Vec<String>| {
-            match r {
-                Ok(plan) => {
-                    rep.push(format!(
-                        "OK   {} txid={} fee={} change={} bytes={}",
-                        what,
-                        hash_to_display(&plan.tx.hash()),
-                        plan.fee,
-                        plan.change,
-                        plan.tx.serialize().len()
-                    ));
-                    checks.0 += 1;
-                    Some(plan)
-                }
-                Err(e) => {
-                    eprintln!("FAIL: {} errored: {}", what, e);
-                    checks.1 += 1;
-                    None
-                }
+    let expect_ok = |r: Result<spend::SpendPlan, String>,
+                     what: &str,
+                     checks: &mut (usize, usize),
+                     rep: &mut Vec<String>| {
+        match r {
+            Ok(plan) => {
+                rep.push(format!(
+                    "OK   {} txid={} fee={} change={} bytes={}",
+                    what,
+                    hash_to_display(&plan.tx.hash()),
+                    plan.fee,
+                    plan.change,
+                    plan.tx.serialize().len()
+                ));
+                checks.0 += 1;
+                Some(plan)
             }
-        };
+            Err(e) => {
+                eprintln!("FAIL: {} errored: {}", what, e);
+                checks.1 += 1;
+                None
+            }
+        }
+    };
 
     // ---- dry run 1: P2PK → P2PK (the tasked run) ----------------------------
     let plan1 = expect_ok(
@@ -187,11 +193,13 @@ fn main() {
     for (i, plan) in plans.iter().enumerate() {
         // Solver scriptSig shapes
         for (vin_idx, vin) in plan.tx.vin.iter().enumerate() {
-            let pushes = spend::parse_pushes(&vin.script_sig)
-                .unwrap_or_else(|e| die(&format!("plan {} vin {}: bad scriptSig: {}", i, vin_idx, e)));
+            let pushes = spend::parse_pushes(&vin.script_sig).unwrap_or_else(|e| {
+                die(&format!("plan {} vin {}: bad scriptSig: {}", i, vin_idx, e))
+            });
             let prev = prev_of(vin);
             let prev_script = prev.script_pubkey.clone();
-            let st = spend::solver_type(&prev_script).unwrap_or_else(|| die("prev script not standard"));
+            let st =
+                spend::solver_type(&prev_script).unwrap_or_else(|| die("prev script not standard"));
             if pushes.len() != spend::script_sig_args_expected(&st) {
                 die(&format!(
                     "plan {} vin {}: Solver shape violation ({} pushes vs {} expected)",
@@ -202,8 +210,9 @@ fn main() {
                 ));
             }
             // own-verifier signature check
-            let v = spend::verify_input(&plan.tx, vin_idx, &prev_script)
-                .unwrap_or_else(|e| die(&format!("plan {} vin {}: verify failed: {}", i, vin_idx, e)));
+            let v = spend::verify_input(&plan.tx, vin_idx, &prev_script).unwrap_or_else(|e| {
+                die(&format!("plan {} vin {}: verify failed: {}", i, vin_idx, e))
+            });
             if v.der_mode != "strict" || v.hash_type != spend::SIGHASH_ALL {
                 die(&format!("plan {} vin {}: unexpected sig attrs", i, vin_idx));
             }
@@ -258,7 +267,10 @@ fn main() {
             report.push("OK   negative: immature coinbase rejected".to_string());
         }
         Ok(_) => die("immature coinbase was accepted"),
-        Err(e) => die(&format!("immature coinbase rejected with wrong error: {}", e)),
+        Err(e) => die(&format!(
+            "immature coinbase rejected with wrong error: {}",
+            e
+        )),
     }
     // (c) input newer than the spend must be rejected
     let mut late = prev_p2pk.clone();
@@ -283,13 +295,28 @@ fn main() {
     // ---- write + byte-for-byte re-verification ------------------------------
     let mut j = String::with_capacity(1 << 16);
     j.push_str("{\n\"dry_run\": true,\n\"broadcast\": false,\n\"all_keys_synthetic\": true,\n");
-    j.push_str(&format!("\"checks_passed\": {}, \"checks_failed\": {},\n", checks_passed, checks_failed));
+    j.push_str(&format!(
+        "\"checks_passed\": {}, \"checks_failed\": {},\n",
+        checks_passed, checks_failed
+    ));
     j.push_str("\"log\": [\n");
-    j.push_str(&report.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",\n"));
+    j.push_str(
+        &report
+            .iter()
+            .map(|l| format!("\"{}\"", l.replace('"', "'")))
+            .collect::<Vec<_>>()
+            .join(",\n"),
+    );
     j.push_str("\n],\n\"signed_txs\": [\n");
     let txs: Vec<String> = plans
         .iter()
-        .map(|p| format!("{{\"txid\":\"{}\",\"hex\":\"{}\"}}", hash_to_display(&p.tx.hash()), hex(&p.tx.serialize())))
+        .map(|p| {
+            format!(
+                "{{\"txid\":\"{}\",\"hex\":\"{}\"}}",
+                hash_to_display(&p.tx.hash()),
+                hex(&p.tx.serialize())
+            )
+        })
         .collect();
     j.push_str(&txs.join(",\n"));
     j.push_str("\n]\n}\n");
@@ -298,10 +325,15 @@ fn main() {
     std::fs::rename(&tmp, &out_path).unwrap_or_else(|e| die(&format!("rename: {}", e)));
 
     // re-read the file and re-verify every written tx against its prevouts
-    let written = std::fs::read_to_string(&out_path).unwrap_or_else(|e| die(&format!("reread: {}", e)));
+    let written =
+        std::fs::read_to_string(&out_path).unwrap_or_else(|e| die(&format!("reread: {}", e)));
     let count_ok = written.matches("\"hex\"").count();
     if count_ok != plans.len() {
-        die(&format!("written file has {} txs, expected {}", count_ok, plans.len()));
+        die(&format!(
+            "written file has {} txs, expected {}",
+            count_ok,
+            plans.len()
+        ));
     }
     for plan in &plans {
         // reconstruct prevouts by txid prefix match — full verifier pass
@@ -316,28 +348,38 @@ fn main() {
         }
         checks_passed += 1;
     }
-    report.push(format!("OK   {} written txs re-verified byte-for-byte", plans.len()));
+    report.push(format!(
+        "OK   {} written txs re-verified byte-for-byte",
+        plans.len()
+    ));
 
-    println!("dry runs: {} checks passed, {} failed", checks_passed, checks_failed);
-    println!("signed txs written to {} (NOT broadcast — no network code in this bin)", out_path);
+    println!(
+        "dry runs: {} checks passed, {} failed",
+        checks_passed, checks_failed
+    );
+    println!(
+        "signed txs written to {} (NOT broadcast — no network code in this bin)",
+        out_path
+    );
     println!("SPEND DRY RUN PASSED");
 }
 
 /// Mode B: sign a REAL wallet UTXO (from the balances --utxos-out dump) to a
 /// synthetic destination — verify-only, nothing leaves the machine.
-fn run_utxo_dump_mode(
-    dump_path: &str,
-    wallet_path: &str,
-    out_path: &str,
-    spend_height: u32,
-) {
+fn run_utxo_dump_mode(dump_path: &str, wallet_path: &str, out_path: &str, spend_height: u32) {
     use tri7_core::wallet;
 
-    let raw = std::fs::read_to_string(dump_path)
-        .unwrap_or_else(|e| die(&format!("read {}: {} (run: balances --utxos-out {})", dump_path, e, dump_path)));
+    let raw = std::fs::read_to_string(dump_path).unwrap_or_else(|e| {
+        die(&format!(
+            "read {}: {} (run: balances --utxos-out {})",
+            dump_path, e, dump_path
+        ))
+    });
     let v: serde_json::Value =
         serde_json::from_str(&raw).unwrap_or_else(|e| die(&format!("dump JSON parse: {}", e)));
-    let entries = v["utxos"].as_array().unwrap_or_else(|| die("dump has no utxos array"));
+    let entries = v["utxos"]
+        .as_array()
+        .unwrap_or_else(|| die("dump has no utxos array"));
     if entries.is_empty() {
         die("dump has zero wallet UTXOs");
     }
@@ -366,7 +408,9 @@ fn run_utxo_dump_mode(
         .unwrap_or_else(|| die("no mature wallet UTXO with value > 1000 sats"));
     let addr = entry["address"].as_str().unwrap();
     let key = by_address[addr];
-    let txid_disp = entry["txid"].as_str().unwrap_or_else(|| die("dump entry without txid"));
+    let txid_disp = entry["txid"]
+        .as_str()
+        .unwrap_or_else(|| die("dump entry without txid"));
     let txid_bytes: Vec<u8> = (0..64)
         .step_by(2)
         .map(|i| u8::from_str_radix(&txid_disp[i..i + 2], 16).unwrap())
@@ -383,7 +427,9 @@ fn run_utxo_dump_mode(
         n: entry["n"].as_u64().unwrap() as u32,
         value: *value,
         script_pubkey: {
-            let h = entry["script_hex"].as_str().unwrap_or_else(|| die("dump entry without script"));
+            let h = entry["script_hex"]
+                .as_str()
+                .unwrap_or_else(|| die("dump entry without script"));
             (0..h.len())
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
@@ -435,7 +481,11 @@ fn run_utxo_dump_mode(
         plan.tx.vout[0].value,
         plan.fee,
         hash_to_display(&plan.tx.hash()),
-        plan.tx.serialize().iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        plan.tx
+            .serialize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     );
     let tmp = format!("{}.tmp", out_path);
     std::fs::write(&tmp, &report).unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));

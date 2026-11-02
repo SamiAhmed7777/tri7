@@ -87,7 +87,10 @@ pub fn script_pubkey_p2pk(pubkey: &[u8]) -> Result<Vec<u8>, String> {
     let ok = pubkey.len() == 33 && (pubkey[0] == 2 || pubkey[0] == 3)
         || pubkey.len() == 65 && pubkey[0] == 4;
     if !ok {
-        return Err(format!("p2pk: invalid pubkey form ({} bytes)", pubkey.len()));
+        return Err(format!(
+            "p2pk: invalid pubkey form ({} bytes)",
+            pubkey.len()
+        ));
     }
     let mut s = Vec::with_capacity(pubkey.len() + 2);
     push_data(&mut s, pubkey);
@@ -160,9 +163,12 @@ pub fn find_and_delete_op(script: &[u8], needle: u8) -> Vec<u8> {
                 Some(l)
             }
             0x4e if pc + 4 <= script.len() => {
-                let l =
-                    u32::from_le_bytes([script[pc], script[pc + 1], script[pc + 2], script[pc + 3]])
-                        as usize;
+                let l = u32::from_le_bytes([
+                    script[pc],
+                    script[pc + 1],
+                    script[pc + 2],
+                    script[pc + 3],
+                ]) as usize;
                 pc += 4;
                 Some(l)
             }
@@ -366,7 +372,11 @@ pub fn decode_signature_der_lax(data: &[u8]) -> Result<([u8; 32], [u8; 32]), Str
         return Err("DER: missing SEQUENCE".into());
     }
     let total = data[1] as usize + 2;
-    let total = if total > data.len() { data.len() } else { total };
+    let total = if total > data.len() {
+        data.len()
+    } else {
+        total
+    };
     let body = &data[2..total];
     let mut idx = 0usize;
     let r = der_read_int(body, &mut idx, false)?;
@@ -487,9 +497,8 @@ pub fn check_sig(
     let (r, s) = if is_strict {
         decode_signature_der_strict(sig_der).expect("checked ok above")
     } else {
-        decode_signature_der_lax(sig_der).map_err(|_| {
-            "signature not parseable as DER (strict or lax)".to_string()
-        })?
+        decode_signature_der_lax(sig_der)
+            .map_err(|_| "signature not parseable as DER (strict or lax)".to_string())?
     };
     let mut compact = [0u8; 64];
     compact[..32].copy_from_slice(&r);
@@ -552,8 +561,8 @@ pub fn verify_input(
             tx_to.vin.len()
         ));
     }
-    let spend_type =
-        solver_type(prev_script_pubkey).ok_or_else(|| "VerifyScript: non-standard script".to_string())?;
+    let spend_type = solver_type(prev_script_pubkey)
+        .ok_or_else(|| "VerifyScript: non-standard script".to_string())?;
     let pushes = parse_pushes(&tx_to.vin[n_in].script_sig)
         .map_err(|e| format!("VerifyScript: bad scriptSig: {}", e))?;
     if pushes.len() != script_sig_args_expected(&spend_type) {
@@ -666,7 +675,10 @@ impl SpendInput {
 /// value-covering set produces an identical wire outcome once signed, so the
 /// simpler deterministic policy is safe here. Selection never picks inputs
 /// that fail the ownership pre-check (they would fail at signing anyway).
-pub fn select_utxos_covering(inputs: &[SpendInput], target: i64) -> Result<Vec<SpendInput>, String> {
+pub fn select_utxos_covering(
+    inputs: &[SpendInput],
+    target: i64,
+) -> Result<Vec<SpendInput>, String> {
     if target <= 0 {
         return Err("select: target must be positive".into());
     }
@@ -681,7 +693,12 @@ pub fn select_utxos_covering(inputs: &[SpendInput], target: i64) -> Result<Vec<S
         i.assert_owns_prevout()?;
     }
     let mut sorted: Vec<&SpendInput> = inputs.iter().collect();
-    sorted.sort_by(|a, b| b.value.cmp(&a.value).then(a.txid.cmp(&b.txid)).then(a.n.cmp(&b.n)));
+    sorted.sort_by(|a, b| {
+        b.value
+            .cmp(&a.value)
+            .then(a.txid.cmp(&b.txid))
+            .then(a.n.cmp(&b.n))
+    });
     let mut picked = Vec::new();
     let mut sum = 0i64;
     for i in sorted {
@@ -803,9 +820,9 @@ pub fn build_spend(
             ));
         }
         if change > 0 {
-            let cs = change_script
-                .clone()
-                .ok_or_else(|| "CreateTransaction: change required but no change script".to_string())?;
+            let cs = change_script.clone().ok_or_else(|| {
+                "CreateTransaction: change required but no change script".to_string()
+            })?;
             if solver_type(&cs).is_none() {
                 return Err("CreateTransaction: change script is non-standard".into());
             }
@@ -833,13 +850,23 @@ pub fn build_spend(
 
         // Sign (SignSignature per input, wallet.cpp:2084-2088)
         for (i, input) in ordered.iter().enumerate() {
-            sign_input(&mut tx, i, &input.script_pubkey, &input.secret, &input.pubkey, SIGHASH_ALL)?;
+            sign_input(
+                &mut tx,
+                i,
+                &input.script_pubkey,
+                &input.secret,
+                &input.pubkey,
+                SIGHASH_ALL,
+            )?;
         }
 
         // Size limit (wallet.cpp:2090-2093): nBytes >= MAX_BLOCK_SIZE_GEN/5
         let n_bytes = tx.serialize().len();
         if n_bytes >= MAX_BLOCK_SIZE_GEN / 5 {
-            return Err(format!("CreateTransaction: tx too large ({} bytes)", n_bytes));
+            return Err(format!(
+                "CreateTransaction: tx too large ({} bytes)",
+                n_bytes
+            ));
         }
 
         // Fee check (wallet.cpp:2096-2104): nPayFee = nTransactionFee *
@@ -896,7 +923,11 @@ pub fn connect_inputs_check(
                 if depth < COINBASE_MATURITY as i64 {
                     return Err(format!(
                         "ConnectInputs: tried to spend {} at depth {}",
-                        if entry.is_coinbase { "coinbase" } else { "coinstake" },
+                        if entry.is_coinbase {
+                            "coinbase"
+                        } else {
+                            "coinstake"
+                        },
                         depth
                     ));
                 }
@@ -1042,7 +1073,10 @@ mod tests {
         let mut m = base.clone();
         m.vout[1].script_pubkey.push(0xac);
         assert_ne!(signature_hash(&m, 0, &sc, SIGHASH_ALL).unwrap(), h0);
-        assert_ne!(signature_hash(&base, 0, &[0x21, 0x02, 0xac, 0xac], SIGHASH_ALL).unwrap(), h0);
+        assert_ne!(
+            signature_hash(&base, 0, &[0x21, 0x02, 0xac, 0xac], SIGHASH_ALL).unwrap(),
+            h0
+        );
         assert_ne!(signature_hash(&base, 1, &sc, SIGHASH_ALL).unwrap(), h0);
         // hashtype is a 4-byte LE int in the preimage: 1 vs 0x81 differ
         assert_ne!(
@@ -1162,7 +1196,12 @@ mod tests {
                 c
             })
             .unwrap();
-            assert_eq!(der, lib.serialize_der().to_vec(), "encode mismatch at {}", i);
+            assert_eq!(
+                der,
+                lib.serialize_der().to_vec(),
+                "encode mismatch at {}",
+                i
+            );
             // strict decode roundtrip
             let (r2, s2) = decode_signature_der_strict(&der).unwrap();
             assert_eq!(r2, r);
@@ -1212,7 +1251,10 @@ mod tests {
         assert_eq!(&p2pkh[..3], &[0x76, 0xa9, 0x14]);
         assert_eq!(&p2pkh[3..23], &crate::address::hash160(&pk));
         assert_eq!(&p2pkh[23..], &[0x88, 0xac]);
-        assert!(matches!(solver_type(&p2pkh), Some(SpendType::PubkeyHash(_))));
+        assert!(matches!(
+            solver_type(&p2pkh),
+            Some(SpendType::PubkeyHash(_))
+        ));
         // scriptSig shapes per Solver
         let sig = vec![0x30u8; 71];
         assert_eq!(script_sig_p2pk(&sig).len(), 1 + 71);
@@ -1264,7 +1306,10 @@ mod tests {
         for label in ["rt/p2pk", "rt/p2pkh"] {
             let (_, pk) = synthetic_key(&format!("{}-key", label));
             let (prev_script, build_script) = if label.ends_with("p2pk") {
-                (script_pubkey_p2pk(&pk).unwrap(), script_pubkey_p2pk(&pk).unwrap())
+                (
+                    script_pubkey_p2pk(&pk).unwrap(),
+                    script_pubkey_p2pk(&pk).unwrap(),
+                )
             } else {
                 (script_pubkey_p2pkh(&pk), script_pubkey_p2pkh(&pk))
             };
@@ -1287,13 +1332,19 @@ mod tests {
             sign_input(&mut tx, 0, &prev_script, &secret, &pk, SIGHASH_ALL).unwrap();
             // Solver shapes: 1 push for PubKey, 2 for PubKeyHash
             let pushes = parse_pushes(&tx.vin[0].script_sig).unwrap();
-            assert_eq!(pushes.len(), script_sig_args_expected(&solver_type(&prev_script).unwrap()));
+            assert_eq!(
+                pushes.len(),
+                script_sig_args_expected(&solver_type(&prev_script).unwrap())
+            );
             // hashtype byte rides on the signature
             assert_eq!(*pushes[0].last().unwrap(), SIGHASH_ALL as u8);
             let v = verify_input(&tx, 0, &prev_script).unwrap();
             assert_eq!(v.hash_type, SIGHASH_ALL);
             assert_eq!(v.der_mode, "strict");
-            assert_eq!(v.sighash, signature_hash(&tx, 0, &prev_script, SIGHASH_ALL).unwrap());
+            assert_eq!(
+                v.sighash,
+                signature_hash(&tx, 0, &prev_script, SIGHASH_ALL).unwrap()
+            );
             // the same script via a rebuilt prev (identical bytes) verifies too
             verify_input(&tx, 0, &build_script).unwrap();
         }
@@ -1321,7 +1372,7 @@ mod tests {
         let (secret, _) = synthetic_key("tamper/key");
         sign_input(&mut tx, 0, &prev, &secret, &pk, SIGHASH_ALL).unwrap();
         verify_input(&tx, 0, &prev).unwrap(); // sanity
-        // flip a byte inside the DER sig (middle of the r integer)
+                                              // flip a byte inside the DER sig (middle of the r integer)
         let mut bad = tx.clone();
         let last = bad.vin[0].script_sig.len() - 2;
         bad.vin[0].script_sig[last] ^= 0x01;
@@ -1339,11 +1390,18 @@ mod tests {
         let (_, pk2) = synthetic_key("tamper/other");
         let prev_h = script_pubkey_p2pkh(&pk);
         let mut bad = tx.clone();
-        bad.vin[0].script_sig = script_sig_p2pkh(&{
-            let mut s = sign_msg(&secret, &signature_hash(&tx, 0, &prev_h, SIGHASH_ALL).unwrap()).unwrap();
-            s.push(SIGHASH_ALL as u8);
-            s
-        }, &pk2);
+        bad.vin[0].script_sig = script_sig_p2pkh(
+            &{
+                let mut s = sign_msg(
+                    &secret,
+                    &signature_hash(&tx, 0, &prev_h, SIGHASH_ALL).unwrap(),
+                )
+                .unwrap();
+                s.push(SIGHASH_ALL as u8);
+                s
+            },
+            &pk2,
+        );
         assert!(verify_input(&bad, 0, &prev_h)
             .err()
             .unwrap()
@@ -1384,11 +1442,11 @@ mod tests {
         sign_input(&mut tx, 0, &prev, &secret, &pk, SIGHASH_NONE).unwrap();
         tx.vout[0].value = 999_999;
         verify_input(&tx, 0, &prev).unwrap(); // unbound under NONE
-        // re-sign ALL over the mutated vout, then mutate again: bound under ALL
+                                              // re-sign ALL over the mutated vout, then mutate again: bound under ALL
         sign_input(&mut tx, 0, &prev, &secret, &pk, SIGHASH_ALL).unwrap();
         tx.vout[0].value += 1;
         assert!(verify_input(&tx, 0, &prev).is_err()); // bound under ALL
-        // ANYONECANPAY: adding another input after signing does NOT invalidate
+                                                       // ANYONECANPAY: adding another input after signing does NOT invalidate
         let mut tx = Tx {
             vin: vec![Vin {
                 prev_hash: [0x55u8; 32],
@@ -1398,7 +1456,15 @@ mod tests {
             }],
             ..tx.clone()
         };
-        sign_input(&mut tx, 0, &prev, &secret, &pk, SIGHASH_ANYONECANPAY | SIGHASH_ALL).unwrap();
+        sign_input(
+            &mut tx,
+            0,
+            &prev,
+            &secret,
+            &pk,
+            SIGHASH_ANYONECANPAY | SIGHASH_ALL,
+        )
+        .unwrap();
         tx.vin.push(Vin {
             prev_hash: [0x66u8; 32],
             prev_n: 1,
@@ -1417,20 +1483,50 @@ mod tests {
         let mut prev = make_prevout("spend/in0", vec![], 1_000_000);
         prev.script_pubkey = script_pubkey_p2pk(&prev.pubkey).unwrap();
         let inputs = vec![prev];
-        let plan = build_spend(&inputs, dest.clone(), 900_000, Some(change.clone()), 0, 1_400_003_600, 107).unwrap();
+        let plan = build_spend(
+            &inputs,
+            dest.clone(),
+            900_000,
+            Some(change.clone()),
+            0,
+            1_400_003_600,
+            107,
+        )
+        .unwrap();
         // fee was raised to the GetMinFee floor ((1 + bytes/1000) * 100)
         let bytes = plan.tx.serialize().len();
-        assert_eq!(plan.fee, get_min_fee(&[900_000, plan.change], bytes, 1, FeeMode::Block));
+        assert_eq!(
+            plan.fee,
+            get_min_fee(&[900_000, plan.change], bytes, 1, FeeMode::Block)
+        );
         assert_eq!(plan.inputs_value - 900_000 - plan.fee, plan.change);
         assert_eq!(plan.tx.vout.len(), 2);
         connect_inputs_check(&plan.tx, &inputs, 107).unwrap();
         // deterministic rebuild: same inputs → identical signed tx bytes
-        let plan2 = build_spend(&inputs, dest.clone(), 900_000, Some(change.clone()), 0, 1_400_003_600, 107).unwrap();
+        let plan2 = build_spend(
+            &inputs,
+            dest.clone(),
+            900_000,
+            Some(change.clone()),
+            0,
+            1_400_003_600,
+            107,
+        )
+        .unwrap();
         assert_eq!(plan.tx.serialize(), plan2.tx.serialize());
         // P2PKH input → 2-push scriptSig
         let mut prev_h = make_prevout("spend/in1", vec![], 2_000_000);
         prev_h.script_pubkey = script_pubkey_p2pkh(&prev_h.pubkey);
-        let plan_h = build_spend(&[prev_h.clone()], script_pubkey_p2pkh(&dest_pk), 1_000_000, Some(change.clone()), 0, 1_400_003_600, 107).unwrap();
+        let plan_h = build_spend(
+            &[prev_h.clone()],
+            script_pubkey_p2pkh(&dest_pk),
+            1_000_000,
+            Some(change.clone()),
+            0,
+            1_400_003_600,
+            107,
+        )
+        .unwrap();
         connect_inputs_check(&plan_h.tx, &[prev_h], 107).unwrap();
         assert_eq!(parse_pushes(&plan_h.tx.vin[0].script_sig).unwrap().len(), 2);
     }
@@ -1444,19 +1540,44 @@ mod tests {
         cb.is_coinbase = true;
         // coinbase at depth 6 (< 7) must be rejected (990_000 + 10_000 fee
         // consumes the input exactly, so no change script is needed)
-        let err = build_spend(&[cb.clone()], dest.clone(), 990_000, None, 10_000, 1_400_003_600, 106)
-            .err()
-            .unwrap();
+        let err = build_spend(
+            &[cb.clone()],
+            dest.clone(),
+            990_000,
+            None,
+            10_000,
+            1_400_003_600,
+            106,
+        )
+        .err()
+        .unwrap();
         assert!(err.contains("depth 6"), "got: {}", err);
         // depth 7 matures
-        build_spend(&[cb.clone()], dest.clone(), 990_000, None, 10_000, 1_400_003_600, 107).unwrap();
+        build_spend(
+            &[cb.clone()],
+            dest.clone(),
+            990_000,
+            None,
+            10_000,
+            1_400_003_600,
+            107,
+        )
+        .unwrap();
         // input newer than the spend tx
         let mut late = make_prevout("rej/late", vec![], 1_000_000);
         late.script_pubkey = script_pubkey_p2pk(&late.pubkey).unwrap();
         late.tx_time = 1_400_003_700;
-        let err = build_spend(&[late.clone()], dest.clone(), 990_000, None, 10_000, 1_400_003_600, 200)
-            .err()
-            .unwrap();
+        let err = build_spend(
+            &[late.clone()],
+            dest.clone(),
+            990_000,
+            None,
+            10_000,
+            1_400_003_600,
+            200,
+        )
+        .err()
+        .unwrap();
         assert!(err.contains("timestamp earlier than input"), "got: {}", err);
         // fee below GetMinFee ((1 + bytes/1000)*100) is impossible via
         // build_spend (the loop raises it) — check connect_inputs_check
@@ -1480,7 +1601,15 @@ mod tests {
             }],
             locktime: 0,
         };
-        sign_input(&mut tx, 0, &ok.script_pubkey, &ok.secret, &ok.pubkey, SIGHASH_ALL).unwrap();
+        sign_input(
+            &mut tx,
+            0,
+            &ok.script_pubkey,
+            &ok.secret,
+            &ok.pubkey,
+            SIGHASH_ALL,
+        )
+        .unwrap();
         let bytes = tx.serialize().len();
         let min_fee = get_min_fee(&[999_950], bytes, 1, FeeMode::Block);
         assert!(min_fee > 0 && 1_000_000 - 999_950 < min_fee);
@@ -1494,7 +1623,15 @@ mod tests {
             }],
             ..tx.clone()
         };
-        sign_input(&mut tx, 0, &ok.script_pubkey, &ok.secret, &ok.pubkey, SIGHASH_ALL).unwrap();
+        sign_input(
+            &mut tx,
+            0,
+            &ok.script_pubkey,
+            &ok.secret,
+            &ok.pubkey,
+            SIGHASH_ALL,
+        )
+        .unwrap();
         connect_inputs_check(&tx, &[ok], 200).unwrap();
     }
 
@@ -1506,7 +1643,8 @@ mod tests {
         big.script_pubkey = script_pubkey_p2pk(&big.pubkey).unwrap();
         let mut tiny = make_prevout("sel/tiny", vec![], 50);
         tiny.script_pubkey = script_pubkey_p2pk(&tiny.pubkey).unwrap();
-        let picked = select_utxos_covering(&[small.clone(), big.clone(), tiny.clone()], 100_000).unwrap();
+        let picked =
+            select_utxos_covering(&[small.clone(), big.clone(), tiny.clone()], 100_000).unwrap();
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].txid, big.txid);
         let picked = select_utxos_covering(&[tiny.clone(), small.clone()], 120).unwrap();

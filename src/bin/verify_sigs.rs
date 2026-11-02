@@ -81,7 +81,10 @@ fn main() {
                 }
             }
             if sig_checked > 0 && sig_checked % 50_000 == 0 {
-                println!("... {} signatures verified (height {})", sig_checked, height);
+                println!(
+                    "... {} signatures verified (height {})",
+                    sig_checked, height
+                );
             }
         }
 

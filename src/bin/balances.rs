@@ -30,12 +30,12 @@
 //! Anomaly counters (untracked spends / duplicate txids) are reported in the
 //! JSON, never silently dropped.
 
+use std::collections::HashMap;
 use tri7_core::address::{payload_to_address, pubkey_payload};
 use tri7_core::consensus;
 use tri7_core::kernel::UtxoSet;
 use tri7_core::replay::{check_coverage, ArchiveWalker, Step};
 use tri7_core::wallet;
-use std::collections::HashMap;
 
 /// One live wallet-owned UTXO (phase-3 spend record for --utxos-out).
 struct WalletUtxo {
@@ -291,7 +291,10 @@ fn main() {
     j.push_str(&format!("    \"blocks_replayed\": {},\n", blocks));
     j.push_str(&format!("    \"pos_blocks\": {},\n", pos_blocks));
     j.push_str(&format!("    \"live_utxos\": {},\n", live_utxos));
-    j.push_str(&format!("    \"total_balance_sats\": {},\n", total_balance_sats));
+    j.push_str(&format!(
+        "    \"total_balance_sats\": {},\n",
+        total_balance_sats
+    ));
     j.push_str(&format!(
         "    \"attributed_balance_sats\": {},\n",
         attributed_sats
@@ -304,18 +307,21 @@ fn main() {
         "    \"unattributed_utxos\": {},\n",
         totals.unattributed_utxos
     ));
-    j.push_str(&format!("    \"outputs_processed\": {},\n", outputs_processed));
+    j.push_str(&format!(
+        "    \"outputs_processed\": {},\n",
+        outputs_processed
+    ));
     j.push_str(&format!(
         "    \"outputs_attributed_to_address\": {},\n",
         outputs_attributed
     ));
     j.push_str(&format!("    \"regular_txs\": {},\n", regular_txs));
-    j.push_str(&format!("    \"untracked_spends\": {},\n", untracked_spends));
-    j.push_str(&format!("    \"duplicate_txids\": {},\n", duplicate_txids));
     j.push_str(&format!(
-        "    \"wallet_key_count\": {},\n",
-        wall.keys.len()
+        "    \"untracked_spends\": {},\n",
+        untracked_spends
     ));
+    j.push_str(&format!("    \"duplicate_txids\": {},\n", duplicate_txids));
+    j.push_str(&format!("    \"wallet_key_count\": {},\n", wall.keys.len()));
     j.push_str(&format!(
         "    \"wallet_addresses_distinct\": {},\n",
         distinct_wallet_payloads
@@ -377,8 +383,7 @@ fn main() {
         }
     }
     j.push_str("\n  }\n}\n");
-    std::fs::write(&out_path, &j)
-        .unwrap_or_else(|e| die(&format!("write {}: {}", out_path, e)));
+    std::fs::write(&out_path, &j).unwrap_or_else(|e| die(&format!("write {}: {}", out_path, e)));
 
     // ---- wallet UTXO dump (phase 3) ------------------------------------------
     if let Some(dump_path) = &utxos_out_path {
@@ -396,6 +401,12 @@ fn main() {
         let mut d = String::with_capacity(1 << 20);
         d.push_str("{\n");
         d.push_str(&format!("  \"height\": {},\n", covered_to));
+        // coverage tip hash: required by the tri7d listunspent consistency
+        // gate (height AND hash must match the balances snapshot)
+        d.push_str(&format!(
+            "  \"covered_tip_hash\": \"{}\",\n",
+            tri7_core::legacy::hash_to_display(&tip_hash)
+        ));
         d.push_str(&format!("  \"count\": {},\n", rows.len()));
         d.push_str(&format!(
             "  \"total_value_sats\": {},\n",
@@ -420,7 +431,10 @@ fn main() {
                 tri7_core::legacy::hash_to_display(txid),
                 n,
                 u.value,
-                u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                u.script
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
                 addr,
                 u.height,
                 u.tx_time,
@@ -430,8 +444,7 @@ fn main() {
         }
         d.push_str("  ]\n}\n");
         let tmp = format!("{}.tmp", dump_path);
-        std::fs::write(&tmp, &d)
-            .unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));
+        std::fs::write(&tmp, &d).unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));
         std::fs::rename(&tmp, dump_path)
             .unwrap_or_else(|e| die(&format!("rename {}: {}", dump_path, e)));
         println!(

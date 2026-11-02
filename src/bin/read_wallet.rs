@@ -21,10 +21,17 @@ fn main() {
     println!("wallet version : {:?}", w.version);
     println!("encrypted      : {}", w.encrypted);
     println!("keys           : {}", w.keys.len());
-    println!("bestblock      : {}",
-        w.best_block.map(|h| {
-            h.iter().rev().map(|b| format!("{:02x}", b)).collect::<String>()
-        }).unwrap_or_else(|| "none".into()));
+    println!(
+        "bestblock      : {}",
+        w.best_block
+            .map(|h| {
+                h.iter()
+                    .rev()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| "none".into())
+    );
     println!("labels         : {}", w.names.len());
 
     let mut status_ok = true;
