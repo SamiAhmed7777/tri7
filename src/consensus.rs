@@ -12,6 +12,13 @@ pub const CUTOFF_POW_BLOCK: usize = 9000;
 pub const CRAPCHAIN_CUTOFF_BLOCK: usize = 17691;
 pub const FORK_HEIGHT_V5: usize = 17651;
 pub const FORK_HEIGHT_V5_4: usize = 2_186_941;
+/// First block minted by the v5.0.0.0 revival client (chain resumed
+/// 2026-03-11 after the Dec-2022 freeze; the last pre-revival block 2186941 is
+/// the nBits seam exempt).
+pub const V5_REVIVAL_HEIGHT: usize = 2_186_942;
+/// Last block of the v5-era stretch: the chain stalled 2026-04-07..2026-09-06;
+/// h2200901+ was minted by the reverted (capped-GetWeight) v6.2.6.5+ client.
+pub const V6_RESTART_HEIGHT: usize = 2_200_900;
 pub const MODIFIER_INTERVAL_SWITCH: usize = 1;
 pub const COINBASE_HEIGHT_ENFORCEMENT: usize = 2_300_000;
 pub const TARGET_SPACING: u32 = 120;
@@ -81,10 +88,41 @@ pub fn stake_kernel_hash(
     sha256d(&s)
 }
 
-/// GetWeight (kernel.cpp:25-41): min(end - begin - minAge, maxAge), floored at 0.
-pub fn stake_weight(time_prev_tx: u32, time_tx: u32) -> i64 {
+/// GetWeight (kernel.cpp:25-41), era-aware per the mint-time client. `height`
+/// is the height of the block BEING VALIDATED (the replay position):
+///   - h < 2186942 (Pharao / Black-Pharao lineage, Oct 2014..Dec 2022): the
+///     kernel.cpp of that era had no fork branch — Peercoin hard cap at
+///     nStakeMaxAge (12 h).
+///   - 2186942..2200900 (v5.0.0.0 revival 2026-03-11 .. v6 2026-09-06
+///     restart): "After v5 fork: remove max age cap so coins aged during the
+///     freeze can stake" (kernel.cpp:37-39 at c636edb) — weight UNCAPPED (the
+///     validating tip is always >= FORK_HEIGHT_V5 here).
+///   - h >= 2200901 (v6.2.6.5+, post-revert 0411be6 2026-08-03, chain resumed
+///     2026-09-06): the revert restored the hard cap, forward-only.
+pub fn stake_weight_era(time_prev_tx: u32, time_tx: u32, height: usize) -> i64 {
     let delta = time_tx as i64 - time_prev_tx as i64 - STAKE_MIN_AGE as i64;
-    delta.clamp(0, STAKE_MAX_AGE as i64)
+    if delta < 0 {
+        return 0;
+    }
+    if height >= V5_REVIVAL_HEIGHT && height <= V6_RESTART_HEIGHT {
+        delta
+    } else {
+        delta.min(STAKE_MAX_AGE as i64)
+    }
+}
+
+/// GetWeight (kernel.cpp:25-41) keyed on the validating tip (pindexBest), the
+/// v5.0.0.0 form. Kept for callers that model the live tip explicitly.
+pub fn stake_weight(time_prev_tx: u32, time_tx: u32, tip_height: usize) -> i64 {
+    let delta = time_tx as i64 - time_prev_tx as i64 - STAKE_MIN_AGE as i64;
+    if delta < 0 {
+        return 0;
+    }
+    if tip_height >= FORK_HEIGHT_V5 {
+        delta
+    } else {
+        delta.min(STAKE_MAX_AGE as i64)
+    }
 }
 
 /// Compact-format difficulty target (bitcoin nBits) → 32-byte big-endian

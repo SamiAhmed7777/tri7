@@ -1,0 +1,1 @@
+/root/tri7/target/release/validate_pos: /root/tri7/build.rs /root/tri7/src/bin/validate_pos.rs /root/tri7/src/blkfile.rs /root/tri7/src/consensus.rs /root/tri7/src/difficulty.rs /root/tri7/src/kernel.rs /root/tri7/src/legacy.rs /root/tri7/src/lib.rs /root/tri7/src/replay.rs /root/tri7/src/wallet.rs /root/tri7/vendor

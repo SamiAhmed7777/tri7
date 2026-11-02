@@ -6,6 +6,7 @@
 
 pub mod consensus;
 pub mod difficulty;
+pub mod kernel;
 pub mod legacy;
 pub mod blkfile;
 pub mod replay;

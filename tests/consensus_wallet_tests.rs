@@ -129,11 +129,14 @@ fn kernel_hash_is_double_sha256_of_six_le_fields() {
 
 #[test]
 fn stake_weight_respects_min_and_max_age() {
-    assert_eq!(stake_weight(1_000_000, 1_000_000), 0); // younger than min age
-    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600), 0); // exactly min age → 0
-    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3601), 1);
-    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600 + 43_200), 43_200); // capped
-    assert_eq!(stake_weight(1_000_000, 1_000_000 + 100_000), 43_200);
+    // tip_height 0 = pre-v5 validating tip -> the capped Peercoin rule
+    assert_eq!(stake_weight(1_000_000, 1_000_000, 0), 0); // younger than min age
+    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600, 0), 0); // exactly min age -> 0
+    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3601, 0), 1);
+    assert_eq!(stake_weight(1_000_000, 1_000_000 + 3600 + 43_200, 0), 43_200); // capped
+    assert_eq!(stake_weight(1_000_000, 1_000_000 + 100_000, 0), 43_200);
+    // v5-era validating tip -> uncapped (fork gate, kernel.cpp:37-39)
+    assert_eq!(stake_weight(1_000_000, 1_000_000 + 100_000, 17_651), 96_400);
 }
 
 // ---------------------------------------------------------------------------

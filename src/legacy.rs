@@ -213,7 +213,7 @@ impl Tx {
         })
     }
 
-    fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         let mut w = Vec::new();
         w.extend_from_slice(&self.version.to_le_bytes());
         w.extend_from_slice(&self.time.to_le_bytes());
