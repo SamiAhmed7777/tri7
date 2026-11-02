@@ -1,0 +1,42 @@
+... 100000 blocks (204719 outputs, 11043 live UTXOs)
+... 200000 blocks (334619 outputs, 7692 live UTXOs)
+... 300000 blocks (453851 outputs, 6119 live UTXOs)
+... 400000 blocks (575725 outputs, 8205 live UTXOs)
+... 500000 blocks (690456 outputs, 8812 live UTXOs)
+... 600000 blocks (814206 outputs, 11901 live UTXOs)
+... 700000 blocks (930884 outputs, 11202 live UTXOs)
+... 800000 blocks (1040306 outputs, 11818 live UTXOs)
+... 900000 blocks (1143358 outputs, 11512 live UTXOs)
+... 1000000 blocks (1245694 outputs, 12028 live UTXOs)
+... 1100000 blocks (1348008 outputs, 12139 live UTXOs)
+... 1200000 blocks (1449253 outputs, 12657 live UTXOs)
+... 1300000 blocks (1552139 outputs, 12737 live UTXOs)
+... 1400000 blocks (1654035 outputs, 13034 live UTXOs)
+... 1500000 blocks (1755458 outputs, 13198 live UTXOs)
+... 1600000 blocks (1857686 outputs, 13290 live UTXOs)
+... 1700000 blocks (1960565 outputs, 13692 live UTXOs)
+... 1800000 blocks (2063939 outputs, 14137 live UTXOs)
+... 1900000 blocks (2166557 outputs, 14051 live UTXOs)
+... 2000000 blocks (2275636 outputs, 14956 live UTXOs)
+... 2100000 blocks (2431918 outputs, 33421 live UTXOs)
+... 2200000 blocks (2624979 outputs, 17780 live UTXOs)
+utxo dump: 177 wallet-owned live UTXOs (3036990591 sats) -> /root/tri7/wallet_utxos.json
+replay: 2201091 blocks (genesis..2201090), tip f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307
+outputs: 2626455 non-empty processed, 2626455 attributed to an address, 17769 live UTXOs held
+supply: total live balance 222507326452 sats (222507326452 attributed + 0 unattributed in 0 UTXOs)
+anomalies: 0 untracked spends, 0 duplicate-txid overwrites
+wallet: 248 keys / 248 distinct addresses, 23 funded; balance 3036990591 sats in 177 UTXOs; received(regular/P2PKH) 1457671017 sats; received(all) 493484557261 sats
+top wallet balances (sats):
+        1148561196 in  63 UTXOs  TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3
+         830401884 in  49 UTXOs  TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL
+         334283149 in  18 UTXOs  TZ4ZrftdfK9MLCvo63uR3ZcPibFEG54WT7
+         281479938 in  15 UTXOs  TV5C6CAobGaZP92Da6EPfzPEKjiJiFJeoj
+         209755283 in  14 UTXOs  TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL
+         129604310 in   8 UTXOs  TP5FfFT2o8mQjjGXPbsECqYF9xprUCcRW4
+          73125337 in   3 UTXOs  TFUexruqsggjScyBtGWHprwtJEqwLoP7jR
+          29270723 in   1 UTXOs  TNBWQNbrZeAJqx2GJpGLSRnv6ddMP39UbL
+            379073 in   1 UTXOs  TX8YeXumu1VvDRvDX8BLWTQB9AT65mumfw
+             57892 in   1 UTXOs  TTCf1Cvgsz4SaSk4HyZcpxYkzwfLHE26gs
+JSON written: /root/tri7/balances.json
+ALL BALANCE CHECKS PASSED
+balances replay exit=0

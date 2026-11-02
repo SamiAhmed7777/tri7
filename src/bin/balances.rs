@@ -37,6 +37,16 @@ use tri7_core::replay::{check_coverage, ArchiveWalker, Step};
 use tri7_core::wallet;
 use std::collections::HashMap;
 
+/// One live wallet-owned UTXO (phase-3 spend record for --utxos-out).
+struct WalletUtxo {
+    value: i64,
+    script: Vec<u8>,
+    height: u32,
+    tx_time: u32,
+    from_coinbase: bool,
+    from_coinstake: bool,
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {}", msg);
     std::process::exit(1);
@@ -63,6 +73,12 @@ fn main() {
         .position(|a| a == "--out")
         .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| "/root/tri7/balances.json".to_string());
+    // Optional phase-3 dump: every LIVE wallet-owned UTXO as a spend record
+    // (script bytes included, so spend:: can sign it directly).
+    let utxos_out_path = args
+        .iter()
+        .position(|a| a == "--utxos-out")
+        .and_then(|i| args.get(i + 1).cloned());
 
     // ---- wallet: every address derivable from the live keys ----------------
     let wall = wallet::read_wallet(std::path::Path::new(&wallet_path))
@@ -101,6 +117,11 @@ fn main() {
     let mut untracked_spends = 0usize;
     let mut duplicate_txids = 0usize;
     let mut tip_hash = [0u8; 32];
+    // wallet-owned live UTXOs for the --utxos-out dump (same lifecycle rules
+    // as UtxoSet: per-tx all-or-nothing spend removal, IsEmpty never tracked)
+    let mut wallet_utxo_set: HashMap<(tri7_core::legacy::Hash, u32), WalletUtxo> = HashMap::new();
+    let wallet_payload_set: std::collections::HashSet<[u8; 21]> =
+        wallet_payloads.iter().map(|(p, _)| *p).collect();
 
     loop {
         let (_height, block, hash) = match walker.step() {
@@ -137,6 +158,47 @@ fn main() {
                 // outright; P2PKH is the only form its script equality hits.
                 if !is_coinbase && !is_coinstake && dest.is_pubkey_hash() {
                     *received_regular.entry(payload).or_insert(0) += vout.value;
+                }
+            }
+        }
+
+        // wallet-owned UTXO lifecycle, mirroring UtxoSet::apply_block_reported
+        // (per-tx all-or-nothing spend removal; runs BEFORE apply_block so the
+        // "all vins resolve" check reads the pre-application set)
+        for tx in &block.vtx {
+            let is_coinbase = consensus::tx_is_coin_base(tx);
+            let is_coinstake = consensus::tx_is_coin_stake(tx);
+            if !is_coinbase {
+                let all_resolve = tx
+                    .vin
+                    .iter()
+                    .all(|vin| utxos.get(&(vin.prev_hash, vin.prev_n)).is_some());
+                if all_resolve {
+                    for vin in &tx.vin {
+                        wallet_utxo_set.remove(&(vin.prev_hash, vin.prev_n));
+                    }
+                }
+            }
+            for (n, vout) in tx.vout.iter().enumerate() {
+                if vout.value == 0 && vout.script_pubkey.is_empty() {
+                    continue; // IsEmpty marker
+                }
+                let Some(dest) = tri7_core::address::script_to_dest(&vout.script_pubkey) else {
+                    continue;
+                };
+                let payload = dest.payload();
+                if wallet_payload_set.contains(&payload) {
+                    wallet_utxo_set.insert(
+                        (tx.hash(), n as u32),
+                        WalletUtxo {
+                            value: vout.value,
+                            script: vout.script_pubkey.clone(),
+                            height: _height as u32,
+                            tx_time: tx.time,
+                            from_coinbase: is_coinbase,
+                            from_coinstake: is_coinstake,
+                        },
+                    );
                 }
             }
         }
@@ -317,6 +379,68 @@ fn main() {
     j.push_str("\n  }\n}\n");
     std::fs::write(&out_path, &j)
         .unwrap_or_else(|e| die(&format!("write {}: {}", out_path, e)));
+
+    // ---- wallet UTXO dump (phase 3) ------------------------------------------
+    if let Some(dump_path) = &utxos_out_path {
+        let mut rows: Vec<(tri7_core::legacy::Hash, u32, &WalletUtxo)> = wallet_utxo_set
+            .iter()
+            .map(|((t, n), u)| (*t, *n, u))
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.2.height, tri7_core::legacy::hash_to_display(&a.0), a.1).cmp(&(
+                b.2.height,
+                tri7_core::legacy::hash_to_display(&b.0),
+                b.1,
+            ))
+        });
+        let mut d = String::with_capacity(1 << 20);
+        d.push_str("{\n");
+        d.push_str(&format!("  \"height\": {},\n", covered_to));
+        d.push_str(&format!("  \"count\": {},\n", rows.len()));
+        d.push_str(&format!(
+            "  \"total_value_sats\": {},\n",
+            rows.iter().map(|(_, _, u)| u.value).sum::<i64>()
+        ));
+        d.push_str("  \"utxos\": [\n");
+        for (i, (txid, n, u)) in rows.iter().enumerate() {
+            let payload = tri7_core::address::script_to_dest(&u.script).map(|dest| dest.payload());
+            let addr = payload
+                .map(|p| payload_to_address(&p))
+                .unwrap_or_else(|| "".to_string());
+            let kind = if u.from_coinbase {
+                "coinbase"
+            } else if u.from_coinstake {
+                "coinstake"
+            } else {
+                "regular"
+            };
+            d.push_str(&format!(
+                "    {{\"txid\": \"{}\", \"n\": {}, \"value_sats\": {}, \"script_hex\": \"{}\", \
+                 \"address\": \"{}\", \"height\": {}, \"tx_time\": {}, \"prev_kind\": \"{}\"}}{}\n",
+                tri7_core::legacy::hash_to_display(txid),
+                n,
+                u.value,
+                u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                addr,
+                u.height,
+                u.tx_time,
+                kind,
+                if i + 1 == rows.len() { "" } else { "," }
+            ));
+        }
+        d.push_str("  ]\n}\n");
+        let tmp = format!("{}.tmp", dump_path);
+        std::fs::write(&tmp, &d)
+            .unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));
+        std::fs::rename(&tmp, dump_path)
+            .unwrap_or_else(|e| die(&format!("rename {}: {}", dump_path, e)));
+        println!(
+            "utxo dump: {} wallet-owned live UTXOs ({} sats) -> {}",
+            rows.len(),
+            rows.iter().map(|(_, _, u)| u.value).sum::<i64>(),
+            dump_path
+        );
+    }
 
     // ---- report --------------------------------------------------------------
     println!(
