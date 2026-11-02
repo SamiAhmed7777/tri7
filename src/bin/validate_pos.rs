@@ -56,11 +56,10 @@
 //! enforced nBits and kernel matched, and the genesis modifier checksum
 //! matched the compiled constant.
 
-use tri7_core::blkfile::BlkFileReader;
 use tri7_core::consensus;
 use tri7_core::difficulty;
 use tri7_core::kernel::{self, KernelOutputResolver};
-use tri7_core::replay::IndexEntry;
+use tri7_core::replay::{check_coverage, ArchiveWalker, IndexEntry, Step};
 
 /// First height the deployed acceptance path kernel-checked (its heritage
 /// proofhash is nonzero; daemon-verified). Everything below was accepted with
@@ -88,11 +87,11 @@ fn main() {
         .position(|a| a == "--dump-mods")
         .and_then(|i| args.get(i + 1).cloned());
 
-    let mut rdr = BlkFileReader::open(&path).expect("open blk file");
+    // Shared archive-walk skeleton (replay::ArchiveWalker): frame iteration,
+    // genesis/linkage checks, stale-branch stop, coverage contract.
+    let mut walker = ArchiveWalker::open(&path).unwrap_or_else(|e| die(&e));
     let mut idx = tri7_core::replay::ReplayIndex::new();
     let mut outputs = kernel::OutputIndex::new();
-    let mut height = 0usize;
-    let mut prev: Option<[u8; 32]> = None;
     let mut stale_at: Option<usize> = None;
     let mut dump: Option<std::io::BufWriter<std::fs::File>> = dump_path.as_ref().map(|p| {
         std::io::BufWriter::new(std::fs::File::create(p).expect("create dump file"))
@@ -113,25 +112,16 @@ fn main() {
     let mut pos_blocks = 0usize;
 
     loop {
-        let frame = match rdr.next_frame() {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => die(&format!("frame error at height {}: {}", height, e)),
-        };
-        let block = match frame.block() {
-            Ok(b) => b,
-            Err(e) => die(&format!("parse error at height {}: {}", height, e)),
-        };
-        if height == 0 {
-            if block.prev_hash != [0u8; 32] {
-                die("genesis prev not zero");
+        let (height, block, hash) = match walker.step() {
+            Err(e) => die(&e),
+            Ok(Step::Eof) => break,
+            Ok(Step::StaleBranch(h)) => {
+                stale_at = Some(h);
+                break;
             }
-        } else if block.prev_hash != prev.unwrap() {
-            stale_at = Some(height);
-            break;
-        }
+            Ok(Step::Block(h, b, hash)) => (h, b, hash),
+        };
 
-        let hash = block.hash();
         let is_pos = consensus::block_is_proof_of_stake(&block);
         if is_pos {
             pos_blocks += 1;
@@ -267,12 +257,11 @@ fn main() {
             }
         }
 
-        prev = Some(hash);
-        height += 1;
-        if height % 100_000 == 0 {
+        let done = height + 1;
+        if done % 100_000 == 0 {
             println!(
                 "... {} blocks ({} nBits enforced, {} kernels enforced-passed, {} kernel-skipped-era, {} unresolved)",
-                height,
+                done,
                 nbits_enforced,
                 kernel_enforced_passed,
                 kernel_skipped_era,
@@ -288,7 +277,7 @@ fn main() {
     }
 
     // ---- Coverage contract (mirrors validate_difficulty) --------------------
-    let covered_to = height.saturating_sub(1);
+    let covered_to = walker.height().saturating_sub(1);
     if nbits_enforced == 0 && kernel_enforced_checked == 0 {
         eprintln!(
             "FAIL: zero nBits/kernels enforced over heights 0..{} — no coverage",
@@ -296,23 +285,16 @@ fn main() {
         );
         std::process::exit(1);
     }
-    if let Some(h) = stale_at {
-        if !allow_stale {
-            eprintln!(
-                "FAIL: stale-branch discontinuity at height {} before end_height {} (use --allow-stale)",
-                h, end_height
-            );
-            std::process::exit(1);
-        }
-    } else if covered_to < end_height {
-        eprintln!(
-            "FAIL: EOF at covered height {} before end_height {} — incomplete coverage",
-            covered_to, end_height
-        );
+    if let Err(e) = check_coverage(stale_at, covered_to, end_height, allow_stale) {
+        eprintln!("FAIL: {}", e);
         std::process::exit(1);
     }
 
-    println!("replay: {} blocks total (genesis..{})", height, covered_to);
+    println!(
+        "replay: {} blocks total (genesis..{})",
+        walker.height(),
+        covered_to
+    );
     println!(
         "blocks: {} PoS | nBits enforced + matched: {} (EMA port, seams 17692/17693/2186941 exempt)",
         pos_blocks, nbits_enforced

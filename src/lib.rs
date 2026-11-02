@@ -4,6 +4,7 @@
 //! module mirrors the wire format of triangles_v5 (the 2013-era C++ client)
 //! so that the same bytes produce the same hashes and the same chain.
 
+pub mod address;
 pub mod consensus;
 pub mod difficulty;
 pub mod kernel;

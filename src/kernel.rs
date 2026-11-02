@@ -315,10 +315,32 @@ pub struct UtxoMeta {
 /// UTXO set keyed by (txid, n), built during forward replay. Empty-marker
 /// outputs (vout[0] of coinstakes, IsEmpty = value 0 + empty script) are NOT
 /// tracked — ConnectBlock skips them (main.cpp:2389-2400, 2440-2451).
+/// `addrs` mirrors `map` key-for-key (same insert/remove decisions, evaluated
+/// in the same loops) and carries each live output's 21-byte address payload
+/// (version byte + hash160) — phase 1e per-address balances.
 #[derive(Default)]
 pub struct UtxoSet {
     map: std::collections::HashMap<(Hash, u32), UtxoMeta>,
+    addrs: std::collections::HashMap<(Hash, u32), [u8; 21]>,
     pub count: u64,
+}
+
+/// Track/untrack the address payload of one live output. A script without a
+/// recognizable destination leaves NO entry (the output stays attributable
+/// only to the unattributed bucket).
+fn set_addr(
+    addrs: &mut std::collections::HashMap<(Hash, u32), [u8; 21]>,
+    key: &(Hash, u32),
+    script: &[u8],
+) {
+    match crate::address::script_to_dest(script) {
+        Some(dest) => {
+            addrs.insert(*key, dest.payload());
+        }
+        None => {
+            addrs.remove(key);
+        }
+    }
 }
 
 impl UtxoSet {
@@ -343,11 +365,8 @@ impl UtxoSet {
                 && tx.vin[0].prev_n == u32::MAX)
             {
                 for vin in &tx.vin {
-                    if self
-                        .map
-                        .remove(&(vin.prev_hash, vin.prev_n))
-                        .is_none()
-                    {
+                    let key = (vin.prev_hash, vin.prev_n);
+                    if self.map.remove(&key).is_none() {
                         // VerifySignature-lite precondition: a spend of an
                         // output we never tracked. Kernel reconstruction would
                         // be impossible; the caller reports it.
@@ -358,13 +377,15 @@ impl UtxoSet {
                             vin.prev_n
                         ));
                     }
+                    self.addrs.remove(&key);
                 }
             }
             for (n, vout) in tx.vout.iter().enumerate() {
                 let is_empty = vout.value == 0 && vout.script_pubkey.is_empty();
                 if !is_empty {
+                    let key = (tx.hash(), n as u32);
                     self.map.insert(
-                        (tx.hash(), n as u32),
+                        key,
                         UtxoMeta {
                             height,
                             tx_offset: offset,
@@ -372,6 +393,7 @@ impl UtxoSet {
                             value: vout.value,
                         },
                     );
+                    set_addr(&mut self.addrs, &key, &vout.script_pubkey);
                 }
             }
             offset += tx.serialize().len() as u32;
@@ -390,6 +412,32 @@ impl UtxoSet {
     /// count of spends ever applied (for reporting).
     pub fn tracked_total(&self) -> u64 {
         self.count
+    }
+
+    /// Address payload of one live output (None = unattributable script).
+    pub fn address_payload_of(&self, key: &(Hash, u32)) -> Option<[u8; 21]> {
+        self.addrs.get(key).copied()
+    }
+
+    /// Phase 1e: aggregate live-UTXO value per address payload, with the
+    /// unattributable remainder kept separate (outputs whose script is none
+    /// of the three payable forms). Call after the replay is complete.
+    pub fn address_balances(&self) -> AddressBalances {
+        let mut out = AddressBalances::default();
+        for (key, meta) in &self.map {
+            match self.addrs.get(key) {
+                Some(payload) => {
+                    let e = out.per_address.entry(*payload).or_insert((0i64, 0u64));
+                    e.0 += meta.value;
+                    e.1 += 1;
+                }
+                None => {
+                    out.unattributed_sats += meta.value;
+                    out.unattributed_utxos += 1;
+                }
+            }
+        }
+        out
     }
 
     /// apply_block that reports anomalies instead of hard-failing, for
@@ -418,17 +466,20 @@ impl UtxoSet {
                     rep.untracked_spends += missing;
                 } else {
                     for vin in &tx.vin {
-                        self.map.remove(&(vin.prev_hash, vin.prev_n));
+                        let key = (vin.prev_hash, vin.prev_n);
+                        self.map.remove(&key);
+                        self.addrs.remove(&key);
                     }
                 }
             }
             for (n, vout) in tx.vout.iter().enumerate() {
                 let is_empty = vout.value == 0 && vout.script_pubkey.is_empty();
                 if !is_empty {
+                    let key = (tx.hash(), n as u32);
                     if self
                         .map
                         .insert(
-                            (tx.hash(), n as u32),
+                            key,
                             UtxoMeta {
                                 height,
                                 tx_offset: offset,
@@ -440,6 +491,7 @@ impl UtxoSet {
                     {
                         rep.duplicate_txids += 1;
                     }
+                    set_addr(&mut self.addrs, &key, &vout.script_pubkey);
                 }
             }
             offset += tx.serialize().len() as u32;
@@ -453,6 +505,15 @@ impl UtxoSet {
 pub struct BlockApplyReport {
     pub untracked_spends: usize,
     pub duplicate_txids: usize,
+}
+
+/// Per-address live balances keyed by the 21-byte payload
+/// (version byte + hash160), value in sats + live-UTXO count.
+#[derive(Default)]
+pub struct AddressBalances {
+    pub per_address: std::collections::HashMap<[u8; 21], (i64, u64)>,
+    pub unattributed_sats: i64,
+    pub unattributed_utxos: u64,
 }
 
 /// Resolver trait so the kernel can read txPrev metadata from either the
@@ -793,6 +854,89 @@ mod tests {
         // double-spend detection
         let blk3 = Block { version: 1, prev_hash: [2u8; 32], merkle_root: [0u8; 32], time: 1_400_008_000, bits: 0x207f_ffff, nonce: 0, vtx: vec![spend.clone()], block_sig: vec![] };
         assert!(set.apply_block(&blk3, 2).is_err(), "double spend must error");
+    }
+
+    #[test]
+    fn utxo_address_payloads_track_spends() {
+        use crate::legacy::{Tx, Vin, Vout};
+        let mut set = UtxoSet::new();
+        // fund: P2PKH-looking output (76 a9 14 <h> 88 ac) + unattributable output
+        let mut p2pkh = vec![0x76u8, 0xa9, 0x14];
+        p2pkh.extend_from_slice(&[0x33u8; 20]);
+        p2pkh.extend_from_slice(&[0x88, 0xac]);
+        let expect_payload = tri7_payload(&p2pkh);
+        let fund = Tx {
+            version: 1,
+            time: 1_400_000_000,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: vec![1],
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout { value: 700, script_pubkey: p2pkh.clone() },
+                Vout { value: 11, script_pubkey: vec![0x6a, 0x01, 0xaa] }, // OP_RETURN junk
+                Vout { value: 0, script_pubkey: vec![] },                  // IsEmpty marker
+            ],
+            locktime: 0,
+        };
+        let blk = Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_400_000_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+            vtx: vec![fund.clone()],
+            block_sig: vec![],
+        };
+        set.apply_block(&blk, 0).expect("apply");
+        let txid = fund.hash();
+        assert_eq!(set.address_payload_of(&(txid, 0)), Some(expect_payload));
+        assert_eq!(set.address_payload_of(&(txid, 1)), None, "non-standard script unattributed");
+        assert_eq!(set.address_payload_of(&(txid, 2)), None, "IsEmpty marker untracked");
+        let totals = set.address_balances();
+        assert_eq!(totals.per_address.get(&expect_payload), Some(&(700, 1)));
+        assert_eq!(totals.unattributed_sats, 11);
+        assert_eq!(totals.unattributed_utxos, 1);
+        // spend the attributed output -> payload must disappear in lockstep
+        let spend = Tx {
+            version: 1,
+            time: 1_400_004_000,
+            vin: vec![Vin {
+                prev_hash: txid,
+                prev_n: 0,
+                script_sig: vec![],
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout { value: 700, script_pubkey: p2pkh }],
+            locktime: 0,
+        };
+        let blk2 = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_400_004_000,
+            bits: 0x207f_ffff,
+            nonce: 0,
+            vtx: vec![spend],
+            block_sig: vec![],
+        };
+        set.apply_block(&blk2, 1).expect("apply spend");
+        assert!(set.map.get(&(txid, 0)).is_none());
+        assert_eq!(set.address_payload_of(&(txid, 0)), None);
+        // the spend itself created a live output with the same payload; the
+        // funding tx's OP_RETURN output (11 sats) is still live unattributed
+        let totals = set.address_balances();
+        assert_eq!(totals.per_address.get(&expect_payload), Some(&(700, 1)));
+        assert_eq!(totals.unattributed_sats, 11);
+        assert_eq!(totals.unattributed_utxos, 1);
+    }
+
+    /// The payload a P2PKH script must map to, computed via the public API.
+    fn tri7_payload(p2pkh_script: &[u8]) -> [u8; 21] {
+        crate::address::script_to_dest(p2pkh_script).expect("parse").payload()
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+ "daemon_tip": 2204064,
+ "daemon_moneysupply_sats": 222549124568,
+ "daemon_only_blocks": 2974,
+ "daemon_only_blocks_mint_sats": 41798116,
+ "daemon_moneysupply_at_archive_sats": 222507326452,
+ "tri7_total_balance_sats": 222507326452,
+ "supply_gap_sats": 0,
+ "wallet_addresses": 248,
+ "received_matches": 248,
+ "received_mismatches": 0,
+ "mismatch_detail": [],
+ "rpc_calls": 3223
+}

@@ -95,45 +95,7 @@ fn secret_from_der(der: &[u8]) -> Result<[u8; 32], String> {
 }
 
 pub fn pubkey_to_address(pubkey: &[u8]) -> String {
-    use ripemd::Ripemd160;
-    use sha2::{Digest, Sha256};
-    let h = Sha256::digest(pubkey);
-    let h = Ripemd160::digest(h);
-    let mut payload = vec![0x41u8]; // PUBKEY_ADDRESS mainnet
-    payload.extend_from_slice(&h);
-    // base58check
-    let cs = &Sha256::digest(&Sha256::digest(&payload))[..4];
-    payload.extend_from_slice(cs);
-    bs58_encode(&payload)
-}
-
-fn bs58_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let mut zeros = 0usize;
-    while zeros < data.len() && data[zeros] == 0 {
-        zeros += 1;
-    }
-    let mut out = Vec::with_capacity(data.len() * 137 / 100 + 1);
-    for &byte in &data[zeros..] {
-        let mut carry = byte as usize;
-        for ch in out.iter_mut() {
-            carry += (*ch as usize) << 8;
-            *ch = (carry % 58) as u8;
-            carry /= 58;
-        }
-        while carry > 0 {
-            out.push((carry % 58) as u8);
-            carry /= 58;
-        }
-    }
-    let mut s = String::with_capacity(zeros + out.len());
-    for _ in 0..zeros {
-        s.push('1');
-    }
-    for ch in out.iter().rev() {
-        s.push(ALPHABET[*ch as usize] as char);
-    }
-    s
+    crate::address::payload_to_address(&crate::address::pubkey_payload(pubkey))
 }
 
 /// Open a wallet file read-only and extract everything a spendable wallet needs.

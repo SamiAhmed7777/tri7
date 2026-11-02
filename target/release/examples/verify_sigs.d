@@ -1,1 +1,0 @@
-/root/tri7/target/release/examples/verify_sigs: /root/tri7/build.rs /root/tri7/examples/verify_sigs.rs /root/tri7/src/blkfile.rs /root/tri7/src/consensus.rs /root/tri7/src/legacy.rs /root/tri7/src/lib.rs /root/tri7/src/wallet.rs /root/tri7/vendor
