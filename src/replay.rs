@@ -5,6 +5,8 @@
 
 use crate::legacy::Hash;
 
+use std::borrow::Cow;
+
 #[derive(Clone)]
 pub struct IndexEntry {
     pub height: usize,
@@ -19,14 +21,24 @@ pub struct IndexEntry {
     pub hash_proof_of_stake: Hash, // zeros under assume-valid skip
 }
 
-pub struct ReplayIndex {
-    pub entries: Vec<IndexEntry>,
+/// Entries are Cow so a window/follower can hand consensus a BORROWED view of
+/// its own Vec (zero-copy per block — the from-zero backfill validates
+/// millions of blocks and a per-block Vec clone would dominate), while
+/// replay-style builders keep the owned/push form.
+pub struct ReplayIndex<'a> {
+    pub entries: Cow<'a, [IndexEntry]>,
 }
 
-impl ReplayIndex {
+impl<'a> ReplayIndex<'a> {
     pub fn new() -> Self {
         ReplayIndex {
-            entries: Vec::with_capacity(2_300_000),
+            entries: Cow::Owned(Vec::with_capacity(2_300_000)),
+        }
+    }
+
+    pub fn borrowed(entries: &'a [IndexEntry]) -> Self {
+        ReplayIndex {
+            entries: Cow::Borrowed(entries),
         }
     }
 
@@ -43,11 +55,11 @@ impl ReplayIndex {
     }
 
     pub fn push(&mut self, e: IndexEntry) {
-        self.entries.push(e);
+        self.entries.to_mut().push(e);
     }
 }
 
-impl Default for ReplayIndex {
+impl Default for ReplayIndex<'_> {
     fn default() -> Self {
         Self::new()
     }

@@ -4,6 +4,11 @@
 # POST-CUTOVER (2026-11-02): the unit installs with --rpc-port 19112 --no-proxy
 # (tri7d owns the standard port; legacy trianglesd retired). See
 # deploy/tri7d_rpc_cutover.md.
+#
+# FRESH INSTALLS: use deploy/tri7d_fresh_install.sh instead — one command that
+# takes a bare machine to a fully-synced node with a NEW wallet via
+# follow_tip --sync-from-zero (see deploy/FROM_ZERO_RUNBOOK.md). THIS script
+# is for the DNS2 primary, which was seeded from the legacy daemon's archive.
 set -euo pipefail
 
 REPO_BIN=./target/release/follow_tip

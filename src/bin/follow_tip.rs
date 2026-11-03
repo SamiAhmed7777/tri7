@@ -52,7 +52,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -580,6 +580,14 @@ struct ChainState {
     /// last observed daemon tip (getblockcount); refreshed each poll tick,
     /// persisted on every state write so --status can report it offline
     daemon_tip: Option<i64>,
+    /// True during FROM-ZERO sync: the window never trims — entries/utxo keep
+    /// the WHOLE history from genesis so every historical coinstake kernel is
+    /// fully enforced (no pre-window skips). base stays 0, so entry heights
+    /// stay window-relative == absolute. Restart rebuilds nothing: a resumed
+    /// run re-enters from the persisted 4600-entry window with trimming back
+    /// on (old-input kernels above the re-walked tail are skip-recorded
+    /// honestly until the window re-grows — progress is never re-fetched).
+    no_trim: bool,
     /// wall clock of the last REAL tip-height advance; the periodic 30s state
     /// writes deliberately do NOT bump this (updated_utc/mtime do)
     last_advance_utc: String,
@@ -618,18 +626,14 @@ impl ChainState {
     /// would index past the window and return None → TARGET_LIMIT early
     /// return; bug found live at the first backfill block). The window only
     /// ever appends, so index i == relative height is invariant.
-    fn rel_index(&self) -> ReplayIndex {
-        ReplayIndex {
-            entries: self.entries.clone(),
-        }
+    fn rel_index(&self) -> ReplayIndex<'_> {
+        ReplayIndex::borrowed(&self.entries)
     }
 
     /// Truncated view ending at abs (inclusive): for validating a HISTORICAL
     /// block at abs+1 whose EMA must be anchored at its own ancestors.
-    fn rel_index_to(&self, abs: u64) -> ReplayIndex {
-        ReplayIndex {
-            entries: self.entries[..=self.rel(abs)].to_vec(),
-        }
+    fn rel_index_to(&self, abs: u64) -> ReplayIndex<'_> {
+        ReplayIndex::borrowed(&self.entries[..=self.rel(abs)])
     }
 
     /// CBlockIndex::GetMedianTimePast: median of the 11 entries ending at
@@ -649,6 +653,16 @@ impl ChainState {
     }
 
     fn trim(&mut self) {
+        if self.no_trim {
+            // from-zero: entries + utxo keep the FULL history (kernel
+            // enforcement needs pre-window outputs); only the full-tx records
+            // stay bounded (they are persisted and only serve the tail).
+            let excess_rec = self.records.len().saturating_sub(WINDOW_BLOCKS);
+            if excess_rec > 0 {
+                self.records.drain(..excess_rec);
+            }
+            return;
+        }
         let excess = self.entries.len().saturating_sub(WINDOW_ENTRIES);
         if excess > 0 {
             self.entries.drain(..excess);
@@ -678,18 +692,33 @@ impl ChainState {
     }
 
     fn to_file(&self) -> TipStateFile {
+        // no-trim (from-zero) keeps millions of entries in RAM — persisting
+        // them all would write a multi-hundred-MB JSON every checkpoint.
+        // Persist only the trailing WINDOW_ENTRIES: the on-disk contract is a
+        // 4600-entry window, and a resume reloads exactly that window.
+        let keep = if self.no_trim {
+            WINDOW_ENTRIES.min(self.entries.len())
+        } else {
+            self.entries.len()
+        };
+        let first = self.entries.len() - keep;
+        let base = if self.no_trim {
+            self.tip_height - (keep as u64 - 1)
+        } else {
+            self.base
+        };
         TipStateFile {
             height: self.tip_height,
             blockhash: tri7_core::p2p::internal_to_display(&self.tip_hash),
             updated_utc: now_iso(),
             last_advance_utc: self.last_advance_utc.clone(),
-            window_base: self.base,
+            window_base: base,
             entries: self
-                .entries
+                .entries[first..]
                 .iter()
-                .zip(self.checksums.iter())
+                .zip(self.checksums[first..].iter())
                 .map(|(e, cs)| EntryRec {
-                    height: self.base + e.height as u64,
+                    height: base + (e.height - self.entries[first].height) as u64,
                     hash: tri7_core::p2p::internal_to_display(&e.hash),
                     prev: tri7_core::p2p::internal_to_display(&e.prev_hash),
                     time: e.time,
@@ -810,6 +839,7 @@ impl PeerTarget {
     }
 }
 
+#[derive(Clone)]
 struct Config {
     no_proxy: bool,
     /// outbound attach targets, tried in rotation starting after the last
@@ -857,7 +887,19 @@ struct Config {
     wallet_path: Option<PathBuf>,
     /// i2pd SOCKS5 listener for .b32.i2p targets (default 127.0.0.1:4447)
     i2p_socks: (String, u16),
-}
+    /// FROM-ZERO: build the state from genesis and backfill the ENTIRE
+    /// chain over P2P (no seeded tipstate, no local archive needed)
+    sync_from_zero: bool,
+    /// true when --daemon/--onion/--i2p was given explicitly (from-zero
+    /// auto-arms on "no state + explicit peers")
+    explicit_peers: bool,
+    /// --new-wallet PATH: create a fresh wallet (NEW keys) at PATH if it
+    /// does not exist, then use it as --wallet
+    new_wallet: Option<PathBuf>,
+    /// from-zero fetcher sessions (parallel getdata pipelines; validation
+    /// stays strictly sequential). Default 4.
+    sync_workers: u32,
+    }
 
 fn usage() -> ! {
     eprintln!(
@@ -964,6 +1006,10 @@ fn parse_args() -> Config {
         stake_tick_secs: 15,
         wallet_path: None,
         i2p_socks: ("127.0.0.1".into(), 4447),
+        sync_from_zero: false,
+        explicit_peers: false,
+        new_wallet: None,
+        sync_workers: 4,
     };
     cfg.balances_path = cfg.state_dir.join("balances.json");
     cfg.wallet_utxos_path = cfg.state_dir.join("wallet_utxos.json");
@@ -986,6 +1032,11 @@ fn parse_args() -> Config {
             }
         };
         match args[i].as_str() {
+            "--sync-from-zero" => cfg.sync_from_zero = true,
+            "--new-wallet" => cfg.new_wallet = Some(PathBuf::from(need(&mut i, &args))),
+            "--sync-workers" => {
+                cfg.sync_workers = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
             // repeatable and comma-separated: append targets. The FIRST
             // explicit target REPLACES the built-in default (127.0.0.1:24113)
             // — a primary node listening on 24113 must never carry its own
@@ -1091,6 +1142,7 @@ fn parse_args() -> Config {
         }
         i += 1;
     }
+    cfg.explicit_peers = explicit_peers;
     if cfg.peers.is_empty() {
         die(EXIT_USAGE, "no outbound targets: --daemon/--onion required");
     }
@@ -1809,17 +1861,22 @@ fn validate_block(
     // 6. difficulty: exact EMA reproduction (live era: above the CRAPCHAIN
     // cutoff on every block, so nBits is always enforced). Historical blocks
     // are anchored at their own ancestors via the truncated view.
+    // FROM-ZERO: below the CRAPCHAIN cutoff the AcceptBlock rule (main.cpp:
+    // 3414-3430) tolerates ANY nBits — the early chain's bits don't follow
+    // the EMA, so the exact check is gated on the same cutoff.
     let rel_index = if ctx.live {
         st.rel_index()
     } else {
         st.rel_index_to(h - 1)
     };
-    let expected_bits = get_next_target_required(&rel_index, is_pos);
-    if block.bits != expected_bits {
-        return Err(format!(
-            "h{}: NBITS FAIL block={:08x} expected={:08x}",
-            h, block.bits, expected_bits
-        ));
+    if h as usize > tri7_core::consensus::CRAPCHAIN_CUTOFF_BLOCK {
+        let expected_bits = get_next_target_required(&rel_index, is_pos);
+        if block.bits != expected_bits {
+            return Err(format!(
+                "h{}: NBITS FAIL block={:08x} expected={:08x}",
+                h, block.bits, expected_bits
+            ));
+        }
     }
     stats.nbits_checked += 1;
 
@@ -1849,7 +1906,12 @@ fn validate_block(
                     h as usize - 1, // ABSOLUTE: selects the GetWeight era
                 )
                 .map_err(|e| format!("h{}: kernel guard: {}", h, e))?;
-                if !res.meets_target {
+                if !res.meets_target
+                    && h as usize > tri7_core::consensus::CRAPCHAIN_CUTOFF_BLOCK
+                {
+                    // era rule: at/below the CRAPCHAIN cutoff kernel overshoot
+                    // is tolerated (Pharao-release hack — kernel.cpp:381-403
+                    // comment); above it the target is hard-enforced
                     return Err(format!(
                         "h{}: KERNEL TARGET FAIL modifier={:016x} block_from(abs h{}) coinDays={} hashProof={}",
                         h,
@@ -1899,8 +1961,12 @@ fn validate_block(
             return Err(format!("h{}: PoW hash does not meet nBits target", h));
         }
         proof = [0u8; 32];
-        // 8. PoW blocks carry an empty signature
-        check_pow_block_signature(block).map_err(|e| format!("h{}: {}", h, e))?;
+        // 8. PoW blocks carry an empty signature (era rule: only enforced
+        // above the last hard checkpoint — the pre-revival chain's PoW
+        // blocks serialized a legacy vchBlockSig field that is not empty)
+        if h > LAST_HARDCODED_CHECKPOINT as u64 {
+            check_pow_block_signature(block).map_err(|e| format!("h{}: {}", h, e))?;
+        }
         stats.sigs_checked += 1;
     }
     out.proof = proof;
@@ -1938,10 +2004,13 @@ fn advance_with_block(
     let hash = block.hash();
     let is_pos = block_is_proof_of_stake(block);
 
-    // stake modifier for this height: local computation from the window
+    // stake modifier for this height: local computation from the window.
+    // nModifierInterval is era-dependent: 1200 s for pre-Pharao blocks
+    // (< 17692), 300 s after (kernel.h — see compute_next_stake_modifier_era).
     let rel_tip = st.rel(h - 1);
+    let interval: u32 = if h < 17692 { 1200 } else { 300 };
     let (modifier, generated) =
-        compute_next_stake_modifier_era(&st.rel_index(), Some(rel_tip), 300)
+        compute_next_stake_modifier_era(&st.rel_index(), Some(rel_tip), interval)
             .map_err(|e| format!("h{}: modifier computation: {}", h, e))?;
     let entropy = hash[0] & 1;
     let flags = index_flags(is_pos, entropy, generated);
@@ -1961,10 +2030,16 @@ fn advance_with_block(
     // the state + recent-cache locks across validation, and the RPC thread
     // answering getblock would deadlock on either of them (mirror handles
     // tip; recency uses try_lock and returns not-found under contention).
-    let info = rpc.call(
-        "getblock",
-        serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]),
-    );
+    // FROM-ZERO: a fresh node has NO external index at all — the lookup is
+    // skipped wholesale (per-block RPC across 2.2M blocks would dominate).
+    let info = if FROM_ZERO_NO_ORACLE.load(Ordering::Relaxed) {
+        Err(String::new())
+    } else {
+        rpc.call(
+            "getblock",
+            serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]),
+        )
+    };
     match info.as_ref().ok().and_then(|i| i["modifierchecksum"].as_str()) {
         Some(cs_hex) => {
             let daemon_cs = u32::from_str_radix(cs_hex, 16)
@@ -1978,10 +2053,12 @@ fn advance_with_block(
             stats.checksums_verified += 1;
         }
         None => {
-            log(&format!(
-                "h{}: no external checksum oracle for this block — adopting locally computed {:08x}",
-                h, cs
-            ));
+            if !FROM_ZERO_NO_ORACLE.load(Ordering::Relaxed) {
+                log(&format!(
+                    "h{}: no external checksum oracle for this block — adopting locally computed {:08x}",
+                    h, cs
+                ));
+            }
         }
     }
 
@@ -2008,6 +2085,643 @@ fn advance_with_block(
     st.tip_height = h;
     st.tip_hash = hash;
     st.trim();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// FROM-ZERO sync: genesis state + full-chain P2P backfill (no snapshot)
+// ---------------------------------------------------------------------------
+/// hashGenesisBlockOfficial from triangles_v5/src/main.h — the only chain
+/// constant from-zero needs: block 0 is FETCHED from the peer and its Hash9
+/// must reproduce this exact value before anything else is accepted.
+const GENESIS_OFFICIAL: &str = "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021";
+
+/// true while the from-zero backfill runs: there is no external daemon index
+/// on a fresh node, so advance_with_block must not consult the RPC oracle for
+/// the stake-modifier checksum (the locally computed value IS canonical) —
+/// also avoids a per-block RPC round-trip across millions of blocks.
+static FROM_ZERO_NO_ORACLE: AtomicBool = AtomicBool::new(false);
+
+static SIGINT_SEEN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn tri7_on_signal(_sig: i32) {
+    SIGINT_SEEN.store(true, Ordering::Relaxed);
+}
+
+/// Install SIGINT/SIGTERM handlers that only set a flag: the sync loop checks
+/// it, persists tipstate + stops — the sync is RESUMABLE across restarts.
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGINT, tri7_on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, tri7_on_signal as libc::sighandler_t);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
+
+/// Fetch block 0 from the peer and pin it to the compiled-in genesis hash.
+/// This is the trust anchor: everything after is validated by linkage to it.
+fn fetch_genesis_block(sess: &mut Session, stats: &mut Stats) -> Result<Block, String> {
+    let gh = tri7_core::p2p::display_to_internal(GENESIS_OFFICIAL)?;
+    sess.send(
+        "getdata",
+        &tri7_core::p2p::build_getdata(&[(tri7_core::p2p::MSG_BLOCK, gh)]),
+        stats,
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() > deadline {
+            return Err("from-zero: genesis getdata timeout".into());
+        }
+        for msg in sess.pump()? {
+            stats.note_recv(&msg.command);
+            if msg.command == "block" {
+                let mut r = Reader::new(&msg.payload);
+                let b = Block::read(&mut r).map_err(|e| format!("genesis parse: {}", e))?;
+                r.expect_done().map_err(|e| format!("genesis trailing: {}", e))?;
+                if b.prev_hash != [0u8; 32] {
+                    return Err("genesis prev_hash is not zero".into());
+                }
+                if b.hash() != gh {
+                    return Err(format!(
+                        "genesis hash mismatch: got {} want {}",
+                        tri7_core::p2p::internal_to_display(&b.hash()),
+                        GENESIS_OFFICIAL
+                    ));
+                }
+                return Ok(b);
+            } else if msg.command == "ping" {
+                let n = tri7_core::p2p::parse_ping(&msg.payload)?;
+                sess.send("pong", &tri7_core::p2p::build_pong(n), stats)?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// ChainState at height 0, built purely from the verified genesis block —
+/// no tipstate file, no archive, no daemon index. The window then grows via
+/// the normal acceptance gate (advance_with_block) and self-trims.
+fn genesis_state(gen: &Block) -> ChainState {
+    let hash = gen.hash();
+    let entropy = hash[0] & 1;
+    let mut utxo = WindowOutputs::new();
+    utxo.apply_block(gen, 0);
+    ChainState {
+        base: 0,
+        entries: vec![IndexEntry {
+            height: 0,
+            hash,
+            prev_hash: gen.prev_hash,
+            time: gen.time,
+            bits: gen.bits,
+            is_proof_of_stake: false,
+            entropy_bit: entropy,
+            stake_modifier: 0,
+            // kernel.cpp:152-157 — the genesis block itself qualifies as the
+            // first GeneratedStakeModifier (modifier 0, generated)
+            generated_stake_modifier: true,
+            hash_proof_of_stake: [0u8; 32],
+        }],
+        checksums: vec![0],
+        utxo,
+        records: Vec::new(),
+        pending_headers: HashMap::new(),
+        tip_height: 0,
+        tip_hash: hash,
+        daemon_tip: None,
+        no_trim: true, // from-zero genesis state: full-history validation
+        last_advance_utc: now_iso(),
+        peers_connected: 0,
+        last_peer_utc: None,
+    }
+}
+
+/// One headers round: getheaders from our tip locator, link-checked. Returns
+/// (headers with absolute heights, complete=false when the peer ended the
+/// segment early — i.e. we saw its tip).
+fn headers_round(
+    sess: &mut Session,
+    st: &mut ChainState,
+    stats: &mut Stats,
+) -> Result<(Vec<(u64, Hash, Block)>, bool), String> {
+    let mut out: Vec<(u64, Hash, Block)> = Vec::new();
+    let mut expect_prev = st.tip_hash;
+    // the walk keeps requesting from the last header until the peer sends a
+    // partial (tip-ending) batch or goes idle
+    let mut outstanding = true;
+    let mut last_msg = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if outstanding {
+            sess.send(
+                "getheaders",
+                &tri7_core::p2p::build_getheaders(&[expect_prev], &[0u8; 32]),
+                stats,
+            )?;
+            outstanding = false;
+        }
+        let msgs = sess.pump()?;
+        if msgs.is_empty() {
+            // 2s idle after traffic = segment ended (peer only serves the
+            // next segment on a fresh locator anyway — never wait long here,
+            // the walk re-requests from the last hash immediately)
+            if !out.is_empty() && last_msg.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+            if out.is_empty() && last_msg.elapsed() > Duration::from_secs(30) {
+                break; // truly silent peer
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        last_msg = Instant::now();
+        for msg in msgs {
+            stats.note_recv(&msg.command);
+            match msg.command.as_str() {
+                "headers" => {
+                    let batch = tri7_core::p2p::parse_headers(&msg.payload)?;
+                    for hdr in batch {
+                        if hdr.prev_hash != expect_prev {
+                            return Err(format!(
+                                "from-zero header link mismatch at h{}: prev {} expected {}",
+                                st.tip_height + 1 + out.len() as u64,
+                                tri7_core::p2p::internal_to_display(&hdr.prev_hash),
+                                tri7_core::p2p::internal_to_display(&expect_prev)
+                            ));
+                        }
+                        expect_prev = hdr.hash();
+                        out.push((st.tip_height + 1 + out.len() as u64, hdr.hash(), hdr));
+                        stats.headers_processed += 1;
+                    }
+                    // a partial batch ends at the peer tip
+                    if out.len() % 2000 != 0 {
+                        return Ok((out, true));
+                    }
+                    outstanding = true; // full batch — request the next segment now
+                }
+                "ping" => {
+                    let n = tri7_core::p2p::parse_ping(&msg.payload)?;
+                    sess.send("pong", &tri7_core::p2p::build_pong(n), stats)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((out, true))
+}
+
+/// Worker: one peer session pulling body batches (legacy 500-inv getdata)
+/// over a shared header cursor. Raw payloads go to the channel; the MAIN
+/// thread does ALL validation sequentially (the acceptance gate is strictly
+/// order-dependent). Bounded in-flight via the validated counter so the
+/// pending buffer cannot outrun validation by more than MAX_INFLIGHT blocks.
+fn fetch_worker(
+    target: PeerTarget,
+    cfg_for_worker: Config,
+    start_height: u64,
+    worker_count: usize,
+    hashes: Arc<Vec<(u64, Hash)>>,
+    cursor: Arc<AtomicUsize>,
+    validated: Arc<AtomicU64>,
+    tx: std::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    stop: Arc<AtomicBool>,
+    errors: Arc<Mutex<Vec<String>>>,
+    orphans: Arc<Mutex<VecDeque<(usize, usize, usize)>>>,
+    worker_id: usize,
+) {
+    const BATCH: usize = 500;
+    const MAX_INFLIGHT: u64 = 60_000;
+    const BATCH_DEADLINE: Duration = Duration::from_secs(40);
+    let mut stats = Stats::default();
+    let wcfg = Config {
+        peers: vec![target],
+        ..cfg_for_worker.clone()
+    };
+    let mut connect = |stats: &mut Stats| -> Result<Session, String> {
+        // full rotation: any reachable peer serves the batch
+        connect_and_handshake(&cfg_for_worker, stats, start_height, 0).map(|(p, _)| p.sess)
+    };
+    let mut sess = match connect(&mut stats) {
+        Ok(s) => s,
+        Err(e) => {
+            errors.lock().unwrap().push(format!("worker {}: connect: {}", worker_id, e));
+            return;
+        }
+    };
+    // STRIDE assignment: worker w takes batches w, w+N, w+2N, … so every
+    // contiguous window of N batches is fetched in parallel across all
+    // workers — otherwise the validator would serially wait on ONE worker
+    // for each consecutive segment (measured live: 12 blk/s vs 4×25).
+    let n = worker_count.max(1);
+    let mut k: usize = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // flow control: don't outrun the validator
+        while validated.load(Ordering::Relaxed) + MAX_INFLIGHT
+            <= cursor.load(Ordering::Relaxed) as u64
+        {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // work-stealing: a stalled batch's range is re-queued for ANY worker
+        // (a different session often serves it instantly)
+        let orphan = orphans.lock().unwrap().pop_front();
+        let (start_idx, end, orphan_att) = match orphan {
+            Some(range) => range,
+            None => {
+                let start_idx = (worker_id + k * n) * BATCH;
+                k += 1;
+                if start_idx >= hashes.len() {
+                    // exhausted for this worker — keep stealing until all done
+                    if orphans.lock().unwrap().is_empty()
+                        && cursor.load(Ordering::Relaxed) as u64 >= hashes.len() as u64
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                let end = (start_idx + BATCH).min(hashes.len());
+                (start_idx, end, 0)
+            }
+        };
+        cursor.fetch_add(end - start_idx, Ordering::Relaxed);
+        // fetch with reconnect+retry: peers drop or stall sessions (observed
+        // live: a worker session goes silent mid-batch) — rebuild the session
+        // and re-request only the MISSING outpoints; routine, not fatal.
+        const MAX_BATCH_RETRIES: usize = 6;
+        let mut got: HashMap<u64, Vec<u8>> = HashMap::new();
+        let mut retries = 0usize;
+        loop {
+            let mut awaiting: HashMap<Hash, u64> = HashMap::new();
+            for (h, hash) in &hashes[start_idx..end] {
+                if !got.contains_key(h) {
+                    awaiting.insert(*hash, *h);
+                }
+            }
+            if awaiting.is_empty() {
+                break;
+            }
+            let inv: Vec<(u32, Hash)> = awaiting
+                .keys()
+                .map(|hash| (tri7_core::p2p::MSG_BLOCK, *hash))
+                .collect();
+            if let Err(e) = sess.send("getdata", &tri7_core::p2p::build_getdata(&inv), &mut stats) {
+                sess.shutdown();
+                retries += 1;
+                if retries > MAX_BATCH_RETRIES || stop.load(Ordering::Relaxed) {
+                    errors.lock().unwrap().push(format!("worker {}: getdata: {}", worker_id, e));
+                    return;
+                }
+                log(&format!(
+                    "from-zero: worker {} send failed ({}) — reconnecting",
+                    worker_id, e
+                ));
+                std::thread::sleep(Duration::from_secs(2));
+                match connect(&mut stats) {
+                    Ok(s) => sess = s,
+                    Err(e) => {
+                        errors.lock().unwrap().push(format!("worker {}: reconnect: {}", worker_id, e));
+                        return;
+                    }
+                }
+                continue;
+            }
+            let deadline = Instant::now() + BATCH_DEADLINE;
+            let mut session_dead = false;
+            while !awaiting.is_empty() {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                if Instant::now() > deadline {
+                    session_dead = true;
+                    break;
+                }
+                match sess.pump() {
+                    Ok(msgs) => {
+                        for msg in msgs {
+                            match msg.command.as_str() {
+                                "block" => {
+                                    let hash = if msg.payload.len() >= 80 {
+                                        tri7_core::legacy::hash9(&msg.payload[..80])
+                                    } else {
+                                        [0u8; 32]
+                                    };
+                                    if let Some(h) = awaiting.remove(&hash) {
+                                        got.insert(h, msg.payload);
+                                    }
+                                }
+                                "ping" => {
+                                    if let Ok(n) = tri7_core::p2p::parse_ping(&msg.payload) {
+                                        let _ =
+                                            sess.send("pong", &tri7_core::p2p::build_pong(n), &mut stats);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // wire garbage or the peer closed the socket
+                        session_dead = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if awaiting.is_empty() {
+                break;
+            }
+            retries += 1;
+            if retries == 1 {
+                if orphan_att >= 2 {
+                    errors.lock().unwrap().push(format!(
+                        "worker {}: batch h{} unservable after {} orphan attempts",
+                        worker_id,
+                        hashes[start_idx].0,
+                        orphan_att
+                    ));
+                    return;
+                }
+                // first stall: hand the range to the pool (fresh session) and
+                // move on to the next batch — the validator needs ANYONE to
+                // deliver, not this specific session to keep trying
+                log(&format!(
+                    "from-zero: worker {} batch h{} stalled ({} missing) — requeued for any worker",
+                    worker_id,
+                    hashes[start_idx].0,
+                    awaiting.len()
+                ));
+                orphans.lock().unwrap().push_back((start_idx, end, orphan_att + 1));
+                sess.shutdown();
+                match connect(&mut stats) {
+                    Ok(s) => sess = s,
+                    Err(e) => {
+                        errors.lock().unwrap().push(format!("worker {}: reconnect: {}", worker_id, e));
+                        return;
+                    }
+                }
+                break; // next batch (orphan ranges get stolen by someone)
+            }
+            if retries > MAX_BATCH_RETRIES || stop.load(Ordering::Relaxed) {
+                errors.lock().unwrap().push(format!(
+                    "worker {}: batch h{}+ stalled after {} attempt(s), {} outstanding",
+                    worker_id,
+                    hashes[start_idx].0,
+                    retries,
+                    awaiting.len()
+                ));
+                return;
+            }
+            log(&format!(
+                "from-zero: worker {} retrying batch h{} ({} missing, attempt {}/{})",
+                worker_id,
+                hashes[start_idx].0,
+                awaiting.len(),
+                retries,
+                MAX_BATCH_RETRIES
+            ));
+            sess.shutdown();
+            std::thread::sleep(Duration::from_secs(2));
+            match connect(&mut stats) {
+                Ok(s) => sess = s,
+                Err(e) => {
+                    errors.lock().unwrap().push(format!("worker {}: reconnect: {}", worker_id, e));
+                    return;
+                }
+            }
+        }
+        let mut ordered: Vec<(u64, Vec<u8>)> = got.into_iter().collect();
+        ordered.sort_by_key(|(h, _)| *h);
+        for (h, raw) in ordered {
+            if tx.send((h, raw)).is_err() {
+                return; // validator gone
+            }
+        }
+    }
+}
+
+/// Full from-zero run: header walk to the peer tip, then N parallel fetcher
+/// sessions feeding ONE sequential validator (the normal acceptance gate).
+/// Works from a genesis state (fresh) or a resumed partial tipstate.
+fn sync_from_zero(
+    cfg: &Config,
+    first_sess: &mut Session,
+    st: &mut ChainState,
+    rpc: &Rpc,
+    stats: &mut Stats,
+    store: &Arc<BlockStore>,
+    peer_tip: u64,
+) -> Result<(), String> {
+    FROM_ZERO_NO_ORACLE.store(true, Ordering::Relaxed);
+    let started = Instant::now();
+    let workers = cfg.sync_workers.clamp(1, 16) as usize;
+    log(&format!(
+        "from-zero: syncing h{} → h{} over P2P ({} blocks to go, {} fetcher session(s))",
+        st.tip_height,
+        peer_tip,
+        peer_tip.saturating_sub(st.tip_height),
+        workers
+    ));
+
+    // ---- phase H: walk the header chain to the peer tip (one session) ----
+    let mut all_headers: Vec<(u64, Hash, Block)> = Vec::new();
+    loop {
+        if SIGINT_SEEN.load(Ordering::Relaxed) {
+            write_state_atomic(cfg, &st.to_file())
+                .map_err(|e| format!("write state (SIGINT): {}", e))?;
+            return Err("__SIGINT__".into());
+        }
+        let (round, _complete) = headers_round(first_sess, st, stats)?;
+        if round.is_empty() {
+            break; // peer tip reached (or resumed state already at tip)
+        }
+        all_headers.extend(round);
+        if all_headers.len() % 100_000 == 0 || all_headers.len() < 200_000 {
+            log(&format!(
+                "from-zero: {} headers walked (up to h{})",
+                all_headers.len(),
+                all_headers.last().unwrap().0
+            ));
+        }
+        if all_headers.len() > 3_000_000 {
+            return Err("from-zero: header walk exceeded 3M — aborting".into());
+        }
+        if _complete {
+            break;
+        }
+    }
+    if all_headers.is_empty() {
+        FROM_ZERO_NO_ORACLE.store(false, Ordering::Relaxed);
+        return Ok(()); // nothing to do — at tip
+    }
+    let header_tip = all_headers.last().unwrap().0;
+    if header_tip <= st.tip_height {
+        FROM_ZERO_NO_ORACLE.store(false, Ordering::Relaxed);
+        return Ok(());
+    }
+    // single copy of the walked headers shared with the workers — a
+    // per-worker (height,hash) list or a by-height header map would DOUBLE
+    // the ~300 MB header footprint (matters on 1 GB fresh-install boxes)
+    let first_h = all_headers[0].0;
+    let headers: Arc<Vec<(u64, Hash, Block)>> = Arc::new(all_headers);
+    let hashes: Arc<Vec<(u64, Hash)>> = Arc::new(
+        headers
+            .iter()
+            .map(|(h, hash, _)| (*h, *hash))
+            .collect(),
+    );
+
+    // ---- phase B: parallel fetch + sequential validate ----
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let validated = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let orphans: Arc<Mutex<VecDeque<(usize, usize, usize)>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, Vec<u8>)>();
+    let tip_at_start = st.tip_height;
+    let mut handles = Vec::new();
+    for w in 0..workers.max(1) {
+        let target = cfg.peers[w % cfg.peers.len()].clone();
+        let cfg2 = cfg.clone();
+        let hashes2 = Arc::clone(&hashes);
+        let cursor2 = Arc::clone(&cursor);
+        let validated2 = Arc::clone(&validated);
+        let stop2 = Arc::clone(&stop);
+        let errors2 = Arc::clone(&errors);
+        let orphans2 = Arc::clone(&orphans);
+        let tx2 = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            fetch_worker(target, cfg2, tip_at_start, workers.max(1), hashes2, cursor2, validated2, tx2, stop2, errors2, orphans2, w)
+        }));
+    }
+    drop(tx); // main holds the only receiver; workers exit when done
+
+    let headers2 = Arc::clone(&headers);
+    let mut pending: HashMap<u64, Vec<u8>> = HashMap::new();
+    let mut next_h = st.tip_height + 1;
+    let mut idle_warned = false;
+    let sync_started = Instant::now();
+    while next_h <= header_tip {
+        if SIGINT_SEEN.load(Ordering::Relaxed) {
+            stop.store(true, Ordering::Relaxed);
+            write_state_atomic(cfg, &st.to_file())
+                .map_err(|e| format!("write state (SIGINT): {}", e))?;
+            return Err("__SIGINT__".into());
+        }
+        if let Some(raw) = pending.remove(&next_h) {
+            let mut r = Reader::new(&raw);
+            let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
+            r.expect_done().map_err(|e| format!("block trailing: {}", e))?;
+            let hdr = headers2[(next_h - first_h) as usize].2.clone();
+            if b.hash() != hdr.hash() {
+                return Err(format!(
+                    "h{}: served body {} does not match walked header {}",
+                    next_h,
+                    tri7_core::p2p::internal_to_display(&b.hash()),
+                    tri7_core::p2p::internal_to_display(&hdr.hash())
+                ));
+            }
+            let prev_entry = st
+                .entry_abs(next_h - 1)
+                .cloned()
+                .ok_or_else(|| format!("h{}: predecessor outside window", next_h))?;
+            let outcome = validate_block(
+                st,
+                rpc,
+                stats,
+                &b,
+                &BlockCtx {
+                    height_abs: next_h,
+                    header: Some(&hdr),
+                    prev_entry,
+                    live: false,
+                },
+            )?;
+            advance_with_block(st, rpc, stats, &b, &outcome)?;
+            stats.blocks_validated_hist += 1;
+            validated.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = store.append_block(&raw, Some(next_h)) {
+                return Err(format!("h{}: store append: {}", next_h, e));
+            }
+            let done = validated.load(Ordering::Relaxed);
+            if done % 1000 == 0 {
+                let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                let rate = done as f64 / elapsed;
+                let remaining = header_tip - st.tip_height;
+                let eta = if rate > 0.0 {
+                    remaining as f64 / rate
+                } else {
+                    0.0
+                };
+                log(&format!(
+                    "from-zero: h{} {} ({:.0} blk/s, ETA {:.1}h)",
+                    st.tip_height,
+                    tri7_core::p2p::internal_to_display(&st.tip_hash),
+                    rate,
+                    eta / 3600.0
+                ));
+                write_state_atomic(cfg, &st.to_file())
+                    .map_err(|e| format!("write state: {}", e))?;
+            }
+            next_h += 1;
+            idle_warned = false;
+            continue;
+        }
+        if !errors.lock().unwrap().is_empty() {
+            let e = errors.lock().unwrap().join("; ");
+            stop.store(true, Ordering::Relaxed);
+            return Err(format!("fetch worker failure: {}", e));
+        }
+        // wait for the next block
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok((h, raw)) => {
+                pending.insert(h, raw);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !idle_warned
+                    && sync_started.elapsed() > Duration::from_secs(120)
+                {
+                    idle_warned = true;
+                    log(&format!(
+                        "from-zero: stalled at h{} — {} block(s) fetched, awaiting h{} (workers stuck? SIGINT to checkpoint)",
+                        st.tip_height,
+                        pending.len(),
+                        next_h
+                    ));
+                }
+            }
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                return Err("all fetch workers exited before the tip".into());
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.join();
+    }
+    write_state_atomic(cfg, &st.to_file()).map_err(|e| format!("write state: {}", e))?;
+    FROM_ZERO_NO_ORACLE.store(false, Ordering::Relaxed);
+    log(&format!(
+        "from-zero: COMPLETE h{} {} in {:.1}s ({:.0} blk/s avg)",
+        st.tip_height,
+        tri7_core::p2p::internal_to_display(&st.tip_hash),
+        started.elapsed().as_secs_f64(),
+        stats.blocks_validated_hist as f64 / started.elapsed().as_secs_f64().max(0.001)
+    ));
     Ok(())
 }
 
@@ -2096,6 +2810,7 @@ fn load_state(cfg: &Config) -> Result<ChainState, String> {
         // "" (pre-5a file) stays "" until the first real advance bumps it —
         // honest: no advance observed since this state was created
         last_advance_utc: f.last_advance_utc,
+        no_trim: false,
         // inherit the persisted network-liveness clock: a fresh process with
         // no traffic yet ages the health gate from the last KNOWN traffic
         peers_connected: f.peers.unwrap_or(0),
@@ -2336,6 +3051,7 @@ fn seed_from_network(
         tip_height: tip,
         tip_hash: expect_hashes[expect_hashes.len() - 1],
         daemon_tip: Some(daemon_tip),
+        no_trim: false,
         last_advance_utc: now_iso(), // seeding anchored/advanced the tip
         peers_connected: 0,
         last_peer_utc: None, // seeded: the peer handshake predates this state
@@ -4076,10 +4792,120 @@ fn iso_secs_from_now(iso: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3600 + mi * 60 + s)
 }
 
+/// Bootstrap a minimal-but-valid TRI wallet SQLite container (the container
+/// format the wallet writer validates: application_id/user_version, the main
+/// kv table, one version row, and a genesis bestblock locator). Key rows are
+/// inserted afterwards via WalletHandle::add_key.
+fn bootstrap_wallet_file(path: &Path) {
+    use tri7_core::wallet::{CLIENT_VERSION, WALLET_APP_ID, WALLET_USER_VERSION};
+    let conn = rusqlite::Connection::open(path)
+        .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet sqlite: {}", e)));
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = {};\nPRAGMA user_version = {};",
+        WALLET_APP_ID, WALLET_USER_VERSION
+    ))
+    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet pragma: {}", e)));
+    conn.execute_batch(
+        "CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);",
+    )
+    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet table: {}", e)));
+    // version row (compact-size key "version" → CLIENT_VERSION le bytes)
+    let mut k = Vec::new();
+    k.push(7);
+    k.extend_from_slice(b"version");
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [k, CLIENT_VERSION.to_le_bytes().to_vec()],
+    )
+    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet version row: {}", e)));
+    // bestblock locator at genesis (version + count 1 + zero hash)
+    let mut bk = Vec::new();
+    bk.push(9);
+    bk.extend_from_slice(b"bestblock");
+    let mut bv = Vec::new();
+    bv.extend_from_slice(&CLIENT_VERSION.to_le_bytes());
+    bv.push(1);
+    bv.extend_from_slice(&[0u8; 32]);
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [bk, bv],
+    )
+    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet bestblock row: {}", e)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|e| die(EXIT_USAGE, &format!("chmod wallet: {}", e)));
+    }
+}
+
+/// Insert the `defaultkey` row (compact-size len + pubkey) after the first key
+/// exists — read_wallet and legacy consumers expect a resolvable defaultkey.
+fn insert_default_key(path: &Path, pubkey: &[u8]) {
+    let conn = rusqlite::Connection::open(path)
+        .unwrap_or_else(|e| die(EXIT_USAGE, &format!("defaultkey sqlite: {}", e)));
+    let mut v = Vec::with_capacity(1 + pubkey.len());
+    v.push(pubkey.len() as u8);
+    v.extend_from_slice(pubkey);
+    let mut k = Vec::new();
+    k.push(10);
+    k.extend_from_slice(b"defaultkey");
+    conn.execute(
+        "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+        [k, v],
+    )
+    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("defaultkey insert: {}", e)));
+}
+
 fn main() {
-    let cfg = parse_args();
+    let mut cfg = parse_args();
     if cfg.status {
         status_exit(&cfg); // early: no conf read, no network
+    }
+    install_signal_handlers();
+    // --new-wallet: brand-new wallet with BRAND-NEW keys (never copied) —
+    // bootstrap the SQLite TRIw container (the wallet writer opens rw but
+    // never creates), then insert freshly generated secrets via add_key.
+    if let Some(nw) = cfg.new_wallet.clone() {
+        if nw.exists() {
+            log(&format!(
+                "new-wallet: {} already exists — reusing it (fresh install kept its keys)",
+                nw.display()
+            ));
+        } else {
+            if let Some(dir) = nw.parent() {
+                std::fs::create_dir_all(dir)
+                    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet dir: {}", e)));
+            }
+            bootstrap_wallet_file(&nw);
+            let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&nw)
+                .unwrap_or_else(|e| die(EXIT_USAGE, &format!("create wallet: {}", e)));
+            let mut key = [0u8; 32];
+            loop {
+                getrandom::getrandom(&mut key)
+                    .unwrap_or_else(|e| die(EXIT_USAGE, &format!("keygen entropy: {}", e)));
+                match wh.add_key(&key, "default") {
+                    Ok(k) => {
+                        wh.close();
+                        insert_default_key(&nw, &k.pubkey);
+                        wh = tri7_core::wallet::WalletHandle::open_readwrite(&nw)
+                            .unwrap_or_else(|e| die(EXIT_USAGE, &format!("reopen wallet: {}", e)));
+                        wh.update_bestblock(0, &[0u8; 32]).ok();
+                        log(&format!(
+                            "new-wallet: {} created with fresh key {}",
+                            nw.display(),
+                            k.address
+                        ));
+                        break;
+                    }
+                    Err(e) => die(EXIT_USAGE, &format!("add_key: {}", e)),
+                }
+            }
+            wh.close();
+        }
+        if cfg.wallet_path.is_none() {
+            cfg.wallet_path = Some(nw);
+        }
     }
     let (user, pass) = read_rpc_creds(&cfg);
     let rpc = tri7_rpc(&cfg, &user, &pass);
@@ -4089,10 +4915,16 @@ fn main() {
     // tick. Seeding (no state) still requires a live peer.
     let path = state_path(&cfg);
     let have_state = path.exists() && !cfg.reseed;
+    // FROM-ZERO: explicit flag, or AUTOMATIC on a bare machine (no state
+    // + explicit peers) — the fresh-install default path.
+    let from_zero = cfg.sync_from_zero || (!have_state && cfg.explicit_peers);
     let mut stats = Stats::default();
     let mut outbound_start = 0usize;
     let mut peers: Vec<Peer> = Vec::new();
-    if have_state {
+    // FIX (exit-5 bug): the outbound attach must be attempted on a fresh
+    // machine too — seeding/from-zero needs a live peer even when no
+    // tipstate exists yet.
+    if have_state || from_zero {
         match try_connect(&cfg, &mut stats, 0, 0) {
             Some((p, idx)) => {
                 outbound_start = (idx + 1) % cfg.peers.len();
@@ -4110,6 +4942,29 @@ fn main() {
     let mut st: ChainState = if have_state {
         log("loading tipstate.json …");
         load_state(&cfg).unwrap_or_else(|e| die(EXIT_SEED, &format!("load state: {}", e)))
+    } else if from_zero {
+        // fresh state from genesis: fetch block 0, pin it to the compiled-in
+        // genesis hash, build height-0 state — then the backfill below walks
+        // the ENTIRE chain through the normal acceptance gate
+        let gen = match peers.first_mut() {
+            Some(p) => fetch_genesis_block(&mut p.sess, &mut stats),
+            None => die(
+                EXIT_SEED,
+                "from-zero: needs a live peer but all outbound targets are unreachable",
+            ),
+        };
+        let gen = match gen {
+            Ok(g) => g,
+            Err(e) => die(EXIT_SEED, &e),
+        };
+        let st = genesis_state(&gen);
+        write_state_atomic(&cfg, &st.to_file())
+            .unwrap_or_else(|e| die(EXIT_SEED, &format!("write state: {}", e)));
+        log(&format!(
+            "from-zero: genesis state anchored at {} (h0)",
+            GENESIS_OFFICIAL
+        ));
+        st
     } else {
         log("no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …");
         let seeded = match peers.first_mut() {
@@ -4164,6 +5019,59 @@ fn main() {
         tri7_core::p2p::internal_to_display(&st.tip_hash),
         daemon_tip
     ));
+
+    // 2.5 FROM-ZERO backfill: walk the ENTIRE chain from our (possibly h0)
+    // state to the peer tip through the normal acceptance gate. Resume-safe:
+    // a restart with a partial tipstate continues from its tip. When the
+    // rounds return 0, we ARE at the peer tip and normal follow takes over.
+    let blocks_file = resolve_blocks_file(&cfg);
+    let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+    if from_zero {
+        match peers.first_mut() {
+            Some(p) => {
+                let peer_tip = p.start_height.max(0) as u64;
+                match sync_from_zero(
+                    &cfg,
+                    &mut p.sess,
+                    &mut st,
+                    &rpc,
+                    &mut stats,
+                    &store,
+                    peer_tip,
+                ) {
+                    Ok(()) => {
+                        // full chain already fetched+validated — the generic
+                        // backfill below would only re-walk window headers
+                        cfg.backfill_headers = 0;
+                    }
+                    Err(e) if e == "__SIGINT__" => {
+                        finish(
+                            &cfg,
+                            &st,
+                            &stats,
+                            &rpc,
+                            130,
+                            "from-zero sync interrupted (SIGINT/SIGTERM) — tipstate persisted, resumable",
+                        );
+                    }
+                    Err(e) => {
+                        finish(
+                            &cfg,
+                            &st,
+                            &stats,
+                            &rpc,
+                            EXIT_VALIDATE,
+                            &format!("from-zero sync: {}", e),
+                        );
+                    }
+                }
+            }
+            None => die(
+                EXIT_SEED,
+                "from-zero: no outbound peer reachable — cannot backfill",
+            ),
+        }
+    }
 
     // 3. backfill
     if cfg.backfill_headers > 0 {
@@ -4252,8 +5160,6 @@ fn main() {
     };
     let balances_snap = load_balances_snap(&cfg.balances_path);
     let utxos_snap = load_utxos_snap(&cfg.wallet_utxos_path);
-    let blocks_file = resolve_blocks_file(&cfg);
-    let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
     let recent_shared: Arc<Mutex<RecentBlocks>> = Arc::new(Mutex::new(RecentBlocks::new()));
     // wallet live UTXO view: seeded from the disk store in a background
     // thread once the index build finishes (needs heights_ok + bodies)
@@ -5558,6 +6464,7 @@ mod tests {
             checksums,
             utxo: WindowOutputs::new(),
             records: Vec::new(),
+            no_trim: false,
             pending_headers: HashMap::new(),
             tip_height: tip,
             tip_hash: {

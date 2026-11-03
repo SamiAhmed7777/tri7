@@ -232,7 +232,7 @@ mod tests {
         let next = get_next_target_required(&idx, false);
         assert_eq!(next, 0x1e03_78a3);
         // spacing 600 (slow) → easier: mantissa grows, no era clamp
-        idx.entries[3].time = 1_400_000_840;
+        idx.entries.to_mut()[3].time = 1_400_000_840;
         let next = get_next_target_required(&idx, false);
         assert_ne!(next, 0x1e03_78a3);
         let (new_target, _, _) = set_compact(next);

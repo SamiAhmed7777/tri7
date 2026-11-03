@@ -729,8 +729,8 @@ fn write_report(path: &str, v: &serde_json::Value) {
 // ---------------------------------------------------------------------------
 // Chain replay state
 // ---------------------------------------------------------------------------
-struct Replay {
-    idx: ReplayIndex,
+struct Replay<'a> {
+    idx: ReplayIndex<'a>,
     /// (block height, tx offset) per candidate txid — kernel prevout metadata.
     tx_locations: HashMap<Hash, (usize, u32)>,
     /// Wallet-owned outputs appearing in blocks ABOVE the dump snapshot.

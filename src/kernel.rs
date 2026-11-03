@@ -1068,7 +1068,7 @@ mod tests {
             }
             idx.push(e);
         }
-        idx.entries[0].generated_stake_modifier = true;
+        idx.entries.to_mut()[0].generated_stake_modifier = true;
         // blockFrom at 1: threshold = t0+120+600 = t0+720. Generated blocks at
         // t0+600 (h5, mod 1) and t0+1200 (h10, mod 2). Walk: h2..h5 update to
         // t0+600 <720; keep walking; h10 sets mod time t0+1200 >= 720 -> stop

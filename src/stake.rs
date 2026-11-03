@@ -817,7 +817,7 @@ mod tests {
     /// 40 blocks at 120 s spacing; generated modifiers every 5 blocks
     /// (h5→1, h10→2, …) so the fixed-600s walk from h1 stops at h10 (mod 2),
     /// mirroring kernel.rs's own synthetic-window test.
-    fn synthetic_index() -> ReplayIndex {
+    fn synthetic_index() -> ReplayIndex<'static> {
         let mut idx = ReplayIndex::new();
         let t0 = 1_400_000_400u32;
         for h in 0..40usize {

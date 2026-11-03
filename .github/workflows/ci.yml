@@ -96,7 +96,7 @@ jobs:
           } else {
             $mk = "$env:ChocolateyInstall\bin\makensis.exe"
           }
-          & "$mk" -DVERSION=${{ steps.ver.outputs.version }} deploy\windows\tri7-wallet.nsi
+          & "$mk" "-DVERSION=${{ steps.ver.outputs.version }}" deploy\windows\tri7-wallet.nsi
           Copy-Item target\release\tri7_wallet_gui.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe"
           Copy-Item target\release\follow_tip.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-tri7d.exe"
       - name: SHA256SUMS (digest pinning for the updater)
