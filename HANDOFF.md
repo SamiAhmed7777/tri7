@@ -1,4 +1,115 @@
-# tri7 modern-client loop — session handoff (2026-11-02, phase 5b)
+# tri7 modern-client loop — session handoff (2026-11-02, phase 6)
+
+## TOPOLOGY (authoritative — 2026-11-02 phase 6, remediation)
+
+**tri7d IS the DNS2 primary node. The legacy trianglesd is retired
+(stopped+disabled). Any other description is history, not current state.**
+
+| Port | Role |
+|---|---|
+| 19112 | tri7d native JSON-RPC (loopback only; `--no-proxy`; 16 native methods incl. getbestblockhash) |
+| 24113 | tri7d inbound P2P listener (bind 0.0.0.0; ufw allow v4+v6; tor HS gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 → 127.0.0.1:24113) |
+| 19113 | autossh tunnel → sami-pc:19112 RPC (triangles-api consumer) — unrelated to tri7d, never bind it |
+
+Outbound attach targets (rotation with fallback; .onion via tor SOCKS
+127.0.0.1:9050): sami-pc 100.85.236.10:24113/:24112, DNS3 100.81.59.99:24112/:24113,
+DNS3 onion i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112.
+All targets down ⇒ HEADLESS (native RPCs from persisted state, rotation retried
+each 30s poll tick — POLL_SECS in follow_tip.rs).
+
+Inbound peers: server-side handshake (they send version first; we reply
+version+verack; non-handshake messages received during the handshake are
+BUFFERED and replayed — a block pusher fires immediately after its verack),
+getdata served from recent-blocks cache (heights above the frozen
+blk0001.dat) or the disk store, getheaders served (2000-header cap), pushed
+blocks validated by the same consensus path and RELAYED to all peers
+(inv → getdata). A malformed/invalid message from an INBOUND peer drops the
+PEER (Misbehaving-style), never the process; from an OUTBOUND target it is
+fatal (fork-safety stance unchanged).
+
+The loop holds the state + recent-cache locks across a validation batch, and
+post-cutover the "daemon RPC" is tri7d ITSELF — the RPC threads therefore
+never block on those locks: tip served from a lock-free mirror under
+contention (TipMirror), recent cache via try_lock, and the stake-modifier
+checksum cross-check skips (logs "no external checksum oracle") for blocks
+above the disk store's tip, where tri7d is the chain authority.
+
+Healthcheck (tri7d-health.timer, 5 min): exit 0 healthy; 3 on unreadable
+state, stale write (>600s), OR degraded = no peer traffic for >600s AND no
+tip advance for >1800s (a frozen+isolated network primary is a failure).
+--static skips the network-quiet gate. Degraded ⇒ try-restart tri7d — with
+the fleet dark this restarts tri7d every 5 min BY DESIGN. last_peer_utc is
+persisted IN tipstate and INHERITED across restarts (a fresh process ages
+the gate from the last known traffic, never from "no data").
+
+## Fleet reality check (2026-11-02 23:00 UTC, probes + SSH)
+
+The premise "sami-pc/DNS3 advance" was FALSE at remediation time:
+sami-pc has NO triangles/tri7 process (netstat/tasklist over SSH, wallet.dat
+mtime 2026-10-19), the ssh-alias dns3 (appt/74.208.167.19) has no daemon,
+dc-contabo-de is a DashCaddy test box, Hetzner stopped+disabled, samihost
+unreachable, and ALL fleet onions refuse through tor. Chain advancement on
+DNS2 was being produced by tri7's OWN stake_mint live runs (c1..c3, blocks
+h2204065..67) pushed into the legacy daemon's P2P path. Chain advancement
+was therefore restored via tri7d itself: stake_mint c4 pushed
+block 0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c into
+tri7d's 24113 listener → validated (kernel enforced) → TIP ADVANCE
+h2204068 → relayed (inv) to the connected peer in +2.0s (ACCEPTED).
+
+## Phase 6 (2026-11-02): LIVE STAKING + RPC cutover — DONE on DNS2
+
+### Live staking (legacy trianglesd up as validator/relay)
+- stake_mint extended with `--submit-to-legacy`: after self-validation → POST
+  submitblock to the daemon → **the V6 fork REMOVED submitblock** (dispatch
+  table rpcmining.cpp:142 comment; running binary strings have NO submitblock;
+  live probe: `{"error":{"code":-32601,"message":"Method not found"}}`). Code
+  captures that and falls back to the daemon's P2P `block` message
+  (main.cpp:4366 → same ProcessBlock gate; daemon relays only what it accepts;
+  anti-spam Misbehaving(100) is `if (false && …)` disabled; generic failures
+  carry block.nDoS=0 → no peer penalty). Wire form: header+vtx+cs(vchBlockSig),
+  tri7 p2p.rs framing; handshake = follow_tip's version/verack.
+- **3 blocks minted + ACCEPTED (0 rejections), each self-validated first:**
+  1. h2204065 `4c0a55a39d48eeb47b86f62f245294c6010b4bfe986ac98332624c5d60bbd17b`
+     reward 484,971 sats, kernel coin 1c3fba13…d27:2 (12,010,466 sats @h2203769)
+  2. h2204066 `fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3`
+     reward 1,026,552 sats, kernel coin f5481f6a…db:1 (14,530,000 sats @h2203776)
+  3. h2204067 `0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f`
+     reward 943,793 sats, kernel coin fba90ab3…25:1 (12,950,000 sats @h2203895)
+  Total minted 2,455,316 sats. Daemon log: "ProcessBlock: ACCEPTED block 2204065+";
+  peers pulled the blocks via getdata (relay confirmed). Reports:
+  /root/tri7/stake_live_c{1,2,3}.json + logs/stake_live_c{1,2,3}.log.
+- Safety held: one block in flight, daemon-tip RPC guard before every submit,
+  abort on any failure (exit 6), wallet.dat read-only, no chain rewrite.
+- **BUG FOUND + FIXED (follow_tip window slide):** after following a new tip,
+  trim() drained window entries and bumped window_base WITHOUT re-basing the
+  survivors' window-relative heights → tipstate entry heights +1 (all 4600),
+  stake_mint panicked (entries[prev_h] OOB), rel_index's "index i == relative
+  height" invariant broken (difficulty walk would read shifted neighbors).
+  FIX: trim() re-bases entries (-excess) and WindowOutputs (rebase()); repaired
+  the poisoned /var/lib/tri7/tipstate.json on disk (heights -1, tri7:tri7 0600
+  preserved) with tri7d stopped; fix verified live on the NEXT slide
+  (h2204066: base 2199467, contiguous). Tests 99/99.
+
+### RPC cutover (per deploy/tri7d_rpc_cutover.md — EXECUTED section)
+- tri7d now OWNS 19112 (unit: `--rpc-port 19112 --no-proxy`); 19114 released;
+  P2P arg unchanged (--daemon 127.0.0.1:24113). trianglesd STOPPED + DISABLED.
+- `--no-proxy` flag added: post-cutover the proxy target (conf rpcport=19112)
+  would be tri7d ITSELF — proxy disabled → proxy-only methods return clean
+  cutover-mode errors. Methods that LOSE service with the daemon down:
+  getrawmempool, getmempoolinfo, getstakinginfo, getnetworkhashps,
+  getwalletinfo, gettransaction. Everything else NATIVE (verified on 19112,
+  incl. all 3 staked blocks via getblock/getblockhash/getrawtransaction).
+- HEADLESS follow mode added (follow_tip): with 24113 gone, connect failures
+  no longer kill the process (try_connect/Option<Session>) — tri7d serves
+  native RPCs from persisted state, retries the attach each 30s tick, keeps
+  the tipstate write cadence (healthcheck stays green, NRestarts=0).
+- Autossh 19113 → sami-pc:19112 UNTOUCHED (triangles-api reads SAMI-PC through
+  it; live ESTAB consumer confirmed). api/explorer/richlist/bootstrap services
+  all active throughout.
+- NOTE: with the legacy daemon gone there is no block validator/relay — live
+  staking pauses until tri7d gains its own relay path (P2P to sami-pc/onion
+  peers; the daemon-P2P submit path in stake_mint is the template). The chain
+  tip is 2204067; blockindex froze there (blk0001.dat appends stopped).
 
 ## State
 Repo: /root/tri7 (Rust, phases 1a..4 committed; phase 5a+5b deployed — see below).

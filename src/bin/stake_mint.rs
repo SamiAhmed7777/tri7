@@ -33,13 +33,31 @@
 //!              [--archive /root/.triangles/blk0001.dat]
 //!              [--out /root/tri7/stake_dryrun.json] [--search-secs 60]
 //!              [--max-coins N]
+//!              [--submit-to-legacy [--rpc-host 127.0.0.1] [--rpc-port 19112]
+//!                                  [--conf /root/.triangles/triangles.conf]
+//!                                  [--p2p-addr 127.0.0.1:24113]
+//!                                  [--accept-wait-secs 120]]
 //!
 //! Exit codes: 0 = dry run complete (report written; a kernel solution may or
 //! may not exist — see the report), 2 = usage, 3 = chain/window verification
 //! failure, 4 = a found solution FAILED self-validation, 5 = input loading
-//! failure.
+//! failure, 6 = a live submit failed or the daemon did not accept the block
+//! (abort — never retried).
+//!
+//! LIVE MODE (--submit-to-legacy): after self-validation passes, the block is
+//! submitted to the legacy trianglesd daemon — first via the submitblock RPC
+//! (the historical method; the V6 fork removed it from the dispatch table, in
+//! which case the daemon's P2P `block` message is used instead — the SAME
+//! ProcessBlock acceptance gate, and the daemon relays the block to its peers
+//! ONLY if it accepts it, so the daemon stays the validator/gatekeeper either
+//! way). Acceptance is then verified through the daemon's own chain view
+//! (getblockcount/getbestblockhash). One block in flight; any rejection is
+//! fatal for the run; wallet keys are read-only.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -58,6 +76,7 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_CHAIN: i32 = 3;
 const EXIT_VALIDATE: i32 = 4;
 const EXIT_INPUT: i32 = 5;
+const EXIT_SUBMIT: i32 = 6;
 
 fn die(code: i32, msg: &str) -> ! {
     eprintln!("FAIL({}): {}", code, msg);
@@ -162,6 +181,12 @@ fn main() {
     let mut out_path = "/root/tri7/stake_dryrun.json".to_string();
     let mut search_secs: i64 = 60;
     let mut max_coins = usize::MAX;
+    let mut submit_to_legacy = false;
+    let mut rpc_host = "127.0.0.1".to_string();
+    let mut rpc_port: u16 = 19112;
+    let mut conf_path = "/root/.triangles/triangles.conf".to_string();
+    let mut p2p_addr = "127.0.0.1:24113".to_string();
+    let mut accept_wait_secs: u64 = 120;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0usize;
     while i < args.len() {
@@ -186,6 +211,20 @@ fn main() {
                 max_coins = need(&mut i, &args)
                     .parse()
                     .unwrap_or_else(|_| die(EXIT_USAGE, "--max-coins"))
+            }
+            "--submit-to-legacy" => submit_to_legacy = true,
+            "--rpc-host" => rpc_host = need(&mut i, &args),
+            "--rpc-port" => {
+                rpc_port = need(&mut i, &args)
+                    .parse()
+                    .unwrap_or_else(|_| die(EXIT_USAGE, "--rpc-port"))
+            }
+            "--conf" => conf_path = need(&mut i, &args),
+            "--p2p-addr" => p2p_addr = need(&mut i, &args),
+            "--accept-wait-secs" => {
+                accept_wait_secs = need(&mut i, &args)
+                    .parse()
+                    .unwrap_or_else(|_| die(EXIT_USAGE, "--accept-wait-secs"))
             }
             _ => die(EXIT_USAGE, &format!("unknown arg {}", args[i])),
         }
@@ -245,6 +284,18 @@ fn main() {
         key_by_payload.len(),
         wall.encrypted
     ));
+
+    // ---- 2b. legacy RPC creds (submit mode only) -----------------------------
+    let (rpc_user, rpc_pass) = if submit_to_legacy {
+        let creds = read_rpc_creds(&conf_path);
+        log(&format!(
+            "submit mode: legacy RPC {}:{} (creds from {}), P2P {}, acceptance wait {}s",
+            rpc_host, rpc_port, conf_path, p2p_addr, accept_wait_secs
+        ));
+        creds
+    } else {
+        (String::new(), String::new())
+    };
 
     // ---- 3. utxo dump ---------------------------------------------------------
     let dump_text = std::fs::read_to_string(&dump_path)
@@ -606,13 +657,54 @@ fn main() {
                 "coinstake_input_sigs_verified": plan.inputs.len(),
                 "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path",
             });
-            report["note"] =
-                serde_json::json!("candidate block validated but NOT broadcast — dry run only");
+            report["note"] = if submit_to_legacy {
+                serde_json::json!(
+                    "submit-to-legacy mode: submitting the self-validated block to the legacy daemon"
+                )
+            } else {
+                serde_json::json!("candidate block validated but NOT broadcast — dry run only")
+            };
             write_report(&out_path, &report);
             log(&format!(
                 "RESULT: kernel solution found and self-validated — candidate block {}",
                 block_hash_display
             ));
+            if submit_to_legacy {
+                let block_bytes = serialize_block(&block);
+                match submit_to_legacy_flow(
+                    &rpc_host,
+                    rpc_port,
+                    &rpc_user,
+                    &rpc_pass,
+                    &p2p_addr,
+                    &block_bytes,
+                    &block_hash_display,
+                    (tip_entry.height + 1) as u64,
+                    tip_height_abs,
+                    &tip.blockhash,
+                    accept_wait_secs,
+                    &mut report,
+                    &out_path,
+                ) {
+                    Ok((submit_j, accept_j)) => {
+                        report["submit"] = submit_j;
+                        report["acceptance"] = accept_j;
+                        report["note"] = serde_json::json!(
+                            "LIVE: block accepted into the legacy daemon's chain (no retries were performed)"
+                        );
+                        write_report(&out_path, &report);
+                        log(&format!(
+                            "RESULT: LIVE ACCEPT — block {} is in the daemon's chain",
+                            block_hash_display
+                        ));
+                    }
+                    Err(e) => {
+                        // the flow already recorded submit/acceptance evidence
+                        // in the report and wrote it — abort, no retry-loop.
+                        die(EXIT_SUBMIT, &format!("submit failed: {}", e));
+                    }
+                }
+            }
         }
         Err(e) => {
             report["self_validation"] = serde_json::json!({ "verdict": "FAILED", "error": e });
@@ -1004,6 +1096,488 @@ fn apply_tail_bookkeeping(
                     offset += t2.serialize().len() as u32;
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LIVE submit (--submit-to-legacy): daemon guard → submitblock RPC → (V6 fork
+// removed it) → P2P `block` message → acceptance poll over the daemon's chain
+// view. Any rejection/failure aborts the run (exit 6) with the evidence
+// written into the report — never a retry-loop.
+// ---------------------------------------------------------------------------
+
+fn read_rpc_creds(path: &str) -> (String, String) {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| die(EXIT_USAGE, &format!("read conf {}: {}", path, e)));
+    let mut user = String::new();
+    let mut pass = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("rpcuser=") {
+            user = v.trim().to_string();
+        }
+        if let Some(v) = line.strip_prefix("rpcpassword=") {
+            pass = v.trim().to_string();
+        }
+    }
+    if user.is_empty() || pass.is_empty() {
+        die(EXIT_USAGE, "rpcuser/rpcpassword missing in conf");
+    }
+    (user, pass)
+}
+
+fn rpc_call(
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "jsonrpc": "1.0",
+        "id": "stake_mint",
+        "method": method,
+        "params": params,
+    })
+    .to_string();
+    let (_status, text) = tri7_core::rpc::legacy_post(host, port, user, pass, &body, timeout)?;
+    serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "non-JSON RPC reply for {}: {} — body head: {}",
+            method,
+            e,
+            text.chars().take(200).collect::<String>()
+        )
+    })
+}
+
+/// (getblockcount, getbestblockhash) — the daemon's own chain view. The fork's
+/// getblockcount returns nBestHeight (the tip HEIGHT), verified in
+/// rpcblockchain.cpp.
+fn daemon_tip(
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    timeout: Duration,
+) -> Result<(i64, String), String> {
+    let c = rpc_call(host, port, user, pass, "getblockcount", serde_json::json!([]), timeout)?;
+    let n = c
+        .get("result")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("getblockcount: unexpected reply {}", c))?;
+    let b = rpc_call(host, port, user, pass, "getbestblockhash", serde_json::json!([]), timeout)?;
+    let s = b
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("getbestblockhash: unexpected reply {}", b))?
+        .to_string();
+    Ok((n, s))
+}
+
+fn push_cs(w: &mut Vec<u8>, n: u64) {
+    if n < 0xfd {
+        w.push(n as u8);
+    } else if n <= 0xffff {
+        w.push(0xfd);
+        w.extend_from_slice(&(n as u16).to_le_bytes());
+    } else if n <= 0xffff_ffff {
+        w.push(0xfe);
+        w.extend_from_slice(&(n as u32).to_le_bytes());
+    } else {
+        w.push(0xff);
+        w.extend_from_slice(&n.to_le_bytes());
+    }
+}
+
+/// CBlock wire form (main.h IMPLEMENT_SERIALIZE): header, vtx, vchBlockSig —
+/// all vectors compactsize-prefixed. Mirrors Block::read byte-for-byte.
+fn serialize_block(b: &Block) -> Vec<u8> {
+    let mut w = Vec::with_capacity(128 * 1024);
+    w.extend_from_slice(&b.version.to_le_bytes());
+    w.extend_from_slice(&b.prev_hash);
+    w.extend_from_slice(&b.merkle_root);
+    w.extend_from_slice(&b.time.to_le_bytes());
+    w.extend_from_slice(&b.bits.to_le_bytes());
+    w.extend_from_slice(&b.nonce.to_le_bytes());
+    push_cs(&mut w, b.vtx.len() as u64);
+    for tx in &b.vtx {
+        w.extend_from_slice(&tx.serialize());
+    }
+    push_cs(&mut w, b.block_sig.len() as u64);
+    w.extend_from_slice(&b.block_sig);
+    w
+}
+
+fn error_text(env: &serde_json::Value) -> String {
+    let err = env.get("error").cloned().unwrap_or(serde_json::Value::Null);
+    if err.is_null() {
+        return "no error".into();
+    }
+    if let Some(s) = err.as_str() {
+        return s.to_string();
+    }
+    err.to_string()
+}
+
+/// The V6 fork removed submitblock from the dispatch table (rpcmining.cpp:142
+/// comment; absent from the running binary's strings) — recognize the
+/// method-not-found error envelope so the P2P fallback can take over.
+fn method_missing(env: &serde_json::Value) -> bool {
+    let err = env.get("error");
+    let msg = err
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let code = err.and_then(|e| e.get("code")).and_then(|c| c.as_i64());
+    msg.contains("not found") || code == Some(-1)
+}
+
+fn record_submit_evidence(
+    report: &mut serde_json::Value,
+    out_path: &str,
+    submit: serde_json::Value,
+    acceptance: serde_json::Value,
+) {
+    report["submit"] = submit;
+    report["acceptance"] = acceptance;
+    write_report(out_path, report);
+}
+
+fn p2p_submit(
+    addr: &str,
+    block_bytes: &[u8],
+    tip_height: u64,
+) -> Result<serde_json::Value, String> {
+    let mut stream =
+        TcpStream::connect(addr).map_err(|e| format!("p2p connect {}: {}", addr, e))?;
+    stream.set_nodelay(true).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    stream.set_read_timeout(Some(Duration::from_millis(300))).ok();
+    let mut dec = tri7_core::p2p::MessageDecoder::new();
+
+    // Handshake (the daemon is "be shy": it answers version+verack after ours).
+    let (ip, port_s) = addr.rsplit_once(':').ok_or("p2p addr must be IP:PORT")?;
+    let octets: Vec<u8> = ip
+        .split('.')
+        .map(|o| o.parse::<u8>().map_err(|_| "p2p IP must be dotted quad"))
+        .collect::<Result<_, _>>()?;
+    let addr_you = tri7_core::p2p::WireAddr::ipv4(
+        octets[0],
+        octets[1],
+        octets[2],
+        octets[3],
+        port_s.parse().map_err(|_| "bad p2p port")?,
+        tri7_core::p2p::NODE_NETWORK,
+    );
+    let addr_me = tri7_core::p2p::WireAddr::ipv4(
+        127,
+        0,
+        0,
+        1,
+        tri7_core::p2p::DEFAULT_PORT,
+        tri7_core::p2p::NODE_NETWORK,
+    );
+    let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
+    let vp = tri7_core::p2p::VersionPayload {
+        version: tri7_core::p2p::PROTOCOL_VERSION,
+        services: tri7_core::p2p::NODE_NETWORK,
+        timestamp: now_secs() as i64,
+        addr_you,
+        addr_me,
+        nonce,
+        user_agent: "/tri7-stake_mint:0.1/".into(),
+        start_height: tip_height as i32,
+    };
+    let frame = tri7_core::p2p::encode_message("version", &tri7_core::p2p::encode_version(&vp))?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("send version: {}", e))?;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut veracked = false;
+    let mut verack_sent = false;
+    let mut peer_subver = String::new();
+    let mut buf = [0u8; 65_536];
+    while Instant::now() < deadline && !veracked {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => return Err("p2p peer closed during handshake".into()),
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => return Err(format!("p2p read: {}", e)),
+        };
+        let msgs = dec.feed(&buf[..n])?;
+        for msg in msgs {
+            match msg.command.as_str() {
+                "version" => {
+                    let v = tri7_core::p2p::parse_version(&msg.payload)?;
+                    peer_subver = v.user_agent.clone();
+                    if !verack_sent {
+                        let vf = tri7_core::p2p::encode_message("verack", &[])?;
+                        stream.write_all(&vf).map_err(|e| format!("send verack: {}", e))?;
+                        verack_sent = true;
+                    }
+                }
+                "verack" => veracked = true,
+                _ => {}
+            }
+        }
+    }
+    if !veracked {
+        return Err("p2p handshake timed out waiting for verack".into());
+    }
+
+    // The submission itself: one unsolicited `block` message → the daemon's
+    // ProcessBlock (the same gate submitblock used pre-V6; main.cpp:4366).
+    let frame = tri7_core::p2p::encode_message("block", block_bytes)?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("send block: {}", e))?;
+
+    // Drain briefly — the daemon may push inv/headers (or a relay echo) back.
+    let mut saw: Vec<String> = Vec::new();
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Ok(msgs) = dec.feed(&buf[..n]) {
+                    for msg in msgs {
+                        saw.push(msg.command);
+                    }
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    Ok(serde_json::json!({
+        "path": "p2p-block",
+        "addr": addr,
+        "peer_subver": peer_subver,
+        "block_bytes": block_bytes.len(),
+        "post_send_msgs": saw,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_to_legacy_flow(
+    rpc_host: &str,
+    rpc_port: u16,
+    rpc_user: &str,
+    rpc_pass: &str,
+    p2p_addr: &str,
+    block_bytes: &[u8],
+    block_hash_display: &str,
+    next_height: u64,
+    tip_height: u64,
+    tip_hash: &str,
+    accept_wait_secs: u64,
+    report: &mut serde_json::Value,
+    out_path: &str,
+) -> Result<(serde_json::Value, serde_json::Value), String> {
+    let timeout = Duration::from_secs(30);
+
+    // ---- guard: the daemon must still sit on the tip we built on ----------
+    let (cnt, best) =
+        daemon_tip(rpc_host, rpc_port, rpc_user, rpc_pass, timeout)
+            .map_err(|e| format!("daemon tip probe: {}", e))?;
+    if cnt != tip_height as i64 || !best.eq_ignore_ascii_case(tip_hash) {
+        let why = format!(
+            "daemon tip moved (getblockcount={} getbestblockhash={}) — refusing to submit a block built on h{} {}",
+            cnt, best, tip_height, tip_hash
+        );
+        record_submit_evidence(
+            report,
+            out_path,
+            serde_json::json!({"guard": "FAILED", "daemon_tip": {"count": cnt, "best": best}}),
+            serde_json::json!({"accepted": false, "error": why}),
+        );
+        return Err(why);
+    }
+    log(&format!(
+        "daemon guard: tip h{} {} confirmed via RPC — safe to submit",
+        cnt, best
+    ));
+
+    // ---- path 1 (task-specified): submitblock RPC -------------------------
+    let block_hex: String = block_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let mut submit_evidence = serde_json::json!({"submitblock_rpc": null});
+    match rpc_call(
+        rpc_host,
+        rpc_port,
+        rpc_user,
+        rpc_pass,
+        "submitblock",
+        serde_json::json!([block_hex]),
+        timeout,
+    ) {
+        Ok(v) => {
+            let err_null = v.get("error").map(|e| e.is_null()).unwrap_or(true);
+            let result_null = v.get("result").map(|r| r.is_null()).unwrap_or(false);
+            if err_null && result_null {
+                log("submitblock RPC: result null — daemon ACCEPTED the block");
+                submit_evidence["submitblock_rpc"] =
+                    serde_json::json!({"method_found": true, "reply": v});
+                return verify_acceptance(
+                    rpc_host,
+                    rpc_port,
+                    rpc_user,
+                    rpc_pass,
+                    block_hash_display,
+                    next_height,
+                    accept_wait_secs,
+                    "submitblock-rpc",
+                    submit_evidence,
+                    report,
+                    out_path,
+                );
+            }
+            let etext = error_text(&v);
+            if method_missing(&v) {
+                log(
+                    "submitblock RPC: METHOD NOT FOUND on this daemon (the V6 fork removed \
+                     submitblock from the dispatch table) — falling back to the daemon's P2P \
+                     block path (same ProcessBlock validator; the daemon relays only what it \
+                     accepts)",
+                );
+                submit_evidence["submitblock_rpc"] =
+                    serde_json::json!({"method_found": false, "reply": v});
+            } else {
+                let why = format!("submitblock rejected the block: {}", etext);
+                submit_evidence["submitblock_rpc"] =
+                    serde_json::json!({"method_found": true, "reply": v});
+                record_submit_evidence(
+                    report,
+                    out_path,
+                    submit_evidence,
+                    serde_json::json!({"accepted": false, "error": etext}),
+                );
+                return Err(why);
+            }
+        }
+        Err(e) => {
+            log(&format!(
+                "submitblock RPC transport: {} — falling back to P2P",
+                e
+            ));
+            submit_evidence["submitblock_rpc"] =
+                serde_json::json!({"method_found": "unknown", "transport_error": e});
+        }
+    }
+
+    // ---- path 2: the daemon's P2P `block` message -------------------------
+    match p2p_submit(p2p_addr, block_bytes, tip_height) {
+        Ok(detail) => {
+            log(&format!(
+                "p2p submit: block frame ({} B) sent to {}; peer {}; post-send msgs {:?}",
+                block_bytes.len(),
+                p2p_addr,
+                detail["peer_subver"],
+                detail["post_send_msgs"]
+            ));
+            submit_evidence["p2p"] = detail;
+            verify_acceptance(
+                rpc_host,
+                rpc_port,
+                rpc_user,
+                rpc_pass,
+                block_hash_display,
+                next_height,
+                accept_wait_secs,
+                "p2p-block",
+                submit_evidence,
+                report,
+                out_path,
+            )
+        }
+        Err(e) => {
+            let why = format!("p2p submit failed: {}", e);
+            submit_evidence["p2p"] = serde_json::json!({"error": e});
+            record_submit_evidence(
+                report,
+                out_path,
+                submit_evidence,
+                serde_json::json!({"accepted": false, "error": why}),
+            );
+            Err(why)
+        }
+    }
+}
+
+fn verify_acceptance(
+    rpc_host: &str,
+    rpc_port: u16,
+    rpc_user: &str,
+    rpc_pass: &str,
+    block_hash_display: &str,
+    next_height: u64,
+    accept_wait_secs: u64,
+    via: &str,
+    submit_evidence: serde_json::Value,
+    report: &mut serde_json::Value,
+    out_path: &str,
+) -> Result<(serde_json::Value, serde_json::Value), String> {
+    let timeout = Duration::from_secs(20);
+    let started = Instant::now();
+    log(&format!(
+        "acceptance poll: waiting for h{} {} in the daemon chain (up to {}s)...",
+        next_height, block_hash_display, accept_wait_secs
+    ));
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        match daemon_tip(rpc_host, rpc_port, rpc_user, rpc_pass, timeout) {
+            Ok((cnt, best)) => {
+                if cnt >= next_height as i64 && best.eq_ignore_ascii_case(block_hash_display) {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    log(&format!(
+                        "ACCEPTED: daemon chain tip is now h{} {} (+{:.1}s)",
+                        cnt, best, elapsed
+                    ));
+                    return Ok((
+                        submit_evidence,
+                        serde_json::json!({
+                            "accepted": true,
+                            "via": via,
+                            "elapsed_secs": elapsed,
+                            "tip_height": cnt,
+                            "best_hash": best,
+                        }),
+                    ));
+                }
+            }
+            Err(e) => log(&format!("acceptance poll transport: {}", e)),
+        }
+        if started.elapsed() >= Duration::from_secs(accept_wait_secs) {
+            let (cnt, best) = daemon_tip(rpc_host, rpc_port, rpc_user, rpc_pass, timeout)
+                .unwrap_or((-1, "?".to_string()));
+            let why = format!(
+                "block NOT accepted: daemon tip still h{} {} after {}s (expected h{} {})",
+                cnt, best, accept_wait_secs, next_height, block_hash_display
+            );
+            record_submit_evidence(
+                report,
+                out_path,
+                submit_evidence,
+                serde_json::json!({"accepted": false, "error": why}),
+            );
+            return Err(why);
         }
     }
 }

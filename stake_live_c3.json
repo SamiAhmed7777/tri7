@@ -1,0 +1,127 @@
+{
+  "acceptance": {
+    "accepted": true,
+    "best_hash": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "elapsed_secs": 2.001288379,
+    "tip_height": 2204067,
+    "via": "p2p-block"
+  },
+  "block": {
+    "bits": "2000ffff",
+    "block_sig_len": 71,
+    "coinbase_scriptsig_hex": "03a3a121",
+    "hash": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "merkle": "6148d10e90cd4f3f05cf3c1267f808c56d954b3bde84315d5281a82326298669",
+    "nonce": 0,
+    "prev": "fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3",
+    "time": 1793656833,
+    "vtx": 2
+  },
+  "coinstake": {
+    "coin_age_sat_days": "1043892753",
+    "coin_day_weight": "6",
+    "credit_sats": 25303793,
+    "hash_proof_of_stake": "00adf6fd12f12a22dbae8a3f9a1369e80de3fc236ec51b5a5866856c0e19f4a9",
+    "inputs": [
+      {
+        "height": 2203895,
+        "n": 1,
+        "txid": "fba90ab383a7a5608c7f6d5785fff75053b41ffdab694a4da61ad9048a339f25",
+        "value_sats": 12950000
+      },
+      {
+        "height": 2203960,
+        "n": 1,
+        "txid": "c4ca4d879122e5d2ba0d20533b60ded2753c0588b328baa16aa204122379302a",
+        "value_sats": 11410000
+      }
+    ],
+    "kernel_block_height": 2203895,
+    "kernel_block_time": 1789948351,
+    "kernel_coin_sats": 12950000,
+    "kernel_n": 1,
+    "kernel_tx_offset": 149,
+    "kernel_txid": "fba90ab383a7a5608c7f6d5785fff75053b41ffdab694a4da61ad9048a339f25",
+    "modifier": "30b025c3019a5e29",
+    "n_time": 1793656833,
+    "reward_sats": 943793,
+    "seconds_back": 23,
+    "split": false
+  },
+  "kernel_search": {
+    "attempts": 504,
+    "coins_considered": 9,
+    "coins_meeting_min_age": 9,
+    "credit_over_balance_aborts": 0,
+    "kernel_hits": 1,
+    "search_secs": 60,
+    "search_time": 1793656856,
+    "zero_reward_aborts": 0
+  },
+  "mode": "dry-run — no network, nothing broadcast, daemon untouched",
+  "modifier_oracle": {
+    "archive_prefix_blocks": 2199467,
+    "archive_window_blocks_reconstructed": 4600,
+    "checksum_steps_verified": 142,
+    "genesis_checksum_ok": true,
+    "window_heights_checked": 4600
+  },
+  "n_bits": "2000ffff",
+  "next_height": 2204067,
+  "note": "LIVE: block accepted into the legacy daemon's chain (no retries were performed)",
+  "self_validation": {
+    "coin_age_sat_days": "1043892753",
+    "coinstake_input_sigs_verified": 2,
+    "finality_ok": true,
+    "kernel_meets_target": true,
+    "link_ok": true,
+    "merkle_ok": true,
+    "n_bits_ok": true,
+    "reward_ok": true,
+    "signature_ok": true,
+    "size_ok": true,
+    "stake_reward_calculated": 943793,
+    "stake_reward_paid": 943793,
+    "structure_ok": true,
+    "time_ok": true,
+    "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path"
+  },
+  "solution_found": true,
+  "submit": {
+    "p2p": {
+      "addr": "127.0.0.1:24113",
+      "block_bytes": 515,
+      "path": "p2p-block",
+      "peer_subver": "/Cryptographic Triangles:6.2.6.7/",
+      "post_send_msgs": [
+        "sendheaders",
+        "sendcmpct",
+        "getblocks",
+        "smsgPing",
+        "block"
+      ]
+    },
+    "submitblock_rpc": {
+      "method_found": false,
+      "reply": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "stake_mint",
+        "result": null
+      }
+    }
+  },
+  "tip": {
+    "blockhash": "fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3",
+    "height": 2204066,
+    "time": 1793656708
+  },
+  "wallet": {
+    "balance_sats": 3080300230,
+    "candidates": 177,
+    "keys": 248,
+    "live_utxos": 177
+  }
+}

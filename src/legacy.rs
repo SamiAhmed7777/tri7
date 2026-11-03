@@ -332,6 +332,21 @@ impl Block {
         w
     }
 
+    /// Full CBlock wire form (the P2P `block` message payload): 80-byte
+    /// header, CompactSize vtx count, the transactions, then CompactSize-
+    /// prefixed vchBlockSig. Round-trips through Block::read.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.extend_from_slice(&self.header_bytes());
+        push_compact_size(&mut w, self.vtx.len() as u64);
+        for tx in &self.vtx {
+            w.extend_from_slice(&tx.serialize());
+        }
+        push_compact_size(&mut w, self.block_sig.len() as u64);
+        w.extend_from_slice(&self.block_sig);
+        w
+    }
+
     /// CBlock::GetHash() = Hash9 over the 80 header bytes.
     pub fn hash(&self) -> Hash {
         hash9(&self.header_bytes())
@@ -367,5 +382,67 @@ impl Block {
             level = next;
         }
         level[0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Block::serialize must round-trip through Block::read byte-exactly —
+    /// the P2P `block` payload tri7d serves to peers is produced by this
+    /// serializer (disk store hits), so a lossy form would corrupt relays.
+    #[test]
+    fn block_serialize_roundtrips_through_read() {
+        let mut tx = Tx {
+            version: 1,
+            time: 1_793_656_833,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: vec![1, 2, 3],
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 12_950_000,
+                    script_pubkey: vec![0x76, 0xa9, 0x14],
+                },
+                Vout {
+                    value: 943_793,
+                    script_pubkey: vec![0x6a],
+                },
+            ],
+            locktime: 0,
+        };
+        tx.vout.push(Vout {
+            value: 5,
+            script_pubkey: vec![0x51],
+        });
+        let tx_copy = tx.clone();
+        let tx_copy_len = tx.serialize().len();
+        let b = Block {
+            version: 7,
+            prev_hash: [9u8; 32],
+            merkle_root: [8u8; 32],
+            time: 1_793_656_833,
+            bits: 0x2000_ffff,
+            nonce: 0,
+            vtx: vec![tx],
+            block_sig: vec![0xAA; 71],
+        };
+        let raw = b.serialize();
+        // header 80 + cs(1 vtx) + tx bytes + cs(71) + 71
+        let expected_len = 80 + 1 + tx_copy_len + 1 + 71;
+        assert_eq!(raw.len(), expected_len);
+        let mut r = Reader::new(&raw);
+        let back = Block::read(&mut r).unwrap();
+        r.expect_done().unwrap();
+        assert_eq!(back.header_bytes(), b.header_bytes());
+        assert_eq!(back.hash(), b.hash());
+        assert_eq!(back.vtx.len(), 1);
+        assert_eq!(back.vtx[0].serialize(), tx_copy.serialize());
+        assert_eq!(back.block_sig, b.block_sig);
+        assert_eq!(raw, back.serialize());
     }
 }

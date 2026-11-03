@@ -1,0 +1,78 @@
+[Unit]
+Description=tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)
+Documentation=file:/root/tri7/HANDOFF.md
+After=network-online.target trianglesd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tri7
+Group=tri7
+# TOPOLOGY (single source of truth — keep HANDOFF.md in sync with this):
+#   tri7d IS the DNS2 primary node. The legacy trianglesd is retired
+#   (stopped+disabled). Ports:
+#     19112  native JSON-RPC (loopback ONLY; 1MB request cap; --no-proxy)
+#     24113  inbound P2P listener (0.0.0.0; tor HS 43kgtx6vcz2253vo5ybfq3ax5s
+#            j5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 -> 127.0.0.1:24113)
+#     19113  autossh tunnel to sami-pc's RPC (triangles-api consumer) —
+#            UNRELATED to tri7d, never bind or re-route it
+#   Outbound attach targets (tried in rotation with fallback; .onion via the
+#   local tor SOCKS at 127.0.0.1:9050):
+#     100.85.236.10:24113 / :24112   sami-pc (canonical chain reference)
+#     100.81.59.99:24112 / :24113    DNS3
+#     i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112
+#   All targets down => HEADLESS mode (native RPCs from persisted state,
+#   rotation retried each poll tick; tipstate write cadence continues).
+#   Inbound peers get handshake + getdata/getheaders serving and may push
+#   validated blocks, which are relayed to all peers (inv -> getdata).
+#   Data sources: tipstate window, blockindex over /var/lib/tri7/blk0001.dat
+#   (hardlink to the daemon's file), replay snapshots (NOT a live UTXO set),
+#   plus an in-RAM recent-blocks cache for heights above the file's tip.
+#   Every RPC response carries "source": "tri7".
+ExecStart=/opt/tri7/bin/follow_tip \
+  --daemon 100.85.236.10:24113,100.85.236.10:24112 \
+  --daemon 100.81.59.99:24112,100.81.59.99:24113 \
+  --onion i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 \
+  --socks 127.0.0.1:9050 \
+  --listen-port 24113 --listen-bind 0.0.0.0 \
+  --conf /etc/tri7/triangles.conf --state-dir /var/lib/tri7 --forever \
+  --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy \
+  --blocks-file /var/lib/tri7/blk0001.dat \
+  --balances /var/lib/tri7/balances.json \
+  --wallet-utxos /var/lib/tri7/wallet_utxos.json \
+  --index-dir /var/lib/tri7/index
+# Healthcheck (tri7d-health.timer, every 5 min):
+#   /opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7
+#     exit 0 healthy; 3 when state unreadable OR stale (write age >
+#     --max-write-age, default 600s) OR DEGRADED: no peer traffic for >
+#     --peer-quiet-secs (600s) AND no tip advance for >
+#     --advance-quiet-secs (1800s). A network primary that can neither reach
+#     peers nor follow the chain is NOT healthy; pass --static to skip the
+#     network-quiet gate (explicit static/air-gapped mode only).
+Restart=on-failure
+# Note: any non-zero exit (2 usage / 3 validation / 4 protocol / 5 seed) and
+# signal death trigger this restart; `systemctl stop` stays stopped.
+RestartSec=30
+# Footprint bound: window ~13MB + block index ~53MB + tx index ~72MB + height
+# maps ~26MB + snapshots ~10MB + recent-blocks cache ~4MB ~= 180MB steady;
+# ~200MB transient during the first index build (subsequent restarts load the
+# on-disk caches in ~1-2s). 512M ~= 2.5x steady headroom; the retired legacy
+# trianglesd was ~1.5GB.
+MemoryMax=512M
+# Hardening: outbound P2P rotation + tor SOCKS + inbound P2P listener +
+# loopback-only RPC; write access limited to its state dir; conf copy (not
+# /root/.triangles) for RPC creds; blocks file via hardlink.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tri7
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

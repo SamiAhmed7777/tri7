@@ -46,9 +46,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -287,6 +287,77 @@ struct TipStateFile {
     entries: Vec<EntryRec>,
     blocks: Vec<BlockRec>,
     daemon_tip: Option<i64>,
+    // ---- phase 6: network liveness (written by the follow loop on every
+    // state write; absent in pre-phase-6 state files) ----
+    #[serde(default)]
+    peers: Option<u32>, // connected peers (outbound + inbound) at write time
+    #[serde(default)]
+    last_peer_utc: Option<String>, // last peer traffic (any direction), ISO UTC
+    #[serde(default)]
+    listen_port: Option<u16>, // inbound listener port when enabled
+}
+
+// ---------------------------------------------------------------------------
+// Recent blocks cache — raw bytes of blocks received since process start.
+// Serves getdata from peers and getblock RPCs for heights ABOVE the disk
+// store's tip (blk0001.dat stopped growing when the legacy daemon retired;
+// blocks accepted by tri7d itself live only here until a store rebuild).
+// ---------------------------------------------------------------------------
+const RECENT_CAP: usize = 4000;
+
+struct RecentBlocks {
+    order: VecDeque<Hash>,
+    map: HashMap<Hash, (u64, Vec<u8>)>,   // hash -> (height, raw block payload)
+    by_height: Vec<(u64, Hash)>,          // append-ordered, height>0 only
+}
+
+impl RecentBlocks {
+    fn new() -> Self {
+        RecentBlocks {
+            order: VecDeque::new(),
+            map: HashMap::new(),
+            by_height: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, hash: Hash, height: u64, payload: &[u8]) {
+        if self.map.contains_key(&hash) {
+            return;
+        }
+        self.order.push_back(hash);
+        self.map.insert(hash, (height, payload.to_vec()));
+        if height > 0 {
+            self.by_height.push((height, hash));
+        }
+        while self.order.len() > RECENT_CAP {
+            let evict = self.order.pop_front().unwrap();
+            self.map.remove(&evict);
+        }
+        // prune the height index as the window slides (blocks arrive ascending)
+        if self.by_height.len() > RECENT_CAP * 2 {
+            let min_keep = self
+                .store_tip_height()
+                .unwrap_or(0)
+                .saturating_sub(RECENT_CAP as u64);
+            self.by_height.retain(|(h, _)| *h >= min_keep);
+        }
+    }
+
+    fn get(&self, hash: &Hash) -> Option<&(u64, Vec<u8>)> {
+        self.map.get(hash)
+    }
+
+    fn at_height(&self, height: u64) -> Option<&(u64, Vec<u8>)> {
+        self.by_height
+            .iter()
+            .rev()
+            .find(|(h, _)| *h == height)
+            .and_then(|(_, has)| self.map.get(has))
+    }
+
+    fn store_tip_height(&self) -> Option<u64> {
+        self.by_height.last().map(|(h, _)| *h)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +422,18 @@ impl WindowOutputs {
     fn trim(&mut self, min_height_rel: usize) {
         self.map.retain(|_, m| m.height >= min_height_rel);
     }
+
+    /// Shift every stored window-relative height down after the window base
+    /// advanced (ChainState::trim re-basing; keeps kernel-meta consumers
+    /// aligned with entries' relative heights in-session).
+    fn rebase(&mut self, excess: usize) {
+        if excess == 0 {
+            return;
+        }
+        for m in self.map.values_mut() {
+            m.height = m.height.saturating_sub(excess);
+        }
+    }
 }
 
 impl KernelOutputResolver for WindowOutputs {
@@ -374,6 +457,12 @@ struct ChainState {
     /// wall clock of the last REAL tip-height advance; the periodic 30s state
     /// writes deliberately do NOT bump this (updated_utc/mtime do)
     last_advance_utc: String,
+    /// network liveness — persisted IN the chain state (not injected at write
+    /// time) so a RESTART inherits the last-peer clock instead of wiping it:
+    /// a fresh process with no traffic yet must age the gate from the last
+    /// known peer traffic, not report "no data"
+    peers_connected: u32,
+    last_peer_utc: Option<String>,
 }
 
 impl ChainState {
@@ -430,8 +519,22 @@ impl ChainState {
         let excess = self.entries.len().saturating_sub(WINDOW_ENTRIES);
         if excess > 0 {
             self.entries.drain(..excess);
+            // Re-base the survivors: e.height is WINDOW-RELATIVE ("index i ==
+            // relative height" invariant, see rel_index doc) — after base
+            // advances by `excess` every kept entry's relative height drops by
+            // `excess`. Without this, the next advance writes tipstate entry
+            // heights base+e.height = abs+excess (observed live: the whole
+            // window shifted +1 after following the first minted block) and
+            // the difficulty walk's entries[e.height-1] indexing reads the
+            // wrong neighbors.
+            for e in self.entries.iter_mut() {
+                e.height -= excess;
+            }
             self.checksums.drain(..excess);
             self.base += excess as u64;
+            // WindowOutputs heights are window-relative too (apply_block takes
+            // st.rel(h)) — re-base so kernel-meta consumers stay aligned.
+            self.utxo.rebase(excess);
         }
         let excess_rec = self.records.len().saturating_sub(WINDOW_BLOCKS);
         if excess_rec > 0 {
@@ -468,6 +571,9 @@ impl ChainState {
                 .collect(),
             blocks: self.records.clone(),
             daemon_tip: self.daemon_tip,
+            peers: Some(self.peers_connected),
+            last_peer_utc: self.last_peer_utc.clone(),
+            listen_port: None,
         }
     }
 
@@ -511,8 +617,57 @@ impl ChainState {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+/// One outbound attach target. `.onion` hosts are reached through the local
+/// tor SOCKS5 listener (cfg.socks); plain IPs connect directly.
+#[derive(Clone, Debug)]
+struct PeerTarget {
+    host: String,
+    port: u16,
+    socks: Option<(String, u16)>,
+}
+
+impl PeerTarget {
+    fn parse(spec: &str, socks_default: &(String, u16)) -> Result<PeerTarget, String> {
+        let (host, port) = spec
+            .rsplit_once(':')
+            .ok_or_else(|| format!("peer target \"{}\" must be HOST:PORT", spec))?;
+        let port: u16 = port
+            .parse()
+            .map_err(|_| format!("peer target \"{}\": bad port", spec))?;
+        if host.is_empty() {
+            return Err(format!("peer target \"{}\": empty host", spec));
+        }
+        let socks = if host.ends_with(".onion") {
+            Some(socks_default.clone())
+        } else {
+            None
+        };
+        Ok(PeerTarget {
+            host: host.to_string(),
+            port,
+            socks,
+        })
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 struct Config {
-    daemon: String,
+    no_proxy: bool,
+    /// outbound attach targets, tried in rotation starting after the last
+    /// successful one (multi-target attach with fallback)
+    peers: Vec<PeerTarget>,
+    /// tor SOCKS5 listener used for .onion targets
+    socks: (String, u16),
+    /// inbound P2P listener (None = disabled)
+    listen_bind: String,
+    listen_port: Option<u16>,
+    /// healthcheck: skip the network-quiet gate (static/air-gapped node)
+    static_mode: bool,
+    peer_quiet_secs: u64,
+    advance_quiet_secs: u64,
     rpc_host: String,
     rpc_port: u16,
     conf_path: PathBuf,
@@ -541,24 +696,50 @@ struct Config {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: follow_tip [--daemon IP:PORT] [--rpc-port N] [--conf PATH]\n\
-         [--archive PATH] [--state-dir DIR] [--seconds N] [--backfill N]\n\
-         [--backfill-blocks N] [--reseed] [--forever] [--status]\n\
-         [--max-write-age SECS] [--summary PATH]\n\
+        "usage: follow_tip [--daemon HOST:PORT[,...]] [--onion HOST:PORT] [--socks IP:PORT]\n\
+         [--listen-bind ADDR] [--listen-port N] [--no-listen] [--static]\n\
+         [--rpc-port N] [--conf PATH] [--archive PATH] [--state-dir DIR]\n\
+         [--seconds N] [--backfill N] [--backfill-blocks N] [--reseed]\n\
+         [--forever] [--status] [--max-write-age SECS] [--summary PATH]\n\
+         \n\
+         Outbound P2P attach (phase 6 multi-target with fallback):\n\
+         --daemon HOST:PORT  outbound peer; comma-separated list and repeated\n\
+                             flags append. .onion hosts go through --socks.\n\
+         --onion HOST:PORT   shorthand: outbound peer via tor SOCKS.\n\
+         --socks IP:PORT     tor SOCKS5 listener for .onion targets\n\
+                             (default 127.0.0.1:9050).\n\
+         Targets are tried in rotation starting after the last successful one;\n\
+         all targets failing => HEADLESS mode (native RPCs from state, retry\n\
+         each poll tick).\n\
+         \n\
+         Inbound P2P listener (phase 6 — tri7d is a primary network peer):\n\
+         --listen-port N     listen for inbound peers (default 24113).\n\
+         --listen-bind ADDR  listener bind address (default 0.0.0.0).\n\
+         --no-listen         disable the inbound listener (follower-only).\n\
+         Inbound peers get the same handshake/serve path: getdata (stored\n\
+         blocks), getheaders, ping — and may PUSH validated blocks, which are\n\
+         relayed to all other peers (inv -> getdata).\n\
          \n\
          --forever: run the follow loop with no deadline (daemon mode; systemd\n\
          restarts on failure).\n\
-         --status: healthcheck — print tip height + advance/write times as JSON.\n\
-         No network, no conf needed. Exit 0 healthy; 3 when the state file is\n\
-         unreadable OR stale (state-write age > --max-write-age, default 600:\n\
-         the loop rewrites tipstate.json every 30s while alive, so a big age\n\
-         means the follower is wedged or dead). last_advance_utc bumps only on\n\
-         real tip-height advances; updated_utc/state mtime bump every write.\n\
+         --status: healthcheck — print tip height + advance/write/peer times as\n\
+         JSON. No network, no conf needed. Exit 0 healthy; 3 when the state\n\
+         file is unreadable OR stale (state-write age > --max-write-age,\n\
+         default 600) OR degraded. Degraded (--static NOT set): NO peer\n\
+         connected/traffic for > --peer-quiet-secs (default 600) AND the tip\n\
+         has not advanced for > --advance-quiet-secs (default 1800) — a\n\
+         network node that can neither talk to peers nor follow the chain is\n\
+         not healthy even if its own loop is writing state. --static skips\n\
+         the network-quiet gate. last_advance_utc bumps only on real\n\
+         tip-height advances; updated_utc/state mtime bump every write;\n\
+         last_peer_utc bumps on any peer traffic (inbound or outbound).\n\
          \n\
-         RPC surface (phase 5b, daemon-replacement build):\n\
-         --rpc-port N        JSON-RPC listener port (default 19113; legacy\n\
-                             daemon owns 19112 — never bind it here)\n\
+         RPC surface (daemon-replacement build):\n\
+         --rpc-port N        JSON-RPC listener port (loopback-only)\n\
          --rpc-bind ADDR     loopback-only bind, default 127.0.0.1 (non-loopback\n\
+         --no-proxy          disable the transitional legacy-RPC proxy entirely\n\
+                             (cutover: daemon retired — proxy-only methods\n\
+                             return cutover-mode errors instead of forwarding)\n\
                              addresses are refused)\n\
          --no-rpc            disable the RPC listener\n\
          --rpc-max-body N    request cap, default 1048576 (1 MB)\n\
@@ -578,7 +759,17 @@ fn usage() -> ! {
 
 fn parse_args() -> Config {
     let mut cfg = Config {
-        daemon: "127.0.0.1:24113".into(), // triangles.conf port=24113 (net.cpp default 24112)
+        peers: vec![PeerTarget {
+            host: "127.0.0.1".into(),
+            port: 24113,
+            socks: None,
+        }], // legacy attach default (triangles.conf port=24113)
+        socks: ("127.0.0.1".into(), 9050),
+        listen_bind: "0.0.0.0".into(),
+        listen_port: Some(24113),
+        static_mode: false,
+        peer_quiet_secs: 600,
+        advance_quiet_secs: 1800,
         rpc_host: "127.0.0.1".into(),
         rpc_port: 19112,
         conf_path: PathBuf::from("/root/.triangles/triangles.conf"),
@@ -594,6 +785,7 @@ fn parse_args() -> Config {
         summary_out: None,
         rpc_enabled: true,
         rpc_bind: "127.0.0.1".into(),
+        no_proxy: false,
         rpc_listen_port: 19113,
         rpc_max_body: 1_048_576,
         rpc_debug: false,
@@ -608,13 +800,64 @@ fn parse_args() -> Config {
     cfg.index_dir = cfg.state_dir.join("index");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
+    let mut explicit_peers = false; // first --daemon/--onion replaces the default
     while i < args.len() {
         let need = |i: &mut usize, args: &[String]| -> String {
             *i += 1;
             args.get(*i).cloned().unwrap_or_else(|| usage())
         };
+        let parse_sock_addr = |s: &str| -> (String, u16) {
+            match s.rsplit_once(':') {
+                Some((h, p)) => match p.parse() {
+                    Ok(port) => (h.to_string(), port),
+                    Err(_) => usage(),
+                },
+                None => usage(),
+            }
+        };
         match args[i].as_str() {
-            "--daemon" => cfg.daemon = need(&mut i, &args),
+            // repeatable and comma-separated: append targets. The FIRST
+            // explicit target REPLACES the built-in default (127.0.0.1:24113)
+            // — a primary node listening on 24113 must never carry its own
+            // listener as an attach target (self-connect handshake loop).
+            "--daemon" => {
+                for spec in need(&mut i, &args).split(',') {
+                    if spec.trim().is_empty() {
+                        continue;
+                    }
+                    let t = PeerTarget::parse(spec.trim(), &cfg.socks)
+                        .unwrap_or_else(|_| usage());
+                    if !explicit_peers {
+                        cfg.peers.clear();
+                        explicit_peers = true;
+                    }
+                    cfg.peers.push(t);
+                }
+            }
+            "--onion" => {
+                let mut t = PeerTarget::parse(&need(&mut i, &args), &cfg.socks)
+                    .unwrap_or_else(|_| usage());
+                t.socks = Some(cfg.socks.clone());
+                if !explicit_peers {
+                    cfg.peers.clear();
+                    explicit_peers = true;
+                }
+                cfg.peers.push(t);
+            }
+            "--socks" => cfg.socks = parse_sock_addr(&need(&mut i, &args)),
+            "--listen-bind" => cfg.listen_bind = need(&mut i, &args),
+            "--listen-port" => {
+                cfg.listen_port =
+                    Some(need(&mut i, &args).parse().unwrap_or_else(|_| usage()))
+            }
+            "--no-listen" => cfg.listen_port = None,
+            "--static" => cfg.static_mode = true,
+            "--peer-quiet-secs" => {
+                cfg.peer_quiet_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
+            "--advance-quiet-secs" => {
+                cfg.advance_quiet_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+            }
             "--rpc-port" => {
                 cfg.rpc_listen_port = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
             }
@@ -642,6 +885,7 @@ fn parse_args() -> Config {
             }
             "--summary" => cfg.summary_out = Some(PathBuf::from(need(&mut i, &args))),
             "--rpc-bind" => cfg.rpc_bind = need(&mut i, &args),
+            "--no-proxy" => cfg.no_proxy = true,
             "--no-rpc" => cfg.rpc_enabled = false,
             "--rpc-max-body" => {
                 cfg.rpc_max_body = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
@@ -657,6 +901,9 @@ fn parse_args() -> Config {
             _ => usage(),
         }
         i += 1;
+    }
+    if cfg.peers.is_empty() {
+        die(EXIT_USAGE, "no outbound targets: --daemon/--onion required");
     }
     cfg
 }
@@ -731,6 +978,11 @@ struct Stats {
     reconnects: u64,
     parse_failures: u64,
     handshakes: u64,
+    // phase 6: primary-node serving/relay
+    blocks_relayed: u64,     // inv announcements sent on tip advance
+    getdata_served: u64,     // block payloads served to peers
+    getheaders_served: u64,  // headers ranges served to peers
+    inbound_accepted: u64,   // inbound peers that completed the handshake
 }
 
 impl Stats {
@@ -767,6 +1019,10 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "reconnects": s.reconnects,
         "parse_failures": s.parse_failures,
         "handshakes": s.handshakes,
+        "blocks_relayed": s.blocks_relayed,
+        "getdata_served": s.getdata_served,
+        "getheaders_served": s.getheaders_served,
+        "inbound_accepted": s.inbound_accepted,
     })
 }
 
@@ -781,6 +1037,38 @@ struct Session {
 impl Session {
     fn connect(addr: &str) -> Result<Session, String> {
         let stream = TcpStream::connect(addr).map_err(|e| format!("connect {}: {}", addr, e))?;
+        stream.set_nodelay(true).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .ok();
+        Ok(Session {
+            stream,
+            dec: tri7_core::p2p::MessageDecoder::new(),
+        })
+    }
+
+    /// Connect via a direct IP target (dotted quad, 5s connect timeout so a
+    /// filtered host cannot stall the rotation) or through the tor SOCKS5
+    /// listener for .onion targets.
+    fn connect_target(target: &PeerTarget) -> Result<Session, String> {
+        let stream = match &target.socks {
+            None => {
+                use std::net::ToSocketAddrs;
+                let addr = (target.host.as_str(), target.port)
+                    .to_socket_addrs()
+                    .map_err(|e| format!("resolve {}: {}", target.endpoint(), e))?
+                    .next()
+                    .ok_or_else(|| format!("resolve {}: no address", target.endpoint()))?;
+                let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+                    .map_err(|e| format!("connect {}: {}", target.endpoint(), e))?;
+                stream
+            }
+            Some((sh, sp)) => {
+                let stream = socks5_connect(sh, *sp, &target.host, target.port)?;
+                stream
+            }
+        };
         stream.set_nodelay(true).ok();
         stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
         stream
@@ -830,27 +1118,133 @@ struct PeerInfo {
     services: u64,
 }
 
+// ---------------------------------------------------------------------------
+// SOCKS5 (tor) client — minimal RFC 1928, METHOD none, ATYP domain/ipv4.
+// Used to reach .onion peers through the local tor listener (127.0.0.1:9050).
+// ---------------------------------------------------------------------------
+
+fn socks5_greeting() -> Vec<u8> {
+    vec![0x05, 0x01, 0x00] // VER 5, 1 method, NO-AUTH
+}
+
+fn socks5_connect_request(host: &str, port: u16) -> Vec<u8> {
+    let mut w = Vec::new();
+    w.push(0x05); // VER
+    w.push(0x01); // CMD CONNECT
+    w.push(0x00); // RSV
+    let octets: Option<Vec<u8>> = host
+        .split('.')
+        .map(|o| o.parse::<u8>())
+        .collect::<Result<Vec<u8>, std::num::ParseIntError>>()
+        .ok()
+        .filter(|v| v.len() == 4);
+    match octets {
+        Some(o) => {
+            w.push(0x01); // ATYP IPv4
+            w.extend_from_slice(&o);
+        }
+        None => {
+            w.push(0x03); // ATYP domain (onion)
+            w.push(host.len() as u8);
+            w.extend_from_slice(host.as_bytes());
+        }
+    }
+    w.extend_from_slice(&port.to_be_bytes());
+    w
+}
+
+/// Drain the ATYP-dependent bound-address tail of a SOCKS5 reply.
+fn socks5_consume_reply(atyp: u8, r: &mut impl Read) -> Result<(), String> {
+    fn drain(r: &mut impl Read, n: usize) -> Result<(), String> {
+        let mut buf = vec![0u8; n];
+        r.read_exact(&mut buf)
+            .map_err(|e| format!("socks reply: {}", e))
+    }
+    match atyp {
+        0x01 => drain(r, 4 + 2),
+        0x03 => {
+            let mut ln = [0u8; 1];
+            r.read_exact(&mut ln)
+                .map_err(|e| format!("socks reply: {}", e))?;
+            drain(r, ln[0] as usize + 2)
+        }
+        0x04 => drain(r, 16 + 2),
+        other => Err(format!("socks reply: unknown ATYP {:#x}", other)),
+    }
+}
+
+fn socks5_connect(
+    socks_host: &str,
+    socks_port: u16,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let mut s = TcpStream::connect(
+        (socks_host, socks_port)
+            .to_socket_addrs()
+            .map_err(|e| format!("resolve socks {}: {}", socks_host, e))?
+            .next()
+            .ok_or_else(|| format!("resolve socks {}: no address", socks_host))?,
+    )
+    .map_err(|e| format!("connect socks {}: {}", socks_host, e))?;
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    s.set_write_timeout(Some(Duration::from_secs(10))).ok();
+    s.write_all(&socks5_greeting())
+        .map_err(|e| format!("socks greeting: {}", e))?;
+    let mut reply = [0u8; 2];
+    s.read_exact(&mut reply)
+        .map_err(|e| format!("socks greeting reply: {}", e))?;
+    if reply[0] != 0x05 {
+        return Err(format!("socks greeting: bad version {:#x}", reply[0]));
+    }
+    if reply[1] != 0x00 {
+        return Err(format!("socks proxy refused auth (method {:#x})", reply[1]));
+    }
+    s.write_all(&socks5_connect_request(host, port))
+        .map_err(|e| format!("socks connect req: {}", e))?;
+    let mut hdr = [0u8; 4];
+    s.read_exact(&mut hdr)
+        .map_err(|e| format!("socks connect reply: {}", e))?;
+    if hdr[0] != 0x05 {
+        return Err(format!("socks connect: bad version {:#x}", hdr[0]));
+    }
+    if hdr[1] != 0x00 {
+        return Err(format!(
+            "socks connect to {}:{} failed: SOCKS reply code {} (0=ok, 1=general, \
+             4=host unreachable, 5=refused)",
+            host, port, hdr[1]
+        ));
+    }
+    let mut rest = s.try_clone().map_err(|e| format!("socks clone: {}", e))?;
+    socks5_consume_reply(hdr[3], &mut rest)?;
+    Ok(s)
+}
+
 fn handshake(
     sess: &mut Session,
     stats: &mut Stats,
     our_height: u64,
-    daemon: &str,
+    target: &PeerTarget,
 ) -> Result<PeerInfo, String> {
-    let (ip, port) = daemon
-        .rsplit_once(':')
-        .ok_or("daemon addr must be IP:PORT")?;
-    let octets: Vec<u8> = ip
-        .split('.')
-        .map(|o| o.parse::<u8>().map_err(|_| "daemon IP must be dotted quad"))
-        .collect::<Result<_, _>>()?;
-    let addr_you = tri7_core::p2p::WireAddr::ipv4(
-        octets[0],
-        octets[1],
-        octets[2],
-        octets[3],
-        port.parse().map_err(|_| "bad daemon port")?,
-        tri7_core::p2p::NODE_NETWORK,
-    );
+    // addr_you: the target's address for direct IP peers; a placeholder
+    // (127.0.0.1 + the target port) for .onion peers — the wire form needs 4
+    // bytes and the legacy daemon treats the version address as informational
+    // (phase 2 evidence: loopback peers announced them=127.0.0.1:<port>).
+    let quad: Option<[u8; 4]> = if target.host.ends_with(".onion") {
+        None
+    } else {
+        target
+            .host
+            .split('.')
+            .map(|o| o.parse::<u8>())
+            .collect::<Result<Vec<u8>, std::num::ParseIntError>>()
+            .ok()
+            .and_then(|v| <[u8; 4]>::try_from(v).ok())
+    };
+    let q = quad.unwrap_or([127, 0, 0, 1]);
+    let (a, b, c, d) = (q[0], q[1], q[2], q[3]);
+    let addr_you = tri7_core::p2p::WireAddr::ipv4(a, b, c, d, target.port, tri7_core::p2p::NODE_NETWORK);
     let addr_me = tri7_core::p2p::WireAddr::ipv4(
         127,
         0,
@@ -1290,24 +1684,39 @@ fn advance_with_block(
         .ok_or("empty checksum chain in advance")?;
     let cs = stake_modifier_checksum(Some(prev_cs), flags, &outcome.proof, modifier);
 
+    // Checksum cross-check: meaningful only when an EXTERNAL index already
+    // holds this block (pre-cutover: the legacy daemon's independently
+    // persisted checksums). For a block tri7d itself is accepting (our own
+    // mint push, or a peer push of a block above the disk store's tip) there
+    // is no external oracle — our locally computed cs IS the canonical value,
+    // so the lookup is skipped instead of self-comparing. The store/recent
+    // lookup also must not BLOCK here: this runs while the follow loop holds
+    // the state + recent-cache locks across validation, and the RPC thread
+    // answering getblock would deadlock on either of them (mirror handles
+    // tip; recency uses try_lock and returns not-found under contention).
     let info = rpc.call(
         "getblock",
         serde_json::json!([tri7_core::p2p::internal_to_display(&hash)]),
-    )?;
-    let daemon_cs = u32::from_str_radix(
-        info["modifierchecksum"]
-            .as_str()
-            .ok_or("no modifierchecksum")?,
-        16,
-    )
-    .map_err(|e| e.to_string())?;
-    if daemon_cs != cs {
-        return Err(format!(
-            "h{}: stake-modifier checksum divergence: computed {:08x} daemon {:08x}",
-            h, cs, daemon_cs
-        ));
+    );
+    match info.as_ref().ok().and_then(|i| i["modifierchecksum"].as_str()) {
+        Some(cs_hex) => {
+            let daemon_cs = u32::from_str_radix(cs_hex, 16)
+                .map_err(|e| format!("h{}: bad modifierchecksum: {}", h, e))?;
+            if daemon_cs != cs {
+                return Err(format!(
+                    "h{}: stake-modifier checksum divergence: computed {:08x} daemon {:08x}",
+                    h, cs, daemon_cs
+                ));
+            }
+            stats.checksums_verified += 1;
+        }
+        None => {
+            log(&format!(
+                "h{}: no external checksum oracle for this block — adopting locally computed {:08x}",
+                h, cs
+            ));
+        }
     }
-    stats.checksums_verified += 1;
 
     // apply to the window (relative heights), advance the tip
     st.utxo.apply_block(block, st.rel(h));
@@ -1420,6 +1829,10 @@ fn load_state(cfg: &Config) -> Result<ChainState, String> {
         // "" (pre-5a file) stays "" until the first real advance bumps it —
         // honest: no advance observed since this state was created
         last_advance_utc: f.last_advance_utc,
+        // inherit the persisted network-liveness clock: a fresh process with
+        // no traffic yet ages the health gate from the last KNOWN traffic
+        peers_connected: f.peers.unwrap_or(0),
+        last_peer_utc: f.last_peer_utc,
     })
 }
 
@@ -1657,6 +2070,8 @@ fn seed_from_network(
         tip_hash: expect_hashes[expect_hashes.len() - 1],
         daemon_tip: Some(daemon_tip),
         last_advance_utc: now_iso(), // seeding anchored/advanced the tip
+        peers_connected: 0,
+        last_peer_utc: None, // seeded: the peer handshake predates this state
     };
     let file = st.to_file();
     Ok((st, file))
@@ -1837,8 +2252,78 @@ fn run_backfill(
 // ---------------------------------------------------------------------------
 // live message dispatch
 // ---------------------------------------------------------------------------
+/// Inverse of build_getheaders: stream-version i32 + CompactSize locator
+/// count + hashes + 32-byte hashStop (main.cpp:5305-5307).
+fn parse_getheaders(payload: &[u8]) -> Result<(Vec<Hash>, Hash), String> {
+    let mut r = Reader::new(payload);
+    let _stream_version = r.i32le()?;
+    let n = r.compact_size()? as usize;
+    if n > 512 {
+        return Err(format!("getheaders locator count {} > 512", n));
+    }
+    let mut locator = Vec::with_capacity(n.min(64));
+    for _ in 0..n {
+        locator.push(r.hash32()?);
+    }
+    let stop = r.hash32()?;
+    r.expect_done()?;
+    Ok((locator, stop))
+}
+
+/// Resolve the deepest locator hit against the disk store then the recent
+/// cache, and collect the header range [start+1 .. start+1+2000) stopping at
+/// `stop` (non-zero) or the first missing height. Mirrors main.cpp's
+/// getheaders serving (nLimit 2000, headers only).
+fn collect_headers(
+    store: &Arc<BlockStore>,
+    recent: &RecentBlocks,
+    locator: &[Hash],
+    stop: &Hash,
+) -> Vec<Block> {
+    // deepest known height among the locator hashes
+    let mut start_h: Option<u64> = None;
+    for h in locator {
+        let hit = store.block_by_hash(h).ok().flatten();
+        let height = match hit {
+            Some(hit) => hit.height,
+            None => match recent.get(h) {
+                Some((hgt, _)) if *hgt > 0 => Some(*hgt),
+                _ => None,
+            },
+        };
+        if let Some(hgt) = height {
+            // locator[0] is the most recent — the first match is the deepest
+            start_h = Some(hgt);
+            break;
+        }
+    }
+    let Some(mut h) = start_h else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    while out.len() < 2000 {
+        h += 1;
+        let next = match store.block_by_height(h) {
+            Ok(Some(hit)) => hit.block,
+            _ => match recent.at_height(h) {
+                Some((_, raw)) => match Block::read(&mut Reader::new(raw)) {
+                    Ok(b) => b,
+                    Err(_) => break,
+                },
+                None => break,
+            },
+        };
+        let stop_hit = *stop != [0u8; 32] && next.hash() == *stop;
+        out.push(next);
+        if stop_hit {
+            break;
+        }
+    }
+    out
+}
+
 fn handle_message(
-    sess: &mut Session,
+    peer: &mut Peer,
     st: &mut ChainState,
     rpc: &Rpc,
     stats: &mut Stats,
@@ -1846,6 +2331,8 @@ fn handle_message(
     msg: tri7_core::p2p::RawMessage,
     outstanding: &mut HashMap<Hash, u64>,
     pending_from_headers: &mut VecDeque<(Hash, u64)>,
+    store: &Arc<BlockStore>,
+    recent: &mut RecentBlocks,
 ) -> Result<(), String> {
     match msg.command.as_str() {
         "version" => {
@@ -1859,7 +2346,8 @@ fn handle_message(
         "verack" => Ok(()),
         "ping" => {
             let n = tri7_core::p2p::parse_ping(&msg.payload)?;
-            sess.send("pong", &tri7_core::p2p::build_pong(n), stats)?;
+            peer.sess
+                .send("pong", &tri7_core::p2p::build_pong(n), stats)?;
             Ok(())
         }
         "pong" => Ok(()),
@@ -1880,7 +2368,7 @@ fn handle_message(
                         "headers announcement does not chain to our tip — requesting reconciliation"
                     ));
                     let stop = [0u8; 32];
-                    sess.send(
+                    peer.sess.send(
                         "getheaders",
                         &tri7_core::p2p::build_getheaders(&[st.tip_hash], &stop),
                         stats,
@@ -1900,13 +2388,13 @@ fn handle_message(
                 if t != tri7_core::p2p::MSG_BLOCK {
                     continue;
                 }
-                if st.entry_by_hash(&hash).is_none() {
+                if st.entry_by_hash(&hash).is_none() && recent.get(&hash).is_none() {
                     unknown += 1;
                 }
             }
             if unknown > 0 {
                 let stop = [0u8; 32];
-                sess.send(
+                peer.sess.send(
                     "getheaders",
                     &tri7_core::p2p::build_getheaders(&[st.tip_hash], &stop),
                     stats,
@@ -1923,6 +2411,10 @@ fn handle_message(
             let hash = b.hash();
             let links_tip = b.prev_hash == st.tip_hash;
             let height_abs = if links_tip { st.tip_height + 1 } else { 0 };
+            // cache the raw bytes BEFORE validation: a valid block must be
+            // servable to peers immediately (relay getdata), and the RPC
+            // surface must serve heights above the disk store's tip
+            recent.insert(hash, height_abs, &msg.payload);
             if height_abs > 0 {
                 let prev_entry = st.entries.last().cloned().unwrap();
                 let header = st.pending_headers.remove(&hash);
@@ -1944,14 +2436,15 @@ fn handle_message(
                 let file = st.to_file();
                 write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
                 log(&format!(
-                    "TIP ADVANCE → h{} {} (kernel {})",
+                    "TIP ADVANCE → h{} {} (kernel {}) via {}",
                     st.tip_height,
                     tri7_core::p2p::internal_to_display(&st.tip_hash),
                     if paths.kernel_enforced {
                         "enforced"
                     } else {
                         "seeded"
-                    }
+                    },
+                    peer.label
                 ));
             } else if outstanding.contains_key(&hash) {
                 // requested block that no longer extends the tip — skip
@@ -1965,8 +2458,38 @@ fn handle_message(
             }
             Ok(())
         }
-        // read-only: never serve anything
-        "getdata" | "getheaders" | "getblocks" | "getaddr" | "mempool" | "getwalletaddr"
+        // serving: peers may pull stored blocks and header ranges from us
+        "getdata" => {
+            let inv = tri7_core::p2p::parse_inv(&msg.payload)?;
+            for (t, hash) in inv {
+                if t != tri7_core::p2p::MSG_BLOCK {
+                    continue; // never serve transactions or filtered variants
+                }
+                let payload: Option<Vec<u8>> = match recent.get(&hash) {
+                    Some((_, raw)) => Some(raw.clone()),
+                    None => match store.block_by_hash(&hash) {
+                        Ok(Some(hit)) => Some(hit.block.serialize()),
+                        _ => None,
+                    },
+                };
+                if let Some(raw) = payload {
+                    stats.getdata_served += 1;
+                    peer.sess.send("block", &raw, stats)?;
+                }
+            }
+            Ok(())
+        }
+        "getheaders" => {
+            let (locator, stop) = parse_getheaders(&msg.payload)?;
+            let headers = collect_headers(store, recent, &locator, &stop);
+            stats.getheaders_served += 1;
+            peer.sess
+                .send("headers", &tri7_core::p2p::encode_headers(&headers), stats)?;
+            Ok(())
+        }
+        // read-only inbound noise: announce preferences and compact-block
+        // negotiation carry no data we act on
+        "getblocks" | "getaddr" | "mempool" | "getwalletaddr"
         | "getsnap" | "getsnapchunk" | "tx" | "addr" | "walletaddr" | "seeder"
         | "getseederlist" | "seederlist" | "cmpctblock" | "sendcmpct" | "sendheaders" => Ok(()),
         other => {
@@ -1997,11 +2520,41 @@ fn handle_message(
 /// RPC threads take short locks per call.
 type SharedState = Arc<Mutex<ChainState>>;
 
+/// Lock-free tip snapshot. The follow loop may hold the state mutex for a
+/// LONG stretch (a validation batch that calls our own RPC — post-cutover the
+/// "daemon" RPC is tri7d itself, so a lock held across rpc.call would
+/// otherwise deadlock the RPC thread). RPC threads therefore try_lock and
+/// fall back to this mirror (a stale-but-consistent tip) instead of blocking.
+struct TipMirror {
+    height: AtomicU64,
+    hash: std::sync::RwLock<String>,
+}
+
+impl TipMirror {
+    fn new(height: u64, hash_display: &str) -> Arc<TipMirror> {
+        Arc::new(TipMirror {
+            height: AtomicU64::new(height),
+            hash: std::sync::RwLock::new(hash_display.to_string()),
+        })
+    }
+    fn set(&self, height: u64, hash_display: &str) {
+        self.height.store(height, Ordering::Relaxed);
+        *self.hash.write().unwrap() = hash_display.to_string();
+    }
+    fn height(&self) -> u64 {
+        self.height.load(Ordering::Relaxed)
+    }
+    fn hash_display(&self) -> String {
+        self.hash.read().unwrap().clone()
+    }
+}
+
 struct LiveTip {
     st: SharedState,
     started: Instant,
     last_write: Arc<Mutex<Instant>>,
     peers: Arc<AtomicU32>,
+    mirror: Arc<TipMirror>,
 }
 
 /// Window entry → the rpc::EntryView shape (shared by both adapters).
@@ -2023,31 +2576,45 @@ fn entry_view(st: &ChainState, h: u64) -> Option<EntryView> {
 
 impl TipProvider for LiveTip {
     fn tip(&self) -> TipView {
-        let g = self.st.lock().unwrap();
+        // try_lock first: while the follow loop holds the state mutex across
+        // a validation batch (which itself calls our own RPC), serve the
+        // mirror instead of deadlocking the RPC thread
+        if let Ok(g) = self.st.try_lock() {
+            return TipView {
+                height: g.tip_height,
+                blockhash: tri7_core::p2p::internal_to_display(&g.tip_hash),
+                daemon_tip: g.daemon_tip,
+            };
+        }
         TipView {
-            height: g.tip_height,
-            blockhash: tri7_core::p2p::internal_to_display(&g.tip_hash),
-            daemon_tip: g.daemon_tip,
+            height: self.mirror.height(),
+            blockhash: self.mirror.hash_display(),
+            daemon_tip: Some(self.mirror.height() as i64),
         }
     }
 
     fn window(&self) -> (u64, usize) {
-        let g = self.st.lock().unwrap();
-        (g.base, g.entries.len())
+        match self.st.try_lock() {
+            Ok(g) => (g.base, g.entries.len()),
+            Err(_) => {
+                let base = self.mirror.height().saturating_sub(4599);
+                (base, 4600)
+            }
+        }
     }
 
     fn entry_at(&self, h: u64) -> Option<EntryView> {
-        let g = self.st.lock().unwrap();
+        let g = self.st.try_lock().ok()?;
         entry_view(&g, h)
     }
 
     fn last_bits(&self) -> Option<u32> {
-        let g = self.st.lock().unwrap();
+        let g = self.st.try_lock().ok()?;
         g.entries.last().map(|e| e.bits)
     }
 
     fn next_target_bits(&self, pos: bool) -> Option<u32> {
-        let g = self.st.lock().unwrap();
+        let g = self.st.try_lock().ok()?;
         get_next_target_required(&g.rel_index(), pos).into() // Option<u32>
     }
 
@@ -2069,16 +2636,41 @@ impl TipProvider for LiveTip {
 struct StoreAdapter {
     store: Arc<BlockStore>,
     tip: SharedState,
+    mirror: Arc<TipMirror>,
+    /// blocks accepted since process start — covers heights ABOVE the disk
+    /// store's tip (the blocks file stopped growing when legacy retired)
+    recent: Arc<Mutex<RecentBlocks>>,
+}
+
+/// Tip height without blocking on the state mutex (mirror fallback).
+fn tip_height_nonblocking(tip: &SharedState, mirror: &TipMirror) -> u64 {
+    match tip.try_lock() {
+        Ok(g) => g.tip_height,
+        Err(_) => mirror.height(),
+    }
+}
+
+fn recent_block_hit(hash: Hash, height: u64, raw: &[u8]) -> Option<tri7_core::blockindex::BlockHit> {
+    let mut r = Reader::new(raw);
+    let block = Block::read(&mut r).ok()?;
+    r.expect_done().ok()?;
+    Some(tri7_core::blockindex::BlockHit {
+        block,
+        hash,
+        off: 0,
+        body_len: raw.len(),
+        height: if height > 0 { Some(height) } else { None },
+    })
 }
 
 fn format_block_from_store(adapter: &StoreAdapter, hit: tri7_core::blockindex::BlockHit) -> Value {
-    let tip_height = adapter.tip.lock().unwrap().tip_height;
+    let tip_height = tip_height_nonblocking(&adapter.tip, &adapter.mirror);
     let next_hash = match hit.height {
         Some(h) => adapter.store.hash_at_height(h + 1).ok().flatten(),
         None => None,
     };
     let entry = hit.height.and_then(|h| {
-        let g = adapter.tip.lock().unwrap();
+        let g = adapter.tip.try_lock().ok()?;
         entry_view(&g, h)
     });
     rpc::format_block_json(&hit, tip_height, next_hash, entry)
@@ -2117,25 +2709,61 @@ impl BlockDataProvider for StoreAdapter {
     fn block_by_hash(&self, hash_display: &str) -> Result<Option<Value>, String> {
         let hash = tri7_core::p2p::display_to_internal(hash_display)?;
         let hit = self.store.block_by_hash(&hash)?;
-        Ok(hit.map(|h| format_block_from_store(self, h)))
+        if let Some(hit) = hit {
+            return Ok(Some(format_block_from_store(self, hit)));
+        }
+        // try_lock: the follow loop holds the recent-cache lock across a
+        // validation batch that may itself call this RPC — under contention
+        // answer store-only instead of deadlocking
+        let recent_hit = self
+            .recent
+            .try_lock()
+            .ok()
+            .and_then(|mut r| r.get(&hash).cloned())
+            .and_then(|(h, raw)| recent_block_hit(hash, h, &raw));
+        Ok(recent_hit.map(|h| format_block_from_store(self, h)))
     }
 
     fn block_by_height(&self, h: u64) -> Result<Option<Value>, String> {
         let hit = self.store.block_by_height(h)?;
-        Ok(hit.map(|b| format_block_from_store(self, b)))
+        if let Some(hit) = hit {
+            return Ok(Some(format_block_from_store(self, hit)));
+        }
+        let recent_hit = self
+            .recent
+            .try_lock()
+            .ok()
+            .and_then(|mut r| r.at_height(h).cloned())
+            .and_then(|(_, raw)| {
+                let hash = Block::read(&mut Reader::new(&raw))
+                    .map(|b| b.hash())
+                    .ok()?;
+                recent_block_hit(hash, h, &raw)
+            });
+        Ok(recent_hit.map(|h| format_block_from_store(self, h)))
     }
 
     fn tx(&self, txid_display: &str, verbose: bool) -> Result<Option<Value>, String> {
         let txid = tri7_core::p2p::display_to_internal(txid_display)?;
         let hit = self.store.tx_by_id(&txid)?;
         let Some(hit) = hit else { return Ok(None) };
-        let tip_height = self.tip.lock().unwrap().tip_height;
+        let tip_height = tip_height_nonblocking(&self.tip, &self.mirror);
         let (obj, hex) = rpc::format_tx_json(&hit, tip_height);
         Ok(Some(if verbose { obj } else { Value::String(hex) }))
     }
 
     fn hash_at(&self, h: u64) -> Result<Option<String>, String> {
-        self.store.hash_at_height(h)
+        let store_hit = self.store.hash_at_height(h)?;
+        if store_hit.is_some() {
+            return Ok(store_hit);
+        }
+        Ok(self
+            .recent
+            .try_lock()
+            .ok()
+            .and_then(|mut r| r.at_height(h).cloned())
+            .and_then(|(_, raw)| Block::read(&mut Reader::new(&raw)).ok())
+            .map(|b| tri7_core::p2p::internal_to_display(&b.hash())))
     }
 }
 
@@ -2183,14 +2811,63 @@ impl Proxy for LegacyProxyAdapter {
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-/// --status: healthcheck — tip height + advance/write times as JSON.
+/// Phase 6 health gate — pure so the unit tests can drive it.
+///
+/// Returns (exit_code, degraded, reasons). Rules:
+///   - unreadable/unparseable state   → EXIT_VALIDATE (caller handles)
+///   - stale state write (> max_write_age or future mtime) → EXIT_VALIDATE
+///   - degraded: --static NOT set AND no peer traffic for > peer_quiet_secs
+///     AND no tip advance for > advance_quiet_secs → EXIT_VALIDATE. A network
+///     node that can neither reach peers nor follow the chain is NOT healthy
+///     even though its own loop keeps writing state; --static (explicit)
+///     skips the network-quiet gate.
+fn status_gate(
+    static_mode: bool,
+    stale: bool,
+    peer_age_secs: Option<i64>,
+    advance_age_secs: Option<i64>,
+    peer_quiet_secs: u64,
+    advance_quiet_secs: u64,
+) -> (i32, bool, Vec<String>) {
+    let mut reasons: Vec<String> = Vec::new();
+    if stale {
+        reasons.push("state write stale".into());
+    }
+    let peer_quiet = peer_age_secs
+        .map(|a| a > peer_quiet_secs as i64)
+        .unwrap_or(true); // no peer data at all counts as quiet
+    let advance_quiet = advance_age_secs
+        .map(|a| a > advance_quiet_secs as i64)
+        .unwrap_or(true); // never advanced = quiet
+    let degraded = !static_mode && peer_quiet && advance_quiet;
+    if degraded {
+        if peer_quiet {
+            reasons.push(format!(
+                "no peer traffic for {}s (> {}s)",
+                peer_age_secs.unwrap_or(-1),
+                peer_quiet_secs
+            ));
+        }
+        if advance_quiet {
+            reasons.push(format!(
+                "tip not advanced for {}s (> {}s)",
+                advance_age_secs.unwrap_or(-1),
+                advance_quiet_secs
+            ));
+        }
+    }
+    let exit = if stale || degraded {
+        EXIT_VALIDATE
+    } else {
+        0
+    };
+    (exit, degraded, reasons)
+}
+
+/// --status: healthcheck — tip height + advance/write/peer times as JSON.
 /// Pure file read: no RPC creds, no P2P session, no conf access.
 /// Exit 0 healthy; 3 (EXIT_VALIDATE) when the state file is unreadable OR
-/// stale (state-write age > --max-write-age). Two distinct clocks:
-///   - last_advance_utc: bumped ONLY on a real tip-height advance (null here
-///     on a static chain or pre-5a state — honest "never advanced")
-///   - updated_utc / state_mtime_utc: bumped by the loop's periodic 30s
-///     writes; staleness of THIS clock is the liveness signal
+/// stale OR degraded (see status_gate).
 fn status_exit(cfg: &Config) -> ! {
     let path = state_path(cfg);
     let read = || -> Result<serde_json::Value, String> {
@@ -2213,7 +2890,22 @@ fn status_exit(cfg: &Config) -> ! {
         } else {
             Some(f.last_advance_utc.clone())
         };
-        Ok(serde_json::json!({
+        let advance_age_secs = last_advance.as_ref().map(|iso| {
+            now_secs() as i64 - iso_secs_from_now(iso).unwrap_or(i64::MAX / 2)
+        });
+        let peer_age_secs = f.last_peer_utc.as_ref().map(|iso| {
+            now_secs() as i64 - iso_secs_from_now(iso).unwrap_or(i64::MAX / 2)
+        });
+        let (exit, degraded, reasons) = status_gate(
+            cfg.static_mode,
+            stale,
+            peer_age_secs,
+            advance_age_secs,
+            cfg.peer_quiet_secs,
+            cfg.advance_quiet_secs,
+        );
+        let at_daemon_tip = f.daemon_tip.map_or(false, |dt| dt >= 0 && f.height == dt as u64);
+        let v = serde_json::json!({
             "height": f.height,
             "blockhash": f.blockhash,
             "updated_utc": f.updated_utc,
@@ -2225,20 +2917,56 @@ fn status_exit(cfg: &Config) -> ! {
             "window_base": f.window_base,
             "window_entries": f.entries.len(),
             "daemon_tip": f.daemon_tip,
-            "at_daemon_tip": f.daemon_tip.map_or(false, |dt| dt >= 0 && f.height == dt as u64),
-        }))
+            "at_daemon_tip": at_daemon_tip,
+            "peers": f.peers,
+            "last_peer_utc": f.last_peer_utc,
+            "listen_port": f.listen_port,
+            "static_mode": cfg.static_mode,
+            "peer_quiet_secs": cfg.peer_quiet_secs,
+            "advance_quiet_secs": cfg.advance_quiet_secs,
+            "seconds_since_peer": peer_age_secs,
+            "seconds_since_advance": advance_age_secs,
+            "degraded": degraded,
+            "degraded_reasons": reasons,
+            "exit_code": exit,
+        });
+        Ok(v)
     };
     match read() {
         Ok(v) => {
-            let stale = v.get("stale").and_then(|s| s.as_bool()).unwrap_or(true);
+            let exit =
+                v.get("exit_code").and_then(|e| e.as_i64()).unwrap_or(EXIT_VALIDATE as i64) as i32;
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
-            std::process::exit(if stale { EXIT_VALIDATE } else { 0 });
+            std::process::exit(exit);
         }
         Err(e) => {
             eprintln!("status: {}: {}", path.display(), e);
             std::process::exit(EXIT_VALIDATE);
         }
     }
+}
+
+/// Parse the ISO UTC timestamps written by now_iso() back to epoch seconds.
+fn iso_secs_from_now(iso: &str) -> Option<i64> {
+    // format: YYYY-MM-DDTHH:MM:SSZ (utc_from_secs writer)
+    let (date, time) = iso.strip_suffix('Z')?.split_once('T')?;
+    let mut dp = date.split('-');
+    let y: i64 = dp.next()?.parse().ok()?;
+    let mo: i64 = dp.next()?.parse().ok()?;
+    let d: i64 = dp.next()?.parse().ok()?;
+    let mut tp = time.split(':');
+    let h: i64 = tp.next()?.parse().ok()?;
+    let mi: i64 = tp.next()?.parse().ok()?;
+    let s: i64 = tp.next()?.parse().ok()?;
+    // days-from-civil (Howard Hinnant's algorithm)
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + s)
 }
 
 fn main() {
@@ -2248,21 +2976,46 @@ fn main() {
     }
     let (user, pass) = read_rpc_creds(&cfg);
     let rpc = tri7_rpc(&cfg, &user, &pass);
+    // 1. multi-target outbound attach (HEADLESS TOLERANT): with a usable
+    // tipstate the follower starts and serves its native RPC surface even
+    // when every target is unreachable — it retries the rotation each poll
+    // tick. Seeding (no state) still requires a live peer.
+    let path = state_path(&cfg);
+    let have_state = path.exists() && !cfg.reseed;
     let mut stats = Stats::default();
-
-    // 1. connect + handshake (the seed itself pulls raw blocks over P2P)
-    let mut sess = connect_and_handshake(&cfg, &mut stats, 0);
+    let mut outbound_start = 0usize;
+    let mut peers: Vec<Peer> = Vec::new();
+    if have_state {
+        match try_connect(&cfg, &mut stats, 0, 0) {
+            Some((p, idx)) => {
+                outbound_start = (idx + 1) % cfg.peers.len();
+                peers.push(p);
+            }
+            None => log(&format!(
+                "no outbound target reachable ({} configured) — starting HEADLESS \
+                 (native RPCs from persisted state)",
+                cfg.peers.len()
+            )),
+        }
+    }
 
     // 2. load or seed chain state
-    let path = state_path(&cfg);
-    let mut st: ChainState = if path.exists() && !cfg.reseed {
+    let mut st: ChainState = if have_state {
         log("loading tipstate.json …");
         load_state(&cfg).unwrap_or_else(|e| die(EXIT_SEED, &format!("load state: {}", e)))
     } else {
         log("no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …");
-        let seeded = seed_from_network(&cfg, &rpc, &mut sess, &mut stats);
+        let seeded = match peers.first_mut() {
+            Some(p) => seed_from_network(&cfg, &rpc, &mut p.sess, &mut stats),
+            None => die(
+                EXIT_SEED,
+                "seeding needs a live peer but all outbound targets are unreachable",
+            ),
+        };
         if let Err(e) = &seeded {
-            sess.shutdown();
+            if let Some(p) = peers.first_mut() {
+                p.sess.shutdown();
+            }
             die(EXIT_SEED, &e);
         }
         let (chain, file) = seeded.unwrap();
@@ -2277,11 +3030,18 @@ fn main() {
         chain
     };
 
-    // report our real height to the daemon: reconnect with the correct
+    // report our real height to the peer: reconnect with the correct
     // start_height so its fNearTip logic treats us as a block peer
-    sess.shutdown();
-    stats.reconnects += 1;
-    sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
+    if let Some(mut p) = peers.pop() {
+        p.sess.shutdown();
+        stats.reconnects += 1;
+    }
+    if let Some((p, idx)) = try_connect(&cfg, &mut stats, st.tip_height, outbound_start) {
+        outbound_start = (idx + 1) % cfg.peers.len();
+        peers.push(p);
+    } else {
+        log("no outbound peer after state load — HEADLESS mode (retrying each poll)");
+    }
 
     let daemon_tip = rpc
         .call("getblockcount", serde_json::json!([]))
@@ -2300,29 +3060,42 @@ fn main() {
 
     // 3. backfill
     if cfg.backfill_headers > 0 {
-        if let Err(e) = run_backfill(&mut sess, &st, &rpc, &mut stats, &cfg) {
-            sess.shutdown();
-            finish(
-                &cfg,
-                &st,
-                &stats,
-                &rpc,
-                EXIT_PROTOCOL,
-                &format!("backfill: {}", e),
-            );
+        if let Some(p) = peers.first_mut() {
+            if let Err(e) = run_backfill(&mut p.sess, &st, &rpc, &mut stats, &cfg) {
+                p.sess.shutdown();
+                finish(
+                    &cfg,
+                    &st,
+                    &stats,
+                    &rpc,
+                    EXIT_PROTOCOL,
+                    &format!("backfill: {}", e),
+                );
+            }
+        } else {
+            log("backfill skipped — no outbound peer (headless mode)");
         }
     }
 
-    // 3.5 phase 5b: shared state + RPC surface + background block-index build.
+    // 3.5 phase 5b/6: shared state + RPC surface + block index + P2P listener.
     // The follow loop keeps exclusive ownership via the mutex; RPC threads take
     // short per-call locks (no lock is held across the 40 ms sleep).
     let st_shared: SharedState = Arc::new(Mutex::new(st));
     let last_write_shared = Arc::new(Mutex::new(Instant::now()));
-    let peers_shared = Arc::new(AtomicU32::new(1)); // follower is connected here
+    let peers_shared = Arc::new(AtomicU32::new(peers.len() as u32));
+    // lock-free tip mirror for the RPC threads (deadlock-free validation path)
+    let tip_mirror = {
+        let stg = st_shared.lock().unwrap();
+        TipMirror::new(
+            stg.tip_height,
+            &tri7_core::p2p::internal_to_display(&stg.tip_hash),
+        )
+    };
     let balances_snap = load_balances_snap(&cfg.balances_path);
     let utxos_snap = load_utxos_snap(&cfg.wallet_utxos_path);
     let blocks_file = resolve_blocks_file(&cfg);
     let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+    let recent_shared: Arc<Mutex<RecentBlocks>> = Arc::new(Mutex::new(RecentBlocks::new()));
     {
         // chain-threading oracle: the daemon-anchored window hashes
         let oracle = {
@@ -2350,6 +3123,7 @@ fn main() {
                 started: Instant::now(),
                 last_write: Arc::clone(&last_write_shared),
                 peers: Arc::clone(&peers_shared),
+                mirror: Arc::clone(&tip_mirror),
             }),
             wallet: Arc::new(SnapshotWallet {
                 balances: balances_snap,
@@ -2358,14 +3132,20 @@ fn main() {
             blocks: Arc::new(StoreAdapter {
                 store: Arc::clone(&store),
                 tip: Arc::clone(&st_shared),
+                mirror: Arc::clone(&tip_mirror),
+                recent: Arc::clone(&recent_shared),
             }),
-            proxy: Some(Arc::new(LegacyProxyAdapter {
-                host: cfg.rpc_host.clone(),
-                port: cfg.rpc_port,
-                user: user.clone(),
-                pass: pass.clone(),
-                timeout: Duration::from_secs(cfg.proxy_timeout_secs),
-            })),
+            proxy: if cfg.no_proxy {
+                None // cutover: legacy daemon retired — proxy-only methods lose service
+            } else {
+                Some(Arc::new(LegacyProxyAdapter {
+                    host: cfg.rpc_host.clone(),
+                    port: cfg.rpc_port,
+                    user: user.clone(),
+                    pass: pass.clone(),
+                    timeout: Duration::from_secs(cfg.proxy_timeout_secs),
+                }))
+            },
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,
                 max_body: cfg.rpc_max_body,
@@ -2384,80 +3164,144 @@ fn main() {
             .expect("spawn rpc thread");
     }
 
-    // 4. live follow loop
+    // 4. inbound P2P listener (phase 6 — tri7d is a primary network peer)
+    let listener: Option<TcpListener> = match cfg.listen_port {
+        Some(port) => {
+            let addr = format!("{}:{}", cfg.listen_bind, port);
+            match TcpListener::bind(&addr) {
+                Ok(l) => {
+                    l.set_nonblocking(true)
+                        .expect("listener nonblocking");
+                    log(&format!("p2p: inbound listener on {} (getdata/getheaders/push-block)", addr));
+                    Some(l)
+                }
+                Err(e) => {
+                    // not fatal: the node still follows + serves RPC, but the
+                    // "primary" role is degraded — say so loudly
+                    log(&format!(
+                        "p2p: CANNOT bind inbound listener {}: {} — no inbound peers this run",
+                        addr, e
+                    ));
+                    None
+                }
+            }
+        }
+        None => {
+            log("p2p: inbound listener disabled (--no-listen)");
+            None
+        }
+    };
+
+    // 5. live follow loop
     let deadline = if cfg.forever {
         None // daemon mode: no deadline, run until signalled (systemd restarts on failure)
     } else {
         Some(Instant::now() + Duration::from_secs(cfg.seconds))
     };
     let mut last_poll = Instant::now() - Duration::from_secs(POLL_SECS);
-    let mut last_traffic = Instant::now();
     let mut poll_parity = false;
     let mut outstanding: HashMap<Hash, u64> = HashMap::new();
     let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
     let mut last_state_write = Instant::now();
+    let mut relayed_tip: Option<Hash> = None;
 
     loop {
         if deadline.map_or(false, |d| Instant::now() >= d) {
             break;
         }
 
-        // poll tick — getheaders with an alternating locator (the daemon
-        // silently drops a consecutive duplicate getheaders request)
+        // poll tick — rotation retry + getheaders with an alternating locator
+        // (the legacy daemon silently drops a consecutive duplicate getheaders)
         if last_poll.elapsed() >= Duration::from_secs(POLL_SECS) {
-            let mut st = st_shared.lock().unwrap();
-            poll_parity = !poll_parity;
-            let locator: Vec<Hash> = if poll_parity {
-                vec![st.tip_hash]
-            } else {
-                let prev_hash = st
-                    .entry_abs(st.tip_height - 1)
-                    .map(|e| e.hash)
-                    .unwrap_or(st.tip_hash);
-                vec![prev_hash, st.tip_hash]
-            };
-            let stop = [0u8; 32];
-            if let Err(e) = sess.send(
-                "getheaders",
-                &tri7_core::p2p::build_getheaders(&locator, &stop),
-                &mut stats,
-            ) {
-                log(&format!("send getheaders failed: {} — reconnecting", e));
-                sess.shutdown();
-                stats.reconnects += 1;
-                peers_shared.store(0, Ordering::Relaxed);
-                sess = connect_and_handshake(&cfg, &mut stats, st.tip_height);
-                peers_shared.store(1, Ordering::Relaxed);
-                last_poll = Instant::now();
-                continue;
+            // poll tick body: rotate attach, poll outbound peers, refresh
+            // the persisted daemon_tip (tri7d's OWN native getblockcount —
+            // a live value proves the RPC surface answers; -1 = not yet)
+            let height_for_attach = st_shared.lock().unwrap().tip_height;
+            if let Some(dt) = rpc
+                .call("getblockcount", serde_json::json!([]))
+                .ok()
+                .and_then(|v| v.as_i64())
+            {
+                st_shared.lock().unwrap().daemon_tip = Some(dt);
             }
-            stats.polls += 1;
-            // refresh the observed daemon tip each poll so persisted state
-            // carries it (--status reads it back with no network access)
-            if let Ok(v) = rpc.call("getblockcount", serde_json::json!([])) {
-                if let Some(dt) = v.as_i64() {
-                    if dt >= 0 {
-                        st.daemon_tip = Some(dt);
+            let have_outbound = peers.iter().any(|p| p.outbound);
+            if !have_outbound {
+                // headless/peerless: retry the outbound rotation each tick
+                if let Some((p, idx)) = try_connect(&cfg, &mut stats, height_for_attach, outbound_start) {
+                    log(&format!("outbound re-attached: {}", p.label));
+                    outbound_start = (idx + 1) % cfg.peers.len();
+                    peers.push(p);
+                    st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
+                }
+            }
+            if peers.iter().any(|p| p.outbound) {
+                {
+                    let mut stg = st_shared.lock().unwrap();
+                    poll_parity = !poll_parity;
+                    let locator: Vec<Hash> = if poll_parity {
+                        vec![stg.tip_hash]
+                    } else {
+                        let prev_hash = stg
+                            .entry_abs(stg.tip_height - 1)
+                            .map(|e| e.hash)
+                            .unwrap_or(stg.tip_hash);
+                        vec![prev_hash, stg.tip_hash]
+                    };
+                    let stop = [0u8; 32];
+                    let body = tri7_core::p2p::build_getheaders(&locator, &stop);
+                    for p in peers.iter_mut().filter(|p| p.outbound) {
+                        if let Err(e) = p.sess.send("getheaders", &body, &mut stats) {
+                            log(&format!(
+                                "send getheaders to {} failed: {} — dropping",
+                                p.label, e
+                            ));
+                            p.dead = true;
+                            p.sess.shutdown();
+                            break;
+                        }
+                        stats.polls += 1;
                     }
                 }
             }
-            log(&format!(
-                "poll #{}: tip h{} · rx={} msgs tx={} msgs · blocks {}/{} received+{} hist validated · kernels {}/{} enforced/seeded",
-                stats.polls,
-                st.tip_height,
-                stats.total_recv(),
-                stats.total_sent(),
-                stats.blocks_validated_live,
-                stats.blocks_received,
-                stats.blocks_validated_hist,
-                stats.kernel_enforced,
-                stats.kernel_seeded
-            ));
             last_poll = Instant::now();
         }
 
-        // request queued block announcements
-        if !pending_from_headers.is_empty() && outstanding.len() < MAX_OUTSTANDING_GETDATA {
+        // accept inbound peers (nonblocking; handshake is bounded)
+        if let Some(l) = listener.as_ref() {
+            loop {
+                match l.accept() {
+                    Ok((stream, sa)) => {
+                        let height = st_shared.lock().unwrap().tip_height;
+                        let port = cfg.listen_port.unwrap_or(0);
+                        match accept_handshake(stream, sa, &mut stats, height, port) {
+                            Ok(p) => {
+                                stats.inbound_accepted += 1;
+                                log(&format!("inbound peer connected: {}", p.label));
+                                peers.push(p);
+                                st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
+                                peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log(&format!("inbound handshake {} failed: {}", sa, e));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+                // bound the accepts per tick so a flood cannot starve the loop
+                if peers.len() > 32 {
+                    break;
+                }
+            }
+            peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+        }
+
+        // request queued block announcements from the FIRST outbound peer
+        if peers.iter().any(|p| p.outbound)
+            && !pending_from_headers.is_empty()
+            && outstanding.len() < MAX_OUTSTANDING_GETDATA
+        {
             let mut batch: Vec<(u32, Hash)> = Vec::new();
             while batch.len() < GETDATA_BATCH {
                 match pending_from_headers.pop_front() {
@@ -2471,101 +3315,155 @@ fn main() {
                 }
             }
             if !batch.is_empty() {
-                if let Err(e) = sess.send(
-                    "getdata",
-                    &tri7_core::p2p::build_getdata(&batch),
-                    &mut stats,
-                ) {
-                    log(&format!("send getdata failed: {} — reconnecting", e));
-                    sess.shutdown();
-                    stats.reconnects += 1;
-                    peers_shared.store(0, Ordering::Relaxed);
-                    let height = st_shared.lock().unwrap().tip_height;
-                    sess = connect_and_handshake(&cfg, &mut stats, height);
-                    peers_shared.store(1, Ordering::Relaxed);
-                    continue;
+                let body = tri7_core::p2p::build_getdata(&batch);
+                if let Some(p) = peers.iter_mut().find(|p| p.outbound) {
+                    if let Err(e) = p.sess.send("getdata", &body, &mut stats) {
+                        log(&format!("send getdata to {} failed: {} — dropping", p.label, e));
+                        p.dead = true;
+                        p.sess.shutdown();
+                    }
                 }
+                peers.retain(|p| p.sess_ok());
             }
         }
 
-        // pump inbound
-        let mut msgs = match sess.pump() {
-            Ok(m) => m,
-            Err(e) => {
-                log(&format!("protocol failure: {} — clean disconnect", e));
-                sess.shutdown();
-                stats.parse_failures += 1;
-                if stats.parse_failures >= 3 {
-                    let st = st_shared.lock().unwrap();
-                    finish(
-                        &cfg,
-                        &st,
-                        &stats,
-                        &rpc,
-                        EXIT_PROTOCOL,
-                        "repeated protocol failures",
-                    );
+        // pump + dispatch every peer's inbound messages
+        let tip_before = st_shared.lock().unwrap().tip_height;
+        let mut validation_failed: Option<String> = None;
+        for pi in 0..peers.len() {
+            // messages buffered during the inbound handshake replay first
+            let mut msgs: Vec<tri7_core::p2p::RawMessage> =
+                peers[pi].buffered.drain(..).collect();
+            match peers[pi].sess.pump() {
+                Ok(m) => msgs.extend(m),
+                Err(e) => {
+                    log(&format!(
+                        "protocol failure from {}: {} — dropping",
+                        peers[pi].label, e
+                    ));
+                    peers[pi].dead = true;
+                    peers[pi].sess.shutdown();
+                    stats.parse_failures += 1;
                 }
-                stats.reconnects += 1;
-                peers_shared.store(0, Ordering::Relaxed);
-                let height = st_shared.lock().unwrap().tip_height;
-                sess = connect_and_handshake(&cfg, &mut stats, height);
-                peers_shared.store(1, Ordering::Relaxed);
-                last_traffic = Instant::now();
+            }
+            if msgs.is_empty() {
                 continue;
             }
-        };
-        if msgs.is_empty() {
-            // keep polling cadence tight without busy-spinning
-        } else {
-            last_traffic = Instant::now();
-        }
-
-        let mut fatal: Option<String> = None;
-        {
-            let mut st = st_shared.lock().unwrap();
-            for msg in msgs.drain(..) {
-                stats.note_recv(&msg.command);
-                let res = handle_message(
-                    &mut sess,
-                    &mut st,
-                    &rpc,
-                    &mut stats,
-                    &cfg,
-                    msg,
-                    &mut outstanding,
-                    &mut pending_from_headers,
-                );
-                if let Err(e) = res {
-                    fatal = Some(e);
-                    break;
+            peers[pi].last_traffic = Instant::now();
+            let mut fatal: Option<String> = None;
+            {
+                let mut stg = st_shared.lock().unwrap();
+                stg.last_peer_utc = Some(now_iso());
+                let mut msgs = msgs;
+                for msg in msgs.drain(..) {
+                    stats.note_recv(&msg.command);
+                    let res = handle_message(
+                        &mut peers[pi],
+                        &mut stg,
+                        &rpc,
+                        &mut stats,
+                        &cfg,
+                        msg,
+                        &mut outstanding,
+                        &mut pending_from_headers,
+                        &store,
+                        &mut recent_shared.lock().unwrap(),
+                    );
+                    if let Err(e) = res {
+                        fatal = Some(e);
+                        break;
+                    }
                 }
             }
+            if let Some(e) = fatal {
+                if peers[pi].outbound {
+                    // outbound targets are the trusted tip sources — a
+                    // validation failure there is fatal for the process
+                    // (phase-2 fork-safety stance, unchanged)
+                    log(&format!(
+                        "validation failure from {}: {} — clean disconnect",
+                        peers[pi].label, e
+                    ));
+                    peers[pi].dead = true;
+                    peers[pi].sess.shutdown();
+                    validation_failed = Some(e);
+                    break;
+                }
+                // inbound peers are untrusted: a malformed/invalid message
+                // drops THE PEER, not the node (Misbehaving-style eviction;
+                // a rejected pushed block simply never enters our chain)
+                log(&format!(
+                    "validation failure from {}: {} — dropping inbound peer",
+                    peers[pi].label, e
+                ));
+                peers[pi].dead = true;
+                peers[pi].sess.shutdown();
+            }
         }
-        if let Some(e) = fatal {
-            log(&format!("validation failure: {} — clean disconnect", e));
-            sess.shutdown();
+        peers.retain(|p| p.sess_ok());
+        peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+        if let Some(e) = validation_failed {
             let st = st_shared.lock().unwrap();
             finish(&cfg, &st, &stats, &rpc, EXIT_VALIDATE, &e);
         }
 
-        if last_traffic.elapsed() >= Duration::from_secs(STALE_LINK_SECS) {
-            log("no traffic for 90 s — clean reconnect");
-            sess.shutdown();
-            stats.reconnects += 1;
-            peers_shared.store(0, Ordering::Relaxed);
-            let height = st_shared.lock().unwrap().tip_height;
-            sess = connect_and_handshake(&cfg, &mut stats, height);
-            peers_shared.store(1, Ordering::Relaxed);
-            last_traffic = Instant::now();
+        // relay: a validated block (pushed by a peer, another node, or our own
+        // stake mint) is announced to every peer via inv → they getdata it
+        let (tip_now, tip_hash_now) = {
+            let stg = st_shared.lock().unwrap();
+            (stg.tip_height, stg.tip_hash)
+        };
+        // keep the RPC mirror in sync (lock-free reads during validation)
+        tip_mirror.set(
+            tip_now,
+            &tri7_core::p2p::internal_to_display(&tip_hash_now),
+        );
+        if tip_now > tip_before {
+            let announced = relayed_tip.map_or(false, |h| h == tip_hash_now);
+            if !announced {
+                let body = tri7_core::p2p::build_inv(&[(tri7_core::p2p::MSG_BLOCK, tip_hash_now)]);
+                let mut sent = 0usize;
+                for p in peers.iter_mut() {
+                    if p.sess.send("inv", &body, &mut stats).is_ok() {
+                        sent += 1;
+                    }
+                }
+                relayed_tip = Some(tip_hash_now);
+                stats.blocks_relayed += sent as u64;
+                log(&format!(
+                    "relay: announced h{} to {} peer(s) (inv)",
+                    tip_now, sent
+                ));
+            }
         }
 
-        // persist tip state periodically
+        // drop silent peers (90s without any inbound traffic)
+        let stale_cut = Duration::from_secs(STALE_LINK_SECS);
+        let dropped: Vec<String> = peers
+            .iter()
+            .filter(|p| p.last_traffic.elapsed() >= stale_cut)
+            .map(|p| p.label.clone())
+            .collect();
+        if !dropped.is_empty() {
+            for p in peers.iter_mut() {
+                if p.last_traffic.elapsed() >= stale_cut {
+                    log(&format!("no traffic for {}s — dropping {}", STALE_LINK_SECS, p.label));
+                    p.dead = true;
+                    p.sess.shutdown();
+                }
+            }
+            peers.retain(|p| p.sess_ok());
+            peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+        }
+
+        // persist tip state periodically (network-liveness lives IN the state)
         if last_state_write.elapsed() >= Duration::from_secs(30) {
-            let file = {
-                let st = st_shared.lock().unwrap();
-                st.to_file()
+            let mut file = {
+                let mut stg = st_shared.lock().unwrap();
+                stg.peers_connected = peers.len() as u32;
+                stg.to_file()
             };
+            file.listen_port = cfg.listen_port;
             write_state_atomic(&cfg, &file)
                 .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
             *last_write_shared.lock().unwrap() = Instant::now();
@@ -2575,15 +3473,29 @@ fn main() {
         std::thread::sleep(Duration::from_millis(40));
     }
 
-    sess.shutdown();
-    let file = {
-        let st = st_shared.lock().unwrap();
-        st.to_file()
+    for p in peers.iter_mut() {
+        p.sess.shutdown();
+    }
+    let mut file = {
+        let mut stg = st_shared.lock().unwrap();
+        // peers=0 (all streams just closed) but KEEP last_peer_utc: the gate
+        // must age from the last KNOWN traffic, not report "no data"
+        stg.peers_connected = 0;
+        stg.to_file()
     };
+    file.listen_port = cfg.listen_port;
     write_state_atomic(&cfg, &file)
         .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
     let st = st_shared.lock().unwrap();
     finish(&cfg, &st, &stats, &rpc, 0, "run complete");
+}
+
+impl Peer {
+    /// Eviction check: retain() drops peers flagged dead (their streams are
+    /// already shut down).
+    fn sess_ok(&self) -> bool {
+        !self.dead
+    }
 }
 
 fn tri7_rpc(cfg: &Config, user: &str, pass: &str) -> Rpc {
@@ -2607,27 +3519,197 @@ fn resolve_blocks_file(cfg: &Config) -> Option<PathBuf> {
     None
 }
 
-fn connect_and_handshake(cfg: &Config, stats: &mut Stats, height: u64) -> Session {
-    for attempt in 1..=3 {
-        match Session::connect(&cfg.daemon) {
-            Ok(mut sess) => match handshake(&mut sess, stats, height, &cfg.daemon) {
+/// One connected P2P peer — outbound (we attached) or inbound (they attached
+/// to our listener). Both directions share the same message dispatch.
+struct Peer {
+    label: String,
+    outbound: bool,
+    sess: Session,
+    last_traffic: Instant,
+    /// messages decoded during the SERVER-side handshake that are not part of
+    /// the handshake itself (a block pusher fires its block immediately after
+    /// its own verack — discarding them would silently drop the push)
+    buffered: VecDeque<tri7_core::p2p::RawMessage>,
+    /// set alongside sess.shutdown() when the peer must be evicted (protocol
+    /// failure, send failure, or traffic silence)
+    dead: bool,
+}
+
+/// Server-side handshake for an accepted inbound connection: the client
+/// speaks first (legacy daemon behavior — it waits for our version on its
+/// outbound connects), we answer version+verack together, then sendheaders
+/// so the peer prefers header announcements.
+fn accept_handshake(
+    stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    stats: &mut Stats,
+    our_height: u64,
+    listen_port: u16,
+) -> Result<Peer, String> {
+    stream.set_nodelay(true).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .ok();
+    let mut sess = Session {
+        stream,
+        dec: tri7_core::p2p::MessageDecoder::new(),
+    };
+    // messages decoded while completing the server handshake are buffered and
+    // replayed by the main loop (never discarded)
+    let mut buffered: VecDeque<tri7_core::p2p::RawMessage> = VecDeque::new();
+    // 1. wait for the client's version (deadline 20s)
+    let mut peer: Option<PeerInfo> = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while peer.is_none() && Instant::now() < deadline {
+        for msg in sess.pump()? {
+            stats.note_recv(&msg.command);
+            if msg.command == "version" {
+                let v = tri7_core::p2p::parse_version(&msg.payload)?;
+                if v.version < tri7_core::p2p::MIN_PROTO_VERSION {
+                    return Err(format!("peer version {} obsolete", v.version));
+                }
+                peer = Some(PeerInfo {
+                    version: v.version,
+                    subver: v.user_agent.clone(),
+                    start_height: v.start_height,
+                    services: v.services,
+                });
+            } else {
+                buffered.push_back(msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let info = peer.ok_or("inbound handshake: no version from client")?;
+    // 2. our version + verack together
+    let (ya, yb, yc, yd, yport) = match peer_addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            (o[0], o[1], o[2], o[3], peer_addr.port())
+        }
+        _ => (127, 0, 0, 1, peer_addr.port()), // v6: informational placeholder
+    };
+    let addr_you = tri7_core::p2p::WireAddr::ipv4(
+        ya,
+        yb,
+        yc,
+        yd,
+        yport,
+        tri7_core::p2p::NODE_NETWORK,
+    );
+    let addr_me = tri7_core::p2p::WireAddr::ipv4(
+        127,
+        0,
+        0,
+        1,
+        listen_port,
+        tri7_core::p2p::NODE_NETWORK,
+    );
+    let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
+    let vp = tri7_core::p2p::VersionPayload {
+        version: tri7_core::p2p::PROTOCOL_VERSION,
+        services: tri7_core::p2p::NODE_NETWORK,
+        timestamp: now_secs() as i64,
+        addr_you,
+        addr_me,
+        nonce,
+        user_agent: "/tri7:0.2.0/".into(),
+        start_height: our_height as i32,
+    };
+    sess.send("version", &tri7_core::p2p::encode_version(&vp), stats)?;
+    sess.send("verack", &[], stats)?;
+    // 3. wait their verack — anything else arriving here (the pushed block!)
+    // is buffered, not dropped
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut veracked = false;
+    while !veracked && Instant::now() < deadline {
+        for msg in sess.pump()? {
+            stats.note_recv(&msg.command);
+            if msg.command == "verack" {
+                veracked = true;
+            } else {
+                buffered.push_back(msg);
+            }
+        }
+        if veracked {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !veracked {
+        return Err("inbound handshake: no verack from client".into());
+    }
+    sess.send("sendheaders", &[], stats)?;
+    stats.handshakes += 1;
+    Ok(Peer {
+        label: format!("in:{} ({} h{})", peer_addr, info.subver, info.start_height),
+        outbound: false,
+        sess,
+        last_traffic: Instant::now(),
+        buffered,
+        dead: false,
+    })
+}
+
+fn connect_and_handshake(
+    cfg: &Config,
+    stats: &mut Stats,
+    height: u64,
+    start: usize,
+) -> Result<(Peer, usize), String> {
+    let n = cfg.peers.len();
+    for off in 0..n {
+        let idx = (start + off) % n;
+        let target = &cfg.peers[idx];
+        match Session::connect_target(target) {
+            Ok(mut sess) => match handshake(&mut sess, stats, height, target) {
                 Ok(peer) => {
                     log(&format!(
-                        "handshake ok (attempt {}): peer version {} ({:?}) start height {} services {}",
-                        attempt, peer.version, peer.subver, peer.start_height, peer.services
+                        "handshake ok: {} — peer version {} ({}) start height {} services {}",
+                        target.endpoint(),
+                        peer.version,
+                        peer.subver,
+                        peer.start_height,
+                        peer.services
                     ));
-                    return sess;
+                    return Ok((
+                        Peer {
+                            label: format!("out:{}", target.endpoint()),
+                            outbound: true,
+                            sess,
+                            last_traffic: Instant::now(),
+                            buffered: VecDeque::new(),
+                            dead: false,
+                        },
+                        idx,
+                    ));
                 }
                 Err(e) => {
-                    log(&format!("handshake attempt {} failed: {}", attempt, e));
+                    log(&format!("handshake {} failed: {}", target.endpoint(), e));
                     sess.shutdown();
                 }
             },
-            Err(e) => log(&format!("connect attempt {} failed: {}", attempt, e)),
+            Err(e) => log(&format!("connect {} failed: {}", target.endpoint(), e)),
         }
-        std::thread::sleep(Duration::from_secs(2 * attempt as u64));
     }
-    die(EXIT_PROTOCOL, "handshake failed after 3 attempts");
+    Err(format!("no outbound target reachable ({} tried)", n))
+}
+
+/// Bounded multi-target connect that TOLERATES all targets being down
+/// (headless mode): returns None instead of dying so the native RPC surface
+/// can serve from persisted state while the follower keeps retrying the
+/// rotation on later ticks.
+fn try_connect(
+    cfg: &Config,
+    stats: &mut Stats,
+    height: u64,
+    start: usize,
+) -> Option<(Peer, usize)> {
+    match connect_and_handshake(cfg, stats, height, start) {
+        Ok((peer, idx)) => Some((peer, idx)),
+        Err(_) => None,
+    }
 }
 
 fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, note: &str) -> ! {
@@ -2652,7 +3734,8 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
         },
         "protocol": {
             "magic": "70352205",
-            "daemon_endpoint": cfg.daemon,
+            "outbound_targets": cfg.peers.iter().map(|t| t.endpoint()).collect::<Vec<_>>(),
+            "listen": cfg.listen_port.map(|p| format!("{}:{}", cfg.listen_bind, p)),
             "protocol_version": tri7_core::p2p::PROTOCOL_VERSION,
             "user_agent": "/tri7:0.2.0/",
         },
@@ -2664,4 +3747,238 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
         let _ = std::fs::write(p, text);
     }
     std::process::exit(code);
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- PeerTarget parsing ----
+
+    #[test]
+    fn peer_target_parse_ipv4() {
+        let socks = ("127.0.0.1".to_string(), 9050u16);
+        let t = PeerTarget::parse("100.85.236.10:24113", &socks).unwrap();
+        assert_eq!(t.host, "100.85.236.10");
+        assert_eq!(t.port, 24113);
+        assert!(t.socks.is_none());
+        assert_eq!(t.endpoint(), "100.85.236.10:24113");
+    }
+
+    #[test]
+    fn peer_target_parse_onion_gets_socks() {
+        let socks = ("127.0.0.1".to_string(), 9050u16);
+        let t = PeerTarget::parse(
+            "i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112",
+            &socks,
+        )
+        .unwrap();
+        assert_eq!(t.socks.as_ref().unwrap().1, 9050);
+        assert_eq!(t.port, 24112);
+    }
+
+    #[test]
+    fn peer_target_parse_rejects_garbage() {
+        let socks = ("127.0.0.1".to_string(), 9050u16);
+        assert!(PeerTarget::parse("no-port", &socks).is_err());
+        assert!(PeerTarget::parse("host:notaport", &socks).is_err());
+        assert!(PeerTarget::parse(":24112", &socks).is_err());
+    }
+
+    #[test]
+    fn daemon_flag_replaces_default_and_appends() {
+        // the built-in default (127.0.0.1:24113) must be REPLACED by the first
+        // explicit target: a node listening on 24113 would otherwise carry a
+        // self-connect target and handshake-loop against its own listener
+        let socks = ("127.0.0.1".to_string(), 9050u16);
+        let mut peers = vec![PeerTarget {
+            host: "127.0.0.1".into(),
+            port: 24113,
+            socks: None,
+        }];
+        let mut explicit = false;
+        for spec in "100.85.236.10:24113,100.85.236.10:24112".split(',') {
+            if !explicit {
+                peers.clear();
+                explicit = true;
+            }
+            peers.push(PeerTarget::parse(spec.trim(), &socks).unwrap());
+        }
+        assert_eq!(peers.len(), 2, "default target replaced");
+        assert_eq!(peers[0].endpoint(), "100.85.236.10:24113");
+        assert_eq!(peers[1].endpoint(), "100.85.236.10:24112");
+        assert!(peers.iter().all(|p| p.endpoint() != "127.0.0.1:24113"));
+    }
+
+    // ---- status gate (healthcheck network-quiet rules) ----
+
+    #[test]
+    fn status_gate_healthy_when_peer_recent() {
+        // peer talked 60s ago, tip advanced 120s ago → healthy
+        let (exit, degraded, _) = status_gate(false, false, Some(60), Some(120), 600, 1800);
+        assert_eq!(exit, 0);
+        assert!(!degraded);
+    }
+
+    #[test]
+    fn status_gate_degraded_needs_both_quiets() {
+        // peer quiet but tip advanced recently → NOT degraded
+        let (exit, degraded, _) = status_gate(false, false, Some(3600), Some(60), 600, 1800);
+        assert_eq!(exit, 0);
+        assert!(!degraded);
+        // tip quiet but peers active → NOT degraded
+        let (exit, degraded, _) = status_gate(false, false, Some(60), Some(7200), 600, 1800);
+        assert_eq!(exit, 0);
+        assert!(!degraded);
+    }
+
+    #[test]
+    fn status_gate_degraded_when_both_quiets() {
+        let (exit, degraded, reasons) = status_gate(false, false, Some(700), Some(1900), 600, 1800);
+        assert_eq!(exit, EXIT_VALIDATE);
+        assert!(degraded);
+        assert_eq!(reasons.len(), 2);
+    }
+
+    #[test]
+    fn status_gate_static_skips_network_gate() {
+        let (exit, degraded, _) = status_gate(true, false, Some(99_999), Some(99_999), 600, 1800);
+        assert_eq!(exit, 0);
+        assert!(!degraded);
+    }
+
+    #[test]
+    fn status_gate_stale_state_fails_even_static() {
+        let (exit, degraded, reasons) = status_gate(true, true, Some(1), Some(1), 600, 1800);
+        assert_eq!(exit, EXIT_VALIDATE);
+        assert!(!degraded);
+        assert_eq!(reasons, vec!["state write stale".to_string()]);
+    }
+
+    #[test]
+    fn status_gate_missing_peer_data_counts_quiet() {
+        // a pre-phase-6 state file has no last_peer_utc — counts as quiet
+        let (exit, degraded, _) = status_gate(false, false, None, Some(7200), 600, 1800);
+        assert_eq!(exit, EXIT_VALIDATE);
+        assert!(degraded);
+    }
+
+    // ---- ISO timestamp round trip (healthcheck clock math) ----
+
+    #[test]
+    fn iso_secs_roundtrip() {
+        for s in [0i64, 86_400, 1_700_000_000, 1_793_656_833] {
+            let iso = iso_from_secs(s);
+            assert_eq!(iso_secs_from_now(&iso), Some(s), "iso {}", iso);
+        }
+        assert_eq!(iso_secs_from_now("not-a-timestamp"), None);
+    }
+
+    // ---- recent blocks cache ----
+
+    fn fake_block_bytes(tag: u8) -> Vec<u8> {
+        // NOT a real block — RecentBlocks stores opaque payloads; parse only
+        // happens in the RPC fallback path which is not exercised here
+        vec![tag; 64]
+    }
+
+    #[test]
+    fn recent_blocks_insert_get_at_height() {
+        let mut rb = RecentBlocks::new();
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        rb.insert(h1, 2204068, &fake_block_bytes(1));
+        rb.insert(h2, 2204069, &fake_block_bytes(2));
+        assert!(rb.get(&h1).is_some());
+        assert_eq!(rb.get(&h1).unwrap().0, 2204068);
+        assert_eq!(
+            rb.at_height(2204069).map(|(_, raw)| raw[0]),
+            Some(2)
+        );
+        assert_eq!(rb.at_height(1), None);
+        assert_eq!(rb.store_tip_height(), Some(2204069));
+    }
+
+    #[test]
+    fn recent_blocks_evicts_oldest_beyond_cap() {
+        let mut rb = RecentBlocks::new();
+        let mut first = [0u8; 32];
+        first[31] = 0xAA;
+        rb.insert(first, 0, &fake_block_bytes(0)); // height 0: no height entry
+        for i in 0..(RECENT_CAP as u64 + 10) {
+            let mut h = [0u8; 32];
+            h[0..8].copy_from_slice(&i.to_le_bytes());
+            rb.insert(h, 10_000 + i as u64, &fake_block_bytes((i % 251) as u8));
+        }
+        assert!(rb.get(&first).is_none(), "oldest entry evicted");
+        assert!(rb.order.len() <= RECENT_CAP);
+        assert!(rb.at_height(10_000).is_none(), "pruned height entry");
+        assert!(rb.at_height(10_000 + RECENT_CAP as u64 + 9).is_some());
+    }
+
+    #[test]
+    fn recent_blocks_ignores_duplicate_hash() {
+        let mut rb = RecentBlocks::new();
+        let h = [7u8; 32];
+        rb.insert(h, 5, &fake_block_bytes(1));
+        rb.insert(h, 6, &fake_block_bytes(2)); // duplicate — first insert wins
+        assert_eq!(rb.get(&h).unwrap().0, 5);
+        assert_eq!(rb.order.len(), 1);
+    }
+
+    // ---- SOCKS5 request bytes (pure part of the tor transport) ----
+
+    #[test]
+    fn socks5_request_ipv4_form() {
+        let req = socks5_connect_request("100.85.236.10", 24113);
+        assert_eq!(&req[..4], &[0x05, 0x01, 0x00, 0x01]);
+        assert_eq!(&req[4..8], &[100, 85, 236, 10]);
+        assert_eq!(&req[8..10], &24113u16.to_be_bytes());
+        assert_eq!(req.len(), 10);
+    }
+
+    #[test]
+    fn socks5_request_domain_form_for_onion() {
+        let host = "i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion";
+        let req = socks5_connect_request(host, 24112);
+        assert_eq!(&req[..4], &[0x05, 0x01, 0x00, 0x03]);
+        assert_eq!(req[4], host.len() as u8);
+        assert_eq!(&req[5..5 + host.len()], host.as_bytes());
+        let port_at = 5 + host.len();
+        assert_eq!(&req[port_at..port_at + 2], &24112u16.to_be_bytes());
+    }
+
+    #[test]
+    fn socks5_greeting_bytes() {
+        assert_eq!(socks5_greeting(), vec![0x05, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn socks5_reply_drain_variants() {
+        // ATYP=1: 4-byte addr + 2-byte port
+        let mut r: &[u8] = &[1, 2, 3, 4, 0x5E, 0x71];
+        assert!(socks5_consume_reply(0x01, &mut r).is_ok());
+        // ATYP=3: 1-byte len + domain + 2-byte port
+        let mut r: &[u8] = &[3, b'a', b'b', b'c', 0, 0];
+        assert!(socks5_consume_reply(0x03, &mut r).is_ok());
+        // ATYP=4: 16 + 2
+        let mut r = vec![0u8; 18].into_iter().collect::<Vec<u8>>();
+        assert!(socks5_consume_reply(0x04, &mut r.as_slice()).is_ok());
+        let mut r: &[u8] = &[];
+        assert!(socks5_consume_reply(0x09, &mut r).is_err());
+    }
+
+    // ---- status JSON keeps its exit code contract ----
+
+    #[test]
+    fn status_gate_exit_codes_are_stable() {
+        // the healthcheck unit restarts tri7d on ANY nonzero exit — these
+        // values are load-bearing; changing them changes service behavior
+        assert_eq!(EXIT_VALIDATE, 3);
+        assert_eq!(status_gate(false, false, Some(0), Some(0), 600, 1800).0, 0);
+        assert_eq!(status_gate(false, false, Some(700), Some(1900), 600, 1800).0, 3);
+    }
 }

@@ -70,6 +70,7 @@ pub const DEFAULT_MAX_BODY: usize = 1_048_576;
 pub const NATIVE_METHODS: &[&str] = &[
     "gettip",
     "getblockcount",
+    "getbestblockhash",
     "getblockhash",
     "getblock",
     "getrawtransaction",
@@ -702,6 +703,12 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             }))
         }
         "getblockcount" => NativeOutcome::Ok(json!(deps.tip.tip().height)),
+        "getbestblockhash" => {
+            // Source: tri7 tipstate window tip (the followed chain's tip hash).
+            // Post-cutover this method was LOST (legacy-only); stake_mint's
+            // daemon-tip guard and any daemon-parity consumer need it.
+            NativeOutcome::Ok(json!(deps.tip.tip().blockhash))
+        }
 
         "getblockhash" => {
             // Source: tri7 blockindex height map; proxy fallback when the map
@@ -1872,6 +1879,18 @@ mod tests {
         assert_eq!(v["result"], json!(TIP_H));
         // id passthrough
         assert_eq!(v["id"], 7);
+    }
+
+    #[test]
+    fn getbestblockhash_native_from_tipstate() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true };
+        let d = deps(&t, &w, &b, None);
+        let v = call(&d, "getbestblockhash", json!([]));
+        assert_eq!(v["result"], json!(TIP_HASH));
+        // it must be a registered native method (never proxy-forwarded)
+        assert!(NATIVE_METHODS.contains(&"getbestblockhash"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+[Unit]
+Description=tri7d healthcheck: stale-state + network-quiet gate, restarts tri7d on failure
+# GATES (follow_tip --status, exit codes):
+#   exit 0  healthy
+#   exit 3  state unreadable OR stale write (age > --max-write-age 600s:
+#           the loop rewrites tipstate.json every 30s while alive) OR
+#           DEGRADED — no peer traffic for > 600s AND no tip advance for
+#           > 1800s (tri7d is a NETWORK primary: frozen+isolated is a
+#           failure even when its own loop keeps writing state). Any
+#           nonzero exit restarts tri7d.service (try-restart). --static
+#           skips the network-quiet gate (explicit static mode).
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7 --max-write-age 600 > /dev/null 2>&1 || { echo "tri7d healthcheck FAILED (rc=$?) — restarting tri7d"; systemctl try-restart tri7d.service; exit 1; }'

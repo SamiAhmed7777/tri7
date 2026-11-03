@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # install_tri7d.sh — idempotent phase-5a installer for tri7d on DNS2.
 # Run as root from the repo root (/root/tri7). Safe to re-run.
+# POST-CUTOVER (2026-11-02): the unit installs with --rpc-port 19112 --no-proxy
+# (tri7d owns the standard port; legacy trianglesd retired). See
+# deploy/tri7d_rpc_cutover.md.
 set -euo pipefail
 
 REPO_BIN=./target/release/follow_tip

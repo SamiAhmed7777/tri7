@@ -379,6 +379,34 @@ pub fn build_pong(nonce: u64) -> Vec<u8> {
     nonce.to_le_bytes().to_vec()
 }
 
+/// inv payload (announcement): CompactSize count + [i32 LE type + hash] per
+/// entry — same wire shape as getdata (protocol.h CInv).
+pub fn build_inv(inv: &[(u32, Hash)]) -> Vec<u8> {
+    let mut w = Vec::new();
+    push_compact_size(&mut w, inv.len() as u64);
+    for (t, h) in inv {
+        w.extend_from_slice(&t.to_le_bytes());
+        w.extend_from_slice(h);
+    }
+    w
+}
+
+/// headers payload (getheaders response): CompactSize count + header-only
+/// CBlock entries, mirroring parse_headers / main.cpp PushBlockHeaders
+/// (GetBlockHeader() leaves vtx+vchBlockSig empty — 82 bytes per entry:
+/// 80-byte header + CompactSize-0 vtx + CompactSize-0 vchBlockSig, exactly
+/// what Block::read parses back).
+pub fn encode_headers(headers: &[Block]) -> Vec<u8> {
+    let mut w = Vec::new();
+    push_compact_size(&mut w, headers.len() as u64);
+    for b in headers {
+        w.extend_from_slice(&b.header_bytes());
+        push_compact_size(&mut w, 0); // vtx count: header-only entry
+        push_compact_size(&mut w, 0); // vchBlockSig: empty
+    }
+    w
+}
+
 // ---------------------------------------------------------------------------
 // Inbound payload parsers
 // ---------------------------------------------------------------------------
@@ -682,6 +710,51 @@ mod tests {
             0xdead_beef_cafe_1234
         );
         assert_eq!(parse_ping(&[]).unwrap(), 0);
+    }
+
+    /// build_inv (announcements) is byte-identical in shape to build_getdata:
+    /// a relayed inv must parse back through parse_inv for any consumer.
+    #[test]
+    fn build_inv_roundtrips_through_parse_inv() {
+        let inv = vec![
+            (MSG_BLOCK, [0x11u8; 32]),
+            (MSG_BLOCK, display_to_internal(
+                "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+            ).unwrap()),
+        ];
+        let payload = build_inv(&inv);
+        assert_eq!(parse_inv(&payload).unwrap(), inv);
+        // and matches the getdata encoding byte-for-byte for the same entries
+        assert_eq!(payload, build_getdata(&inv));
+    }
+
+    /// encode_headers (getheaders response) must parse back through
+    /// parse_headers and round-trip to the identical header bytes.
+    #[test]
+    fn encode_headers_roundtrips_through_parse_headers() {
+        fn header(prev: u8, t: u32) -> Block {
+            Block {
+                version: 6,
+                prev_hash: [prev; 32],
+                merkle_root: [prev + 1; 32],
+                time: t,
+                bits: 0x2000_ffff,
+                nonce: 0,
+                vtx: Vec::new(),
+                block_sig: Vec::new(),
+            }
+        }
+        let headers = vec![header(1, 1_793_000_000), header(2, 1_793_000_600)];
+        let payload = encode_headers(&headers);
+        let parsed = parse_headers(&payload).unwrap();
+        assert_eq!(parsed.len(), 2);
+        for (a, b) in headers.iter().zip(parsed.iter()) {
+            assert_eq!(a.header_bytes(), b.header_bytes());
+            assert!(b.vtx.is_empty() && b.block_sig.is_empty());
+        }
+        // exact per-entry size: 80 header + 1 vtx-count + 1 sig-len = 82
+        let n = payload[0] as usize; // compact_size count (small n → 1 byte)
+        assert_eq!(payload.len(), 1 + n * 82);
     }
 
     #[test]

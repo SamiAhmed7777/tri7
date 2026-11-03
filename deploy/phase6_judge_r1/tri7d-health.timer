@@ -1,0 +1,8 @@
+[Unit]
+Description=Run tri7d healthcheck every 5 minutes
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=tri7d-health.service
+[Install]
+WantedBy=timers.target

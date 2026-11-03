@@ -9,6 +9,7 @@ pub mod blkfile;
 pub mod blockindex;
 pub mod consensus;
 pub mod difficulty;
+pub mod gui;
 pub mod kernel;
 pub mod legacy;
 pub mod p2p;

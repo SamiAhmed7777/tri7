@@ -1,0 +1,110 @@
+{
+  "balances": {
+    "funded_addresses": 14,
+    "top": [
+      {
+        "address": "TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3",
+        "sats": 1164136532,
+        "utxos": 68
+      },
+      {
+        "address": "TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL",
+        "sats": 842853956,
+        "utxos": 50
+      },
+      {
+        "address": "TZ4ZrftdfK9MLCvo63uR3ZcPibFEG54WT7",
+        "sats": 338829801,
+        "utxos": 17
+      },
+      {
+        "address": "TV5C6CAobGaZP92Da6EPfzPEKjiJiFJeoj",
+        "sats": 286369712,
+        "utxos": 15
+      },
+      {
+        "address": "TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL",
+        "sats": 213238468,
+        "utxos": 9
+      }
+    ],
+    "total_sats": 3081244023,
+    "total_tri": "3081.244023"
+  },
+  "elapsed_secs": 0.611483662,
+  "explorer": {
+    "address_view": true,
+    "block_at_tip": true,
+    "endpoint": "127.0.0.1:19112",
+    "fee_resolution": true,
+    "search_classification": true,
+    "stats": true,
+    "tx_decode": true
+  },
+  "explorer_rich_list": {
+    "height": 2201090,
+    "parsed": true,
+    "path": "/root/tri7/balances.json",
+    "top1": {
+      "addr": "TRLrmyvLvYXhcjTEJDxx2fo8hTwxiKfz1n",
+      "sats": 32530647775
+    }
+  },
+  "message_sign_roundtrip": true,
+  "qr_png": true,
+  "result": "OK",
+  "rpc_probe": {
+    "addr": "127.0.0.1:19112",
+    "connections": 0,
+    "error": null,
+    "reachable": true
+  },
+  "send": {
+    "amount_sats": 2655000,
+    "change_sats": 27637658,
+    "dest": "TRjaobsAFK46B69Drn6ruHfXc6E2GeBS1g",
+    "fee_sats": 100,
+    "from": "TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3",
+    "inputs": 1,
+    "n_bytes": 196,
+    "spend_rs_cli_bytes_equal": true,
+    "tx_hex_len": 392,
+    "txid": "f3b7ab9297a308618eda20017de0a8762606189573b3774fde6e40fabb0750f7",
+    "utxo": {
+      "n": 1,
+      "txid": "6213142793f52fa27fae0f0906ccb8fa95c47b66ce72904dec05ee7f5c9a51c2",
+      "value_sats": 5310000
+    },
+    "verify_input_ok": true
+  },
+  "staking": {
+    "last_dryrun_attempts": 381,
+    "mature_weight_sats": 3016554858,
+    "note": "display-only — no kernel search is run by the GUI",
+    "stakeable_coins": 173
+  },
+  "tip": {
+    "blockhash": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "daemon_tip": 2204067,
+    "height": 2204067,
+    "pos_difficulty": 5.960464477539063e-8,
+    "tip_bits": "2000ffff",
+    "tip_modifier": "0000000000000003",
+    "tip_time": 1793656833
+  },
+  "wallet": {
+    "coverage_height_derived": 2204067,
+    "coverage_height_snapshot": 2201090,
+    "keys": 248,
+    "labels": 36,
+    "path": "/root/.triangles/wallet.dat",
+    "reconcile": {
+      "additions_kept": 170,
+      "blocks_applied": 2977,
+      "enabled": true,
+      "note": "",
+      "spends_applied": 4008
+    },
+    "wallet_version": 6020607
+  }
+}

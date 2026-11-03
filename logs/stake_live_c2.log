@@ -1,0 +1,28 @@
+[stake_mint] tipstate: tip h2204065 4c0a55a39d48eeb47b86f62f245294c6010b4bfe986ac98332624c5d60bbd17b · window h2199466..h2204065 (4600 entries)
+[stake_mint] wallet: 248 keys read (248 distinct addresses), encrypted=false
+[stake_mint] submit mode: legacy RPC 127.0.0.1:19112 (creds from /root/.triangles/triangles.conf), P2P 127.0.0.1:24113, acceptance wait 120s
+[stake_mint] utxo dump: 177 wallet UTXOs / 3036990591 sats live at h2201090 (snapshot)
+[stake_mint] archive scan: 500000 frames (20s) — prefix 499999, tail 0
+[stake_mint] archive scan: 1000000 frames (39s) — prefix 999999, tail 0
+[stake_mint] archive scan: 1500000 frames (60s) — prefix 1499999, tail 0
+[stake_mint] archive scan: 2000000 frames (80s) — prefix 1999999, tail 0
+[stake_mint] checksum chain anchored at h2203924 (bea74517 adopted — daemon FastImport boundary)
+[stake_mint] archive scan complete: 2210693 frames read, prefix 2199466 blocks (genesis..h2199465), window 4600 blocks reconstructed (88.3s)
+[stake_mint] modifier oracle: 4600/4600 window heights matched the daemon-anchored state, 141 checksum steps verified — any mismatch exited above
+[stake_mint] live wallet at tip h2204065: 178 UTXOs / 3079273678 sats (172 tail additions kept of 4005 found, 4004 tail spends applied)
+[stake_mint] candidates: 178 staking-eligible UTXOs (0 non-standard, 0 key-unresolved, 0 unlocated)
+[stake_mint] next target for h2204066 (PoS): 2000ffff · tip time 1793656035 · MTP 1790238482
+[stake_mint] kernel search: 178 coins × up to 60 backward seconds from nTime=1793656725 …
+[stake_mint] search done in 0.0s: coins considered 7 (min-age 7), attempts 378, kernel hits 1, zero-reward aborts 0, credit-aborts 0
+[stake_mint] KERNEL SOLVED: coin f5481f6a07d5d4c81393955d48f800842b8b838d4c44b1d9212798745f215ddb:1 (14530000 sats, h2203776), nTime 1793656708 (-17 s), modifier 0000000000000000, coinDays 7, hashProof 06bcd75a2da5e98a6566dbcb006a63740331dbe0e304a8aaf28cace4d80e178c
+[stake_mint] candidate block: fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3 (vtx 2, time 1793656708, bits 2000ffff, sig 71 B)
+[stake_mint] SELF-VALIDATION PASSED: kernel meets target (coinDays 7), reward paid 1026552 == calculated 1026552 (coin age 1135429114 sat-days), sig verified, nBits 2000ffff exact
+report -> /root/tri7/stake_live_c2.json
+[stake_mint] RESULT: kernel solution found and self-validated — candidate block fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3
+[stake_mint] daemon guard: tip h2204065 4c0a55a39d48eeb47b86f62f245294c6010b4bfe986ac98332624c5d60bbd17b confirmed via RPC — safe to submit
+[stake_mint] submitblock RPC: METHOD NOT FOUND on this daemon (the V6 fork removed submitblock from the dispatch table) — falling back to the daemon's P2P block path (same ProcessBlock validator; the daemon relays only what it accepts)
+[stake_mint] p2p submit: block frame (514 B) sent to 127.0.0.1:24113; peer "/Cryptographic Triangles:6.2.6.7/"; post-send msgs Array [String("getblocks"), String("smsgPing"), String("block")]
+[stake_mint] acceptance poll: waiting for h2204066 fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3 in the daemon chain (up to 120s)...
+[stake_mint] ACCEPTED: daemon chain tip is now h2204066 fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3 (+2.0s)
+report -> /root/tri7/stake_live_c2.json
+[stake_mint] RESULT: LIVE ACCEPT — block fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3 is in the daemon's chain

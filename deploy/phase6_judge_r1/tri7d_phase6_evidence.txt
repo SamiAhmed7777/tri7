@@ -1,0 +1,126 @@
+# tri7d phase-6 network-primary remediation — live evidence
+# captured: 2026-11-02T23:42:09Z UTC on vmi3080415
+
+===== 0. deployed binary identity =====
+
+### CMD: sha256 repo build vs deployed
+$ sha256sum /root/tri7/target/release/follow_tip /opt/tri7/bin/follow_tip
+db60e18348152aca3b01b8067baf762397b9c7c42ee33d1739b408a41c01a8c9  /root/tri7/target/release/follow_tip
+db60e18348152aca3b01b8067baf762397b9c7c42ee33d1739b408a41c01a8c9  /opt/tri7/bin/follow_tip
+rc=0
+
+### CMD: systemd active
+$ systemctl is-active tri7d.service
+active
+rc=0
+
+### CMD: deployed binary sha256 (short)
+$ sha256sum /opt/tri7/bin/follow_tip | cut -c1-16
+db60e18348152aca
+rc=0
+
+===== 1. listeners (P2P inbound 24113 + RPC 19112) =====
+
+### CMD: ss -tlnp tri7d ports
+$ ss -tlnp | grep -E '24113|19112|19113'
+LISTEN 0      128                                   0.0.0.0:24113      0.0.0.0:*    users:(("follow_tip",pid=3965109,fd=4))                                                                                                                                                             
+LISTEN 0      128                                 127.0.0.1:19113      0.0.0.0:*    users:(("ssh",pid=1673614,fd=5))                                                                                                                                                                    
+LISTEN 0      128                                 127.0.0.1:19112      0.0.0.0:*    users:(("follow_tip",pid=3965109,fd=3))                                                                                                                                                             
+LISTEN 0      128                                     [::1]:19113         [::]:*    users:(("ssh",pid=1673614,fd=4))                                                                                                                                                                    
+rc=0
+
+### CMD: ufw 24113 rule
+$ ufw status | grep 2411
+24112/tcp                  ALLOW       Anywhere                   # Triangles P2P
+24113/tcp                  ALLOW       Anywhere                   # Triangles P2P
+24112/tcp (v6)             ALLOW       Anywhere (v6)              # Triangles P2P
+24113/tcp (v6)             ALLOW       Anywhere (v6)              # Triangles P2P
+rc=0
+
+===== 2. legacy trianglesd retired =====
+
+### CMD: trianglesd state
+$ systemctl is-active trianglesd.service
+failed
+rc=3
+
+### CMD: trianglesd enabled-state
+$ systemctl is-enabled trianglesd.service
+disabled
+rc=1
+
+===== 3. chain advancement restored (h2204067 -> h2204068) =====
+
+### CMD: getblockcount (native, source tag)
+$ curl -s -m 5 -u trianglesrpc:86f228fda3a6c3bf829fd47c34b50956f15e7889c96bbfa4c4d90250e8fda8de --data '{"jsonrpc":"1.0","id":"v","method":"getblockcount","params":[]}' http://127.0.0.1:19112/
+{"error":null,"id":"v","result":2204068,"source":"tri7"}rc=0
+
+### CMD: getbestblockhash (native)
+$ curl -s -m 5 -u trianglesrpc:86f228fda3a6c3bf829fd47c34b50956f15e7889c96bbfa4c4d90250e8fda8de --data '{"jsonrpc":"1.0","id":"v","method":"getbestblockhash","params":[]}' http://127.0.0.1:19112/
+{"error":null,"id":"v","result":"0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c","source":"tri7"}rc=0
+
+### CMD: getblock NEW tip h2204068 (above disk store tip -> recent cache)
+$ curl -s -m 5 -u trianglesrpc:86f228fda3a6c3bf829fd47c34b50956f15e7889c96bbfa4c4d90250e8fda8de --data '{"jsonrpc":"1.0","id":"v","method":"getblock","params":["0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c",false]}' http://127.0.0.1:19112/ | python3 -c 'import json,sys; d=json.load(sys.stdin)["result"]; print({k: d[k] for k in ("height","time","bits","confirmations")})'
+{'height': 2204068, 'time': 1793662484, 'bits': '2000ffff', 'confirmations': 1}
+rc=0
+
+### CMD: journal: mint push -> TIP ADVANCE -> relay inv
+$ journalctl -u tri7d --no-pager --since "2026-11-02 15:30" | grep -E "TIP ADVANCE|relay: announced|checksum oracle" | tail -4
+Nov 02 15:34:51 vmi3080415 follow_tip[3965109]: [2026-11-02T23:34:51Z] h2204068: no external checksum oracle for this block — adopting locally computed 6763aa1e
+Nov 02 15:34:51 vmi3080415 follow_tip[3965109]: [2026-11-02T23:34:51Z] TIP ADVANCE → h2204068 0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c (kernel enforced) via in:127.0.0.1:35340 (/tri7-stake_mint:0.1/ h2204067)
+Nov 02 15:34:51 vmi3080415 follow_tip[3965109]: [2026-11-02T23:34:51Z] relay: announced h2204068 to 1 peer(s) (inv)
+rc=0
+
+### CMD: stake_mint acceptance (LIVE ACCEPT +2.0s)
+$ grep -E "LIVE ACCEPT|p2p submit" /root/tri7/logs/stake_live_c4.log | tail -2
+[stake_mint] p2p submit: block frame (513 B) sent to 127.0.0.1:24113; peer "/tri7:0.2.0/"; post-send msgs Array [String("sendheaders"), String("inv")]
+[stake_mint] RESULT: LIVE ACCEPT — block 0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c is in the daemon's chain
+rc=0
+
+===== 4. relay serving over inbound P2P (getdata: recent-cache tip + disk-store block) =====
+
+### CMD: relay_verify.py transcript
+$ python3 /root/.hermes/cache/scratch/relay_verify.py 0a5b2288894c4c2bda2c0dcd85d42483c0a4498f386fa535b64977182b12764c fab257170c06c1a824c6f6a0a5f01a38ea7313a1b90eaf27bebc3acd9c3d30f3
+blocks served: 2 payloads: [513, 514]
+RELAY-SERVING OK: tip (recent cache) + historical (disk store) both served
+rc=0
+
+===== 5. healthcheck gating =====
+
+### CMD: status JSON (key fields)
+$ /opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7 | python3 -c "import json,sys; d=json.load(sys.stdin); print({k: d[k] for k in (\"height\",\"peers\",\"last_peer_utc\",\"seconds_since_peer\",\"seconds_since_advance\",\"degraded\",\"stale\",\"listen_port\",\"static_mode\")})"
+{'height': 2204068, 'peers': 1, 'last_peer_utc': '2026-11-02T23:42:16Z', 'seconds_since_peer': 9, 'seconds_since_advance': 454, 'degraded': False, 'stale': False, 'listen_port': 24113, 'static_mode': False}
+rc=0
+
+### CMD: degraded gate fires (short thresholds -> rc 3)
+$ /opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7 --peer-quiet-secs 5 --advance-quiet-secs 10 >/dev/null 2>&1; echo "status exit=$?"
+status exit=3
+rc=0
+
+### CMD: health unit ExecStart (gate semantics)
+$ grep ExecStart /etc/systemd/system/tri7d-health.service
+ExecStart=/bin/sh -c '/opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7 --max-write-age 600 > /dev/null 2>&1 || { echo "tri7d healthcheck FAILED (rc=$?) — restarting tri7d"; systemctl try-restart tri7d.service; exit 1; }'
+rc=0
+
+===== 6. test suite (final build) =====
+
+### CMD: lib + follow_tip unit tests
+$ cd /root/tri7 && source $HOME/.cargo/env && cargo test --release --lib --bin follow_tip 2>&1 | grep "test result"
+test result: ok. 136 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0
+
+===== 7. peer attach rotation (fleet dark at capture time — all targets tried) =====
+
+### CMD: latest rotation burst
+$ journalctl -u tri7d --no-pager --since "-4 min" | grep -E "connect|no outbound" | tail -7
+Nov 02 15:42:09 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:09Z] connect 100.85.236.10:24113 failed: connect 100.85.236.10:24113: Connection refused (os error 111)
+Nov 02 15:42:09 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:09Z] connect 100.85.236.10:24112 failed: connect 100.85.236.10:24112: Connection refused (os error 111)
+Nov 02 15:42:09 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:09Z] connect 100.81.59.99:24112 failed: connect 100.81.59.99:24112: Connection refused (os error 111)
+Nov 02 15:42:09 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:09Z] connect 100.81.59.99:24113 failed: connect 100.81.59.99:24113: Connection refused (os error 111)
+Nov 02 15:42:10 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:10Z] connect i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: socks connect to i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: SOCKS reply code 1 (0=ok, 1=general, 4=host unreachable, 5=refused)
+Nov 02 15:42:16 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:16Z] inbound peer connected: in:127.0.0.1:34744 ( h-1)
+Nov 02 15:42:25 vmi3080415 follow_tip[3965109]: [2026-11-02T23:42:25Z] protocol failure from in:127.0.0.1:34744 ( h-1): peer closed connection — dropping
+rc=0
+
+# capture rc of last command: 0
