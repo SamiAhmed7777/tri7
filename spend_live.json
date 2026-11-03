@@ -1,0 +1,19 @@
+{
+  "amount_sats": 1000000,
+  "broadcast": false,
+  "bytes": 195,
+  "change_sats": 19968354,
+  "fee_sats": 100,
+  "input": {
+    "address": "TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL",
+    "height": 2204147,
+    "n": 1,
+    "txid_display": "e09191f721a1aa6f6a2537cf2423ed875a69a044ea927fd6d2c45b7227f9ad93",
+    "value_sats": 20968454
+  },
+  "mode": "live-self-spend",
+  "source_block": 2204147,
+  "to_address": "TJWJVTStJc3FmCEwvsnMxP6aUo94WPYikG",
+  "tx_hex": "010000004d73e96a0193adf927725bc4d2d67f92ea44a0695a87ed2324cf37256a6faaa121f79191e00100000048473044022007b8031b4a805abc2a5478c5af15b46dcbe35beea09786b65c48ea89e424ca50022071a5ac0614c9e4f2091fa0805c524a5222cce3dbcfd42a7c3c14df5fdf9e2e7801ffffffff0240420f00000000001976a9145da27bcc5f18b42956940cc4ede2aa0e31f9b14388ac62b13001000000001976a914825dd2e8d28ebf8303b3a2bd0302a088234a87c288ac00000000",
+  "txid": "d7f7a8db709125888e6a2d044b0ae38aa9573c857ab2580a6166a8e2fcdadc26"
+}

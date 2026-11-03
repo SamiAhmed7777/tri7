@@ -30,17 +30,8 @@ Section "Install"
   File "${EXEDIR}\tri7_wallet_gui.exe"
   File "${EXEDIR}\follow_tip.exe"
 
-  SetOutPath "$INSTDIR\conf"
-  FileOpen $0 "$INSTDIR\conf\triangles.conf" w
-  FileWrite $0 "rpcbind=127.0.0.1$\r$\n"
-  FileWrite $0 "rpcport=19114$\r$\n"
-  FileWrite $0 "listen=1$\r$\n"
-  FileWrite $0 "port=24113$\r$\n"
-  FileWrite $0 "staking=0$\r$\n"
-  FileWrite $0 "$\r$\n; Tor/I2P transports (optional)$\r$\n"
-  FileWrite $0 ";torsocks=127.0.0.1:9050$\r$\n"
-  FileWrite $0 ";i2psocks=127.0.0.1:4447$\r$\n"
-  FileClose $0
+  ; no starter config shipped: tri7d/GUI generate their own defaults on first
+  ; run and the operator decides staking/transport settings in-app
 
   ; registry for reinstall path memory + uninstall entry
   WriteRegStr HKCU "Software\Tri7Wallet" "InstallDir" $INSTDIR
@@ -72,11 +63,10 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\bin\tri7_wallet_gui.exe"
   Delete "$INSTDIR\bin\follow_tip.exe"
-  Delete "$INSTDIR\conf\triangles.conf"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR\bin"
-  RMDir "$INSTDIR\conf"
   RMDir /r "$INSTDIR\state"
+  RMDir /r "$INSTDIR\conf"
   RMDir "$INSTDIR"
   Delete "$DESKTOP\${APPNAME} Wallet.lnk"
   RMDir /r "$SMPROGRAMS\${APPNAME}"
