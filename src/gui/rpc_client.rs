@@ -10,8 +10,12 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// Methods the GUI may call. Mirrors the NATIVE read surface (HANDOFF 5b);
-/// anything else → refused client-side before a byte hits the wire.
+/// Methods the GUI may call. Mirrors the NATIVE read surface (HANDOFF 5b)
+/// plus the phase-7 milestone-2 wallet-owned operations the GUI drives on the
+/// user's behalf (Send screen Broadcast, staking panel on|off, Messages
+/// compose) — these go to the user's OWN tri7d on loopback; the daemon still
+/// validates everything server-side. Anything else → refused client-side
+/// before a byte hits the wire.
 pub const ALLOWED_METHODS: &[&str] = &[
     "gettip",
     "getblockcount",
@@ -28,6 +32,19 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "getreceivedbyaddress",
     "validateaddress",
     "health",
+    // phase 7 milestone 2
+    "getstakinginfo",
+    "staking",
+    "sendrawtransaction",
+    "getpeerinfo",
+    "smsgsend",
+    "smsginbox",
+    "smsgoutbox",
+    "smsgscandir",
+    "smsgpurge",
+    "smsgaddaddress",
+    "smsgkeys",
+    "smsglocalinfo",
 ];
 
 pub fn is_allowed(method: &str) -> bool {

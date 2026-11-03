@@ -92,6 +92,77 @@ pub struct Dialogs {
 }
 
 // ===========================================================================
+// Phase 7 milestone 2 — live daemon panels (staking / broadcast / messages /
+// peers). Each state polls tri7d's NATIVE RPC through gui::rpc_client.
+// ===========================================================================
+
+/// getstakinginfo snapshot (parsed loosely — the daemon owns the shape).
+#[derive(Debug, Clone, Default)]
+pub struct StakingLive {
+    pub info: Option<serde_json::Value>,
+    pub last_poll: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl StakingLive {
+    pub fn field(&self, key: &str) -> String {
+        self.info
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| "—".into())
+    }
+}
+
+/// Per-session peer table (getpeerinfo — transport flags clearnet/tor/i2p).
+#[derive(Debug, Clone, Default)]
+pub struct PeersLive {
+    pub table: Option<serde_json::Value>,
+    pub last_error: Option<String>,
+}
+
+/// Messages page state: inbox/outbox rows from tri7d + compose form.
+#[derive(Debug, Clone, Default)]
+pub struct MessagesState {
+    pub inbox: Option<serde_json::Value>,
+    pub outbox: Option<serde_json::Value>,
+    pub localinfo: Option<serde_json::Value>,
+    pub compose_from: String,
+    pub compose_to: String,
+    pub compose_text: String,
+    pub send_result: Option<Result<String, String>>,
+    pub last_error: Option<String>,
+    pub last_refresh: Option<String>,
+}
+
+impl MessagesState {
+    pub fn unread_count(&self) -> usize {
+        self.inbox
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|r| r.get("read") == Some(&serde_json::Value::Bool(false)))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// Broadcast flow state (sign → review → broadcast).
+#[derive(Debug, Clone, Default)]
+pub struct BroadcastState {
+    pub busy: bool,
+    pub result: Option<Result<String, String>>, // txid on success
+    pub last_error: Option<String>,
+}
+
+// ===========================================================================
 // AppState
 // ===========================================================================
 
@@ -117,6 +188,11 @@ pub struct AppState {
     pub dialogs: Dialogs,
     pub status_log: Vec<String>,
     pub explorer: super::explorer::ExplorerState,
+    // ---- phase 7 milestone 2 ----
+    pub staking_live: StakingLive,
+    pub peers_live: PeersLive,
+    pub messages: MessagesState,
+    pub broadcast: BroadcastState,
 }
 
 impl AppState {
@@ -155,7 +231,175 @@ impl AppState {
             dialogs: Dialogs::default(),
             status_log: Vec::new(),
             explorer,
+            staking_live: StakingLive::default(),
+            peers_live: PeersLive::default(),
+            messages: MessagesState::default(),
+            broadcast: BroadcastState::default(),
         }
+    }
+
+    /// The RPC endpoint the live panels talk to (same tri7d as the explorer).
+    fn live_rpc_addr(&self) -> Option<String> {
+        self.cfg.rpc_addr.clone()
+    }
+
+    /// Poll getstakinginfo for the live staking panel.
+    pub fn staking_poll_action(&mut self) {
+        let Some(addr) = self.live_rpc_addr() else {
+            self.staking_live.last_error = Some("RPC disabled in config".into());
+            return;
+        };
+        match crate::gui::rpc_client::rpc_call(&addr, "getstakinginfo", &[]) {
+            Ok(v) => {
+                self.staking_live.info = Some(v);
+                self.staking_live.last_error = None;
+                self.staking_live.last_poll =
+                    Some(chrono_iso_now());
+            }
+            Err(e) => self.staking_live.last_error = Some(e),
+        }
+    }
+
+    /// staking on|off — persisted to the daemon's conf.
+    pub fn staking_toggle_action(&mut self, on: bool) {
+        let Some(addr) = self.live_rpc_addr() else {
+            self.staking_live.last_error = Some("RPC disabled in config".into());
+            return;
+        };
+        let arg = if on { "on" } else { "off" };
+        match crate::gui::rpc_client::rpc_call(&addr, "staking", &[serde_json::json!(arg)]) {
+            Ok(_) => self.staking_poll_action(),
+            Err(e) => self.staking_live.last_error = Some(e),
+        }
+    }
+
+    /// Refresh the peers table + connections count.
+    pub fn peers_poll_action(&mut self) {
+        let Some(addr) = self.live_rpc_addr() else {
+            self.peers_live.last_error = Some("RPC disabled in config".into());
+            return;
+        };
+        match crate::gui::rpc_client::rpc_call(&addr, "getpeerinfo", &[]) {
+            Ok(v) => {
+                self.peers_live.table = Some(v);
+                self.peers_live.last_error = None;
+            }
+            Err(e) => self.peers_live.last_error = Some(e),
+        }
+    }
+
+    /// Refresh inbox + outbox + local info.
+    pub fn messages_refresh_action(&mut self) {
+        let Some(addr) = self.live_rpc_addr() else {
+            self.messages.last_error = Some("RPC disabled in config".into());
+            return;
+        };
+        let rc = crate::gui::rpc_client::rpc_call;
+        if let Ok(v) = rc(&addr, "smsginbox", &[serde_json::json!("all")]) {
+            self.messages.inbox = Some(v);
+        }
+        if let Ok(v) = rc(&addr, "smsgoutbox", &[]) {
+            self.messages.outbox = Some(v);
+        }
+        match rc(&addr, "smsglocalinfo", &[]) {
+            Ok(v) => {
+                // default the compose-from to the first owned key
+                if self.messages.compose_from.is_empty() {
+                    if let Some(addrs) = v.get("addresses").and_then(|a| a.as_array()) {
+                        if let Some(a0) = addrs.first().and_then(|x| x.as_str()) {
+                            self.messages.compose_from = a0.to_string();
+                        }
+                    }
+                }
+                self.messages.localinfo = Some(v);
+                self.messages.last_error = None;
+                self.messages.last_refresh = Some(chrono_iso_now());
+            }
+            Err(e) => self.messages.last_error = Some(e),
+        }
+    }
+
+    /// smsgsend: compose + encrypt + store (the daemon relays via buckets).
+    pub fn messages_send_action(&mut self) {
+        let (from, to, text) = (
+            self.messages.compose_from.clone(),
+            self.messages.compose_to.clone(),
+            self.messages.compose_text.clone(),
+        );
+        if from.is_empty() || to.is_empty() || text.is_empty() {
+            self.messages.send_result = Some(Err("from, to and text are all required".into()));
+            return;
+        }
+        let Some(addr) = self.live_rpc_addr() else {
+            self.messages.send_result = Some(Err("RPC disabled in config".into()));
+            return;
+        };
+        let r = crate::gui::rpc_client::rpc_call(
+            &addr,
+            "smsgsend",
+            &[serde_json::json!(from), serde_json::json!(to), serde_json::json!(text)],
+        )
+        .map(|v| {
+            format!(
+                "sent — timestamp {} sample {}",
+                v.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0),
+                v.get("sample").and_then(|s| s.as_str()).unwrap_or("?")
+            )
+        });
+        if r.is_ok() {
+            self.messages.compose_text.clear();
+        }
+        self.messages.send_result = Some(r);
+    }
+
+    /// smsgpurge: drop messages past the 48h retention.
+    pub fn messages_purge_action(&mut self) {
+        let Some(addr) = self.live_rpc_addr() else {
+            self.messages.last_error = Some("RPC disabled in config".into());
+            return;
+        };
+        match crate::gui::rpc_client::rpc_call(&addr, "smsgpurge", &[]) {
+            Ok(v) => {
+                let n = v.get("purged").and_then(|x| x.as_u64()).unwrap_or(0);
+                self.status_log.push(format!("smsg purge: {} removed", n));
+                self.messages_refresh_action();
+            }
+            Err(e) => self.messages.last_error = Some(e),
+        }
+    }
+
+    /// Broadcast the signed tx on the Send screen: sendrawtransaction on the
+    /// user's own tri7d; the daemon consensus-validates, adds the pending
+    /// relay set and announces inv(MSG_TX) to every peer.
+    pub fn broadcast_action(&mut self, tx_hex: String) {
+        if tx_hex.is_empty() {
+            self.broadcast.result = Some(Err("no signed tx — sign first".into()));
+            return;
+        }
+        let Some(addr) = self.live_rpc_addr() else {
+            self.broadcast.result = Some(Err("RPC disabled in config".into()));
+            return;
+        };
+        self.broadcast.busy = true;
+        let r = crate::gui::rpc_client::rpc_call(
+            &addr,
+            "sendrawtransaction",
+            &[serde_json::json!(tx_hex)],
+        )
+        .map(|v| {
+            let txid = v
+                .get("txid")
+                .and_then(|t| t.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let acks = v.get("announced_to").and_then(|a| a.as_u64()).unwrap_or(0);
+            format!(
+                "txid {} — relay acks from {} peer(s) (inv → getdata → tx)",
+                txid, acks
+            )
+        });
+        self.broadcast.busy = false;
+        self.broadcast.result = Some(r);
     }
 
     pub fn loaded(&self) -> bool {
@@ -1069,4 +1313,30 @@ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
         }
     }
     0
+}
+
+/// ISO-8601 UTC stamp (std-only; no chrono dependency).
+fn chrono_iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // civil-from-days (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, h, mi, s
+    )
 }

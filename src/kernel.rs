@@ -281,7 +281,18 @@ pub fn get_kernel_stake_modifier_with(
     block_from_height: usize,
     window: i64,
 ) -> Result<u64, String> {
-    let from = &idx.entries[block_from_height];
+    // Bounds-guard the entry index: callers stake from candidate heights that
+    // must index `idx.entries` (window-relative in the follow-loop, absolute
+    // in stake_mint). A foreign/out-of-range height must take the wallet.cpp
+    // 2269-2271 skip-coin Err path, NOT panic the process (a panicked staking
+    // loop killed the live daemon on 2026-11-02).
+    let from = idx.entries.get(block_from_height).ok_or_else(|| {
+        format!(
+            "GetKernelStakeModifier: block height {} outside the index ({} entries) — coin skipped",
+            block_from_height,
+            idx.entries.len()
+        )
+    })?;
     let threshold = from.time as i64 + window;
     let mut p = block_from_height;
     let mut modifier_time = from.time as i64;

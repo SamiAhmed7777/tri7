@@ -731,6 +731,13 @@ pub struct SmsgKey {
     pub pubkey: Vec<u8>,
 }
 
+impl SmsgKey {
+    /// Compressed identity pubkey bytes (the addrbook value).
+    pub fn pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey.clone()
+    }
+}
+
 fn ecdh_x(secret: &[u8; 32], pubkey: &[u8]) -> Result<[u8; 32], String> {
     let sk = SecretKey::from_slice(secret).map_err(|e| format!("ecdh: bad secret: {}", e))?;
     let pk = PublicKey::from_slice(pubkey).map_err(|e| format!("ecdh: bad pubkey: {}", e))?;
@@ -865,6 +872,9 @@ pub struct DecryptedMessage {
     pub timestamp: i64,
     pub from_address: String, // "anon" for anonymous
     pub plaintext: String,
+    /// Recovered sender identity pubkey (compressed) — None for anon. The
+    /// inbox uses it to learn the sender for replies (SecureMsgInsertAddress).
+    pub from_pubkey: Option<Vec<u8>>,
 }
 
 /// Decrypt a validated wire message for one owned address
@@ -908,6 +918,7 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
         }
         data[..len_plain as usize].to_vec()
     };
+    let mut recovered_pubkey: Option<Vec<u8>> = None;
     let from_address = if anon {
         "anon".to_string()
     } else {
@@ -922,12 +933,14 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
         if claimed != recovered_addr {
             return Err("signature validation failed (sender mismatch)".into());
         }
+        recovered_pubkey = Some(recovered);
         claimed
     };
     // trailing NUL parity with legacy vchMessage
     let text = String::from_utf8_lossy(&msg_bytes).to_string();
     Ok(DecryptedMessage {
         timestamp: m.timestamp,
+        from_pubkey: if anon { None } else { recovered_pubkey },
         from_address,
         plaintext: text.trim_end_matches('\0').to_string(),
     })
@@ -1051,7 +1064,9 @@ pub struct StoredMessage {
 pub const SMSG_MASK_UNREAD: u8 = 1 << 0;
 
 pub struct MessageStore {
-    conn: Connection,
+    /// Mutex: MessageStore is shared across RPC threads (Arc<SmsgEngine>) —
+    /// rusqlite's Connection is Send-but-not-Sync.
+    conn: std::sync::Mutex<Connection>,
 }
 
 impl MessageStore {
@@ -1079,7 +1094,7 @@ impl MessageStore {
              );",
         )
         .map_err(|e| format!("smsg schema: {}", e))?;
-        Ok(MessageStore { conn })
+        Ok(MessageStore { conn: std::sync::Mutex::new(conn) })
     }
 
     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
@@ -1102,8 +1117,8 @@ impl MessageStore {
             sample: msg.key[10..18].try_into().map_err(|_| "key sample")?,
         };
         let _ = t;
-        let n = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let n = conn
             .execute(
                 "INSERT OR IGNORE INTO messages
                  (folder, key, time_received, status, addr_to, addr_outbox, data)
@@ -1123,8 +1138,8 @@ impl MessageStore {
     }
 
     pub fn list(&self, folder: u16) -> Result<Vec<StoredMessage>, String> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
             .prepare(
                 "SELECT key, time_received, status, addr_to, addr_outbox, data
                  FROM messages WHERE folder = ?1 ORDER BY time_received DESC, key",
@@ -1150,8 +1165,8 @@ impl MessageStore {
     }
 
     pub fn mark_read(&self, folder: u16, key: &[u8]) -> Result<bool, String> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let n = conn
             .execute(
                 "UPDATE messages SET status = status & ~1 WHERE folder = ?1 AND key = ?2",
                 rusqlite::params![folder as i64, key],
@@ -1161,8 +1176,8 @@ impl MessageStore {
     }
 
     pub fn delete(&self, folder: u16, key: &[u8]) -> Result<bool, String> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let n = conn
             .execute(
                 "DELETE FROM messages WHERE folder = ?1 AND key = ?2",
                 rusqlite::params![folder as i64, key],
@@ -1175,8 +1190,8 @@ impl MessageStore {
     /// the count removed (legacy expiry parity — 48h receive-time retention).
     pub fn purge_expired(&self, now: i64) -> Result<usize, String> {
         let cut = now - SMSG_RETENTION;
-        let n = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let n = conn
             .execute(
                 "DELETE FROM messages WHERE time_received < ?1",
                 rusqlite::params![cut],
@@ -1188,8 +1203,8 @@ impl MessageStore {
     /// Insert/lookup sender public keys learned from received messages
     /// (SecureMsgInsertAddress / SecureMsgGetStoredKey).
     pub fn insert_pubkey(&self, hash160: &[u8; 20], pubkey: &[u8], now: i64) -> Result<bool, String> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let n = conn
             .execute(
                 "INSERT OR IGNORE INTO pubkeys (hash160, pubkey, added) VALUES (?1, ?2, ?3)",
                 rusqlite::params![hash160, pubkey, now],
@@ -1199,8 +1214,8 @@ impl MessageStore {
     }
 
     pub fn lookup_pubkey(&self, hash160: &[u8; 20]) -> Result<Option<Vec<u8>>, String> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
             .prepare("SELECT pubkey FROM pubkeys WHERE hash160 = ?1")
             .map_err(|e| format!("smsg lookup: {}", e))?;
         let mut rows = stmt

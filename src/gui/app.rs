@@ -18,7 +18,6 @@
 //! All behavior comes from gui::app_state::AppState (pure, tested headless);
 //! this file only renders it and forwards clicks to its action methods.
 
-use crate::consensus::STAKE_MIN_AGE;
 use crate::gui::app_state::AppState;
 use crate::gui::explorer as ex;
 use crate::gui::state as s;
@@ -163,6 +162,8 @@ pub struct Tri7App {
     st: AppState,
     tex: HashMap<String, TextureHandle>,
     console_open: bool,
+    /// repaint ticks since start — paces the live-panel polls (10 ticks ≈ 5s)
+    poll_ticker: u32,
 }
 
 impl Tri7App {
@@ -295,7 +296,7 @@ impl Tri7App {
 
     fn banner_no_broadcast(ui: &mut egui::Ui) {
         ui.label(egui::RichText::new(
-            "BROADCAST DISABLED in this build — signing is real (spend.rs, offline); the signed hex is produced for the operator. Network sending arrives with daemon integration.",
+            "Signing is real (spend.rs, offline). Broadcast goes through YOUR tri7d's sendrawtransaction (consensus-validated, then relayed inv→getdata→tx).",
         )
         .small());
     }
@@ -369,12 +370,49 @@ impl eframe::App for Tri7App {
                 ui.label(egui::RichText::new(label).small());
                 ui.separator();
                 self.ico(ui, "icons/staking_off", 16.0);
-                ui.label(egui::RichText::new("Staking: dry-run only").small());
+                // live staking indicator (polled with the peers tick)
+                let stake_state = self
+                    .st
+                    .staking_live
+                    .info
+                    .as_ref()
+                    .map(|v| {
+                        let on = v.get("staking") == Some(&Value::Bool(true));
+                        let en = v.get("enabled") == Some(&Value::Bool(true));
+                        if on {
+                            "Staking: ON".to_string()
+                        } else if en {
+                            "Staking: enabled (no mature weight)".to_string()
+                        } else {
+                            "Staking: off".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "Staking: —".to_string());
+                ui.label(egui::RichText::new(stake_state).small());
+                // transport flags (clearnet/tor/i2p) from the peer table
+                let transport_note = self
+                    .st
+                    .peers_live
+                    .table
+                    .as_ref()
+                    .and_then(|v| v.get("by_transport"))
+                    .map(|bt| {
+                        format!(
+                            " [clearnet {} · tor {} · i2p {}]",
+                            bt.get("clearnet").and_then(|x| x.as_u64()).unwrap_or(0),
+                            bt.get("tor").and_then(|x| x.as_u64()).unwrap_or(0),
+                            bt.get("i2p").and_then(|x| x.as_u64()).unwrap_or(0),
+                        )
+                    })
+                    .unwrap_or_default();
+                ui.label(egui::RichText::new(transport_note).small());
                 if ui
                     .add(egui::Button::new(egui::RichText::new("refresh").small()))
                     .clicked()
                 {
                     self.st.refresh_debug_info_action();
+                    self.st.staking_poll_action();
+                    self.st.peers_poll_action();
                 }
             });
         });
@@ -403,6 +441,12 @@ impl eframe::App for Tri7App {
         self.debug_window(ctx);
         if DEBUG_TOGGLE.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.console_open = true;
+        }
+        // live-panel polling: staking + peers every ~5s (cheap loopback RPCs)
+        self.poll_ticker = self.poll_ticker.wrapping_add(1);
+        if self.poll_ticker % 10 == 0 {
+            self.st.staking_poll_action();
+            self.st.peers_poll_action();
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
@@ -574,6 +618,63 @@ impl Tri7App {
                 ui.add(img(&tex, Vec2::splat(16.0)));
             }
         });
+
+        // ---- live peers (real per-session records, transport flags) ----
+        ui.separator();
+        ui.label(egui::RichText::new("Peers").strong());
+        ui.horizontal(|ui| {
+            if ui.button("Refresh peers").clicked() {
+                self.st.peers_poll_action();
+            }
+            if let Some(e) = &self.st.peers_live.last_error {
+                ui.colored_label(RED_ERR, format!("rpc: {}", e));
+            }
+        });
+        if let Some(table) = &self.st.peers_live.table {
+            if let Some(rows) = table.get("peers").and_then(|p| p.as_array()) {
+                egui::Grid::new("peers_grid")
+                    .num_columns(6)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for r in rows {
+                            let transport = r.get("transport").and_then(|x| x.as_str()).unwrap_or("?");
+                            let tcol = match transport {
+                                "tor" => Color32::from_rgb(0xaa, 0x77, 0xee),
+                                "i2p" => Color32::from_rgb(0x77, 0xaa, 0xdd),
+                                _ => Color32::GRAY,
+                            };
+                            ui.label(egui::RichText::new(
+                                if r.get("inbound") == Some(&Value::Bool(true)) { "in" } else { "out" },
+                            ).small());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    " {}",
+                                    r.get("endpoint").and_then(|x| x.as_str()).unwrap_or("?")
+                                ))
+                                .monospace(),
+                            );
+                            ui.label(egui::RichText::new(transport).color(tcol));
+                            ui.label(egui::RichText::new(
+                                r.get("subver").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                            ).small());
+                            ui.label(egui::RichText::new(
+                                format!(
+                                    "msgs in {}/out {}",
+                                    r.get("msgs_in").and_then(|x| x.as_u64()).unwrap_or(0),
+                                    r.get("msgs_out").and_then(|x| x.as_u64()).unwrap_or(0)
+                                ),
+                            ).small());
+                            ui.label(egui::RichText::new(
+                                format!(
+                                    "traffic {}ms ago",
+                                    r.get("last_traffic_ms_ago").and_then(|x| x.as_u64()).unwrap_or(0)
+                                ),
+                            ).small());
+                            ui.end_row();
+                        }
+                    });
+            }
+        }
     }
 
     fn page_send(&mut self, ui: &mut egui::Ui) {
@@ -716,8 +817,8 @@ impl Tri7App {
         }
 
         ui.separator();
-        // The legacy button is "S&end"; this build NEVER broadcasts — signing
-        // is real and the hex is handed to the operator.
+        // The legacy button is "S&end"; signing is real (spend.rs, offline)
+        // and the hex is reviewed before broadcasting.
         if ui
             .add(egui::Button::new(
                 egui::RichText::new("S&ign — build transaction").size(16.0),
@@ -742,7 +843,18 @@ impl Tri7App {
                         b.inputs.len()
                     ),
                 );
+                // REVIEW → BROADCAST: push the signed tx through tri7d's
+                // sendrawtransaction (consensus-validated server-side, then
+                // inv → getdata → tx relayed to every peer)
                 ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("&Broadcast — relay via tri7d").size(15.0),
+                        ))
+                        .clicked()
+                    {
+                        st.broadcast_action(b.tx_hex.clone());
+                    }
                     if ui.button("Copy hex to clipboard").clicked() {
                         ui.output_mut(|o| o.copied_text = b.tx_hex.clone());
                     }
@@ -759,6 +871,15 @@ impl Tri7App {
                         }
                     }
                 });
+                match &st.broadcast.result {
+                    Some(Ok(msg)) => {
+                        ui.colored_label(OK_GRN, format!("BROADCASTED — {}", msg));
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(RED_ERR, format!("broadcast failed: {}", e));
+                    }
+                    None => {}
+                }
                 ui.add(egui::Label::new(egui::RichText::new(&b.tx_hex).monospace().small()).wrap());
             }
             Some(Err(e)) => {
@@ -988,101 +1109,286 @@ impl Tri7App {
         let st = &mut self.st;
         ui.heading("Staking");
         ui.label(
-            "read-only status — the tri7 engine mints dry-run blocks only; nothing is broadcast",
+            "live staking loop — minting is real when enabled (stake=1); the kernel search runs on tri7d",
         );
         ui.separator();
+        // live poll + on/off
+        ui.horizontal(|ui| {
+            if ui.button("&Refresh (getstakinginfo)").clicked() {
+                st.staking_poll_action();
+            }
+            if st.staking_live.field("enabled") == "true" {
+                if ui.button("Staking &OFF").clicked() {
+                    st.staking_toggle_action(false);
+                }
+            } else if ui.button("Staking &ON").clicked() {
+                st.staking_toggle_action(true);
+            }
+            if let Some(e) = &st.staking_live.last_error {
+                ui.colored_label(RED_ERR, format!("rpc: {}", e));
+            }
+        });
+        ui.separator();
         let Some(stake) = st.stake.clone() else {
-            ui.label("load a wallet to see staking status");
+            ui.label("load a wallet to see the local weight estimate");
             return;
         };
+        let live = st.staking_live.clone();
+        let enabled = live.field("enabled");
+        let staking_on = enabled == "true" && live.field("staking") == "true";
         if let Some(tex) = &st_icon {
             ui.add(img(tex, Vec2::splat(32.0)));
         }
-        ui.label("Staking is currently off on this chain (static tip, staking=0).");
+        ui.label(
+            egui::RichText::new(format!(
+                "Staking loop: {}",
+                if staking_on {
+                    "ON — searching kernels every tick"
+                } else if enabled == "true" {
+                    "enabled but idle (no mature weight yet)"
+                } else {
+                    "OFF (stake=0)"
+                }
+            ))
+            .strong(),
+        );
+        // Spendable / Stake / Unconfirmed / Immature split from real state
+        let (spendable, utxo_n, young_n) = match &st.derived {
+            Some(d) => {
+                let tip_h = st.tip.as_ref().map(|t| t.height).unwrap_or(0);
+                let mut sp = 0i64;
+                let mut n = 0usize;
+                let mut young = 0usize;
+                for u in &d.utxos {
+                    sp += u.value_sats;
+                    n += 1;
+                    if tip_h.saturating_sub(u.height as u64) < 60 {
+                        young += 1; // ~1h of blocks — below the 3600s min age
+                    }
+                }
+                (sp, n, young)
+            }
+            None => (0, 0, 0),
+        };
         egui::Grid::new("stake_grid").num_columns(2).show(ui, |ui| {
-            ui.label("Current weight (mature):");
+            ui.label("Spendable:");
             ui.label(format!(
-                "{} {} ({} coins ≥ min-age {}s)",
-                s::format_tri(stake.mature_weight_sats),
+                "{} {} across {} UTXOs",
+                s::format_tri(spendable),
                 s::TICKER,
-                stake.stakeable_coins,
-                STAKE_MIN_AGE
+                utxo_n
             ));
             ui.end_row();
-            ui.label("PoS difficulty (tip nBits):");
-            ui.label(stake.pos_difficulty.to_string());
+            ui.label("Stake (weight):");
+            ui.label(format!(
+                "{} coin-days ({} mature coins, {} young <1h)",
+                live.field("weight"),
+                live.field("coins_meeting_min_age"),
+                young_n
+            ));
+            ui.end_row();
+            ui.label("Network stake weight:");
+            ui.label(format!(
+                "{} (expected next stake in ~{}s at our weight)",
+                live.field("netstakeweight"),
+                live.field("expectedtime")
+            ));
+            ui.end_row();
+            ui.label("PoS difficulty / target:");
+            ui.label(format!(
+                "{} / {}",
+                live.field("difficulty"),
+                live.field("target")
+            ));
             ui.end_row();
             ui.label("Stake modifier (tip):");
             ui.label(format!(
-                "{:016x}{}",
-                stake.modifier,
-                if stake.modifier_generated {
-                    " (generated)"
-                } else {
-                    ""
-                }
+                "{}{}",
+                live.field("modifier"),
+                if stake.modifier_generated { " (generated)" } else { "" }
             ));
             ui.end_row();
-            ui.label("Note:");
-            ui.label(&stake.note);
+            ui.label("Kernel attempts:");
+            ui.label(format!(
+                "{} attempts / {} searches (last pass {}s)",
+                live.field("attempts"),
+                live.field("searches"),
+                live.field("last_search_secs")
+            ));
             ui.end_row();
+            ui.label("Last stake:");
+            ui.label(
+                live.info
+                    .as_ref()
+                    .and_then(|v| v.get("last_stake"))
+                    .map(|ls| {
+                        format!(
+                            "h{} {} at {}",
+                            ls.get("height").and_then(|x| x.as_u64()).unwrap_or(0),
+                            ls.get("hash").and_then(|x| x.as_str()).unwrap_or("?"),
+                            ls.get("at_utc").and_then(|x| x.as_str()).unwrap_or("?")
+                        )
+                    })
+                    .unwrap_or_else(|| "none this session".into()),
+            );
+            ui.end_row();
+            ui.label("Relay pool:");
+            ui.label(format!("{} pooled tx(s) (fees attach to the next stake)", live.field("pooledtx")));
+            ui.end_row();
+            if let Some(reasons) = live
+                .info
+                .as_ref()
+                .and_then(|v| v.get("staking_disabled_reasons"))
+                .and_then(|r| r.as_array())
+                .filter(|r| !r.is_empty())
+            {
+                ui.label("Disabled because:");
+                ui.label(
+                    reasons
+                        .iter()
+                        .filter_map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+                ui.end_row();
+            }
         });
-        ui.separator();
-        ui.label(egui::RichText::new("Last kernel-search dry run (stake_dryrun.json)").strong());
-        match &stake.dryrun {
-            Some(d) => {
-                egui::Grid::new("dryrun_grid")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        ui.label("Attempts:");
-                        ui.label(d.attempts.to_string());
-                        ui.end_row();
-                        ui.label("Kernel hits:");
-                        ui.label(d.kernel_hits.to_string());
-                        ui.end_row();
-                        ui.label("Coins considered / meeting min-age:");
-                        ui.label(format!(
-                            "{} / {}",
-                            d.coins_considered, d.coins_meeting_min_age
-                        ));
-                        ui.end_row();
-                        ui.label("Reward (last solve):");
-                        ui.label(format!(
-                            "{} {} (split: {})",
-                            s::format_tri(d.reward_sats),
-                            s::TICKER,
-                            d.split
-                        ));
-                        ui.end_row();
-                        ui.label("Candidate block:");
-                        ui.label(&d.block_hash);
-                        ui.end_row();
-                    });
-            }
-            None => {
-                ui.label("no dry-run result found (run src/bin/stake_mint.rs to produce one)");
-            }
+        if !stake.note.is_empty() {
+            ui.label(egui::RichText::new(&stake.note).small());
         }
     }
 
     fn page_messages(&mut self, ui: &mut egui::Ui) {
         let st = &mut self.st;
         ui.heading("Messages");
-        ui.label("View and Send Encrypted messages");
+        ui.label("View and Send Encrypted messages (smsg — relayed over the P2P transports)");
         ui.separator();
-        ui.label(
-            "Encrypted messages (smsg) are carried by the legacy daemon's message store — this page \
-             becomes functional with daemon integration. Message ownership can already be proven \
-             today: use Sign Message / Verify Message.",
-        );
         ui.horizontal(|ui| {
-            if ui.button("Sign &Message").clicked() {
-                st.goto(Screen::SignMessage);
+            if ui.button("&Refresh").clicked() {
+                st.messages_refresh_action();
             }
-            if ui.button("&Verify Message").clicked() {
-                st.goto(Screen::VerifyMessage);
+            if ui.button("&Purge expired").clicked() {
+                st.messages_purge_action();
+            }
+            let unread = st.messages.unread_count();
+            if unread > 0 {
+                ui.colored_label(OK_GRN, format!("{} unread", unread));
+            }
+            if let Some(e) = &st.messages.last_error {
+                ui.colored_label(RED_ERR, format!("rpc: {}", e));
+            }
+            if let Some(li) = &st.messages.localinfo {
+                ui.label(egui::RichText::new(format!(
+                    "keys {} · buckets {} · received {} · sent {}",
+                    li.get("keys").and_then(|x| x.as_u64()).unwrap_or(0),
+                    li.get("buckets").and_then(|x| x.as_u64()).unwrap_or(0),
+                    li.get("received").and_then(|x| x.as_u64()).unwrap_or(0),
+                    li.get("sent").and_then(|x| x.as_u64()).unwrap_or(0),
+                )).small());
             }
         });
+
+        // --- compose ---
+        ui.separator();
+        ui.label(egui::RichText::new("Send an encrypted message").strong());
+        egui::Grid::new("smsg_compose").num_columns(2).show(ui, |ui| {
+            ui.label("From:");
+            let from = &mut st.messages.compose_from;
+            egui::ComboBox::from_id_source("smsg_from")
+                .selected_text(if from.is_empty() { "select a wallet key".to_string() } else { from.clone() })
+                .width(420.0)
+                .show_ui(ui, |ui| {
+                    if let Some(li) = &st.messages.localinfo {
+                        if let Some(addrs) = li.get("addresses").and_then(|a| a.as_array()) {
+                            for a in addrs {
+                                if let Some(addr) = a.as_str() {
+                                    ui.selectable_value(from, addr.to_string(), addr);
+                                }
+                            }
+                        }
+                    }
+                });
+            ui.end_row();
+            ui.label("To:");
+            ui.add_sized([480.0, 22.0], egui::TextEdit::singleline(&mut st.messages.compose_to));
+            ui.end_row();
+            ui.label("Message:");
+            ui.add_sized([480.0, 120.0], egui::TextEdit::multiline(&mut st.messages.compose_text));
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            if ui.button("&Send encrypted").clicked() {
+                st.messages_send_action();
+            }
+            match &st.messages.send_result {
+                Some(Ok(msg)) => {
+                    ui.colored_label(OK_GRN, msg);
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(RED_ERR, e);
+                }
+                None => {}
+            }
+        });
+
+        // --- inbox ---
+        ui.separator();
+        ui.label(egui::RichText::new("Inbox").strong());
+        match st.messages.inbox.clone() {
+            Some(Value::Array(rows)) if !rows.is_empty() => {
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    egui::Grid::new("smsg_inbox")
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for r in &rows {
+                                let unread = r.get("read") == Some(&Value::Bool(false));
+                                let dot = if unread { "●" } else { " " };
+                                ui.label(egui::RichText::new(dot).color(if unread { OK_GRN } else { Color32::GRAY }));
+                                ui.label(r.get("from").and_then(|x| x.as_str()).unwrap_or("?").to_string());
+                                ui.label(r.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string());
+                                ui.label(egui::RichText::new(
+                                    format!("t={} b={}", r.get("time").and_then(|x| x.as_i64()).unwrap_or(0),
+                                        r.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0)),
+                                ).small());
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+            Some(Value::Array(_)) => {
+                ui.label("inbox empty");
+            }
+            _ => {
+                ui.label("press Refresh to load (tri7d must run with --wallet)");
+            }
+        }
+
+        // --- outbox ---
+        ui.separator();
+        ui.label(egui::RichText::new("Outbox").strong());
+        match st.messages.outbox.clone() {
+            Some(Value::Array(rows)) if !rows.is_empty() => {
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    egui::Grid::new("smsg_outbox")
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for r in &rows {
+                                ui.label(r.get("to").and_then(|x| x.as_str()).unwrap_or("?").to_string());
+                                ui.label(r.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string());
+                                ui.label(egui::RichText::new(
+                                    format!("t={}", r.get("time").and_then(|x| x.as_i64()).unwrap_or(0)),
+                                ).small());
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+            _ => {
+                ui.label("outbox empty");
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1744,7 +2050,7 @@ impl Tri7App {
                     }
                     ui.label(
                         egui::RichText::new(format!(
-                            "Triangles version tri7-core v{} (phase 6 GUI)",
+                            "Cryptographic Triangles — tri7 v{} (GUI)",
                             env!("CARGO_PKG_VERSION")
                         ))
                         .strong(),
@@ -1910,6 +2216,7 @@ pub fn run(cfg: UiConfig) {
             st: AppState::new(cfg),
             tex: HashMap::new(),
             console_open: false,
+            poll_ticker: 0,
         }))
     });
     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {

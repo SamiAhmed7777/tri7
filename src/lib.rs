@@ -16,8 +16,10 @@ pub mod p2p;
 pub mod replay;
 pub mod rpc;
 pub mod smsg;
+pub mod smsg_net;
 pub mod spend;
 pub mod stake;
+pub mod txpool;
 pub mod wallet;
 
 pub use legacy::{Block, Tx, Vin, Vout};

@@ -39,6 +39,15 @@ jobs:
           path: |
             target/release/follow_tip.exe
             target/release/tri7_wallet_gui.exe
+      - name: Build Windows installer (NSIS)
+        run: |
+          choco install nsis -y --no-progress
+          cp target/release/tri7_wallet_gui.exe, target/release/follow_tip.exe deploy/windows/
+          makensis deploy/windows/tri7-wallet.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tri7-wallet-setup-7.0.0.exe
+          path: deploy/windows/tri7-wallet-setup-7.0.0.exe
 
   macos-build:
     runs-on: macos-latest

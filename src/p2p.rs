@@ -548,7 +548,7 @@ mod tests {
             addr_you: WireAddr::ipv4(127, 0, 0, 1, 24113, NODE_NETWORK),
             addr_me: WireAddr::ipv4(127, 0, 0, 1, 24112, NODE_NETWORK),
             nonce,
-            user_agent: "/tri7:0.2.0/".into(),
+            user_agent: "/tri7:7.0.0/".into(),
             start_height: height,
         }
     }

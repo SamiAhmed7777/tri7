@@ -659,6 +659,12 @@ pub struct BlockStore {
     pub progress_frames: AtomicU64,
     pub started: Instant,
     failure: RwLock<Option<String>>,
+    /// Bodies accepted while the index build is still running: written to the
+    /// appendix in arrival order once the store is ready. Without this, blocks
+    /// accepted during a cold build (fresh-node onboarding) were lost to both
+    /// the index and the file — the wallet live view could never seed and the
+    /// ops surface (staking/smsg/broadcast) stayed down forever.
+    pending: std::sync::Mutex<Vec<(Vec<u8>, Option<u64>)>>,
 }
 
 pub struct StoreInner {
@@ -741,6 +747,7 @@ impl BlockStore {
             progress_frames: AtomicU64::new(0),
             started: Instant::now(),
             failure: RwLock::new(None),
+            pending: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -1124,10 +1131,96 @@ impl BlockStore {
     /// return Ok with the existing hash. `height` assigns the height-thread
     /// entry for gap fills above the threaded tip.
     pub fn append_block(&self, body: &[u8], height: Option<u64>) -> Result<Hash, String> {
-        let inner = self.inner().ok_or("block index not ready")?;
         if body.len() < 80 {
             return Err(format!("append: body too short ({})", body.len()));
         }
+        let inner = match self.inner() {
+            Some(i) => i,
+            None => {
+                // Index still building: buffer the body, flush on ready. The
+                // frame is durable in RAM only until then — same assumption
+                // the recent-blocks cache makes — but NOTHING is lost to the
+                // disk store once the build lands.
+                let hash = header_hash(body)?;
+                let mut p = self.pending.lock().unwrap();
+                if p.iter().any(|(b, _)| header_hash(b).as_ref() == Ok(&hash)) {
+                    return Ok(hash); // already buffered
+                }
+                p.push((body.to_vec(), height));
+                return Ok(hash);
+            }
+        };
+        // arrival-order guarantee: anything buffered during the build lands
+        // before the first post-ready append
+        self.flush_pending(&inner);
+        let hash = header_hash(body)?;
+        if self.block_by_hash(&hash)?.is_some() {
+            return Ok(hash); // already on disk — nothing to do
+        }
+        if !inner.writable.load(Ordering::SeqCst) {
+            return Err(
+                "blocks file is not writable (append needs a tri7-owned blk file)".into(),
+            );
+        }
+        let f = &inner.file;
+        let off = f
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
+        let mut frame = Vec::with_capacity(8 + body.len());
+        frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(body);
+        use std::io::Seek;
+        let mut fh = f
+            .try_clone()
+            .map_err(|e| format!("append: clone handle: {}", e))?;
+        fh.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| format!("append: seek: {}", e))?;
+        fh.write_all(&frame)
+            .map_err(|e| format!("append: write: {}", e))?;
+        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // index the frame
+        let mut tx_keys = Vec::new();
+        walk_tx_ranges(body, &mut |start, end| {
+            tx_keys.push(key8(&sha256d(&body[start..end])));
+            Ok(())
+        })?;
+        let seq = inner.blocks.frames as u32 + {
+            let a = inner.appendix.read().unwrap();
+            a.len() as u32
+        };
+        inner.appendix.write().unwrap().push(AppendedFrame {
+            key: key8(&hash),
+            off,
+            seq,
+            height,
+            tx_keys,
+        });
+        Ok(hash)
+    }
+
+    /// Drain bodies buffered during the index build into the now-ready store
+    /// (FIFO — same append path as direct appends, dedup via block_by_hash).
+    fn flush_pending(&self, inner: &Arc<StoreInner>) {
+        let drained: Vec<(Vec<u8>, Option<u64>)> = {
+            let mut p = self.pending.lock().unwrap();
+            std::mem::take(&mut *p)
+        };
+        for (body, height) in drained {
+            if let Err(e) = self.append_ready(&inner, &body, height) {
+                eprintln!("[blockidx] pending append flush failed: {}", e);
+            }
+        }
+    }
+
+    /// The ready-store append path (extracted from append_block).
+    fn append_ready(
+        &self,
+        inner: &Arc<StoreInner>,
+        body: &[u8],
+        height: Option<u64>,
+    ) -> Result<Hash, String> {
         let hash = header_hash(body)?;
         if self.block_by_hash(&hash)?.is_some() {
             return Ok(hash); // already on disk — nothing to do
@@ -1390,6 +1483,47 @@ mod tests {
         let hit3r = store2.block_by_height(3).unwrap().expect("post-restart");
         assert_eq!(hit3r.hash, hashes[3]);
         assert_eq!(store2.threaded_tip(), Some(3));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_during_index_build_buffers_and_flushes_on_ready() {
+        // Fresh-node onboarding shape: blocks get accepted while the cold
+        // index build is still scanning. They must land in the store once it
+        // is ready — not vanish into a permanent hole (the bug that kept a
+        // freshly-seeded node's wallet live view from ever seeding).
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("pendingappend");
+        let path = dir.join("blk.dat");
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        let truncated = &frames[..frames.len() - b3_frame.len()];
+        std::fs::write(&path, truncated).unwrap();
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(None);
+        // append while the build may still be running — either order is fine:
+        // pre-ready buffers into `pending`, post-ready appends directly
+        let body = &b3_frame[8..];
+        let first = store.append_block(body, Some(3)).expect("append");
+        assert_eq!(first, hashes[3]);
+
+        let mut waited = 0;
+        while waited < 200 && !matches!(store.status(), StoreStatus::Ready { .. }) {
+            std::thread::sleep(Duration::from_millis(25));
+            waited += 1;
+        }
+        assert!(matches!(store.status(), StoreStatus::Ready { .. }));
+        // post-ready append flushes anything buffered and dedups
+        let again = store.append_block(body, Some(3)).expect("flush append");
+        assert_eq!(again, hashes[3]);
+
+        let hit = store.block_by_height(3).unwrap().expect("served after ready");
+        assert_eq!(hit.hash, hashes[3]);
+        let txid3 = txid(&hit.block.vtx[0]);
+        let thit = store.tx_by_id(&txid3).unwrap().expect("tx indexed");
+        assert_eq!(thit.block_height, Some(3));
 
         std::fs::remove_dir_all(&dir).ok();
     }

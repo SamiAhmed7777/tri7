@@ -124,6 +124,56 @@ pub fn payload_to_address(payload: &[u8; 21]) -> String {
     base58(&full)
 }
 
+/// Legacy DecodeBase58 (leading '1's → zero bytes). Inverse of `base58`.
+pub fn base58_decode(s: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut bytes_map = [255usize; 128];
+    for (i, &c) in ALPHABET.iter().enumerate() {
+        bytes_map[c as usize] = i;
+    }
+    let mut zeros = 0usize;
+    let chars: Vec<u8> = s.as_bytes().to_vec();
+    while zeros < chars.len() && chars[zeros] == b'1' {
+        zeros += 1;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(chars.len() * 137 / 100 + 1);
+    for &ch in chars.iter().skip(zeros) {
+        if ch >= 128 || bytes_map[ch as usize] == 255 {
+            return Err(format!("invalid base58 byte {:#x}", ch));
+        }
+        let mut carry = bytes_map[ch as usize];
+        for b in out.iter_mut() {
+            carry += (*b as usize) * 58;
+            *b = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            out.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    let mut full = vec![0u8; zeros];
+    full.extend(out.into_iter().rev());
+    Ok(full)
+}
+
+/// Decode a base58check address back to its 21-byte payload (version +
+/// hash160), verifying the 4-byte checksum — legacy CTrianglesAddress.
+pub fn address_to_payload(address: &str) -> Result<[u8; 21], String> {
+    let full = base58_decode(address)?;
+    if full.len() != 25 {
+        return Err(format!("address {}: decoded length {}", address, full.len()));
+    }
+    let payload = &full[..21];
+    let expect = &sha256d(payload)[..4];
+    if &full[21..] != expect {
+        return Err(format!("address {}: bad base58check checksum", address));
+    }
+    let mut out = [0u8; 21];
+    out.copy_from_slice(payload);
+    Ok(out)
+}
+
 /// Legacy EncodeBase58 (leading zero bytes → '1's).
 pub fn base58(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";

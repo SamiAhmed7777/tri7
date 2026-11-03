@@ -59,8 +59,8 @@ use crate::p2p::internal_to_display;
 // ---------------------------------------------------------------------------
 
 /// tri7's own RPC version marker (daemon-replacement build, phase 5b).
-pub const TRI7_RPC_VERSION: i64 = 70051;
-pub const TRI7_SUBVERSION: &str = "/tri7:0.5.1/";
+pub const TRI7_RPC_VERSION: i64 = 70000;
+pub const TRI7_SUBVERSION: &str = "/tri7:7.0.0/";
 /// Wire protocol version tri7 speaks (p2p.rs PROTOCOL_VERSION).
 pub const TRI7_PROTOCOL_VERSION: i64 = 70206;
 /// Default request cap: 1 MB (task requirement).
@@ -84,6 +84,37 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getreceivedbyaddress",
     "validateaddress",
     "health",
+    // ---- phase 7 milestone 2: broadcast / staking / connections / smsg ----
+    "sendrawtransaction",
+    "getstakinginfo",
+    "staking",
+    "getpeerinfo",
+    "smsgsend",
+    "smsginbox",
+    "smsgoutbox",
+    "smsgscandir",
+    "smsgpurge",
+    "smsgaddaddress",
+    "smsgkeys",
+    "smsglocalinfo",
+];
+
+/// The NATIVE_METHODS subset routed to the live NodeOps engine (wallet keys,
+/// peer sessions, staking loop, smsg store). Everything else is served from
+/// the passive snapshots/window.
+pub const OPS_METHODS: &[&str] = &[
+    "sendrawtransaction",
+    "getstakinginfo",
+    "staking",
+    "getpeerinfo",
+    "smsgsend",
+    "smsginbox",
+    "smsgoutbox",
+    "smsgscandir",
+    "smsgpurge",
+    "smsgaddaddress",
+    "smsgkeys",
+    "smsglocalinfo",
 ];
 
 /// Methods allowed to fall back to the legacy proxy when the native path
@@ -103,7 +134,6 @@ pub const PROXY_FALLBACK_METHODS: &[&str] = &[
     "listunspent",
     "getrawmempool",
     "getmempoolinfo",
-    "getstakinginfo",
     "getnetworkhashps",
     "getwalletinfo",
 ];
@@ -444,11 +474,29 @@ pub trait Proxy: Send + Sync {
     fn probe(&self) -> bool;
 }
 
+/// Node-owned operations that need the daemon's live machinery (wallet keys,
+/// peers, staking loop, smsg engine). Implemented by follow_tip; stubbed in
+/// tests. Every method here is NATIVE-ONLY — never proxied, never forwarded.
+///
+///   sendrawtransaction — consensus-validate + pending-relay set + inv relay
+///   getstakinginfo / staking — staking loop status + persisted on|off switch
+///   getpeerinfo — real per-session connection records (transport flags)
+///   smsg* — the smsg engine (store, buckets, wallet keys)
+pub trait NodeOps: Send + Sync {
+    /// Ok(result value) or Err((rpc error code, message)).
+    fn call(&self, method: &str, params: &Value) -> Result<Value, (i64, String)>;
+    /// cheap liveness for health (false before the engine is wired)
+    fn ready(&self) -> bool {
+        true
+    }
+}
+
 pub struct Deps<'a> {
     pub tip: &'a dyn TipProvider,
     pub wallet: &'a dyn WalletProvider,
     pub blocks: &'a dyn BlockDataProvider,
     pub proxy: Option<&'a dyn Proxy>,
+    pub ops: Option<&'a dyn NodeOps>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,6 +1058,15 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 }
                 None => "disabled",
             };
+            // real per-session connection records when the node ops engine is
+            // wired (transport flags clearnet/tor/i2p); else the bare counter
+            let peers_detail = match deps.ops {
+                Some(o) if o.ready() => match o.call("getpeerinfo", &json!([])) {
+                    Ok(v) => v,
+                    Err(_) => json!([]),
+                },
+                _ => json!([]),
+            };
             NativeOutcome::Ok(json!({
                 "status": "ok",
                 "height": t.height,
@@ -1019,12 +1076,26 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 "state_write_age_secs": deps.tip.state_write_age_secs(),
                 "window": {"base": base, "entries": entries},
                 "peers": deps.tip.peers(),
+                "peer_detail": peers_detail,
+                "node_ops": match deps.ops { Some(o) => o.ready(), None => false },
                 "uptime_secs": deps.tip.uptime_secs(),
                 "block_index": deps.blocks.status_json(),
                 "legacy_rpc": legacy,
                 "native_methods": NATIVE_METHODS,
             }))
         }
+
+        m if OPS_METHODS.contains(&m) => match deps.ops {
+            Some(o) if o.ready() => match o.call(m, params) {
+                Ok(v) => NativeOutcome::Ok(v),
+                Err((code, msg)) => NativeOutcome::Err(code, msg),
+            },
+            Some(_) => NativeOutcome::Err(-1, "node ops engine still warming up".into()),
+            None => NativeOutcome::Err(
+                -1,
+                "node ops engine not wired — run tri7d with --wallet (staking/smsg/broadcast need wallet keys)".into(),
+            ),
+        },
 
         _ => NativeOutcome::Err(-32601, unknown_method_msg(method)),
     }
@@ -1454,6 +1525,7 @@ pub struct ServerDeps {
     pub wallet: Arc<dyn WalletProvider>,
     pub blocks: Arc<dyn BlockDataProvider>,
     pub proxy: Option<Arc<dyn Proxy>>,
+    pub ops: Option<Arc<dyn NodeOps>>,
     pub http: HttpServerConfig,
 }
 
@@ -1489,6 +1561,7 @@ pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
                             wallet: &*deps.wallet,
                             blocks: &*deps.blocks,
                             proxy: deps.proxy.as_deref(),
+                            ops: deps.ops.as_deref(),
                         };
                         let (status, resp) = handle_body(&d, &body);
                         let _ = write_response(&mut stream, status, &resp);
@@ -1832,6 +1905,7 @@ mod tests {
             wallet,
             blocks,
             proxy: proxy.map(|p| p as &dyn Proxy),
+            ops: None,
         }
     }
 
@@ -2621,6 +2695,7 @@ mod tests {
             wallet: &good,
             blocks: &b,
             proxy: None,
+            ops: None,
         };
         let v = call(&d, "listunspent", json!([]));
         let arr = v["result"].as_array().unwrap();
@@ -2639,6 +2714,7 @@ mod tests {
             wallet: &bad_h,
             blocks: &b,
             proxy: None,
+            ops: None,
         };
         let v = call(&d, "listunspent", json!([]));
         assert!(v["error"].is_object());
@@ -2660,8 +2736,118 @@ mod tests {
             wallet: &no_utx,
             blocks: &b,
             proxy: None,
+            ops: None,
         };
         let v = call(&d, "listunspent", json!([]));
         assert!(v["error"].is_object());
     }
+
+
+use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Node ops stub recording the last call.
+struct StubOps {
+    live: AtomicBool,
+}
+impl StubOps {
+    fn new(live: bool) -> Self {
+        StubOps {
+            live: AtomicBool::new(live),
+        }
+    }
+}
+impl NodeOps for StubOps {
+    fn call(&self, method: &str, _params: &Value) -> Result<Value, (i64, String)> {
+        match method {
+            "sendrawtransaction" => Ok(json!({"txid": "abc123", "announced_to": 2})),
+            "getstakinginfo" => Ok(json!({"enabled": true, "staking": false, "weight": 42})),
+            "staking" => Ok(json!({"staking": true})),
+            "getpeerinfo" => Ok(json!({"count": 0, "by_transport": {}, "peers": []})),
+            _ => Err((-3, format!("stub: unhandled {}", method))),
+        }
+    }
+    fn ready(&self) -> bool {
+        self.live.load(Ordering::Relaxed)
+    }
+}
+
+struct T;
+impl TipProvider for T {
+    fn tip(&self) -> TipView {
+        TipView { height: 5, blockhash: "ab".repeat(32), daemon_tip: Some(5) }
+    }
+    fn window(&self) -> (u64, usize) { (0, 6) }
+    fn entry_at(&self, _h: u64) -> Option<EntryView> { None }
+    fn last_bits(&self) -> Option<u32> { Some(0x2000ffff) }
+    fn next_target_bits(&self, _pos: bool) -> Option<u32> { None }
+    fn peers(&self) -> u32 { 1 }
+    fn uptime_secs(&self) -> u64 { 1 }
+    fn state_write_age_secs(&self) -> Option<u64> { None }
+}
+
+#[test]
+fn ops_methods_route_to_the_engine_and_never_to_the_proxy() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let ops = StubOps::new(true);
+    let d = Deps {
+        tip: &t,
+        wallet: &w,
+        blocks: &b,
+        proxy: None,
+        ops: Some(&ops),
+    };
+    let v = call(&d, "sendrawtransaction", json!(["deadbeef"]));
+    assert_eq!(v["result"]["txid"], "abc123");
+    assert_eq!(v["result"]["announced_to"], 2);
+    assert_eq!(v["source"], "tri7");
+    let v = call(&d, "getstakinginfo", json!([]));
+    assert_eq!(v["result"]["weight"], 42);
+    let v = call(&d, "staking", json!(["on"]));
+    assert_eq!(v["result"]["staking"], true);
+    // NATIVE list must contain every ops method (routing completeness)
+    for m in OPS_METHODS {
+        assert!(
+            NATIVE_METHODS.contains(m),
+            "{} in OPS_METHODS but not NATIVE_METHODS",
+            m
+        );
+    }
+}
+
+#[test]
+fn ops_not_wired_is_a_clear_native_error_and_getstakinginfo_is_never_proxied() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d, "smsginbox", json!([]));
+    assert_eq!(v["error"]["code"], -1);
+    assert!(v["error"]["message"].as_str().unwrap().contains("--wallet"));
+    // getstakinginfo left the proxy fallback set when it went native
+    assert!(!PROXY_FALLBACK_METHODS.contains(&"getstakinginfo"));
+    assert!(NATIVE_METHODS.contains(&"getstakinginfo"));
+    // warming engine → distinct message
+    let ops = StubOps::new(false);
+    let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+    let v = call(&d2, "getstakinginfo", json!([]));
+    assert!(v["error"]["message"].as_str().unwrap().contains("warming up"));
+}
+
+#[test]
+fn health_carries_peer_detail_and_node_ops_flags() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let ops = StubOps::new(true);
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+    let v = call(&d, "health", json!([]));
+    assert_eq!(v["result"]["node_ops"], true);
+    assert!(v["result"]["peer_detail"].is_object());
+    let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d2, "health", json!([]));
+    assert_eq!(v["result"]["node_ops"], false);
+}
 }
