@@ -97,6 +97,19 @@ pub const NATIVE_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // ---- parity audit 2026-11-03: legacy info/util methods (rpcmining /
+    // rpcnet / rpcblockchain / rpcwallet surfaces servable from tri7's own
+    // providers — no ops/daemon needed) ----
+    "help",
+    "getblockheader",
+    "getblockbynumber",
+    "getblockchaininfo",
+    "getwalletinfo",
+    "getnetworkinfo",
+    "getmininginfo",
+    "getsubsidy",
+    "estimatefee",
+    "verifymessage",
 ];
 
 /// The NATIVE_METHODS subset routed to the live NodeOps engine (wallet keys,
@@ -1085,6 +1098,284 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             }))
         }
 
+        // ---- parity audit 2026-11-03: legacy info/util methods ----
+        "help" => {
+            // legacy tableRPC.help(): command list (one per line) with no
+            // arg; tri7 has no per-command help text store, so help <cmd>
+            // reports membership natively.
+            let cmd = ptry!(p_str(params, 0, "command"));
+            match cmd {
+                None => {
+                    let mut all: Vec<&str> = NATIVE_METHODS.to_vec();
+                    all.extend_from_slice(PROXY_FALLBACK_METHODS);
+                    all.sort_unstable();
+                    NativeOutcome::Ok(json!(all.join("\n")))
+                }
+                Some(c) => {
+                    if NATIVE_METHODS.contains(&c.as_str()) {
+                        NativeOutcome::Ok(json!(format!("{} (tri7 native)", c)))
+                    } else if PROXY_FALLBACK_METHODS.contains(&c.as_str()) {
+                        NativeOutcome::Ok(json!(format!("{} (legacy proxy fallback)", c)))
+                    } else {
+                        NativeOutcome::Err(-1, format!("unknown command: {}", c))
+                    }
+                }
+            }
+        }
+
+        "getblockheader" => {
+            // legacy rpcblockchain getblockheader: header fields of the
+            // verbose block object (source: tri7 blockindex frames), minus
+            // the tx/size body fields. nMint/blocktrust/chaintrust live in
+            // the legacy index only — emitted null, never guessed.
+            let id = match (
+                p_str(params, 0, "block hash/height"),
+                p_u64(params, 0, "height"),
+            ) {
+                (Ok(Some(s)), _) => BlockId::Hash(s),
+                (_, Ok(Some(n))) => BlockId::Height(n),
+                _ => return NativeOutcome::Err(-8, "expected block hash or height".into()),
+            };
+            let verbose = ptry!(p_bool(params, 1, "verbose")).unwrap_or(true);
+            if !deps.blocks.ready() {
+                return NativeOutcome::Miss("block index warming up".into());
+            }
+            if !verbose {
+                // legacy raw form: serialized 80-byte header hex — the first
+                // 80 bytes of the raw block wire (header precedes vtx+sig).
+                let (hd, hh) = match &id {
+                    BlockId::Hash(s) => (Some(s.as_str()), None),
+                    BlockId::Height(n) => (None, Some(*n)),
+                };
+                return match deps.blocks.raw_block(hd, hh) {
+                    Ok(Some(hex)) => {
+                        let bytes = hex_decode(&hex);
+                        if bytes.len() < 80 {
+                            NativeOutcome::Err(-1, "block shorter than a header".into())
+                        } else {
+                            NativeOutcome::Ok(json!(hex_encode(&bytes[..80])))
+                        }
+                    }
+                    Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
+                    Err(e) => NativeOutcome::Err(-1, e),
+                };
+            }
+            let res = match &id {
+                BlockId::Hash(s) => deps.blocks.block_by_hash(s),
+                BlockId::Height(n) => deps.blocks.block_by_height(*n),
+            };
+            let block = match res {
+                Ok(Some(v)) => v,
+                Ok(None) => return NativeOutcome::Err(-5, "Block not found".into()),
+                Err(e) => return NativeOutcome::Err(-1, e),
+            };
+            // nextblockhash comes from the height map (h+1)
+            let next = match block.get("height").and_then(Value::as_u64) {
+                Some(h) => match deps.blocks.hash_at(h + 1) {
+                    Ok(Some(s)) => json!(s),
+                    _ => Value::Null,
+                },
+                None => Value::Null,
+            };
+            let get = |k: &str| block.get(k).cloned().unwrap_or(Value::Null);
+            NativeOutcome::Ok(json!({
+                "hash": get("hash"),
+                "confirmations": get("confirmations"),
+                "height": get("height"),
+                "version": get("version"),
+                "merkleroot": get("merkleroot"),
+                "mint": Value::Null,
+                "time": get("time"),
+                "nonce": get("nonce"),
+                "bits": get("bits"),
+                "difficulty": get("difficulty"),
+                "blocktrust": Value::Null,
+                "chaintrust": Value::Null,
+                "flags": get("flags"),
+                "proofhash": get("proofhash"),
+                "entropybit": get("entropybit"),
+                "modifier": get("modifier"),
+                "modifierchecksum": get("modifierchecksum"),
+                "previousblockhash": get("previousblockhash"),
+                "nextblockhash": next,
+            }))
+        }
+
+        "getblockbynumber" => {
+            // legacy alias of getblock <height> (rpcblockchain.cpp)
+            let h = match ptry!(p_u64(params, 0, "height")) {
+                Some(h) => h,
+                None => return NativeOutcome::Err(-8, "expected height parameter".into()),
+            };
+            let verbose = ptry!(p_bool(params, 1, "verbose")).unwrap_or(true);
+            if !deps.blocks.ready() {
+                return NativeOutcome::Miss("block index warming up".into());
+            }
+            if !verbose {
+                return match deps.blocks.raw_block(None, Some(h)) {
+                    Ok(Some(hex)) => NativeOutcome::Ok(json!(hex)),
+                    Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
+                    Err(e) => NativeOutcome::Err(-1, e),
+                };
+            }
+            match deps.blocks.block_by_height(h) {
+                Ok(Some(v)) => NativeOutcome::Ok(v),
+                Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
+                Err(e) => NativeOutcome::Err(-1, e),
+            }
+        }
+
+        "getblockchaininfo" => {
+            // legacy rpcblockchain getblockchaininfo: chain identity + tip +
+            // difficulty + supply (tri7's supply comes from the replay
+            // snapshot with its coverage height; the legacy daemon reads its
+            // full txdb — the coverage fields say exactly where this comes
+            // from).
+            let t = deps.tip.tip();
+            let bal = deps.wallet.balance();
+            NativeOutcome::Ok(json!({
+                "chain": "main",
+                "blocks": t.height,
+                "bestblockhash": t.blockhash,
+                "difficulty": difficulty_json(deps),
+                "moneysupply": bal.as_ref().map(|b| sats_to_tri(b.supply_sats)),
+                "moneysupply_sats": bal.as_ref().map(|b| b.supply_sats),
+                "moneysupply_coverage_height": bal.as_ref().map(|b| b.coverage_height),
+                "verificationprogress": 1.0,
+                "chain_trust_note": "legacy chaintrust/blocks fields are full-index state tri7 does not build",
+            }))
+        }
+
+        "getwalletinfo" => {
+            // legacy rpcwallet getwalletinfo: tri7's wallet view is the
+            // replay snapshot (balance/coverage/addresses/utxos). Legacy
+            // keypool/txcount fields are emitted null — tri7 keeps no
+            // keypool and its snapshot carries no tx-count.
+            let bal = deps.wallet.balance();
+            match bal {
+                Some(b) => NativeOutcome::Ok(json!({
+                    "walletversion": 60000,
+                    "balance": sats_to_tri(b.sats),
+                    "balance_sats": b.sats,
+                    "txcount": Value::Null,
+                    "keypoololdest": Value::Null,
+                    "keypoolsize": Value::Null,
+                    "unlocked_until": Value::Null,
+                    "paytxfee": 0.0,
+                    "coverage_height": b.coverage_height,
+                    "coverage_hash": b.coverage_hash,
+                    "addresses": b.addresses,
+                    "utxos": b.utxos,
+                })),
+                None => NativeOutcome::Err(
+                    -1,
+                    "wallet balance snapshot unavailable (balances file not loaded)".into(),
+                ),
+            }
+        }
+
+        "getnetworkinfo" => {
+            // legacy rpcnet getnetworkinfo
+            NativeOutcome::Ok(json!({
+                "version": TRI7_RPC_VERSION,
+                "subversion": TRI7_SUBVERSION,
+                "protocolversion": TRI7_PROTOCOL_VERSION,
+                "timeoffset": 0,
+                "connections": deps.tip.peers(),
+                "uptime_secs": deps.tip.uptime_secs(),
+                "transports": "clearnet+tor+i2p",
+                "localaddresses": [],
+                "warnings": "",
+            }))
+        }
+
+        "getmininginfo" => {
+            // legacy rpcmining getmininginfo: composed from the tri7 tip +
+            // difficulty module + the live ops engine's staking stats when
+            // wired (weight/pooledtx/search-interval). blockvalue is the PoW
+            // subsidy schedule at the tip height (0 above h9001 — the live
+            // chain mints PoS rewards, not PoW).
+            let t = deps.tip.tip();
+            let ops_info = match deps.ops {
+                Some(o) if o.ready() => o.call("getstakinginfo", &json!([])).ok(),
+                _ => None,
+            };
+            let ops_get = |k: &str| ops_info
+                .as_ref()
+                .and_then(|v| v.get(k))
+                .cloned()
+                .unwrap_or(Value::Null);
+            NativeOutcome::Ok(json!({
+                "blocks": t.height,
+                "currentblocksize": ops_get("currentblocksize"),
+                "currentblocktx": ops_get("currentblocktx"),
+                "difficulty": difficulty_json(deps),
+                "blockvalue": sats_to_tri(pow_subsidy_sats(t.height)),
+                "netmhashps": 0.0,
+                "netstakeweight": ops_get("netstakeweight"),
+                "errors": "",
+                "pooledtx": ops_get("pooledtx"),
+                "stakeweight": {
+                    "minimum": Value::Null,
+                    "maximum": Value::Null,
+                    "combined": ops_get("weight"),
+                },
+                "search-interval": ops_get("search-interval"),
+                "stakeinterest": 0.33, // COIN_YEAR_REWARD = 33 * CENT (main.h:61)
+                "testnet": false,
+            }))
+        }
+
+        "getsubsidy" => {
+            // legacy rpcmining getsubsidy [nTarget]: the PoW subsidy at the
+            // tip (GetProofOfWorkReward schedule); the nTarget param is
+            // parsed for compat and ignored exactly as the legacy one is.
+            let _ = ptry!(p_str(params, 0, "nTarget"));
+            let t = deps.tip.tip();
+            NativeOutcome::Ok(json!(sats_to_tri(pow_subsidy_sats(t.height))))
+        }
+
+        "estimatefee" => {
+            // legacy rpcblockchain estimatefee: "Triangles uses a static
+            // minimum fee structure" — returns MIN_TX_FEE (= CENT/100 =
+            // 100 sats = 0.0001 TRI, main.h:58/util.h:53). tri7 has no
+            // nTransactionFee override, so the constant is exact.
+            let _nblocks = ptry!(p_u64(params, 0, "nblocks"));
+            NativeOutcome::Ok(json!(sats_to_tri(MIN_TX_FEE_SATS)))
+        }
+
+        "verifymessage" => {
+            // legacy rpcwallet verifymessage <address> <signature> <message>
+            // (strMessageMagic double-hash + compact recoverable sig; the
+            // exact parity implementation lives in gui::state — the same
+            // functions behind the GUI sign/verify pages).
+            let addr = match ptry!(p_str(params, 0, "address")) {
+                Some(a) => a,
+                None => return NativeOutcome::Err(-8, "expected address parameter".into()),
+            };
+            let sig = match ptry!(p_str(params, 1, "signature")) {
+                Some(s) => s,
+                None => return NativeOutcome::Err(-8, "expected signature parameter".into()),
+            };
+            let msg = match ptry!(p_str(params, 2, "message")) {
+                Some(m) => m,
+                None => return NativeOutcome::Err(-8, "expected message parameter".into()),
+            };
+            if crate::address::address_to_payload(&addr).is_err() {
+                return NativeOutcome::Err(-5, "Invalid address".into());
+            }
+            match crate::gui::state::verify_message(&addr, &msg, &sig) {
+                Ok(ok) => NativeOutcome::Ok(json!(ok)),
+                Err(e) => {
+                    if e.contains("length") || e.contains("base64") {
+                        NativeOutcome::Err(-5, "Malformed base64 encoding".into())
+                    } else {
+                        NativeOutcome::Err(-5, e)
+                    }
+                }
+            }
+        }
+
         m if OPS_METHODS.contains(&m) => match deps.ops {
             Some(o) if o.ready() => match o.call(m, params) {
                 Ok(v) => NativeOutcome::Ok(v),
@@ -1105,6 +1396,58 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
 // Formatting helpers — legacy-style JSON from blockindex hits. Used by the
 // live adapter; unit-tested here with synthetic hits.
 // ---------------------------------------------------------------------------
+
+/// Which form a block id parameter arrived in (getblockheader dispatch).
+enum BlockId {
+    Hash(String),
+    Height(u64),
+}
+
+/// Legacy MIN_TX_FEE (main.h:58 = (1 * CENT) / 100, util.h:53 CENT = 10000):
+/// 100 sats = 0.0001 TRI — the static fee policy estimatefee reports.
+pub const MIN_TX_FEE_SATS: i64 = 100;
+
+/// Legacy GetProofOfWorkReward (main.cpp:1518-1536) — the PoW subsidy
+/// schedule by height, in sats (COIN = 1e6). Height 0 (genesis) follows the
+/// h<100 branch legacy takes for any best block below 100.
+pub fn pow_subsidy_sats(height: u64) -> i64 {
+    if height >= 9001 {
+        0
+    } else if height >= 7000 {
+        10_000_000
+    } else if height >= 3000 {
+        5_000_000
+    } else if height >= 1000 {
+        10_000_000
+    } else if height >= 100 {
+        20_000_000
+    } else {
+        1_000_000
+    }
+}
+
+/// Inverse of hex_encode (RPC hex-string params → bytes).
+pub fn hex_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let val = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    if bytes.len() % 2 == 0 {
+        for pair in bytes.chunks(2) {
+            match (val(pair[0]), val(pair[1])) {
+                (Some(h), Some(l)) => out.push((h << 4) | l),
+                _ => return Vec::new(),
+            }
+        }
+    }
+    out
+}
 
 pub fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
@@ -2849,5 +3192,288 @@ fn health_carries_peer_detail_and_node_ops_flags() {
     let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     let v = call(&d2, "health", json!([]));
     assert_eq!(v["result"]["node_ops"], false);
+}
+
+// ---- parity audit 2026-11-03: legacy info/util RPCs ----
+
+/// Block provider returning a realistic verbose block JSON + raw hex,
+/// mirroring the live adapter's shapes.
+struct BlocksJson;
+impl BlockDataProvider for BlocksJson {
+    fn ready(&self) -> bool {
+        true
+    }
+    fn status_json(&self) -> Value {
+        json!({"state": "ready"})
+    }
+    fn block_by_hash(&self, h: &str) -> Result<Option<Value>, String> {
+        if h == BLOCK_HASH {
+            Ok(Some(self.by_height_json()))
+        } else {
+            Ok(None)
+        }
+    }
+    fn block_by_height(&self, h: u64) -> Result<Option<Value>, String> {
+        if h == BLOCK_H {
+            Ok(Some(self.by_height_json()))
+        } else {
+            Ok(None)
+        }
+    }
+    fn raw_block(&self, hd: Option<&str>, hh: Option<u64>) -> Result<Option<String>, String> {
+        let hit = (hd == Some(BLOCK_HASH)) || (hh == Some(BLOCK_H));
+        Ok(if hit {
+            // 100-byte fake block: header 80 + 20 bytes of body
+            let mut v = vec![0u8; 80];
+            v[0] = 7; // version marker, asserted via header-hex slice
+            v.extend_from_slice(&[0xAA; 20]);
+            Some(hex_encode(&v))
+        } else {
+            None
+        })
+    }
+    fn tx(&self, _t: &str, _v: bool) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+    fn hash_at(&self, h: u64) -> Result<Option<String>, String> {
+        Ok(if h == BLOCK_H {
+            Some(BLOCK_HASH.into())
+        } else {
+            None
+        })
+    }
+}
+impl BlocksJson {
+    fn by_height_json(&self) -> Value {
+        json!({
+            "hash": BLOCK_HASH,
+            "confirmations": 11,
+            "size": 100,
+            "height": BLOCK_H,
+            "version": 7,
+            "merkleroot": "cc".repeat(32),
+            "tx": ["tx1", "tx2"],
+            "time": 1_700_000_100,
+            "nonce": 42,
+            "bits": "2000ffff",
+            "difficulty": difficulty_from_bits(0x2000_ffff),
+            "previousblockhash": "dd".repeat(32),
+            "nextblockhash": Value::Null,
+            "entropybit": 1,
+            "modifier": "1122334455667788",
+            "modifierchecksum": "aabbccdd",
+            "proofhash": "ee".repeat(32),
+            "flags": "proof-of-stake",
+        })
+    }
+}
+const BLOCK_H: u64 = 8;
+const BLOCK_HASH: &str = "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b";
+
+#[test]
+fn pow_subsidy_schedule_matches_legacy_getproofowreward() {
+    // main.cpp:1518-1536 schedule (COIN = 1e6)
+    assert_eq!(pow_subsidy_sats(0), 1_000_000);
+    assert_eq!(pow_subsidy_sats(99), 1_000_000);
+    assert_eq!(pow_subsidy_sats(100), 20_000_000);
+    assert_eq!(pow_subsidy_sats(999), 20_000_000);
+    assert_eq!(pow_subsidy_sats(1000), 10_000_000);
+    assert_eq!(pow_subsidy_sats(2999), 10_000_000);
+    assert_eq!(pow_subsidy_sats(3000), 5_000_000);
+    assert_eq!(pow_subsidy_sats(6999), 5_000_000);
+    assert_eq!(pow_subsidy_sats(7000), 10_000_000);
+    assert_eq!(pow_subsidy_sats(9000), 10_000_000);
+    assert_eq!(pow_subsidy_sats(9001), 0);
+    assert_eq!(pow_subsidy_sats(2_204_064), 0, "live era mints PoS, not PoW");
+}
+
+#[test]
+fn help_lists_every_native_and_proxy_method() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = deps(&t, &w, &b, None);
+    let v = call(&d, "help", json!([]));
+    let text = v["result"].as_str().unwrap();
+    for m in NATIVE_METHODS.iter().chain(PROXY_FALLBACK_METHODS.iter()) {
+        assert!(text.split('\n').any(|l| l == *m), "help must list {}", m);
+    }
+    // membership: native vs proxy vs unknown
+    let v = call(&d, "help", json!(["getblockcount"]));
+    assert!(v["result"].as_str().unwrap().contains("tri7 native"));
+    let v = call(&d, "help", json!(["gettransaction"]));
+    assert!(v["result"].as_str().unwrap().contains("legacy proxy fallback"));
+    let v = call(&d, "help", json!(["nosuchcommand"]));
+    assert_eq!(v["error"]["code"], -1);
+}
+
+#[test]
+fn getblockheader_is_the_block_json_without_body_fields() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = BlocksJson;
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    // by hash and by height both work
+    let v = call(&d, "getblockheader", json!([BLOCK_HASH]));
+    assert_eq!(v["result"]["height"], json!(BLOCK_H));
+    let v = call(&d, "getblockheader", json!([BLOCK_H]));
+    assert_eq!(v["result"]["height"], json!(BLOCK_H));
+    // header = block minus body
+    let r = &v["result"];
+    assert!(r.get("tx").is_none(), "no tx array in a header");
+    assert!(r.get("size").is_none(), "no size in a header");
+    assert_eq!(r["merkleroot"], json!("cc".repeat(32)));
+    assert_eq!(r["bits"], json!("2000ffff"));
+    assert_eq!(r["modifier"], json!("1122334455667788"));
+    assert_eq!(r["previousblockhash"], json!("dd".repeat(32)));
+    // legacy index-only fields are null, never invented
+    assert!(r["mint"].is_null());
+    assert!(r["blocktrust"].is_null());
+    assert!(r["chaintrust"].is_null());
+    // nextblockhash from the height map: h+1 not present in this stub → null
+    assert!(r["nextblockhash"].is_null());
+    // not found
+    let v = call(&d, "getblockheader", json!(["00".repeat(32)]));
+    assert_eq!(v["error"]["code"], -5);
+    // param validation
+    let v = call(&d, "getblockheader", json!([]));
+    assert_eq!(v["error"]["code"], -8);
+}
+
+#[test]
+fn getblockheader_raw_form_is_the_80_byte_header_hex() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = BlocksJson;
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d, "getblockheader", json!([BLOCK_HASH, false]));
+    let hdr = v["result"].as_str().unwrap();
+    let bytes = hex_decode(hdr);
+    assert_eq!(bytes.len(), 80, "exactly the header");
+    assert_eq!(bytes[0], 7, "first header byte = block version marker");
+    // the body bytes (0xAA filler) must NOT appear
+    assert!(hex_decode(hdr)[80..].is_empty());
+    // by height raw form too
+    let v = call(&d, "getblockheader", json!([BLOCK_H, false]));
+    assert_eq!(v["result"].as_str().unwrap().len(), 160);
+}
+
+#[test]
+fn getblockbynumber_aliases_getblock_height() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = BlocksJson;
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d, "getblockbynumber", json!([BLOCK_H]));
+    assert_eq!(v["result"]["hash"], json!(BLOCK_HASH));
+    assert_eq!(v["result"]["tx"].as_array().unwrap().len(), 2, "verbose keeps tx");
+    let v = call(&d, "getblockbynumber", json!([BLOCK_H, false]));
+    assert_eq!(v["result"].as_str().unwrap().len(), 200, "raw keeps the whole block");
+    let v = call(&d, "getblockbynumber", json!([9999]));
+    assert_eq!(v["error"]["code"], -5);
+}
+
+#[test]
+fn getblockchaininfo_and_getnetworkinfo_from_tip_and_snapshot() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = deps(&t, &w, &b, None);
+    let v = call(&d, "getblockchaininfo", json!([]));
+    assert_eq!(v["result"]["chain"], "main");
+    assert_eq!(v["result"]["blocks"], json!(TIP_H));
+    assert_eq!(v["result"]["bestblockhash"], json!(TIP_HASH));
+    assert_eq!(v["result"]["moneysupply_sats"], json!(222_507_326_452i64));
+    assert_eq!(v["result"]["verificationprogress"], json!(1.0));
+    let v = call(&d, "getnetworkinfo", json!([]));
+    assert_eq!(v["result"]["version"], json!(TRI7_RPC_VERSION));
+    assert_eq!(v["result"]["subversion"], json!(TRI7_SUBVERSION));
+    assert_eq!(v["result"]["protocolversion"], json!(TRI7_PROTOCOL_VERSION));
+    assert_eq!(v["result"]["connections"], json!(1));
+}
+
+#[test]
+fn getwalletinfo_serves_snapshot_and_errors_without_one() {
+    let t = StubTip;
+    let b = StubBlocks { ready: true };
+    let w = StubWallet::default();
+    let d = deps(&t, &w, &b, None);
+    let v = call(&d, "getwalletinfo", json!([]));
+    assert_eq!(v["result"]["balance_sats"], json!(3_036_990_591i64));
+    assert_eq!(v["result"]["walletversion"], json!(60000));
+    assert_eq!(v["result"]["coverage_height"], json!(2_201_090));
+    assert_eq!(v["result"]["addresses"], json!(248));
+    // legacy keypool fields exist but are honestly null
+    assert!(v["result"]["keypoolsize"].is_null());
+    // missing snapshot → -1, not a fake zero balance
+    let mut w2 = StubWallet::default();
+    w2.balance = None;
+    let d2 = deps(&t, &w2, &b, None);
+    let v = call(&d2, "getwalletinfo", json!([]));
+    assert_eq!(v["error"]["code"], -1);
+}
+
+#[test]
+fn getmininginfo_composes_ops_stats_and_nulls_when_engine_down() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    // live engine: staking stats flow through
+    let ops = StubOps::new(true);
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+    let v = call(&d, "getmininginfo", json!([]));
+    assert_eq!(v["result"]["stakeweight"]["combined"], json!(42));
+    assert_eq!(v["result"]["blocks"], json!(TIP_H));
+    assert_eq!(v["result"]["blockvalue"], json!(0.0), "PoW subsidy is 0 above h9001");
+    assert_eq!(v["result"]["stakeinterest"], json!(0.33));
+    // engine down: stats null, structure intact
+    let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d2, "getmininginfo", json!([]));
+    assert!(v["result"]["netstakeweight"].is_null());
+    assert!(v["result"]["stakeweight"]["combined"].is_null());
+}
+
+#[test]
+fn getsubsidy_and_estimatefee_are_static_legacy_policy() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = deps(&t, &w, &b, None);
+    let v = call(&d, "getsubsidy", json!([]));
+    assert_eq!(v["result"], json!(0.0), "tip above h9001: PoW subsidy 0");
+    let v = call(&d, "getsubsidy", json!(["2000ffff"])); // nTarget tolerated
+    assert_eq!(v["result"], json!(0.0));
+    let v = call(&d, "estimatefee", json!([1]));
+    assert_eq!(v["result"], json!(0.0001), "MIN_TX_FEE = CENT/100 = 100 sats");
+    let v = call(&d, "estimatefee", json!([6]));
+    assert_eq!(v["result"], json!(0.0001), "static fee policy ignores nblocks");
+}
+
+#[test]
+fn verifymessage_signs_and_verifies_in_legacy_param_order() {
+    let t = StubTip;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = deps(&t, &w, &b, None);
+    // a real signature from the shared sign/verify implementation
+    let secret = [7u8; 32];
+    let secp = secp256k1::Secp256k1::signing_only();
+    let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+    let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+    let addr = crate::wallet::pubkey_to_address(&pk.serialize());
+    let sig = crate::gui::state::sign_message(&secret, "hello tri").unwrap();
+    let v = call(&d, "verifymessage", json!([addr, sig, "hello tri"]));
+    assert_eq!(v["result"], json!(true));
+    // wrong message → false (not an error)
+    let v = call(&d, "verifymessage", json!([addr, sig, "different"]));
+    assert_eq!(v["result"], json!(false));
+    // invalid address → -5 Invalid address (legacy RPC_INVALID_ADDRESS_OR_KEY)
+    let v = call(&d, "verifymessage", json!(["notanaddress", sig, "m"]));
+    assert_eq!(v["error"]["code"], -5);
+    assert_eq!(v["error"]["message"], "Invalid address");
+    // malformed base64 → -5 Malformed base64 encoding
+    let v = call(&d, "verifymessage", json!([addr, "!!!not-base64!!!", "m"]));
+    assert_eq!(v["error"]["code"], -5);
+    assert_eq!(v["error"]["message"], "Malformed base64 encoding");
 }
 }

@@ -16,6 +16,13 @@ pub struct WalletKeys {
     pub version: Option<i32>,
     pub names: Vec<(String, String)>,
     pub encrypted: bool,
+    /// HD seed wallet (legacy `hdmnemonic` row, plaintext mnemonic). None =
+    /// wallet has no seed phrase (pre-HD random-key wallets).
+    pub hd_mnemonic: Option<String>,
+    /// BIP39 passphrase ("25th word") row content; absent = no passphrase.
+    pub hd_passphrase: Option<String>,
+    /// `hdchain` row: next HD derivation index (legacy int64 counter).
+    pub hd_chain_index: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -124,6 +131,9 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
         version: None,
         names: Vec::new(),
         encrypted: false,
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: None,
     };
     // Signing-capable context: used below to derive pubkeys from secrets.
     let secp = secp256k1::Secp256k1::signing_only();
@@ -225,7 +235,22 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
                 let ntime = i64::from_le_bytes(value[4..12].try_into().unwrap());
                 keymeta.insert(suffix[kpos..kpos + pk_len].to_vec(), ntime);
             }
-            "mkey" | "ckey" | "hdcmnemonic" => {
+            "hdmnemonic" => {
+                // value = CompactSize(len) + mnemonic UTF-8 (legacy
+                // WriteHDMnemonic → std::string serialization). Plaintext by
+                // design in UNencrypted wallets (their scheme).
+                w.hd_mnemonic = Some(cs_string(&value).map_err(|e| format!("hdmnemonic: {}", e))?);
+            }
+            "hdpassphrase" => {
+                w.hd_passphrase = Some(cs_string(&value).map_err(|e| format!("hdpassphrase: {}", e))?);
+            }
+            "hdchain" => {
+                // value = int64 LE (their WriteHDChain(int64_t) raw int).
+                if value.len() >= 8 {
+                    w.hd_chain_index = Some(i64::from_le_bytes(value[..8].try_into().unwrap()));
+                }
+            }
+            "mkey" | "ckey" | "hdcmnemonic" | "hdcpassphrase" => {
                 w.encrypted = true;
             }
             _ => {}
@@ -266,6 +291,14 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
 //               value    = CS(len) + label UTF-8 (empty label = 00)
 //   bestblock   key blob = 09 "bestblock"; value = CBlockLocator:
 //               int32 nVersion + CS(count) + tip-first 32-byte hashes
+//   hdmnemonic  key blob = 0A "hdmnemonic"; value = CS(len) + mnemonic UTF-8
+//   hdpassphrase key blob = 0C "hdpassphrase"; value = CS(len) + passphrase
+//               (absent = no passphrase; both crypted variants erased)
+//   hdchain     key blob = 07 "hdchain"; value = int64 LE (next HD index)
+//   defaultkey  key blob = 0A "defaultkey"; value = CS(33) + pubkey
+//   version/minversion values = raw int32 LE (6020607 / 60000)
+// (HD rows byte-matched to triangles_v5 walletdb.h WriteHDMnemonic /
+//  WriteHDPassphrase / WriteHDChain / WriteDefaultKey serializations.)
 //
 // The DER blob is the qt's own template (crypto_ecdsa.cpp
 // der_template_compressed): HEADER[0..8] ‖ secret[8..40] ‖ MID[40..169] ‖
@@ -418,6 +451,42 @@ pub fn encode_bestblock_value(version: i32, hashes: &[Hash]) -> Vec<u8> {
     v
 }
 
+/// Parse a CompactSize-prefixed UTF-8 string value (std::string CDataStream
+/// serialization — the shape of `hdmnemonic`/`hdpassphrase`/`name` values).
+fn cs_string(value: &[u8]) -> Result<String, String> {
+    let mut pos = 0usize;
+    let len = decode_compact_size(value, &mut pos)? as usize;
+    if value.len() < pos + len {
+        return Err("string overruns value".into());
+    }
+    Ok(String::from_utf8_lossy(&value[pos..pos + len]).to_string())
+}
+
+/// `version` row value: raw int32 LE (their `WriteVersion`/ssValue << int).
+pub fn encode_version_value(version: i32) -> Vec<u8> {
+    version.to_le_bytes().to_vec()
+}
+
+/// `minversion` row value: raw int32 LE (observed 60000 on live wallets).
+pub fn encode_minversion_value(min_version: i32) -> Vec<u8> {
+    min_version.to_le_bytes().to_vec()
+}
+
+/// `hdchain` row value: raw int64 LE — the legacy WriteHDChain(int64_t)
+/// serialization of the HD derivation-index counter.
+pub fn encode_hdchain_value(next_index: i64) -> Vec<u8> {
+    next_index.to_le_bytes().to_vec()
+}
+
+/// `defaultkey` row value: CompactSize + pubkey bytes (their
+/// WriteDefaultKey writes vchPubKey.Raw(), a raw byte vector).
+pub fn encode_defaultkey_value(pubkey: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + pubkey.len() + 9);
+    push_compact_size(&mut v, pubkey.len() as u64);
+    v.extend_from_slice(pubkey);
+    v
+}
+
 /// base58check address decode + version check (PUBKEY_ADDRESS = 65). Used to
 /// refuse garbage before a `name` row is written for it.
 fn decode_address_payload(s: &str) -> Result<[u8; 21], String> {
@@ -479,6 +548,12 @@ pub struct WalletHandle {
     /// One automatic pre-first-write backup per session.
     backup_done: bool,
     journal: Vec<String>,
+    /// HD state loaded at open (mirrors the legacy wallet's hdMnemonic /
+    /// hdPassphrase / nHDChainIndex in-memory fields). None mnemonic = the
+    /// wallet is NOT seed-derived (pre-HD random-key wallet).
+    pub hd_mnemonic: Option<String>,
+    pub hd_passphrase: Option<String>,
+    pub hd_chain_index: i64,
 }
 
 fn now_unix() -> i64 {
@@ -541,11 +616,13 @@ impl WalletHandle {
 
         // Encrypted wallets are read-refused already; a writer must never
         // touch them either (spec §5.9). (hex literals: 'mkey', 'ckey',
-        // 'hdcmnemonic' after the CompactSize type-length byte.)
+        // 'hdcmnemonic', 'hdcpassphrase' after the CompactSize type-length
+        // byte.)
         let n_encrypted: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM main WHERE hex(substr(key,2,4)) IN ('6D6B6579','636B6579')
-                 OR hex(substr(key,2,11))='6864636D6E656D6F6E6963'",
+                 OR hex(substr(key,2,11))='6864636D6E656D6F6E6963'
+                 OR hex(substr(key,2,13))='686463706173737072617365'",
                 [],
                 |r| r.get(0),
             )
@@ -570,11 +647,59 @@ impl WalletHandle {
         conn.execute_batch("ROLLBACK")
             .map_err(|e| format!("rollback probe: {}", e))?;
 
+        // Load HD state (hdmnemonic / hdpassphrase / hdchain rows) — the
+        // writer-side mirror of the reader's parse; absent rows = not an HD
+        // wallet (index 0 is then the starting point if a seed is set).
+        let load_cs_row = |blob: Vec<u8>| -> Result<Option<String>, String> {
+            let v: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![blob],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| format!("hd row read: {}", e))?;
+            match v {
+                Some(bytes) => Ok(Some(cs_string(&bytes)?)),
+                None => Ok(None),
+            }
+        };
+        let hd_mnemonic = load_cs_row(encode_key_blob("hdmnemonic", &[]))?;
+        let hd_passphrase = load_cs_row(encode_key_blob("hdpassphrase", &[]))?;
+        let hd_chain_index: i64 = conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![encode_key_blob("hdchain", &[])],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map(|v| {
+                if v.len() >= 8 {
+                    i64::from_le_bytes(v[..8].try_into().unwrap())
+                } else {
+                    // forensic clarity: a malformed hdchain row is loudly
+                    // reported, never silently treated as 0
+                    eprintln!(
+                        "tri7-wallet: {} has a malformed hdchain row ({} bytes, expected 8) — treating as 0",
+                        path.display(),
+                        v.len()
+                    );
+                    0
+                }
+            })
+            .unwrap_or(0);
+
         Ok(WalletHandle {
             conn,
             path: path.to_path_buf(),
             backup_done: false,
             journal: Vec::new(),
+            hd_mnemonic,
+            hd_passphrase,
+            hd_chain_index,
         })
     }
 
@@ -902,11 +1027,396 @@ impl WalletHandle {
         Ok(())
     }
 
+    // ---- HD seed wallet (byte-exact port of the legacy SetHDSeed /
+    // GenerateNewKey record set: hdmnemonic / hdpassphrase / hdchain) ----
+
+    /// Activate an HD seed on this wallet — port of CWallet::SetHDSeed's
+    /// database writes (fGenerate=false path; generation lives in the caller
+    /// via seed::generate_mnemonic_24):
+    ///   - refuse if a seed already exists (their "refusing to replace it"),
+    ///   - validate the mnemonic (hd::CheckMnemonic) and prove index 0
+    ///     derives before touching the file,
+    ///   - erase `hdcmnemonic` then write `hdmnemonic` (their
+    ///     WriteHDMnemonic: exactly one of plain/crypted exists),
+    ///   - write `hdpassphrase` when non-empty, erase BOTH passphrase rows
+    ///     when empty (their WriteHDPassphrase/erase lifecycle),
+    ///   - write `hdchain` = 0 (their SetHDSeed resets the counter),
+    /// all in ONE transaction (their TxnBegin…TxnCommit).
+    pub fn set_hd_seed(&mut self, mnemonic: &str, passphrase: &str) -> Result<(), String> {
+        if self.hd_mnemonic.is_some() {
+            return Err(
+                "wallet already has an HD seed; refusing to replace it (existing random-key \
+                 wallets and seeded wallets keep their seed forever)"
+                    .into(),
+            );
+        }
+        if !crate::seed::check_mnemonic(mnemonic) {
+            return Err("invalid mnemonic (unknown word or bad checksum)".into());
+        }
+        // Derivability proof before any write (their SetHDSeed derives
+        // index 0 first and aborts on failure).
+        let _ = crate::seed::derive_triangles(mnemonic, passphrase, 0, 0, 0)?;
+
+        // Erasures (their WriteHDMnemonic erases the crypted variant first;
+        // empty passphrase = EraseHDPassphrase removes BOTH passphrase rows)
+        // and writes, applied in one transaction.
+        let mut erase: Vec<Vec<u8>> = vec![encode_key_blob("hdcmnemonic", &[])];
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = vec![(
+            encode_key_blob("hdmnemonic", &[]),
+            encode_name_value(mnemonic), // CS + UTF-8: their std::string form
+        )];
+        if passphrase.is_empty() {
+            erase.push(encode_key_blob("hdpassphrase", &[]));
+            erase.push(encode_key_blob("hdcpassphrase", &[]));
+        } else {
+            rows.push((
+                encode_key_blob("hdpassphrase", &[]),
+                encode_name_value(passphrase),
+            ));
+        }
+        rows.push((encode_key_blob("hdchain", &[]), encode_hdchain_value(0)));
+
+        self.ensure_backup()?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| write_error("BEGIN IMMEDIATE", "set_hd_seed", e))?;
+        for blob in &erase {
+            if let Err(e) = self
+                .conn
+                .execute("DELETE FROM main WHERE key = ?1", rusqlite::params![blob])
+            {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(write_error("DELETE", "set_hd_seed", e));
+            }
+        }
+        for (k, v) in &rows {
+            if let Err(e) = self.conn.execute(
+                "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+                rusqlite::params![k, v],
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(write_error("INSERT", "set_hd_seed", e));
+            }
+        }
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(write_error("COMMIT", "set_hd_seed", e));
+        }
+        // Post-commit proof: the written rows byte-match and the erasures
+        // really erased.
+        self.verify_rows(&rows, "set_hd_seed")?;
+        for blob in &erase {
+            let gone: Option<Vec<u8>> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![blob],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other.to_string()),
+                })
+                .map_err(|e| format!("set_hd_seed verify: {}", e))?;
+            if gone.is_some() {
+                return Err("set_hd_seed verify: erased HD row still present".into());
+            }
+        }
+
+        // Reader verification: the whole file must parse with the seed
+        // visible through the EXISTING read path.
+        let w = read_wallet(&self.path)?;
+        if w.hd_mnemonic.as_deref() != Some(mnemonic) {
+            return Err("set_hd_seed verify: reader does not see the written mnemonic".into());
+        }
+        if w.hd_chain_index != Some(0) {
+            return Err("set_hd_seed verify: reader sees hdchain != 0".into());
+        }
+
+        // In-memory state mirrors the legacy CWallet fields.
+        self.hd_mnemonic = Some(mnemonic.to_string());
+        self.hd_passphrase = if passphrase.is_empty() {
+            None
+        } else {
+            Some(passphrase.to_string())
+        };
+        self.hd_chain_index = 0;
+        self.log(format!(
+            "set_hd_seed: {}-word mnemonic + passphrase={} hdchain=0 wallet={}",
+            crate::seed::split_words(mnemonic).len(),
+            !passphrase.is_empty(),
+            self.path.display()
+        ));
+        Ok(())
+    }
+
+    /// Derive the private scalar for the wallet's NEXT HD address (m/44'/
+    /// 2222'/0'/0/hd_chain_index) from the STORED mnemonic row — port of
+    /// CWallet::DeriveHDKey: the row content is used BYTE-EXACT (the same
+    /// string the legacy wallet would PBKDF2), no normalization.
+    pub fn derive_hd_key(&self, index: u32) -> Result<[u8; 32], String> {
+        let Some(m) = self.hd_mnemonic.as_deref() else {
+            return Err("wallet has no HD seed".into());
+        };
+        crate::seed::derive_triangles(m, self.hd_passphrase.as_deref().unwrap_or(""), 0, 0, index)
+    }
+
+    /// Derive and persist the wallet's next HD key — port of the legacy
+    /// GenerateNewKey HD branch: keymeta + key + name + `hdchain` (index+1)
+    /// rows commit in ONE transaction (their atomic TxnBegin…TxnCommit) and
+    /// the counter advances by exactly 1. Keys are compressed (fUsedHD
+    /// forces fCompressed). An existing key row is refused (fOverwrite=false
+    /// parity, same as add_key).
+    pub fn generate_hd_key(&mut self, label: &str) -> Result<WalletKey, String> {
+        let index = self.hd_chain_index;
+        if index < 0 || index > u32::MAX as i64 {
+            return Err(format!("hdchain index out of range: {}", index));
+        }
+        let secret = self.derive_hd_key(index as u32)?;
+
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret)
+            .map_err(|e| format!("generate_hd_key: bad secret: {}", e))?;
+        let pubkey33 = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+        let der = encode_der_privkey(&secret, &pubkey33)?;
+        let key_row = (encode_key_keyblob(&pubkey33), encode_key_value(&der));
+        let now = now_unix();
+        let meta_row = (encode_keymeta_keyblob(&pubkey33), encode_keymeta_value(now));
+        let address = pubkey_to_address(&pubkey33);
+        let name_row = (encode_name_keyblob(&address), encode_name_value(label));
+        let next = index + 1;
+        let chain_row = (encode_key_blob("hdchain", &[]), encode_hdchain_value(next));
+
+        self.ensure_backup()?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| write_error("BEGIN IMMEDIATE", "generate_hd_key", e))?;
+        let dup: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![&key_row.0],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                format!("generate_hd_key: duplicate scan: {}", e)
+            })?;
+        if dup.is_some() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(format!(
+                "generate_hd_key: key {} already exists in {} — hdchain counter inconsistent?",
+                address,
+                self.path.display()
+            ));
+        }
+        let rows = vec![meta_row, key_row, name_row, chain_row];
+        for (k, v) in &rows {
+            if let Err(e) = self.conn.execute(
+                "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+                rusqlite::params![k, v],
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(write_error("INSERT", "generate_hd_key", e));
+            }
+        }
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(write_error("COMMIT", "generate_hd_key", e));
+        }
+        let n_bytes: usize = rows.iter().map(|(k, v)| k.len() + v.len()).sum();
+        self.verify_rows(&rows, "generate_hd_key")?;
+
+        // Reader verification: key visible via the read path, counter = n+1.
+        let w = read_wallet(&self.path)?;
+        let seen = w
+            .keys
+            .iter()
+            .find(|k| k.pubkey == pubkey33)
+            .ok_or_else(|| "generate_hd_key verify: key not visible via the reader".to_string())?;
+        if seen.secret != secret || seen.address != address {
+            return Err("generate_hd_key verify: reader sees different material".into());
+        }
+        if w.hd_chain_index != Some(next) {
+            return Err(format!(
+                "generate_hd_key verify: reader sees hdchain {:?}, expected {}",
+                w.hd_chain_index, next
+            ));
+        }
+
+        self.hd_chain_index = next;
+        self.log(format!(
+            "generate_hd_key: {} index={} (m/44'/2222'/0'/0/{}) label=\"{}\" rows=keymeta,key,name,hdchain bytes={} wallet={}",
+            address,
+            index,
+            index,
+            label,
+            n_bytes,
+            self.path.display()
+        ));
+        Ok(WalletKey {
+            pubkey: pubkey33.to_vec(),
+            secret,
+            compressed: true,
+            address,
+            created: Some(now),
+        })
+    }
+
+    /// Fresh-wallet identity rows (their CreateWalletDatabase + first-open
+    /// writes): `version` (SER_DISK CLIENT_VERSION) and `minversion`
+    /// (60000, the observed live value). Only valid on a NEW empty wallet.
+    pub fn write_fresh_identity_rows(&mut self) -> Result<(), String> {
+        let rows = vec![
+            (
+                encode_key_blob("version", &[]),
+                encode_version_value(CLIENT_VERSION),
+            ),
+            (
+                encode_key_blob("minversion", &[]),
+                encode_minversion_value(60000),
+            ),
+        ];
+        self.write_rows(&rows, "write_fresh_identity_rows")
+    }
+
+    /// `defaultkey` row = the wallet's default receive key (their
+    /// WriteDefaultKey: CS + pubkey bytes).
+    pub fn write_defaultkey(&mut self, pubkey33: &[u8]) -> Result<(), String> {
+        if pubkey33.len() != 33 {
+            return Err("write_defaultkey: expected a 33-byte compressed pubkey".into());
+        }
+        let row = (
+            encode_key_blob("defaultkey", &[]),
+            encode_defaultkey_value(pubkey33),
+        );
+        self.ensure_backup()?;
+        self.write_rows(&[row], "write_defaultkey")?;
+        let w = read_wallet(&self.path)?;
+        if w.default_key.as_deref() != Some(pubkey33) {
+            return Err("write_defaultkey verify: reader sees a different default key".into());
+        }
+        self.log(format!(
+            "write_defaultkey: pubkey {}… wallet={}",
+            hex_short(pubkey33),
+            self.path.display()
+        ));
+        Ok(())
+    }
+
     /// Close the session (drops the SQLite handle, releasing our locks).
     pub fn close(&mut self) {
         self.log(format!("close: {} session ended", self.path.display()));
         // rusqlite closes on drop; nothing else to flush (synchronous=FULL).
     }
+}
+
+/// Result of a seed-wallet create/restore: the derived keys in derivation
+/// order (index 0..count-1) and the final `hdchain` counter.
+#[derive(Debug)]
+pub struct SeedWalletOutcome {
+    pub keys: Vec<WalletKey>,
+    pub hd_chain_index: i64,
+    pub mnemonic: String,
+}
+
+/// Create a brand-new, qt-readable wallet.dat container — the exact
+/// walletdb-sqlite.cpp fresh-file shape: `main(key BLOB PRIMARY KEY, value
+/// BLOB NOT NULL)`, application_id 0x5452_6977 ("TRIw"), user_version 1.
+/// Refuses to touch an existing file (seed wallets are never overwritten).
+pub fn create_wallet_file(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "{}: refusing to overwrite an existing wallet file",
+            path.display()
+        ));
+    }
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|e| format!("create {}: {}", path.display(), e))?;
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = {};
+         PRAGMA user_version = {};
+         CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);",
+        WALLET_APP_ID, WALLET_USER_VERSION
+    ))
+    .map_err(|e| format!("create schema {}: {}", path.display(), e))?;
+    conn.close()
+        .map_err(|e| format!("close {}: {}", path.display(), e.1))?;
+    Ok(())
+}
+
+/// Build a seed-derived wallet at `path`:
+///   - restore semantics: validates + canonicalizes the supplied mnemonic
+///     (whitespace-insensitive like the BIP39 standard; see seed.rs for the
+///     exact legacy-divergence note), then writes it and derives `count`
+///     keys into EXACT legacy records;
+///   - works on a fresh file (created here) or an existing wallet that has
+///     NO seed yet (their hdrestore-onto-existing-wallet semantics: existing
+///     keys are preserved, the seed is added);
+///   - refuses any wallet that already has a seed (seed replacement is
+///     impossible by definition).
+pub fn restore_wallet_from_seed(
+    path: &Path,
+    mnemonic: &str,
+    passphrase: &str,
+    count: usize,
+) -> Result<SeedWalletOutcome, String> {
+    if count == 0 || count > 10_000 {
+        return Err(format!("key count out of range 1..=10000: {}", count));
+    }
+    let canonical = crate::seed::normalize_words(mnemonic)
+        .ok_or_else(|| "mnemonic is empty".to_string())?;
+    if !crate::seed::check_mnemonic(&canonical) {
+        return Err("invalid mnemonic (unknown word or bad checksum)".into());
+    }
+    let path_existed = path.exists();
+    if !path_existed {
+        create_wallet_file(path)?;
+    }
+    let mut h = WalletHandle::open_readwrite(path)?;
+    if h.hd_mnemonic.is_some() {
+        return Err(format!(
+            "{}: wallet already has an HD seed; refusing to replace it",
+            path.display()
+        ));
+    }
+    let fresh = !path_existed;
+    if fresh {
+        // first-open rows the legacy qt writes on wallet creation
+        h.write_fresh_identity_rows()?;
+    }
+    h.set_hd_seed(&canonical, passphrase)?;
+    let mut keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        keys.push(h.generate_hd_key("")?);
+    }
+    h.write_defaultkey(&keys[0].pubkey)?;
+    let outcome = SeedWalletOutcome {
+        keys,
+        hd_chain_index: h.hd_chain_index,
+        mnemonic: canonical,
+    };
+    h.close();
+    Ok(outcome)
+}
+
+/// Create a brand-new seed wallet at a NEW path with a freshly generated
+/// 24-word mnemonic (the GUI "Create new wallet" flow). The caller owns the
+/// returned mnemonic — show it once, verify, never persist it anywhere else.
+pub fn create_wallet_from_seed(
+    path: &Path,
+    passphrase: &str,
+    count: usize,
+) -> Result<SeedWalletOutcome, String> {
+    let mnemonic = crate::seed::generate_mnemonic_24()?;
+    let out = restore_wallet_from_seed(path, &mnemonic, passphrase, count)?;
+    Ok(out)
 }
 
 fn write_error(stage: &str, what: &str, e: rusqlite::Error) -> String {
@@ -1456,5 +1966,398 @@ mod tests {
 
     fn key_row_key_blob_len(pubkey: &[u8]) -> usize {
         encode_key_keyblob(pubkey).len()
+    }
+}
+
+// ===========================================================================
+// HD seed-wallet tests (src/seed.rs port of legacy hdwallet.cpp): record
+// formats, interchangeability, cross-machine roundtrip, refusals.
+// ===========================================================================
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+
+    /// Minimal legacy (random-key, no seed) wallet for cross checks — local
+    /// copy of the main tests' fixture shape (mod-private there).
+    fn synth_legacy_wallet(dir: &Path, tag: &str) -> PathBuf {
+        let path = dir.join(format!("wallet_{}.dat", tag));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {};\nPRAGMA user_version = {};",
+            WALLET_APP_ID, WALLET_USER_VERSION
+        ))
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);",
+        )
+        .unwrap();
+        let secret = crate::legacy::sha256d(b"tri7-wallet-rw/seed");
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        let pk = pk.serialize();
+        let der = encode_der_privkey(&secret, &pk).unwrap();
+        let mut vrow = Vec::new();
+        push_compact_size(&mut vrow, 7);
+        vrow.extend_from_slice(b"version");
+        conn.execute(
+            "INSERT INTO main (key, value) VALUES (?1, ?2)",
+            rusqlite::params![vrow, CLIENT_VERSION.to_le_bytes()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO main (key, value) VALUES (?1, ?2)",
+            rusqlite::params![encode_key_keyblob(&pk), encode_key_value(&der)],
+        )
+        .unwrap();
+        conn.close().unwrap();
+        path
+    }
+
+    fn seed_test_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "tri7wallet_seed_{}_{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The canonical Trezor test phrase (12 words) and the official 24-word
+    /// all-zero-entropy phrase; their derived keys are oracle-pinned in
+    /// seed.rs against the legacy client's compiled hdwallet.cpp.
+    const MN12: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const MN24: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    #[test]
+    fn create_then_reread_matches_legacy_derivation() {
+        let dir = seed_test_dir("create");
+        let path = dir.join("wallet.dat");
+        let out = create_wallet_from_seed(&path, "", 5).unwrap();
+        assert_eq!(out.keys.len(), 5);
+        assert_eq!(out.hd_chain_index, 5);
+        let words = out.mnemonic.split_whitespace().count();
+        assert_eq!(words, 24);
+        assert!(crate::seed::check_mnemonic(&out.mnemonic));
+
+        // every derived key must equal the pure derivation at its index
+        for (i, k) in out.keys.iter().enumerate() {
+            let expected = crate::seed::derive_triangles(&out.mnemonic, "", 0, 0, i as u32).unwrap();
+            assert_eq!(k.secret, expected, "index {}", i);
+        }
+
+        // re-read: HD fields + key census via the EXISTING reader
+        let w = read_wallet(&path).unwrap();
+        assert_eq!(w.keys.len(), 5);
+        assert_eq!(w.hd_mnemonic.as_deref(), Some(out.mnemonic.as_str()));
+        assert_eq!(w.hd_passphrase, None);
+        assert_eq!(w.hd_chain_index, Some(5));
+        assert_eq!(w.default_key.as_deref(), Some(out.keys[0].pubkey.as_slice()));
+    }
+
+    #[test]
+    fn hd_record_bytes_match_legacy_serialization() {
+        // Byte-level assertions on the exact legacy record shapes written
+        // into a seeded wallet (walletdb.h WriteHDMnemonic/WriteHDChain/
+        // WriteDefaultKey serializations).
+        let dir = seed_test_dir("bytes");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, MN12, "", 2).unwrap();
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let get = |k: Vec<u8>| -> Vec<u8> {
+            conn.query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![k],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // hdmnemonic: key blob = 0A "hdmnemonic", value = CS + mnemonic
+        let mut kb = vec![0x0a];
+        kb.extend_from_slice(b"hdmnemonic");
+        let hv = get(kb);
+        assert_eq!(hv[0], MN12.len() as u8); // CS(len)
+        assert_eq!(&hv[1..], MN12.as_bytes());
+
+        // hdchain: key blob = 07 "hdchain", value = int64 LE
+        let mut kb = vec![0x07];
+        kb.extend_from_slice(b"hdchain");
+        let cv = get(kb);
+        assert_eq!(cv, 2i64.to_le_bytes());
+
+        // defaultkey: key blob = 0A "defaultkey", value = CS(33) + pubkey
+        let mut kb = vec![0x0a];
+        kb.extend_from_slice(b"defaultkey");
+        let dv = get(kb);
+        assert_eq!(dv[0], 33);
+        assert_eq!(dv.len(), 34);
+
+        // version + minversion: raw int32 LE
+        let mut kb = vec![0x07];
+        kb.extend_from_slice(b"version");
+        assert_eq!(get(kb), CLIENT_VERSION.to_le_bytes());
+        let mut kb = vec![0x0a];
+        kb.extend_from_slice(b"minversion");
+        assert_eq!(get(kb), 60000i32.to_le_bytes());
+
+        // no hdpassphrase / hdcmnemonic / hdcpassphrase rows exist
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM main WHERE hex(substr(key,2,11))='686463706173737072617365'
+                 OR hex(substr(key,2,11))='6864636D6E656D6F6E6963'
+                 OR hex(substr(key,2,13))='686463706173737072617365'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn key_row_is_exact_legacy_214b_der_shape() {
+        // The seed-derived key rows must be byte-identical in SHAPE to the
+        // grade-A-verified add_key rows (214-byte DER from the qt template).
+        let dir = seed_test_dir("dershape");
+        let path = dir.join("wallet.dat");
+        let out = restore_wallet_from_seed(&path, MN12, "", 3).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        for k in &out.keys {
+            let mut kb = vec![0x03];
+            kb.extend_from_slice(b"key");
+            kb.push(33);
+            kb.extend_from_slice(&k.pubkey);
+            let v: Vec<u8> = conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![kb],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(v[0], 214); // CS(214)
+            let der = &v[1..];
+            assert_eq!(der.len(), 214);
+            assert_eq!(&der[0..8], &DER_HEADER);
+            assert_eq!(&der[8..40], &k.secret);
+            assert_eq!(&der[181..214], k.pubkey.as_slice());
+            // keymeta present with the same pubkey
+            let mut mb = vec![0x07];
+            mb.extend_from_slice(b"keymeta");
+            mb.push(33);
+            mb.extend_from_slice(&k.pubkey);
+            let mv: Vec<u8> = conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![mb],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(mv.len(), 12); // int32 version + int64 time
+            // name row present (empty label)
+            let mut nb = vec![0x04];
+            nb.extend_from_slice(b"name");
+            nb.push(k.address.len() as u8);
+            nb.extend_from_slice(k.address.as_bytes());
+            let nv: Vec<u8> = conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![nb],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(nv, vec![0u8]); // CS(0) = empty label
+        }
+    }
+
+    #[test]
+    fn restore_on_fresh_wallet_reproduces_identical_keys() {
+        // CROSS-MACHINE roundtrip proof: wallet A created from the phrase;
+        // wallet B is a DIFFERENT FILE on a DIFFERENT PATH restored from the
+        // same typed phrase (with messy whitespace, like a real paste).
+        let dir = seed_test_dir("roundtrip");
+        let a = dir.join("machine_a_wallet.dat");
+        let b = dir.join("other").join("machine_b_wallet.dat");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+
+        let created = restore_wallet_from_seed(&a, MN24, "", 10).unwrap();
+        let restored = restore_wallet_from_seed(&b, &format!("  {}\n", MN24), "", 10).unwrap();
+
+        assert_eq!(created.keys.len(), restored.keys.len());
+        for (ka, kb) in created.keys.iter().zip(restored.keys.iter()) {
+            assert_eq!(ka.secret, kb.secret);
+            assert_eq!(ka.address, kb.address);
+            assert_eq!(ka.pubkey, kb.pubkey);
+        }
+        // and both match the pure derivation
+        for i in 0usize..10 {
+            let expected =
+                crate::seed::derive_triangles(MN24, "", 0, 0, i as u32).unwrap();
+            assert_eq!(created.keys[i].secret, expected);
+        }
+    }
+
+    #[test]
+    fn tri7_wallet_is_readable_by_legacy_record_shapes() {
+        // The rows the ORIGINAL qt wallet reads (a "key" row keyed by
+        // CS+pubkey, "keymeta" keyed likewise) — prove tri7's seeded wallet
+        // contains exactly the row TYPES the qt's LoadWallet dispatches on.
+        let dir = seed_test_dir("qtcensus");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, MN12, "", 4).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut stmt = conn.prepare("SELECT key FROM main").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let mut types = std::collections::BTreeMap::new();
+        while let Some(r) = rows.next().unwrap() {
+            let key: Vec<u8> = r.get(0).unwrap();
+            let tlen = key[0] as usize;
+            let t = String::from_utf8(key[1..1 + tlen].to_vec()).unwrap();
+            *types.entry(t).or_insert(0) += 1;
+        }
+        // version, minversion, hdmnemonic, hdchain, defaultkey = 1 each;
+        // 4 × {key, keymeta, name}
+        assert_eq!(types.get("version"), Some(&1));
+        assert_eq!(types.get("minversion"), Some(&1));
+        assert_eq!(types.get("hdmnemonic"), Some(&1));
+        assert_eq!(types.get("hdchain"), Some(&1));
+        assert_eq!(types.get("defaultkey"), Some(&1));
+        assert_eq!(types.get("key"), Some(&4));
+        assert_eq!(types.get("keymeta"), Some(&4));
+        assert_eq!(types.get("name"), Some(&4));
+        assert_eq!(types.len(), 8);
+    }
+
+    #[test]
+    fn restore_into_existing_random_key_wallet_preserves_keys() {
+        // their hdrestore-onto-existing semantics: an OLD random-key wallet
+        // gains a seed; its existing keys stay; new HD keys derive from the
+        // phrase; hdchain counts only HD keys.
+        let dir = seed_test_dir("existing");
+        let path = synth_legacy_wallet(&dir, "legacy");
+        let before = read_wallet(&path).unwrap();
+        assert_eq!(before.keys.len(), 1);
+        assert!(before.hd_mnemonic.is_none());
+
+        let out = restore_wallet_from_seed(&path, MN12, "pass phrase", 3).unwrap();
+        let after = read_wallet(&path).unwrap();
+        assert_eq!(after.keys.len(), 4); // 1 random + 3 HD
+        assert_eq!(after.keys[0].secret, before.keys[0].secret); // preserved
+        assert_eq!(after.hd_mnemonic.as_deref(), Some(MN12));
+        assert_eq!(after.hd_passphrase.as_deref(), Some("pass phrase"));
+        assert_eq!(after.hd_chain_index, Some(3));
+        // the 3 new keys are the HD ones (indices 0..2, WITH passphrase)
+        for i in 0usize..3 {
+            let expected =
+                crate::seed::derive_triangles(MN12, "pass phrase", 0, 0, i as u32).unwrap();
+            assert_eq!(out.keys[i].secret, expected);
+        }
+    }
+
+    #[test]
+    fn seed_replacement_and_second_seed_are_refused() {
+        let dir = seed_test_dir("refuse");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, MN12, "", 1).unwrap();
+
+        let err = restore_wallet_from_seed(&path, MN24, "", 1).unwrap_err();
+        assert!(err.contains("already has an HD seed"), "{}", err);
+
+        // even the same phrase again is refused (a seed is write-once)
+        let err = restore_wallet_from_seed(&path, MN12, "", 1).unwrap_err();
+        assert!(err.contains("already has an HD seed"), "{}", err);
+    }
+
+    #[test]
+    fn bad_mnemonics_never_touch_the_file() {
+        let dir = seed_test_dir("badmn");
+        let path = dir.join("wallet.dat");
+        // wrong checksum
+        let err = restore_wallet_from_seed(&path, &MN12.replace("about", "abandon"), "", 1)
+            .unwrap_err();
+        assert!(err.contains("invalid mnemonic"), "{}", err);
+        // unknown word
+        let err =
+            restore_wallet_from_seed(&path, &format!("{} zzzz", MN12), "", 1).unwrap_err();
+        assert!(err.contains("invalid mnemonic"), "{}", err);
+        // absurd count
+        let err = restore_wallet_from_seed(&path, MN12, "", 0).unwrap_err();
+        assert!(err.contains("out of range"), "{}", err);
+        assert!(!path.exists(), "file must not be created on rejection");
+    }
+
+    #[test]
+    fn generate_hd_key_continues_counter_and_refuses_duplicates() {
+        let dir = seed_test_dir("continue");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, MN12, "", 2).unwrap();
+
+        let mut h = WalletHandle::open_readwrite(&path).unwrap();
+        assert_eq!(h.hd_chain_index, 2);
+        let k2 = h.generate_hd_key("").unwrap();
+        let expected = crate::seed::derive_triangles(MN12, "", 0, 0, 2).unwrap();
+        assert_eq!(k2.secret, expected);
+        assert_eq!(h.hd_chain_index, 3);
+        h.close();
+
+        // re-opened handle continues from the row (cross-session proof)
+        let mut h = WalletHandle::open_readwrite(&path).unwrap();
+        assert_eq!(h.hd_chain_index, 3);
+        let k3 = h.generate_hd_key("next").unwrap();
+        assert_eq!(
+            k3.secret,
+            crate::seed::derive_triangles(MN12, "", 0, 0, 3).unwrap()
+        );
+        // wallets WITHOUT a seed refuse HD generation
+        let old = synth_legacy_wallet(&dir, "noseed");
+        let mut h2 = WalletHandle::open_readwrite(&old).unwrap();
+        assert!(h2.hd_mnemonic.is_none());
+        assert!(h2.generate_hd_key("").is_err());
+    }
+
+    #[test]
+    fn create_wallet_file_refuses_existing() {
+        let dir = seed_test_dir("refusecreate");
+        let path = synth_legacy_wallet(&dir, "x");
+        assert!(create_wallet_file(&path).is_err());
+        let fresh = dir.join("fresh.dat");
+        create_wallet_file(&fresh).unwrap();
+        // container validates as a TRI wallet via the standard reader
+        let w = read_wallet(&fresh).unwrap();
+        assert!(w.keys.is_empty());
+        assert!(w.hd_mnemonic.is_none());
+    }
+
+    #[test]
+    fn passphrase_wallet_restores_identically_across_files() {
+        let dir = seed_test_dir("passphrase");
+        let a = dir.join("a.dat");
+        let b = dir.join("b.dat");
+        let created = restore_wallet_from_seed(&a, MN24, "tri7 25th word", 3).unwrap();
+        let restored =
+            restore_wallet_from_seed(&b, MN24, "tri7 25th word", 3).unwrap();
+        for (ka, kb) in created.keys.iter().zip(restored.keys.iter()) {
+            assert_eq!(ka.address, kb.address);
+        }
+        // and they differ from the no-passphrase derivation (passphrase is
+        // load-bearing for restoration)
+        let nopass = restore_wallet_from_seed(&dir.join("c.dat"), MN24, "", 1).unwrap();
+        assert_ne!(created.keys[0].secret, nopass.keys[0].secret);
     }
 }

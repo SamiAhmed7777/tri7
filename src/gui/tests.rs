@@ -1069,6 +1069,9 @@ fn wallet_label_edit_writes_name_row_when_writable() {
         default_key: wread.default_key,
         version: wread.version,
         best_block: wread.best_block,
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: 0,
     });
     st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&wallet).unwrap());
     st.set_label_action(&seed_addr, "renamed-in-wallet".into())

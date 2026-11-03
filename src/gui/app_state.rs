@@ -203,6 +203,8 @@ pub struct AppState {
     pub updater: crate::updater::UpdateState,
     /// Events from the check/download worker threads (gui feature only).
     pub updater_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateEvent>>,
+    /// Seed-phrase create/restore flow (load screen). None = hidden.
+    pub seed_flow: Option<super::seed_flow::SeedFlow>,
 }
 
 impl AppState {
@@ -258,6 +260,7 @@ impl AppState {
             broadcast: BroadcastState::default(),
             updater,
             updater_rx: None,
+            seed_flow: None,
         }
     }
 
@@ -853,6 +856,9 @@ impl AppState {
                     default_key: w.default_key,
                     version: w.version,
                     best_block: w.best_block,
+                    hd_mnemonic: w.hd_mnemonic,
+                    hd_passphrase: w.hd_passphrase,
+                    hd_chain_index: w.hd_chain_index.unwrap_or(0),
                 });
             }
         }
@@ -1050,6 +1056,41 @@ impl AppState {
     /// the FALLBACK when wallet.dat refuses writes (encrypted / locked /
     /// foreign file) — the fallback entry is journaled like any write.
     pub fn new_address_action(&mut self, label: String) -> Result<String, String> {
+        // Seed-derived wallet: the next address MUST come from the phrase at
+        // hdchain counter i (the legacy CWallet::GenerateNewKey HD branch) —
+        // a random key here would silently break the deterministic backup.
+        if self
+            .wallet_rw
+            .as_ref()
+            .map(|h| h.hd_mnemonic.is_some())
+            .unwrap_or(false)
+        {
+            let res = {
+                let h = self.wallet_rw.as_mut().unwrap();
+                let index = h.hd_chain_index;
+                h.generate_hd_key(&label).map(|k| (index, k))
+            };
+            self.drain_wallet_journal();
+            match res {
+                Ok((index, key)) => {
+                    let addr = key.address.clone();
+                    self.reload_wallet_keys()?;
+                    self.status_log.push(format!(
+                        "HD address {} derived at m/44'/2222'/0'/0/{} from the wallet seed",
+                        addr, index
+                    ));
+                    return Ok(addr);
+                }
+                Err(e) => {
+                    // fall through to the random path is WRONG for HD wallets
+                    return Err(format!(
+                        "HD derivation failed — refusing to create a random key in a \
+                         seed-derived wallet: {}",
+                        e
+                    ));
+                }
+            }
+        }
         if self.wallet_rw.is_some() {
             let res = {
                 let h = self.wallet_rw.as_mut().unwrap();

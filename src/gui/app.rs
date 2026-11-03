@@ -666,10 +666,299 @@ impl Tri7App {
                                 }
                             });
                         });
+                } else if self.st.seed_flow.is_some() {
+                    self.seed_screen(ui);
                 } else {
                     self.load_screen(ui);
                 }
             });
+    }
+
+    // -----------------------------------------------------------------------
+    // Seed-phrase wallet flows (create / restore) — state machine in
+    // src/gui/seed_flow.rs, this is the thin view layer. Replaces the load
+    // screen while active.
+    // -----------------------------------------------------------------------
+    fn seed_screen(&mut self, ui: &mut egui::Ui) {
+        use crate::gui::seed_flow::SeedFlowStep as Step;
+        // take() the flow out of AppState for the render so view closures can
+        // reach self.st freely; restored below unless the flow ends itself.
+        let mut flow = match self.st.seed_flow.take() {
+            Some(f) => f,
+            None => return,
+        };
+        let mut consumed = false;
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.add(egui::Label::new(
+                egui::RichText::new("Seed phrase wallet")
+                    .size(22.0)
+                    .strong()
+                    .color(th::TEXT_PRIMARY),
+            ));
+            th::text_meta(ui, "BIP39 + BIP32 — identical keys to the original qt wallet (m/44'/2222'/0'/0/i)");
+            ui.add_space(8.0);
+            th::inline_notice(ui, th::Notice::Info, "Please read", super::seed_flow::HONEST_NOTE);
+            ui.add_space(10.0);
+        });
+
+        match flow.step.clone() {
+            Step::Menu => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Create new wallet (24 words)").clicked() {
+                            flow.begin_create();
+                        }
+                        if ui.button("Restore from seed phrase").clicked() {
+                            flow.begin_restore();
+                        }
+                        if ui.button("Back").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Could not start", e);
+                    }
+                });
+            }
+            Step::CreateReveal => {
+                let words = flow.revealed_words().unwrap_or_default();
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Warning,
+                        "These 24 words are shown ONCE",
+                        "Anyone who sees them can spend every coin this wallet will ever \
+                         receive. Save them now — no one can recover them, not even tri7.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        // selectable + copyable; right-click menu gives Select
+                        // all/Copy on every platform (Windows paste-menu bar)
+                        egui::TextEdit::multiline(&mut words.as_str())
+                            .desired_rows(6)
+                            .interactive(true)
+                            .show(ui);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy to clipboard").clicked() {
+                            match arboard::Clipboard::new() {
+                                Ok(mut cb) => {
+                                    if let Err(e) = cb.set_text(words.clone()) {
+                                        flow.error =
+                                            Some(format!("clipboard copy failed: {}", e));
+                                    }
+                                }
+                                Err(e) => {
+                                    flow.error = Some(format!("clipboard unavailable: {}", e))
+                                }
+                            }
+                        }
+                        if ui.button("Save to file...").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .set_file_name("tri7-seed-backup.txt")
+                                .set_title("Save your seed phrase backup")
+                                .save_file()
+                            {
+                                if let Err(e) = std::fs::write(p, &words) {
+                                    flow.error = Some(format!("save failed: {}", e));
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(&mut flow.saved_confirmed, "I wrote the words down (paper or file) and stored them safely")
+                        .changed()
+                    {
+                        flow.error = None;
+                    }
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "I saved it — continue").clicked() {
+                            flow.confirm_saved();
+                        }
+                        if ui.button("Cancel (discard these words)").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Hold on", e);
+                    }
+                });
+            }
+            Step::CreateConfirm => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Info,
+                        "Verify your backup",
+                        "Type the 24 words in order (spaces or newlines). This proves the \
+                         backup you saved is correct — without it, a bad backup is only \
+                         discovered when the coins are already gone.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        ui.allocate_ui(Vec2::new(760.0, 140.0), |ui| {
+                            egui::TextEdit::multiline(&mut flow.words_input)
+                                .desired_rows(6)
+                                .desired_width(760.0)
+                                .show(ui);
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Verify words").clicked() {
+                            flow.submit_create_confirm();
+                        }
+                        if ui.button("Cancel (discard this wallet)").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Words do not match", e);
+                    }
+                });
+            }
+            Step::RestoreInput => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Info,
+                        "Restore a wallet from its seed phrase",
+                        "Paste or type the 12/24 words in order, then the optional \
+                         passphrase (\"25th word\") if the wallet was created with one. \
+                         The words must match EXACTLY — including the passphrase — or a \
+                         different (empty) wallet is derived.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        ui.allocate_ui(Vec2::new(760.0, 140.0), |ui| {
+                            egui::TextEdit::multiline(&mut flow.words_input)
+                                .desired_rows(6)
+                                .desired_width(760.0)
+                                .show(ui);
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Passphrase (optional):")
+                                .color(th::TEXT_SECONDARY),
+                        );
+                        th::text_input(ui, 320.0, &mut flow.passphrase);
+                    });
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Validate phrase").clicked() {
+                            flow.submit_restore();
+                        }
+                        if ui.button("Back").clicked() {
+                            flow.abandon();
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Invalid phrase", e);
+                    }
+                });
+            }
+            Step::Ready => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Success,
+                        "Phrase validated",
+                        "The mnemonic checksum is valid. Choose the wallet file and how \
+                         many addresses to derive, then write the wallet.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Wallet file:").color(th::TEXT_SECONDARY));
+                        if th::text_input(ui, 420.0, &mut flow.wallet_path).changed() {
+                            flow.error = None;
+                        }
+                        if ui.button("Browse...").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("Wallet files", &["dat"])
+                                .set_title("Wallet file to create or restore into")
+                                .save_file()
+                            {
+                                flow.wallet_path = p.display().to_string();
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Addresses to derive (first launch):")
+                                .color(th::TEXT_SECONDARY),
+                        );
+                        let mut count = flow.key_count as i32;
+                        if ui
+                            .add(egui::DragValue::new(&mut count).range(1..=10000))
+                            .changed()
+                        {
+                            flow.key_count = count.max(1) as usize;
+                        }
+                    });
+                    th::text_meta(
+                        ui,
+                        "the original qt continues this sequence automatically via the hdchain counter",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Write wallet.dat").clicked() {
+                            flow.error = None;
+                            match flow.execute() {
+                                Ok(_) => {
+                                    // open what we just wrote
+                                    self.st.cfg.wallet_path = flow.wallet_path.clone();
+                                }
+                                Err(e) => flow.error = Some(e),
+                            }
+                        }
+                        if ui.button("Back").clicked() {
+                            flow.abandon();
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Could not write wallet", e);
+                    }
+                });
+            }
+            Step::Done(addresses) => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Success,
+                        "Wallet written and verified",
+                        &format!(
+                            "{} seed-derived addresses written in the exact legacy record \
+                             format (the original qt wallet reads this file). The seed \
+                             phrase is now your ONLY backup — keep it safe.",
+                            addresses.len()
+                        ),
+                    );
+                    if !addresses.is_empty() {
+                        th::text_meta(ui, &format!("first address: {}", addresses[0]));
+                        th::text_meta(ui, &format!("last address:  {}", addresses[addresses.len() - 1]));
+                    }
+                    ui.add_space(8.0);
+                    if th::primary_button(ui, "Open this wallet").clicked() {
+                        consumed = true;
+                        if let Err(e) = self.st.load_wallet_action() {
+                            self.st.load_error = Some(e);
+                        } else {
+                            self.st.refresh_debug_info_action();
+                        }
+                    }
+                });
+            }
+        }
+        if !consumed {
+            self.st.seed_flow = Some(flow);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -888,6 +1177,31 @@ impl Tri7App {
                 ui.add_space(4.0);
                 th::inline_notice(ui, th::Notice::Error, "Could not open wallet", e);
             }
+            ui.add_space(18.0);
+            ui.separator();
+            ui.add_space(6.0);
+            th::text_meta(
+                ui,
+                "Seed phrase wallet — BIP39 create/restore, identical keys to the original qt (m/44'/2222'/0'/0/i)",
+            );
+            ui.add_space(4.0);
+            if th::primary_button(ui, "Seed phrase wallet…").clicked() {
+                let default_path = if self.st.cfg.wallet_path.trim().is_empty() {
+                    "seed_wallet.dat".to_string()
+                } else {
+                    std::path::Path::new(&self.st.cfg.wallet_path)
+                        .parent()
+                        .map(|p| p.join("seed_wallet.dat").display().to_string())
+                        .unwrap_or_else(|| "seed_wallet.dat".to_string())
+                };
+                self.st.seed_flow =
+                    Some(crate::gui::seed_flow::SeedFlow::new(default_path));
+            }
+            ui.add_space(4.0);
+            th::text_meta(
+                ui,
+                "existing wallets created with random keys have NO seed phrase — one can never be added to them",
+            );
             ui.add_space(6.0);
             th::text_meta(
                 ui,
@@ -1752,6 +2066,38 @@ impl Tri7App {
             "Receive Coins",
             "Manage receiving addresses and create payment requests",
         );
+        // HD seed status strip: what this wallet's keys derive from (or the
+        // honest no-seed note for pre-HD random-key wallets).
+        let hd_line = match (
+            self.st.wallet.as_ref().map(|w| w.hd_mnemonic.clone()).unwrap_or(None),
+            self.st.wallet.as_ref().map(|w| w.hd_chain_index).unwrap_or(0),
+        ) {
+            (Some(_), next) => Some(format!(
+                "Seed-derived wallet — new addresses derive at m/44'/2222'/0'/0/{} from the stored phrase (passphrase: {}).",
+                next,
+                self.st
+                    .wallet
+                    .as_ref()
+                    .map(|w| if w.hd_passphrase.is_some() { "set" } else { "none" })
+                    .unwrap_or("none")
+            )),
+            (None, _) if self.st.loaded() => None,
+            _ => None,
+        };
+        if let Some(line) = hd_line {
+            th::inline_notice(ui, th::Notice::Info, "HD wallet", &line);
+            ui.add_space(4.0);
+        } else if self.st.loaded() {
+            th::inline_notice(
+                ui,
+                th::Notice::Info,
+                "No seed phrase",
+                "This wallet's keys were created randomly — it has no seed phrase and one \
+                 can never be added. Back this wallet up by copying wallet.dat itself. \
+                 New seed-phrase wallets are created from the load screen.",
+            );
+            ui.add_space(4.0);
+        }
         let avail = ui.available_width();
         if avail >= 900.0 {
             let left_w = (avail - 16.0) * 0.60;

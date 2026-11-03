@@ -18,6 +18,7 @@
 pub mod app_state;
 pub mod explorer;
 pub mod rpc_client;
+pub mod seed_flow;
 pub mod state;
 
 #[cfg(test)]

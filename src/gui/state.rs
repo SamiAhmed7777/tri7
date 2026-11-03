@@ -462,6 +462,13 @@ pub struct WalletData {
     pub default_key: Option<Vec<u8>>,
     pub version: Option<i32>,
     pub best_block: Option<Hash>,
+    /// Seed wallet (legacy `hdmnemonic` row): the stored phrase. None = the
+    /// wallet is a pre-HD random-key wallet (which can NEVER gain a seed).
+    pub hd_mnemonic: Option<String>,
+    /// BIP39 passphrase row (absent = none).
+    pub hd_passphrase: Option<String>,
+    /// Next HD derivation index (legacy `hdchain` counter).
+    pub hd_chain_index: i64,
 }
 
 pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
@@ -473,6 +480,9 @@ pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
         default_key: w.default_key,
         version: w.version,
         best_block: w.best_block,
+        hd_mnemonic: w.hd_mnemonic,
+        hd_passphrase: w.hd_passphrase,
+        hd_chain_index: w.hd_chain_index.unwrap_or(0),
     })
 }
 
