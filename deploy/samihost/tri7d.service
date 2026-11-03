@@ -1,0 +1,76 @@
+[Unit]
+Description=tri7 daemon (Samihost follow-mode follower: outbound-only P2P, loopback RPC)
+Documentation=file:/root/tri7/HANDOFF.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tri7
+Group=tri7
+# TOPOLOGY (Samihost, 2026-11-02):
+#   FOLLOW-MODE follower. NO STAKING — this host runs the follow_tip binary
+#   only (stake_mint is NOT shipped here); the conf records staking=0.
+#   The legacy trianglesd client is retired/removed after cutover.
+#   Ports (loopback-only RPC; NO local P2P listener):
+#     19112  native JSON-RPC (127.0.0.1 only; --no-proxy) — free on this host
+#   Outbound attach targets (rotation with fallback; .onion via the local
+#   tor SOCKS at 127.0.0.1:9050 — tor runs on Samihost):
+#     gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113  DNS2 tri7d (canonical)
+#     100.121.150.22:24113                                                  DNS2 tailscale direct
+#   All targets down => HEADLESS mode (native RPCs from persisted state,
+#   rotation retried each 30s poll tick).
+#   Blocks store: /var/lib/tri7/blk0001.dat = frame-complete snapshot of
+#   DNS2's chain shipped 2026-11-02 (sha256 in /tmp/tri7-ship/manifest.sha256
+#   at ship time, copied to /var/lib/tri7/BLK_SNAPSHOT.sha256 at install).
+#   Healthcheck (tri7d-health.timer, 5 min): follow_tip --status; degraded =
+#   no peer traffic >600s AND no tip advance >7200s => try-restart (advance
+#   gate widened for DNS2's mint cadence — see tri7d-health.service).
+#   Data sources: tipstate window (seeded 2026-11-02 from DNS2 at h2204068),
+#   blockindex over /var/lib/tri7/blk0001.dat (frame-complete snapshot of
+#   DNS2's chain; same seam history as DNS2's file so heights_ok=false and
+#   height->block lookups are uncovered — getblock-by-HASH works), replay
+#   snapshots (NOT a live UTXO set), plus an in-RAM recent-blocks cache.
+#   WHY --backfill 0 (2026-11-03): the follower's startup backfill asks the
+#   peer for a 3000-header range; DNS2's collect_headers resolves the locator
+#   by hash (works) but walks the range by HEIGHT MAP, which is uncovered on
+#   DNS2 (getblockhash: "not covered by the height map") -> it serves 0
+#   headers -> the follower idles silently -> DNS2's 90s quiet-drop kills the
+#   link -> outbound close is fatal (exit 4) -> restart loop. Skipping the
+#   backfill is safe here: the seed is already AT DNS2's tip. Tip advancement
+#   happens via DNS2's inv relay on each new mint (30s poll ticks keep the
+#   link warm with bidirectional getheaders/headers traffic, so neither side
+#   trips its idle gate). UPSTREAM (unfixed, needs code change + commit):
+#   collect_headers should walk by hash-chain (or the height map needs a
+#   rebuild over the seam-y blk file) before any follower backfill is used.
+ExecStart=/opt/tri7/bin/follow_tip \
+  --onion gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 \
+  --daemon 100.121.150.22:24113 \
+  --socks 127.0.0.1:9050 \
+  --no-listen \
+  --backfill 0 \
+  --conf /etc/tri7/triangles.conf --state-dir /var/lib/tri7 --forever \
+  --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy \
+  --blocks-file /var/lib/tri7/blk0001.dat \
+  --balances /var/lib/tri7/balances.json \
+  --wallet-utxos /var/lib/tri7/wallet_utxos.json \
+  --index-dir /var/lib/tri7/index
+Restart=on-failure
+RestartSec=30
+MemoryMax=512M
+# Hardening: outbound-only P2P (tor SOCKS + tailnet), loopback-only RPC;
+# write access limited to its state dir; conf copy holds its own RPC creds.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tri7
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

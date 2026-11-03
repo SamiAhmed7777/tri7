@@ -685,6 +685,32 @@ pub struct TxHit {
     pub block_time: u32,
 }
 
+/// Positional exact read, portable: unix FileExt.read_exact_at on Linux,
+/// Windows FileExt.seek_read loop elsewhere. Positional — safe from
+/// concurrent request threads (does not disturb the shared file cursor).
+#[cfg(unix)]
+fn read_exact_at(file: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, off)
+}
+
+#[cfg(not(unix))]
+fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut done = 0usize;
+    while done < buf.len() {
+        let n = file.seek_read(&mut buf[done..], off + done as u64)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "read_exact_at: eof",
+            ));
+        }
+        done += n;
+    }
+    Ok(())
+}
+
 impl BlockStore {
     pub fn new(path: Option<PathBuf>, cache_dir: Option<PathBuf>) -> Arc<BlockStore> {
         Arc::new(BlockStore {
@@ -796,11 +822,8 @@ impl BlockStore {
     /// Read the frame body at a frame offset. Positional read — safe from
     /// concurrent request threads.
     fn read_frame(inner: &StoreInner, off: u64) -> Result<Vec<u8>, String> {
-        use std::os::unix::fs::FileExt;
         let mut hdr = [0u8; 8];
-        inner
-            .file
-            .read_exact_at(&mut hdr, off)
+        read_exact_at(&inner.file, &mut hdr, off)
             .map_err(|e| format!("frame header read at {}: {}", off, e))?;
         let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
         let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
@@ -811,9 +834,7 @@ impl BlockStore {
             ));
         }
         let mut body = vec![0u8; len];
-        inner
-            .file
-            .read_exact_at(&mut body, off + 8)
+        read_exact_at(&inner.file, &mut body, off + 8)
             .map_err(|e| format!("frame body read at {}: {}", off, e))?;
         Ok(body)
     }
@@ -883,21 +904,16 @@ impl BlockStore {
             Some(o) => o,
             None => return Ok(None),
         };
-        use std::os::unix::fs::FileExt;
         let mut hdr = [0u8; 8];
         let mut head80 = [0u8; 80];
-        inner
-            .file
-            .read_exact_at(&mut hdr, off)
+        read_exact_at(&inner.file, &mut hdr, off)
             .map_err(|e| format!("header read at {}: {}", off, e))?;
         let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
         if len < 80 {
             return Err(format!("degenerate frame at offset {}", off));
         }
-        inner
-            .file
-            .read_exact_at(&mut head80, off + 8)
-            .map_err(|e| format!("header read at {}: {}", off, e))?;
+        read_exact_at(&inner.file, &mut head80, off + 8)
+            .map_err(|e| format!("header read at {}: {}", off + 8, e))?;
         Ok(Some(crate::p2p::internal_to_display(&hash9(&head80))))
     }
 
