@@ -286,12 +286,18 @@ jobs:
           c = re.sub(r'<version>[\\d.]+</version>', '<version>${VERSION}</version>', c)
           with open('cryptographictriangles.nuspec', 'w') as f: f.write(c)
           with open('tools/chocolateyInstall.ps1') as f: c = f.read()
+          # Bump BOTH the pinned version (URL) and the checksum placeholder —
+          # the script pins the installer URL, so a version-only nuspec bump
+          # would ship packages fetching a stale installer.
           c = c.replace('__CHECKSUM_PLACEHOLDER__', '${{ steps.sha.outputs.sha }}')
+          c = re.sub(r'CryptographicTriangles-[\\d.]+-win64-setup\\.exe',
+                     'CryptographicTriangles-${VERSION}-win64-setup.exe', c)
+          c = re.sub(r'releases/download/v[\\d.]+/', 'releases/download/v${VERSION}/', c)
           with open('tools/chocolateyInstall.ps1', 'w') as f: f.write(c)
-          print('updated nuspec version + install script checksum')
+          print('updated nuspec version + install script URL + checksum')
           "
           grep -E "<version>|<id>" cryptographictriangles.nuspec
-          grep checksum64 tools/chocolateyInstall.ps1
+          grep -E "checksum64|win64-setup" tools/chocolateyInstall.ps1
 
       - name: Pack Chocolatey package
         if: env.CHOCO_API_KEY != ''
@@ -446,12 +452,30 @@ jobs:
           echo 'build ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
           chown -R build:build "$GITHUB_WORKSPACE"
 
-      - name: Stage PKGBUILD + generate .SRCINFO
+      - name: Update PKGBUILD pkgver + sha256sums, regenerate .SRCINFO
         if: env.AUR_SSH_KEY != ''
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cp "$GITHUB_WORKSPACE/packaging/aur/PKGBUILD" /tmp/PKGBUILD
+          # Fetch the tagged source tarball (public URL once the repo is
+          # public) and rewrite pkgver + sha256sums in the AUR PKGBUILD,
+          # then regenerate .SRCINFO — without this, releases after 7.0.0
+          # would leave the AUR stale or fail checksum validation.
+          curl -fsSL -o /tmp/tri7-src.tar.gz \
+            "https://github.com/SamiAhmed7777/tri7/archive/refs/tags/v${VERSION}.tar.gz"
+          SRC_SHA=$(sha256sum /tmp/tri7-src.tar.gz | awk '{print $1}')
+          python3 - "$VERSION" "$SRC_SHA" <<'PYEOF'
+          import re, sys
+          version, sha = sys.argv[1], sys.argv[2]
+          with open('/tmp/PKGBUILD') as f:
+              content = f.read()
+          content = re.sub(r"^pkgver=.*", f"pkgver={version}", content, count=1, flags=re.MULTILINE)
+          content = re.sub(r"^pkgrel=.*", "pkgrel=1", content, count=1, flags=re.MULTILINE)
+          content = re.sub(r"^sha256sums=.*", f"sha256sums=('{sha}')", content, count=1, flags=re.MULTILINE)
+          with open('/tmp/PKGBUILD', 'w') as f:
+              f.write(content)
+          PYEOF
+          grep -E "^(pkgver|pkgrel|sha256sums)" /tmp/PKGBUILD
           chown build:build /tmp/PKGBUILD
           sudo -u build bash -c '
             set -e
