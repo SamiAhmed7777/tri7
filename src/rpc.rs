@@ -1427,6 +1427,10 @@ pub fn pow_subsidy_sats(height: u64) -> i64 {
 }
 
 /// Inverse of hex_encode (RPC hex-string params → bytes).
+/// Contract: an odd-length string or any non-hex character yields an EMPTY
+/// vec (all tri7 call sites treat empty as invalid) — this is a parse
+/// helper, not a validator; use decode errors explicitly where rejection
+/// must be distinguishable.
 pub fn hex_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);

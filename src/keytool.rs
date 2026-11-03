@@ -406,9 +406,16 @@ pub fn check_wallet(wallet_path: &Path) -> Result<CheckReport, String> {
     for k in &wk.keys {
         // The wallet loader already parsed the DER; re-derive the address
         // from the secret to prove the row is internally consistent.
-        match secret_to_address(&k.secret, true) {
-            Ok(a) if a == k.address => {}
-            _ => bad_keys += 1,
+        // compressed=true is valid under the compressed-only store invariant
+        // (tri7's write path always derives the 33-byte pubkey); rows the
+        // loader marked uncompressed are checked against their own form.
+        let ok = if k.compressed {
+            matches!(secret_to_address(&k.secret, true), Ok(ref a) if *a == k.address)
+        } else {
+            matches!(secret_to_address(&k.secret, false), Ok(ref a) if *a == k.address)
+        };
+        if !ok {
+            bad_keys += 1;
         }
     }
     let fk_rows: i64 = conn

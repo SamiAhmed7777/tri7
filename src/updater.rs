@@ -1484,7 +1484,9 @@ mod tests {
                 {"name": "CryptographicTriangles-7.0.1-win64-gui-portable.exe", "size": 9000000,
                  "browser_download_url": "https://example.com/portable.exe"},
                 {"name": "CryptographicTriangles-7.0.1-linux-x64.tar.gz", "size": 8000000,
-                 "browser_download_url": "https://example.com/linux.tar.gz"}
+                 "browser_download_url": "https://example.com/linux.tar.gz"},
+                {"name": "CryptographicTriangles-7.0.1-macos-arm64.tar.gz", "size": 8500000,
+                 "browser_download_url": "https://example.com/macos.tar.gz"}
             ]
         }"###,
         )
@@ -1497,7 +1499,7 @@ mod tests {
         let rel = sample_release();
         assert_eq!(rel.version, v("7.0.1"));
         assert_eq!(rel.tag, "v7.0.1");
-        assert_eq!(rel.assets.len(), 3);
+        assert_eq!(rel.assets.len(), 4);
         assert_eq!(rel.assets[0].size, 12345678);
     }
 
@@ -1523,8 +1525,14 @@ mod tests {
             pick_asset(&rel, UpdateFlavor::LinuxTarball).unwrap().name,
             "CryptographicTriangles-7.0.1-linux-x64.tar.gz"
         );
-        // macOS asset missing → None (updater reports, never guesses)
-        assert!(pick_asset(&rel, UpdateFlavor::MacOsTarball).is_none());
+        assert_eq!(
+            pick_asset(&rel, UpdateFlavor::MacOsTarball).unwrap().name,
+            "CryptographicTriangles-7.0.1-macos-arm64.tar.gz"
+        );
+        // an ABSENT platform asset → None (updater reports, never guesses)
+        let mut rel_no_mac = sample_release();
+        rel_no_mac.assets.retain(|a| !a.name.contains("macos"));
+        assert!(pick_asset(&rel_no_mac, UpdateFlavor::MacOsTarball).is_none());
     }
 
     #[test]
@@ -1885,11 +1893,22 @@ mod tests {
     fn tarball_extraction_enforces_floor_and_magic_and_lands_the_binary() {
         let dir = std::env::temp_dir().join(format!("tri7-tar-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // a >1MiB ELF-magic payload (the size floor applies to the EXTRACTED
-        // bytes; zeros compress to almost nothing in the .tar.gz)
-        let mut payload = b"\x7fELF\x02\x01\x01\x00".to_vec();
+        // a >1MiB executable-magic payload (the size floor applies to the EXTRACTED
+        // bytes; zeros compress to almost nothing in the .tar.gz; magic must
+        // match THIS platform's sanity gate: ELF on linux, Mach-O LE on macOS)
+        let magic: &[u8] = if cfg!(target_os = "macos") {
+            &[0xcf, 0xfa, 0xed, 0xfe] // MH_CIGAM_64 (64-bit LE)
+        } else {
+            b"\x7fELF\x02\x01\x01\x00"
+        };
+        let mut payload = magic.to_vec();
         payload.resize(MIN_PAYLOAD_SIZE as usize + 4096, 0xAB);
-        let tar_path = dir.join("CryptographicTriangles-7.0.1-linux-x64.tar.gz");
+        let tar_name = if cfg!(target_os = "macos") {
+            "CryptographicTriangles-7.0.1-macos-arm64.tar.gz"
+        } else {
+            "CryptographicTriangles-7.0.1-linux-x64.tar.gz"
+        };
+        let tar_path = dir.join(tar_name);
         let f = std::fs::File::create(&tar_path).unwrap();
         let enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
         let mut b = tar::Builder::new(enc);
