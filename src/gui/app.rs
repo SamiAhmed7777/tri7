@@ -484,7 +484,9 @@ impl Tri7App {
             }
             ui.add_space(10.0);
             ui.heading(egui::RichText::new(s::APP_TITLE).size(24.0));
-            ui.label("tri7 engine — wallet.dat opened read-only; nothing is broadcast in this build");
+            ui.label(
+                "tri7 engine — wallet.dat opens READ-WRITE (New Address writes real legacy keys); signed txs broadcast via tri7d",
+            );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label("Wallet file:");
@@ -637,15 +639,23 @@ impl Tri7App {
                     .striped(true)
                     .show(ui, |ui| {
                         for r in rows {
-                            let transport = r.get("transport").and_then(|x| x.as_str()).unwrap_or("?");
+                            let transport =
+                                r.get("transport").and_then(|x| x.as_str()).unwrap_or("?");
                             let tcol = match transport {
                                 "tor" => Color32::from_rgb(0xaa, 0x77, 0xee),
                                 "i2p" => Color32::from_rgb(0x77, 0xaa, 0xdd),
                                 _ => Color32::GRAY,
                             };
-                            ui.label(egui::RichText::new(
-                                if r.get("inbound") == Some(&Value::Bool(true)) { "in" } else { "out" },
-                            ).small());
+                            ui.label(
+                                egui::RichText::new(
+                                    if r.get("inbound") == Some(&Value::Bool(true)) {
+                                        "in"
+                                    } else {
+                                        "out"
+                                    },
+                                )
+                                .small(),
+                            );
                             ui.label(
                                 egui::RichText::new(format!(
                                     " {}",
@@ -654,22 +664,32 @@ impl Tri7App {
                                 .monospace(),
                             );
                             ui.label(egui::RichText::new(transport).color(tcol));
-                            ui.label(egui::RichText::new(
-                                r.get("subver").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
-                            ).small());
-                            ui.label(egui::RichText::new(
-                                format!(
+                            ui.label(
+                                egui::RichText::new(
+                                    r.get("subver")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("?")
+                                        .to_string(),
+                                )
+                                .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
                                     "msgs in {}/out {}",
                                     r.get("msgs_in").and_then(|x| x.as_u64()).unwrap_or(0),
                                     r.get("msgs_out").and_then(|x| x.as_u64()).unwrap_or(0)
-                                ),
-                            ).small());
-                            ui.label(egui::RichText::new(
-                                format!(
+                                ))
+                                .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
                                     "traffic {}ms ago",
-                                    r.get("last_traffic_ms_ago").and_then(|x| x.as_u64()).unwrap_or(0)
-                                ),
-                            ).small());
+                                    r.get("last_traffic_ms_ago")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0)
+                                ))
+                                .small(),
+                            );
                             ui.end_row();
                         }
                     });
@@ -898,6 +918,22 @@ impl Tri7App {
         ui.heading("Receive Coins");
         ui.label("Show the list of addresses for receiving payments");
         ui.separator();
+        // writability note (legacy receive tab parity: keys live in wallet.dat)
+        if st.wallet_writable() {
+            ui.label(
+                egui::RichText::new(
+                    "New Address writes the key INTO wallet.dat (original qt reads it too)",
+                )
+                .small(),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "wallet.dat is not writable this session — new keys go to the GUI keystore (see status log)",
+                )
+                .small(),
+            );
+        }
         let addrs = st.receive_addresses();
         egui::ScrollArea::vertical()
             .max_height(240.0)
@@ -1001,7 +1037,9 @@ impl Tri7App {
                     for (addr, label, src) in &rows {
                         ui.label(addr.clone());
                         let mut lb = label.clone().unwrap_or_default();
-                        let editable = *src != "wallet";
+                        // wallet-owned labels are editable once wallet.dat is
+                        // writable (name rows go into the wallet itself)
+                        let editable = *src != "wallet" || st.wallet_writable();
                         let changed = ui
                             .add_enabled(
                                 editable,
@@ -1205,7 +1243,11 @@ impl Tri7App {
             ui.label(format!(
                 "{}{}",
                 live.field("modifier"),
-                if stake.modifier_generated { " (generated)" } else { "" }
+                if stake.modifier_generated {
+                    " (generated)"
+                } else {
+                    ""
+                }
             ));
             ui.end_row();
             ui.label("Kernel attempts:");
@@ -1233,7 +1275,10 @@ impl Tri7App {
             );
             ui.end_row();
             ui.label("Relay pool:");
-            ui.label(format!("{} pooled tx(s) (fees attach to the next stake)", live.field("pooledtx")));
+            ui.label(format!(
+                "{} pooled tx(s) (fees attach to the next stake)",
+                live.field("pooledtx")
+            ));
             ui.end_row();
             if let Some(reasons) = live
                 .info
@@ -1278,44 +1323,59 @@ impl Tri7App {
                 ui.colored_label(RED_ERR, format!("rpc: {}", e));
             }
             if let Some(li) = &st.messages.localinfo {
-                ui.label(egui::RichText::new(format!(
-                    "keys {} · buckets {} · received {} · sent {}",
-                    li.get("keys").and_then(|x| x.as_u64()).unwrap_or(0),
-                    li.get("buckets").and_then(|x| x.as_u64()).unwrap_or(0),
-                    li.get("received").and_then(|x| x.as_u64()).unwrap_or(0),
-                    li.get("sent").and_then(|x| x.as_u64()).unwrap_or(0),
-                )).small());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "keys {} · buckets {} · received {} · sent {}",
+                        li.get("keys").and_then(|x| x.as_u64()).unwrap_or(0),
+                        li.get("buckets").and_then(|x| x.as_u64()).unwrap_or(0),
+                        li.get("received").and_then(|x| x.as_u64()).unwrap_or(0),
+                        li.get("sent").and_then(|x| x.as_u64()).unwrap_or(0),
+                    ))
+                    .small(),
+                );
             }
         });
 
         // --- compose ---
         ui.separator();
         ui.label(egui::RichText::new("Send an encrypted message").strong());
-        egui::Grid::new("smsg_compose").num_columns(2).show(ui, |ui| {
-            ui.label("From:");
-            let from = &mut st.messages.compose_from;
-            egui::ComboBox::from_id_source("smsg_from")
-                .selected_text(if from.is_empty() { "select a wallet key".to_string() } else { from.clone() })
-                .width(420.0)
-                .show_ui(ui, |ui| {
-                    if let Some(li) = &st.messages.localinfo {
-                        if let Some(addrs) = li.get("addresses").and_then(|a| a.as_array()) {
-                            for a in addrs {
-                                if let Some(addr) = a.as_str() {
-                                    ui.selectable_value(from, addr.to_string(), addr);
+        egui::Grid::new("smsg_compose")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("From:");
+                let from = &mut st.messages.compose_from;
+                egui::ComboBox::from_id_source("smsg_from")
+                    .selected_text(if from.is_empty() {
+                        "select a wallet key".to_string()
+                    } else {
+                        from.clone()
+                    })
+                    .width(420.0)
+                    .show_ui(ui, |ui| {
+                        if let Some(li) = &st.messages.localinfo {
+                            if let Some(addrs) = li.get("addresses").and_then(|a| a.as_array()) {
+                                for a in addrs {
+                                    if let Some(addr) = a.as_str() {
+                                        ui.selectable_value(from, addr.to_string(), addr);
+                                    }
                                 }
                             }
                         }
-                    }
-                });
-            ui.end_row();
-            ui.label("To:");
-            ui.add_sized([480.0, 22.0], egui::TextEdit::singleline(&mut st.messages.compose_to));
-            ui.end_row();
-            ui.label("Message:");
-            ui.add_sized([480.0, 120.0], egui::TextEdit::multiline(&mut st.messages.compose_text));
-            ui.end_row();
-        });
+                    });
+                ui.end_row();
+                ui.label("To:");
+                ui.add_sized(
+                    [480.0, 22.0],
+                    egui::TextEdit::singleline(&mut st.messages.compose_to),
+                );
+                ui.end_row();
+                ui.label("Message:");
+                ui.add_sized(
+                    [480.0, 120.0],
+                    egui::TextEdit::multiline(&mut st.messages.compose_text),
+                );
+                ui.end_row();
+            });
         ui.horizontal(|ui| {
             if ui.button("&Send encrypted").clicked() {
                 st.messages_send_action();
@@ -1336,25 +1396,45 @@ impl Tri7App {
         ui.label(egui::RichText::new("Inbox").strong());
         match st.messages.inbox.clone() {
             Some(Value::Array(rows)) if !rows.is_empty() => {
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    egui::Grid::new("smsg_inbox")
-                        .num_columns(4)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for r in &rows {
-                                let unread = r.get("read") == Some(&Value::Bool(false));
-                                let dot = if unread { "●" } else { " " };
-                                ui.label(egui::RichText::new(dot).color(if unread { OK_GRN } else { Color32::GRAY }));
-                                ui.label(r.get("from").and_then(|x| x.as_str()).unwrap_or("?").to_string());
-                                ui.label(r.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string());
-                                ui.label(egui::RichText::new(
-                                    format!("t={} b={}", r.get("time").and_then(|x| x.as_i64()).unwrap_or(0),
-                                        r.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0)),
-                                ).small());
-                                ui.end_row();
-                            }
-                        });
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("smsg_inbox")
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for r in &rows {
+                                    let unread = r.get("read") == Some(&Value::Bool(false));
+                                    let dot = if unread { "●" } else { " " };
+                                    ui.label(egui::RichText::new(dot).color(if unread {
+                                        OK_GRN
+                                    } else {
+                                        Color32::GRAY
+                                    }));
+                                    ui.label(
+                                        r.get("from")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                    );
+                                    ui.label(
+                                        r.get("text")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "t={} b={}",
+                                            r.get("time").and_then(|x| x.as_i64()).unwrap_or(0),
+                                            r.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0)
+                                        ))
+                                        .small(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
             }
             Some(Value::Array(_)) => {
                 ui.label("inbox empty");
@@ -1369,21 +1449,37 @@ impl Tri7App {
         ui.label(egui::RichText::new("Outbox").strong());
         match st.messages.outbox.clone() {
             Some(Value::Array(rows)) if !rows.is_empty() => {
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                    egui::Grid::new("smsg_outbox")
-                        .num_columns(3)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for r in &rows {
-                                ui.label(r.get("to").and_then(|x| x.as_str()).unwrap_or("?").to_string());
-                                ui.label(r.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string());
-                                ui.label(egui::RichText::new(
-                                    format!("t={}", r.get("time").and_then(|x| x.as_i64()).unwrap_or(0)),
-                                ).small());
-                                ui.end_row();
-                            }
-                        });
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("smsg_outbox")
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for r in &rows {
+                                    ui.label(
+                                        r.get("to")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                    );
+                                    ui.label(
+                                        r.get("text")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "t={}",
+                                            r.get("time").and_then(|x| x.as_i64()).unwrap_or(0)
+                                        ))
+                                        .small(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
             }
             _ => {
                 ui.label("outbox empty");

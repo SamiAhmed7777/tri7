@@ -188,6 +188,12 @@ pub struct AppState {
     pub dialogs: Dialogs,
     pub status_log: Vec<String>,
     pub explorer: super::explorer::ExplorerState,
+    /// Open READ-WRITE wallet.dat session ("New Address"/labels write REAL
+    /// rows into wallet.dat). None = wallet not writable → keystore fallback.
+    pub wallet_rw: Option<crate::wallet::WalletHandle>,
+    /// Write gate — false makes the GUI strictly read-only toward wallet.dat
+    /// (--selfcheck must never mutate the live wallet file).
+    pub allow_wallet_writes: bool,
     // ---- phase 7 milestone 2 ----
     pub staking_live: StakingLive,
     pub peers_live: PeersLive,
@@ -231,6 +237,8 @@ impl AppState {
             dialogs: Dialogs::default(),
             status_log: Vec::new(),
             explorer,
+            wallet_rw: None,
+            allow_wallet_writes: true,
             staking_live: StakingLive::default(),
             peers_live: PeersLive::default(),
             messages: MessagesState::default(),
@@ -253,8 +261,7 @@ impl AppState {
             Ok(v) => {
                 self.staking_live.info = Some(v);
                 self.staking_live.last_error = None;
-                self.staking_live.last_poll =
-                    Some(chrono_iso_now());
+                self.staking_live.last_poll = Some(chrono_iso_now());
             }
             Err(e) => self.staking_live.last_error = Some(e),
         }
@@ -337,7 +344,11 @@ impl AppState {
         let r = crate::gui::rpc_client::rpc_call(
             &addr,
             "smsgsend",
-            &[serde_json::json!(from), serde_json::json!(to), serde_json::json!(text)],
+            &[
+                serde_json::json!(from),
+                serde_json::json!(to),
+                serde_json::json!(text),
+            ],
         )
         .map(|v| {
             format!(
@@ -497,7 +508,84 @@ impl AppState {
         self.stake = Some(stake);
         self.load_error = None;
         self.status_log.push("wallet loaded".into());
+        // Read-write session for wallet.dat writes (best effort: a read-only
+        // or locked wallet keeps loading; New Address then falls back to the
+        // GUI keystore with the reason in the status log).
+        self.ensure_wallet_rw();
         Ok(())
+    }
+
+    /// Open (or keep) the READ-WRITE wallet.dat session for `cfg.wallet_path`.
+    /// Never fails the load — the reason for non-writability is journaled.
+    fn ensure_wallet_rw(&mut self) {
+        if !self.allow_wallet_writes {
+            self.wallet_rw = None;
+            return;
+        }
+        let path = self.cfg.wallet_path.clone();
+        let same = self
+            .wallet_rw
+            .as_ref()
+            .map(|h| h.path.display().to_string() == path)
+            .unwrap_or(false);
+        if same {
+            return; // keep the session (one .bak per session, locks held)
+        }
+        self.wallet_rw = None;
+        match crate::wallet::WalletHandle::open_readwrite(Path::new(&path)) {
+            Ok(h) => {
+                self.status_log
+                    .push(format!("wallet.dat open READ-WRITE: {}", path));
+                self.wallet_rw = Some(h);
+            }
+            Err(e) => {
+                self.status_log.push(format!(
+                    "wallet.dat NOT writable — new keys go to the GUI keystore ({})",
+                    e
+                ));
+            }
+        }
+    }
+
+    /// wallet.dat accepts writes this session ("New Address" goes into
+    /// wallet.dat).
+    pub fn wallet_writable(&self) -> bool {
+        self.wallet_rw.is_some()
+    }
+
+    /// Re-read wallet keys/labels from wallet.dat (after a write) so the
+    /// Receive/Address Book/Send surfaces show the new state immediately.
+    fn reload_wallet_keys(&mut self) -> Result<(), String> {
+        let w = crate::wallet::read_wallet(Path::new(&self.cfg.wallet_path))?;
+        match &mut self.wallet {
+            Some(cur) => {
+                cur.keys = w.keys;
+                cur.names = w.names;
+                cur.default_key = w.default_key;
+                cur.version = w.version;
+                cur.best_block = w.best_block;
+            }
+            None => {
+                self.wallet = Some(WalletData {
+                    path: self.cfg.wallet_path.clone(),
+                    keys: w.keys,
+                    names: w.names,
+                    default_key: w.default_key,
+                    version: w.version,
+                    best_block: w.best_block,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain the wallet write journal into the status log (every write is
+    /// journaled to a log line — both in-memory and stderr).
+    fn drain_wallet_journal(&mut self) {
+        if let Some(h) = self.wallet_rw.as_mut() {
+            let lines = h.drain_journal();
+            self.status_log.extend(lines);
+        }
     }
 
     /// Re-run the UTXO derivation pass (Refresh).
@@ -675,8 +763,50 @@ impl AppState {
         ));
     }
 
-    /// Legacy "New Address" (receive tab): offline key into the GUI keystore.
+    /// Legacy "New Address" (receive tab): a fresh CSPRNG key written INTO
+    /// wallet.dat in the exact legacy record set (keymeta + key + name rows,
+    /// one BEGIN IMMEDIATE transaction, .tri7bak backup, verify-after-write)
+    /// when the wallet is open read-write. The GUI keystore side file is only
+    /// the FALLBACK when wallet.dat refuses writes (encrypted / locked /
+    /// foreign file) — the fallback entry is journaled like any write.
     pub fn new_address_action(&mut self, label: String) -> Result<String, String> {
+        if self.wallet_rw.is_some() {
+            let res = {
+                let h = self.wallet_rw.as_mut().unwrap();
+                super::state::generate_secret().and_then(|sec| h.add_key(&sec, &label))
+            };
+            self.drain_wallet_journal();
+            match res {
+                Ok(key) => {
+                    let addr = key.address.clone();
+                    // surface the new key on Receive/Address Book right away
+                    self.reload_wallet_keys()?;
+                    // best-effort: move the wallet bestblock marker to our
+                    // tip (the qt resumes from hash[0] instead of rescanning)
+                    let tip = self.tip.clone();
+                    if let Some(tip) = tip {
+                        if let Ok(thash) = crate::p2p::display_to_internal(&tip.blockhash) {
+                            let r = self
+                                .wallet_rw
+                                .as_mut()
+                                .map(|h| h.update_bestblock(tip.height, &thash));
+                            self.drain_wallet_journal();
+                            if let Some(Err(e)) = r {
+                                self.status_log
+                                    .push(format!("bestblock update failed: {}", e));
+                            }
+                        }
+                    }
+                    return Ok(addr);
+                }
+                Err(e) => {
+                    self.status_log.push(format!(
+                        "wallet.dat write refused — falling back to GUI keystore: {}",
+                        e
+                    ));
+                }
+            }
+        }
         let mut entry = generate_new_address()?;
         entry.label = label;
         let addr = entry.address.clone();
@@ -685,8 +815,29 @@ impl AppState {
         Ok(addr)
     }
 
-    /// Address book label edit (side file only — wallet.dat stays read-only).
+    /// Address label edit: a wallet.dat `name` row when the address is a
+    /// wallet key and the wallet is open read-write (the qt reads these back
+    /// on its own receive page); the GUI address book side file otherwise.
     pub fn set_label_action(&mut self, address: &str, label: String) -> Result<(), String> {
+        let wallet_owned = self
+            .wallet
+            .as_ref()
+            .map(|w| w.keys.iter().any(|k| k.address == address))
+            .unwrap_or(false);
+        if wallet_owned && self.wallet_rw.is_some() {
+            let r = {
+                let h = self.wallet_rw.as_mut().unwrap();
+                h.set_label(address, &label)
+            };
+            self.drain_wallet_journal();
+            r?;
+            // refresh the in-memory label map (no full re-read needed)
+            if let Some(w) = self.wallet.as_mut() {
+                w.names.retain(|(a, _)| a != address);
+                w.names.push((address.to_string(), label.clone()));
+            }
+            return Ok(());
+        }
         if let Some(e) = self.addressbook.iter_mut().find(|e| e.address == address) {
             e.label = label;
         } else {
@@ -1039,6 +1190,10 @@ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
     };
 
     let mut st = AppState::new(cfg.clone());
+    // Selfcheck must NEVER mutate the live wallet: no RW session, no .bak, no
+    // key writes. New Address write coverage lives in the unit tests against
+    // synthetic wallet files.
+    st.allow_wallet_writes = false;
     if let Err(e) = st.load_wallet_action() {
         return fail(&mut report, format!("wallet load: {}", e));
     }
@@ -1335,8 +1490,5 @@ fn chrono_iso_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, m, d, h, mi, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, mi, s)
 }

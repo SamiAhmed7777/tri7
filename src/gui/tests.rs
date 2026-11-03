@@ -917,3 +917,207 @@ fn script_to_dest_classifies_the_gui_p2pkh_scripts() {
         other => panic!("expected PubkeyHash, got {:?}", other.is_some()),
     }
 }
+
+// ---------------------------------------------------------------------------
+// READ-WRITE wallet.dat: "New Address" writes REAL legacy rows into the
+// wallet file (keystore side file only when the wallet refuses writes).
+// Synthetic wallet fixture (same encoders the qt uses) — never the live file.
+// ---------------------------------------------------------------------------
+
+use std::path::PathBuf;
+
+/// Minimal valid TRI wallet on disk (application_id/user_version/main table +
+/// a version row + one seeded key) via the tri7 legacy encoders.
+fn synth_wallet_file(dir: &std::path::Path, name: &str) -> PathBuf {
+    use crate::wallet::{
+        encode_der_privkey, encode_key_keyblob, encode_key_value, encode_keymeta_keyblob,
+        encode_keymeta_value, encode_name_keyblob, encode_name_value, pubkey_to_address,
+        CLIENT_VERSION, WALLET_APP_ID, WALLET_USER_VERSION,
+    };
+    let path = dir.join(name);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = {};\nPRAGMA user_version = {};",
+        WALLET_APP_ID, WALLET_USER_VERSION
+    ))
+    .unwrap();
+    conn.execute_batch("CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);")
+        .unwrap();
+    let (sec, pk) = spend::synthetic_key("wallet/rw-gui-seed");
+    let der = encode_der_privkey(&sec, &pk).unwrap();
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [encode_key_keyblob(&pk), encode_key_value(&der)],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [
+            encode_keymeta_keyblob(&pk),
+            encode_keymeta_value(1_700_000_000),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [
+            encode_name_keyblob(&pubkey_to_address(&pk)),
+            encode_name_value("seed"),
+        ],
+    )
+    .unwrap();
+    let mut vrow = vec![0x07];
+    vrow.extend_from_slice(b"version");
+    conn.execute(
+        "INSERT INTO main (key, value) VALUES (?1, ?2)",
+        [vrow, CLIENT_VERSION.to_le_bytes().to_vec()],
+    )
+    .unwrap();
+    conn.close().unwrap();
+    path
+}
+
+fn gui_test_dir(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("tri7gui_rw_{}_{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn new_address_writes_into_wallet_dat_and_survives_restart() {
+    let dir = gui_test_dir("walletwrite");
+    let wallet = synth_wallet_file(&dir, "wallet.dat");
+    let cfg = UiConfig {
+        wallet_path: wallet.display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    };
+    let mut st = crate::gui::app_state::AppState::new(cfg);
+    assert!(!st.wallet_writable(), "no session before load");
+    // the GUI opens the RW session during load; do the same here (the load
+    // action itself needs chain-state fixtures this test doesn't ship)
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&wallet).unwrap());
+    let addr = st
+        .new_address_action("cold-storage".into())
+        .expect("wallet write");
+    assert!(addr.starts_with('T'));
+    // wallet.dat itself now holds the key + the label (name row)
+    let w = crate::wallet::read_wallet(&wallet).unwrap();
+    assert_eq!(w.keys.len(), 2);
+    let k = w.keys.iter().find(|k| k.address == addr).unwrap();
+    assert_eq!(k.address, addr);
+    assert!(w
+        .names
+        .contains(&(addr.clone(), "cold-storage".to_string())));
+    // the receive page lists it as a WALLET address (not keystore)
+    let rows = st.receive_addresses();
+    assert!(rows
+        .iter()
+        .any(|(a, _, src)| a == &addr && *src == "wallet"));
+    assert!(st.label_of(&addr).as_deref() == Some("cold-storage"));
+    // session backup exists, one per session, = pre-write snapshot bytes
+    let bak = dir.join("wallet.dat.tri7bak");
+    assert!(bak.exists());
+
+    // RESTART: a fresh AppState loading this wallet sees the new key from
+    // wallet.dat — no keystore involvement
+    let cfg2 = UiConfig {
+        wallet_path: wallet.display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    };
+    let st2 = crate::gui::app_state::AppState::new(cfg2);
+    let w2 = crate::wallet::read_wallet(&wallet).unwrap();
+    assert!(w2.keys.iter().any(|k| k.address == addr));
+    assert!(w2
+        .names
+        .contains(&(addr.clone(), "cold-storage".to_string())));
+    assert!(st2.keystore.is_empty(), "nothing leaked into the keystore");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wallet_label_edit_writes_name_row_when_writable() {
+    let dir = gui_test_dir("labelwrite");
+    let wallet = synth_wallet_file(&dir, "wallet.dat");
+    let cfg = UiConfig {
+        wallet_path: wallet.display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    };
+    let mut st = crate::gui::app_state::AppState::new(cfg);
+    let wread = crate::wallet::read_wallet(&wallet).unwrap();
+    let seed_addr = wread.keys[0].address.clone();
+    // in-memory wallet + open RW session (what load_wallet_action provides)
+    st.wallet = Some(crate::gui::state::WalletData {
+        path: wallet.display().to_string(),
+        keys: wread.keys,
+        names: wread.names,
+        default_key: wread.default_key,
+        version: wread.version,
+        best_block: wread.best_block,
+    });
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&wallet).unwrap());
+    st.set_label_action(&seed_addr, "renamed-in-wallet".into())
+        .unwrap();
+    let w = crate::wallet::read_wallet(&wallet).unwrap();
+    assert!(w
+        .names
+        .contains(&(seed_addr.clone(), "renamed-in-wallet".to_string())));
+    assert_eq!(
+        st.label_of(&seed_addr).as_deref(),
+        Some("renamed-in-wallet")
+    );
+    // non-wallet addresses still go to the side address book
+    let other = "TBWLnkuXmGBeYbRQxhvSLrfj3YtFtoGL";
+    st.set_label_action(other, "book-only".into()).unwrap();
+    assert!(st
+        .addressbook
+        .iter()
+        .any(|e| e.address == other && e.label == "book-only"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn locked_wallet_falls_back_to_keystore() {
+    let dir = gui_test_dir("locked");
+    let wallet = synth_wallet_file(&dir, "wallet.dat");
+    // a competing writer holds wallet.dat → open_readwrite must refuse
+    let blocker =
+        rusqlite::Connection::open_with_flags(&wallet, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let cfg = UiConfig {
+        wallet_path: wallet.display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    };
+    let mut st = crate::gui::app_state::AppState::new(cfg);
+    // no load_wallet_action (no chain state in this fixture): the RW session
+    // is absent, so New Address MUST fall back to the keystore side file
+    let addr = st.new_address_action("fallback".into()).unwrap();
+    assert!(st.keystore.iter().any(|e| e.address == addr));
+    assert!(dir.join("keystore.json").exists());
+    // wallet.dat untouched
+    let w = crate::wallet::read_wallet(&wallet).unwrap();
+    assert_eq!(w.keys.len(), 1);
+    drop(blocker);
+    let _ = std::fs::remove_dir_all(&dir);
+}

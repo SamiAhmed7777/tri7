@@ -4,9 +4,12 @@
 //! `tri7_wallet_gui --selfcheck` run headless against these functions. The
 //! view layer (`gui::app`, feature `gui`) only renders this state.
 //!
-//! Data sources (all read-only; NOTHING is broadcast, /root/.triangles is
-//! only ever opened read-only):
-//!   - wallet.dat          tri7_core::wallet (SQLite reader, 248 keys)
+//! Data sources:
+//!   - wallet.dat          tri7_core::wallet — read-only for balances/spends;
+//!                         opened READ-WRITE ([`crate::wallet::WalletHandle`])
+//!                         so "New Address" and label edits write REAL legacy
+//!                         rows into wallet.dat (keystore is only the fallback
+//!                         when the wallet refuses writes)
 //!   - wallet_utxos.json   the phase-1e `balances --utxos-out` snapshot
 //!   - tipstate.json       phase-2/5a follower state (tip + window entries)
 //!   - blk0001.dat + index live-tail reconciliation via the phase-5b
@@ -1584,24 +1587,28 @@ fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {}", path.display(), e))
 }
 
-/// Generate a fresh offline key for receiving (legacy "New Address"): the key
-/// lives in the GUI keystore (0600 JSON), NOT in the legacy wallet.dat —
-/// documented so the operator can sweep it into wallet.dat later. Entropy is
-/// the OS CSPRNG via the getrandom crate (/dev/urandom on unix, BCryptGenRandom
-/// on windows) — 32 bytes → SecretKey, retried on the ~2^-128 invalid scalar
-/// chance.
-pub fn generate_new_address() -> Result<AbEntry, String> {
-    let secp = secp256k1::Secp256k1::signing_only();
-    let sk = loop {
+/// Fresh CSPRNG 32-byte secret for a new receive key: the OS CSPRNG via the
+/// getrandom crate (/dev/urandom on unix, BCryptGenRandom on windows) — 32
+/// bytes → SecretKey, retried on the ~2^-128 invalid scalar chance.
+pub fn generate_secret() -> Result<[u8; 32], String> {
+    loop {
         let mut buf = [0u8; 32];
-        getrandom::getrandom(&mut buf)
-            .map_err(|e| format!("csprng: {}", e))?;
+        getrandom::getrandom(&mut buf).map_err(|e| format!("csprng: {}", e))?;
         match secp256k1::SecretKey::from_slice(&buf) {
-            Ok(k) => break k,
+            Ok(k) => return Ok(k.secret_bytes()),
             Err(_) => continue, // astronomically rare; retry with fresh bytes
         }
-    };
-    let secret: [u8; 32] = sk.secret_bytes();
+    }
+}
+
+/// Generate a fresh offline key for receiving — the KEYSTORE fallback shape
+/// (used when wallet.dat itself is not writable). Primary path writes the key
+/// INTO wallet.dat via `WalletHandle::add_key`. Entropy is the OS CSPRNG
+/// ([`generate_secret`]).
+pub fn generate_new_address() -> Result<AbEntry, String> {
+    let secret = generate_secret()?;
+    let secp = secp256k1::Secp256k1::signing_only();
+    let sk = secp256k1::SecretKey::from_slice(&secret).map_err(|e| format!("bad secret: {}", e))?;
     let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
     let pubkey = pk.serialize().to_vec();
     Ok(AbEntry {
