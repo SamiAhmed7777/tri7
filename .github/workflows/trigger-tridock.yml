@@ -1,0 +1,72 @@
+# trigger-tridock.yml
+#
+# tri7 — Trigger TRIdock image rebuild
+#
+# Mirrors the legacy wiring (triangles_v5 → tridock `tri-release-published`
+# dispatch): when tri7 publishes a release, this fires a repository_dispatch
+# to samiahmed7777/tridock so its build-and-publish workflow rebuilds the
+# samiahmed7777/tridock:tri7 image (tri7.Dockerfile builds tri7d from this
+# repo).
+#
+# Required secret on the tri7 repo (parent must set it — a fine-grained PAT
+# with `repo`/`workflow` scope on samiahmed7777/tridock):
+#   TRIDOCK_DISPATCH_TOKEN
+# If it is not set, the dispatch step is skipped (non-fatal) and TRIdock must
+# be rebuilt manually via its own workflow_dispatch.
+
+name: Trigger TRIdock rebuild
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tri7 tag/version to report to tridock (default: current ref)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-tridock:
+    runs-on: ubuntu-latest
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      REF_NAME: ${{ github.ref_name }}
+      TOKEN: ${{ secrets.TRIDOCK_DISPATCH_TOKEN }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="${INPUT_VERSION:-${RELEASE_TAG:-$REF_NAME}}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: repository_dispatch → samiahmed7777/tridock
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::TRIDOCK_DISPATCH_TOKEN not set on this repo — skipping dispatch."
+            echo "The parent must create a PAT with workflow scope on samiahmed7777/tridock"
+            echo "and add it as the TRIDOCK_DISPATCH_TOKEN secret here."
+            exit 0
+          fi
+          payload=$(jq -n --arg et tri-release-published \
+                       --arg version "$VERSION" --arg sha "$SHA" \
+                       '{event_type: $et, client_payload: {version: $version, sha: $sha, client: "tri7"}}')
+          code=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://api.github.com/repos/SamiAhmed7777/tridock/dispatches" \
+            -d "$payload")
+          echo "dispatch HTTP $code"
+          cat /tmp/dispatch.json
+          if [ "$code" != "204" ]; then
+            echo "::error::repository_dispatch failed (HTTP $code)"
+            exit 1
+          fi
+          echo "✓ dispatched tri-release-published (tri7 $VERSION) to samiahmed7777/tridock"
