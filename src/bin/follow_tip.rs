@@ -1,6 +1,10 @@
-//! Phase 2 — legacy P2P tip follower (follow_tip).
+//! Phase 2 — legacy P2P tip follower (follow_tip); phase 6 made it the
+//! network PRIMARY: inbound listener + getdata/getheaders serving + block
+//! relay (inv → getdata), phase 7 added gap recovery (window-tail bodies
+//! missing from the store are pulled from peers or the tip rolls back) and
+//! append-on-accept durability.
 //!
-//! Outbound-only TCP client speaking the exact triangles_v5 (v6.2.6.7) wire
+//! Outbound TCP client speaking the exact triangles_v5 (v6.2.6.7) wire
 //! protocol to the local daemon's P2P listener. Handshake (version/verack),
 //! getheaders-driven tip chase with full tri7_core validation of every
 //! received block (parse + Hash9 + link + merkle + timestamps + nBits EMA +
@@ -304,6 +308,128 @@ struct TipStateFile {
 // blocks accepted by tri7d itself live only here until a store rebuild).
 // ---------------------------------------------------------------------------
 const RECENT_CAP: usize = 4000;
+
+// ---------------------------------------------------------------------------
+// Gap recovery (phase 7 urgent): window-tail bodies that exist only in the
+// recent cache (memory) and were lost on a restart leave the store's height
+// thread short of tipstate's tip. stake_mint replays the ARCHIVE against
+// tipstate and exits 3 on any tail mismatch, so minting stays frozen until
+// the tail is complete. Two outcomes are handled:
+//   (a) a peer serves the body  → Hash9/link/merkle validate → append to the
+//       store (appendix) → chain continues at tipstate's tip;
+//   (b) no peer serves it within GAP_ROLLBACK_TICKS rotation ticks (~10 min)
+//       and the store threads exactly tip-1 → tipstate rolls back to tip-1
+//       (the "phantom" tip is invalidated honestly in the log + a marker
+//       file) and staking mints a FRESH block at that height.
+// ---------------------------------------------------------------------------
+const GAP_TAIL_MAX: u64 = 8; // walk at most this many heights below the tip
+const GAP_ROLLBACK_TICKS: u32 = 20; // consecutive unresolved ticks (30s each)
+
+#[derive(Default)]
+struct GapState {
+    /// (height, hash) of the lowest missing tail body, if any
+    missing: Option<(u64, Hash)>,
+    /// when the current gap was first observed
+    since: Option<Instant>,
+    /// consecutive rotation ticks the gap stayed unfilled
+    ticks_failed: u32,
+    /// peer label that served the fill (evidence)
+    filled_from: Option<String>,
+    /// set when the rollback branch fired (height rolled back to)
+    rolled_back_to: Option<u64>,
+}
+
+/// Lowest window-tail height whose body is neither on disk (store, including
+/// gap-recovery appends) nor in the recent cache. Returns (height, hash).
+fn gap_find_missing(
+    stg: &ChainState,
+    store: &Arc<BlockStore>,
+    recent: &RecentBlocks,
+    threaded_tip: Option<u64>,
+) -> Option<(u64, Hash)> {
+    let tip = stg.tip_height;
+    let from_thread = threaded_tip.map_or(tip.saturating_sub(GAP_TAIL_MAX), |t| t + 1);
+    let lower = from_thread.max(tip.saturating_sub(GAP_TAIL_MAX));
+    for h in lower..=tip {
+        let Some(e) = stg.entry_abs(h) else { continue };
+        let hash = e.hash;
+        let on_disk = store.block_by_hash(&hash).map(|v| v.is_some()).unwrap_or(false);
+        if on_disk || recent.get(&hash).is_some() {
+            continue;
+        }
+        return Some((h, hash));
+    }
+    None
+}
+
+/// Roll tipstate back one height (branch b): the phantom tip's body exists on
+/// no reachable peer, so the EFFECTIVE network tip is tip-1 (whose window
+/// entries are all present). Truncates entries/checksums/records, clears
+/// pending header announcements, refreshes daemon_tip. Returns the new tip.
+fn rollback_tip(st: &mut ChainState) -> Result<(u64, Hash), String> {
+    let tip = st.tip_height;
+    if tip == 0 || tip <= st.base {
+        return Err("rollback: tip already at window base".into());
+    }
+    let new_tip = tip - 1;
+    let new_hash = st
+        .entry_abs(new_tip)
+        .ok_or_else(|| format!("rollback: window entry for h{} missing", new_tip))?
+        .hash;
+    st.tip_height = new_tip;
+    st.tip_hash = new_hash;
+    let keep = (new_tip - st.base + 1) as usize;
+    st.entries.truncate(keep);
+    st.checksums.truncate(keep);
+    st.records.retain(|r| r.height <= new_tip);
+    st.pending_headers.clear();
+    st.daemon_tip = Some(new_tip as i64);
+    Ok((new_tip, new_hash))
+}
+
+/// Evidence marker for the report: which gap branch fired, when, over which
+/// hash/height, with the peer that served (or the rollback height).
+fn write_gap_marker(cfg: &Config, payload: Value) {
+    let path = cfg.state_dir.join("gap_recovery.json");
+    let tmp = cfg.state_dir.join("gap_recovery.json.tmp");
+    let body = format!("{}\n", serde_json::to_string_pretty(&payload).unwrap_or_default());
+    if std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+        log("gap marker write failed (non-fatal)");
+    }
+}
+
+/// Validate a gap-fill body the cheap-but-complete archival way: the wire
+/// hash we requested IS the Hash9 of the body (header_hash in the store),
+/// the body must chain to the window entry below it, and its merkle root
+/// must commit to the transactions it carries.
+fn gap_fill_valid(b: &Block, height: u64, want_hash: &Hash, stg: &ChainState) -> Result<(), String> {
+    let hash = b.hash();
+    if &hash != want_hash {
+        return Err(format!(
+            "gap fill hash mismatch: got {} want {}",
+            tri7_core::p2p::internal_to_display(&hash),
+            tri7_core::p2p::internal_to_display(want_hash)
+        ));
+    }
+    if height > 0 {
+        let want_prev = stg
+            .entry_abs(height - 1)
+            .ok_or_else(|| format!("gap fill: no window entry below h{}", height))?
+            .hash;
+        if b.prev_hash != want_prev {
+            return Err(format!(
+                "gap fill does not chain to h{} (prev {} want {})",
+                height - 1,
+                tri7_core::p2p::internal_to_display(&b.prev_hash),
+                tri7_core::p2p::internal_to_display(&want_prev)
+            ));
+        }
+    }
+    if b.merkle_root() != b.merkle_root {
+        return Err("gap fill merkle root mismatch".into());
+    }
+    Ok(())
+}
 
 struct RecentBlocks {
     order: VecDeque<Hash>,
@@ -983,6 +1109,11 @@ struct Stats {
     getdata_served: u64,     // block payloads served to peers
     getheaders_served: u64,  // headers ranges served to peers
     inbound_accepted: u64,   // inbound peers that completed the handshake
+    // gap recovery (phase 7 urgent): tail bodies missing from the store
+    gap_ticks: u64,          // rotation ticks with a tail gap detected
+    gap_requests: u64,       // getdata(MSG_BLOCK) rounds sent for the gap
+    gap_filled: u64,         // bodies recovered from peers and appended
+    gap_rollback: bool,      // phantom-tip rollback fired (branch b)
 }
 
 impl Stats {
@@ -1023,6 +1154,10 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "getdata_served": s.getdata_served,
         "getheaders_served": s.getheaders_served,
         "inbound_accepted": s.inbound_accepted,
+        "gap_ticks": s.gap_ticks,
+        "gap_requests": s.gap_requests,
+        "gap_filled": s.gap_filled,
+        "gap_rollback": s.gap_rollback,
     })
 }
 
@@ -2333,6 +2468,7 @@ fn handle_message(
     pending_from_headers: &mut VecDeque<(Hash, u64)>,
     store: &Arc<BlockStore>,
     recent: &mut RecentBlocks,
+    gap: &Arc<Mutex<GapState>>,
 ) -> Result<(), String> {
     match msg.command.as_str() {
         "version" => {
@@ -2409,6 +2545,62 @@ fn handle_message(
             r.expect_done()
                 .map_err(|e| format!("block trailing: {}", e))?;
             let hash = b.hash();
+            // GAP RECOVERY interception: a body for a missing tail height —
+            // validate (Hash9 == requested hash + link + merkle), append to
+            // the store and cache it. Runs BEFORE the tip-extension logic
+            // (a gap fill never extends the tip).
+            {
+                let target = gap.lock().unwrap().missing;
+                if let Some((gh, ghash)) = target {
+                    if hash == ghash {
+                        return match gap_fill_valid(&b, gh, &ghash, st) {
+                            Ok(()) => {
+                                match store.append_block(&msg.payload, Some(gh)) {
+                                    Ok(_appended) => {
+                                        recent.insert(hash, gh, &msg.payload);
+                                        stats.gap_filled += 1;
+                                        let mut g = gap.lock().unwrap();
+                                        g.filled_from = Some(peer.label.clone());
+                                        g.missing = None;
+                                        g.since = None;
+                                        g.ticks_failed = 0;
+                                        log(&format!(
+                                            "GAP RECOVERY: body for h{} {} appended to the store from {} — tail complete",
+                                            gh,
+                                            tri7_core::p2p::internal_to_display(&hash),
+                                            peer.label
+                                        ));
+                                        write_gap_marker(cfg, serde_json::json!({
+                                            "branch": "recovered_from_peer",
+                                            "height": gh,
+                                            "hash": tri7_core::p2p::internal_to_display(&hash),
+                                            "from_peer": peer.label,
+                                            "at_utc": now_iso(),
+                                        }));
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        // store append failed (e.g. read-only
+                                        // blk file): keep the body in the
+                                        // recent cache so serving + the next
+                                        // gap tick see it, and say why
+                                        recent.insert(hash, gh, &msg.payload);
+                                        log(&format!(
+                                            "GAP RECOVERY: body for h{} validated but NOT appended: {}",
+                                            gh, e
+                                        ));
+                                        Ok(())
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log(&format!("gap fill rejected from {}: {}", peer.label, e));
+                                Ok(()) // stale/fork body — not a protocol failure
+                            }
+                        };
+                    }
+                }
+            }
             let links_tip = b.prev_hash == st.tip_hash;
             let height_abs = if links_tip { st.tip_height + 1 } else { 0 };
             // cache the raw bytes BEFORE validation: a valid block must be
@@ -2433,6 +2625,17 @@ fn handle_message(
                 advance_with_block(st, rpc, stats, &b, &paths)?;
                 stats.blocks_validated_live += 1;
                 outstanding.remove(&hash);
+                // DURABILITY: append the accepted block to the store so the
+                // tip body survives restarts (the memory-only recent cache
+                // already lost one tip body and froze fleet minting until gap
+                // recovery existed). Best-effort — the recent cache still
+                // serves the block if the append fails.
+                if let Err(e) = store.append_block(&msg.payload, Some(height_abs)) {
+                    log(&format!(
+                        "durability: accepted h{} not appended to the store: {}",
+                        height_abs, e
+                    ));
+                }
                 let file = st.to_file();
                 write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
                 log(&format!(
@@ -2764,6 +2967,36 @@ impl BlockDataProvider for StoreAdapter {
             .and_then(|mut r| r.at_height(h).cloned())
             .and_then(|(_, raw)| Block::read(&mut Reader::new(&raw)).ok())
             .map(|b| tri7_core::p2p::internal_to_display(&b.hash())))
+    }
+
+    fn raw_block(
+        &self,
+        hash_display: Option<&str>,
+        height: Option<u64>,
+    ) -> Result<Option<String>, String> {
+        let hit = match (hash_display, height) {
+            (Some(hs), _) => {
+                let hash = tri7_core::p2p::display_to_internal(hs)?;
+                self.store.block_by_hash(&hash)?
+            }
+            (_, Some(h)) => self.store.block_by_height(h)?,
+            _ => None,
+        };
+        if let Some(hit) = hit {
+            return Ok(Some(rpc::hex_encode(&hit.block.serialize())));
+        }
+        // recent cache (blocks above the file tip): payload IS the wire body
+        let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
+            match (hash_display, height) {
+                (Some(hs), _) => {
+                    let hash = tri7_core::p2p::display_to_internal(hs).ok()?;
+                    r.get(&hash).cloned()
+                }
+                (_, Some(h)) => r.at_height(h).cloned(),
+                _ => None,
+            }
+        });
+        Ok(from_recent.map(|(_, raw)| rpc::hex_encode(&raw)))
     }
 }
 
@@ -3204,6 +3437,7 @@ fn main() {
     let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
     let mut last_state_write = Instant::now();
     let mut relayed_tip: Option<Hash> = None;
+    let gap_shared: Arc<Mutex<GapState>> = Arc::new(Mutex::new(GapState::default()));
 
     loop {
         if deadline.map_or(false, |d| Instant::now() >= d) {
@@ -3260,6 +3494,116 @@ fn main() {
                             break;
                         }
                         stats.polls += 1;
+                    }
+                }
+            }
+
+            // ---- GAP RECOVERY: walk the window tail for missing disk bodies
+            // (skip while the index build is still warming up — block_by_hash
+            // would report every body as "missing" and spam getdata)
+            if matches!(store.status(), StoreStatus::Ready { .. }) {
+                let threaded = store.threaded_tip();
+                let found = {
+                    let stg = st_shared.lock().unwrap();
+                    gap_find_missing(&stg, &store, &recent_shared.lock().unwrap(), threaded)
+                };
+                let mut gap = gap_shared.lock().unwrap();
+                match found {
+                    None => {
+                        if gap.missing.is_some() {
+                            log("gap recovery: window tail complete — no missing bodies");
+                        }
+                        gap.missing = None;
+                        gap.since = None;
+                        gap.ticks_failed = 0;
+                    }
+                    Some((h, hash)) => {
+                        stats.gap_ticks += 1;
+                        if gap.missing != Some((h, hash)) {
+                            log(&format!(
+                                "GAP RECOVERY: tail body missing h{} {} — requesting \
+                                 getdata(MSG_BLOCK) from every peer (rollback to h{} after \
+                                 {} unresolved ticks)",
+                                h,
+                                tri7_core::p2p::internal_to_display(&hash),
+                                h.saturating_sub(1),
+                                GAP_ROLLBACK_TICKS
+                            ));
+                            gap.missing = Some((h, hash));
+                            gap.since = Some(Instant::now());
+                            gap.ticks_failed = 0;
+                        }
+                        let body =
+                            tri7_core::p2p::build_getdata(&[(tri7_core::p2p::MSG_BLOCK, hash)]);
+                        let mut sent = 0usize;
+                        for p in peers.iter_mut() {
+                            if p.sess.send("getdata", &body, &mut stats).is_ok() {
+                                sent += 1;
+                            } else {
+                                p.dead = true;
+                                p.sess.shutdown();
+                            }
+                        }
+                        stats.gap_requests += 1;
+                        gap.ticks_failed += 1;
+                        log(&format!(
+                            "gap: getdata for h{} sent to {} peer(s), unfilled ticks {}/{}",
+                            h, sent, gap.ticks_failed, GAP_ROLLBACK_TICKS
+                        ));
+                        // ---- branch (b): the phantom tip ------------------
+                        // only when the missing body IS the tip, the store
+                        // threads exactly one below it, and the gap outlived
+                        // every peer's chance to serve it
+                        let tip_now = st_shared.lock().unwrap().tip_height;
+                        if h == tip_now
+                            && gap.ticks_failed >= GAP_ROLLBACK_TICKS
+                            && threaded == Some(tip_now - 1)
+                        {
+                            let phantom = tri7_core::p2p::internal_to_display(&hash);
+                            let since_secs = gap.since.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                            let mut stg = st_shared.lock().unwrap();
+                            match rollback_tip(&mut stg) {
+                                Ok((new_tip, new_hash)) => {
+                                    stats.gap_rollback = true;
+                                    gap.rolled_back_to = Some(new_tip);
+                                    gap.missing = None;
+                                    gap.since = None;
+                                    gap.ticks_failed = 0;
+                                    relayed_tip = None;
+                                    log(&format!(
+                                        "GAP RECOVERY BRANCH (b): ROLLBACK — h{} ({}) body \
+                                         unobtainable from every peer for {}s; effective \
+                                         network tip is now h{} {}; the phantom tip is \
+                                         INVALIDATED and staking will mint a fresh block \
+                                         at that height",
+                                        tip_now, phantom, since_secs, new_tip,
+                                        tri7_core::p2p::internal_to_display(&new_hash)
+                                    ));
+                                    write_gap_marker(&cfg, serde_json::json!({
+                                        "branch": "rollback",
+                                        "invalidated_height": tip_now,
+                                        "invalidated_hash": phantom,
+                                        "effective_tip_height": new_tip,
+                                        "effective_tip_hash":
+                                            tri7_core::p2p::internal_to_display(&new_hash),
+                                        "unresolved_ticks": GAP_ROLLBACK_TICKS,
+                                        "unresolved_secs": since_secs,
+                                        "peers_tried": stats.gap_requests,
+                                        "at_utc": now_iso(),
+                                    }));
+                                    tip_mirror.set(
+                                        new_tip,
+                                        &tri7_core::p2p::internal_to_display(&new_hash),
+                                    );
+                                    let file = stg.to_file();
+                                    drop(stg);
+                                    if let Err(e) = write_state_atomic(&cfg, &file) {
+                                        log(&format!("rollback state write: {}", e));
+                                    }
+                                }
+                                Err(e) => log(&format!("rollback refused: {}", e)),
+                            }
+                        }
                     }
                 }
             }
@@ -3368,6 +3712,7 @@ fn main() {
                         &mut pending_from_headers,
                         &store,
                         &mut recent_shared.lock().unwrap(),
+                        &gap_shared,
                     );
                     if let Err(e) = res {
                         fatal = Some(e);
@@ -3980,5 +4325,169 @@ mod tests {
         assert_eq!(EXIT_VALIDATE, 3);
         assert_eq!(status_gate(false, false, Some(0), Some(0), 600, 1800).0, 0);
         assert_eq!(status_gate(false, false, Some(700), Some(1900), 600, 1800).0, 3);
+    }
+
+    // ---- gap recovery ----
+
+    use tri7_core::replay::IndexEntry;
+
+    fn synthetic_chain(base: u64, tip: u64) -> ChainState {
+        let mut entries = Vec::new();
+        let mut checksums = Vec::new();
+        let mut prev = [0xAAu8; 32];
+        for h in base..=tip {
+            let mut hash = [0x11u8; 32];
+            hash[0..8].copy_from_slice(&h.to_le_bytes());
+            entries.push(IndexEntry {
+                height: (h - base) as usize,
+                hash,
+                prev_hash: prev,
+                time: 1_700_000_000u32.saturating_add((h * 600) as u32),
+                bits: 0x2000_ffff,
+                is_proof_of_stake: true,
+                entropy_bit: 0,
+                stake_modifier: h,
+                generated_stake_modifier: true,
+                hash_proof_of_stake: [0u8; 32],
+            });
+            checksums.push(7);
+            prev = hash;
+        }
+        ChainState {
+            base,
+            entries,
+            checksums,
+            utxo: WindowOutputs::new(),
+            records: Vec::new(),
+            pending_headers: HashMap::new(),
+            tip_height: tip,
+            tip_hash: {
+                let mut hash = [0x11u8; 32];
+                hash[0..8].copy_from_slice(&tip.to_le_bytes());
+                hash
+            },
+            daemon_tip: Some(tip as i64),
+            last_advance_utc: String::new(),
+            peers_connected: 0,
+            last_peer_utc: None,
+        }
+    }
+
+    #[test]
+    fn gap_find_missing_targets_the_lowest_absent_tail_body() {
+        let stg = synthetic_chain(100, 105);
+        // store not ready (no file) → every tail body counts as missing;
+        // the finder must return the LOWEST tail height
+        let store = BlockStore::new(None, None);
+        let recent = RecentBlocks::new();
+        // threaded tip = 104 → the walk starts at 105
+        let got = gap_find_missing(&stg, &store, &recent, Some(104));
+        assert_eq!(got, Some((105, stg.entry_abs(105).unwrap().hash)));
+        // threaded tip far below → clamped to GAP_TAIL_MAX below the tip, but
+        // never below the window base (heights with no window entry are
+        // skipped, so the first candidate is base itself here)
+        let got2 = gap_find_missing(&stg, &store, &recent, Some(80));
+        assert_eq!(got2.map(|(h, _)| h), Some(100));
+    }
+
+    #[test]
+    fn gap_find_missing_satisfied_by_recent_cache() {
+        let stg = synthetic_chain(100, 105);
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let h = stg.entry_abs(105).unwrap().hash;
+        recent.insert(h, 105, b"pretend-body");
+        assert_eq!(gap_find_missing(&stg, &store, &recent, Some(104)), None);
+    }
+
+    #[test]
+    fn rollback_tip_drops_the_phantom_and_truncates() {
+        let mut stg = synthetic_chain(100, 105);
+        // a record + pending header above the rollback point must go too
+        stg.records.push(BlockRec {
+            height: 105,
+            spends: vec![],
+            outs: vec![],
+        });
+        stg.pending_headers.insert([0x99u8; 32], Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            time: 0,
+            bits: 0,
+            nonce: 0,
+            vtx: vec![],
+            block_sig: vec![],
+        });
+        let phantom_hash = stg.tip_hash;
+        let (new_tip, new_hash) = rollback_tip(&mut stg).expect("rollback");
+        assert_eq!(new_tip, 104);
+        assert_eq!(new_hash, stg.entry_abs(104).unwrap().hash);
+        assert_eq!(stg.tip_height, 104);
+        assert_ne!(stg.tip_hash, phantom_hash);
+        assert_eq!(stg.entries.len(), (104 - 100 + 1) as usize);
+        assert_eq!(stg.checksums.len(), stg.entries.len());
+        assert!(stg.records.iter().all(|r| r.height <= 104));
+        assert!(stg.pending_headers.is_empty());
+        assert_eq!(stg.daemon_tip, Some(104));
+        // to_file stays consistent (entries/checksums zip equal length)
+        let file = stg.to_file();
+        assert_eq!(file.height, 104);
+        assert_eq!(file.entries.len(), stg.entries.len());
+    }
+
+    #[test]
+    fn rollback_tip_refuses_at_window_base() {
+        let mut stg = synthetic_chain(100, 100);
+        assert!(rollback_tip(&mut stg).is_err());
+    }
+
+    #[test]
+    fn gap_fill_valid_hash_link_merkle() {
+        use tri7_core::legacy::{Tx, Vin, Vout};
+        let stg = synthetic_chain(100, 105);
+        // a real block chained onto h104's hash with a real merkle root
+        let tx = Tx {
+            version: 1,
+            time: 1_700_000_999,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: vec![1, 2, 3],
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout {
+                value: 5,
+                script_pubkey: vec![0x51],
+            }],
+            locktime: 0,
+        };
+        let mut b = Block {
+            version: 2,
+            prev_hash: stg.entry_abs(104).unwrap().hash,
+            merkle_root: [0u8; 32],
+            time: 1_700_000_999,
+            bits: 0x2000_ffff,
+            nonce: 1,
+            vtx: vec![tx],
+            block_sig: vec![],
+        };
+        b.merkle_root = b.merkle_root();
+        let want = b.hash();
+        // valid: hash matches (Hash9), prev links to the window, merkle commits
+        assert_eq!(
+            gap_fill_valid(&b, 105, &want, &stg).map_err(|e| e.clone()),
+            Ok(())
+        );
+        // wrong requested hash → reject
+        assert!(gap_fill_valid(&b, 105, &[0xEE; 32], &stg).is_err());
+        // broken link → reject
+        let mut b2 = b.clone();
+        b2.prev_hash = [0x77u8; 32];
+        assert!(gap_fill_valid(&b2, 105, &b2.hash(), &stg).is_err());
+        // broken merkle → reject
+        let mut b3 = b.clone();
+        b3.merkle_root = [0x42u8; 32];
+        assert!(gap_fill_valid(&b3, 105, &b3.hash(), &stg).is_err());
     }
 }

@@ -1,0 +1,94 @@
+{
+  "block": {
+    "bits": "2000ffff",
+    "block_sig_len": 70,
+    "coinbase_scriptsig_hex": "03a4a121",
+    "hash": "95f4d7585444ffb68fb654a464c643e6447d909691655d4d553b5f14041658d7",
+    "merkle": "d456519a1991cd8daaf6b8d347d82b84fb91ca08a1d7520309d199e1d3d8590c",
+    "nonce": 0,
+    "prev": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "time": 1793673440,
+    "vtx": 2
+  },
+  "coinstake": {
+    "coin_age_sat_days": "962575536",
+    "coin_day_weight": "5",
+    "credit_sats": 23193114,
+    "hash_proof_of_stake": "0275cf7d6192c35a9e5d10fef1d2442aaf1481d3363288dbe4ff7c8136df20d9",
+    "inputs": [
+      {
+        "height": 2203890,
+        "n": 1,
+        "txid": "f8bbddfcbd532940d51d2128902f7753a28c7470c360cfc249b9658c29507d61",
+        "value_sats": 11690000
+      },
+      {
+        "height": 2203893,
+        "n": 2,
+        "txid": "91f7d4e09841c24e643442716480b1212e9323193107af2399b58f781d3e5a16",
+        "value_sats": 10632841
+      }
+    ],
+    "kernel_block_height": 2203890,
+    "kernel_block_time": 1789947521,
+    "kernel_coin_sats": 11690000,
+    "kernel_n": 1,
+    "kernel_tx_offset": 149,
+    "kernel_txid": "f8bbddfcbd532940d51d2128902f7753a28c7470c360cfc249b9658c29507d61",
+    "modifier": "962b22915ddde52a",
+    "n_time": 1793673440,
+    "reward_sats": 870273,
+    "seconds_back": 24,
+    "split": false
+  },
+  "kernel_search": {
+    "attempts": 385,
+    "coins_considered": 7,
+    "coins_meeting_min_age": 7,
+    "credit_over_balance_aborts": 0,
+    "kernel_hits": 1,
+    "search_secs": 60,
+    "search_time": 1793673464,
+    "zero_reward_aborts": 0
+  },
+  "mode": "dry-run — no network, nothing broadcast, daemon untouched",
+  "modifier_oracle": {
+    "archive_prefix_blocks": 2199469,
+    "archive_window_blocks_reconstructed": 4599,
+    "checksum_steps_verified": 143,
+    "genesis_checksum_ok": true,
+    "window_heights_checked": 4599
+  },
+  "n_bits": "2000ffff",
+  "next_height": 2204068,
+  "note": "candidate block validated but NOT broadcast — dry run only",
+  "self_validation": {
+    "coin_age_sat_days": "962575536",
+    "coinstake_input_sigs_verified": 2,
+    "finality_ok": true,
+    "kernel_meets_target": true,
+    "link_ok": true,
+    "merkle_ok": true,
+    "n_bits_ok": true,
+    "reward_ok": true,
+    "signature_ok": true,
+    "size_ok": true,
+    "stake_reward_calculated": 870273,
+    "stake_reward_paid": 870273,
+    "structure_ok": true,
+    "time_ok": true,
+    "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path"
+  },
+  "solution_found": true,
+  "tip": {
+    "blockhash": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "height": 2204067,
+    "time": 1793656833
+  },
+  "wallet": {
+    "balance_sats": 3081244023,
+    "candidates": 176,
+    "keys": 248,
+    "live_utxos": 176
+  }
+}

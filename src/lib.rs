@@ -15,6 +15,7 @@ pub mod legacy;
 pub mod p2p;
 pub mod replay;
 pub mod rpc;
+pub mod smsg;
 pub mod spend;
 pub mod stake;
 pub mod wallet;

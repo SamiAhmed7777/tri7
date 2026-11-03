@@ -344,17 +344,18 @@ pub fn build_index(
         return Err("no frames found".into());
     }
 
-    // heights usable only if the thread reached the window base (anchor:
-    // an accept inside the window REQUIRES the daemon-anchored hash, which
-    // is only reachable if every earlier link chained correctly) and ended
-    // at the window tip.
+    // Heights are usable from genesis up to the height the thread actually
+    // REACHED: every in-window accept requires an exact oracle-hash match and
+    // every below-window accept requires prev-hash chaining from genesis, so
+    // the map is authoritative wherever it is populated. A frame missing ABOVE
+    // the reached height (e.g. a body that lived only in a memory cache and
+    // was lost on restart) shortens the map — heights below it stay valid and
+    // servable (gap recovery appends the missing body later; CACHE_VERSION 2).
+    // The old gate (map valid only when the thread ended exactly at the window
+    // tip) voided ALL height lookups whenever one tip frame was missing, which
+    // blanked every getblock/getblockhash on the node.
     let heights_ok = match oracle {
-        Some(o) => {
-            let reached_base = height_off.len() as u64 > o.base;
-            let ended_tip =
-                last_accepted.map_or(false, |h| h == o.hashes[(o.tip - o.base) as usize]);
-            reached_base && ended_tip
-        }
+        Some(o) => height_off.len() as u64 > o.base,
         None => true, // oracle-less build: the sequential run IS the truth
     };
 
@@ -407,7 +408,10 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, String>
 
 const CACHE_MAGIC_BLOCKS: u32 = 0x5452_4942; // TRIB
 const CACHE_MAGIC_TX: u32 = 0x5452_4954; // TRIT
-const CACHE_VERSION: u32 = 1;
+/// v2: heights_ok semantics changed (a frame missing ABOVE the threaded tip
+/// shortens the map instead of invalidating it) + the append appendix. v1
+/// caches carry the old gate — force one rebuild.
+const CACHE_VERSION: u32 = 2;
 const BLOCKS_HEAD_LEN: usize = 49;
 const TX_HEAD_LEN: usize = 32;
 
@@ -663,6 +667,23 @@ pub struct StoreInner {
     pub heights_ok: bool,
     file: File,
     pub build_secs: u64,
+    /// Frames appended after the scan (gap recovery). Lookups consult the
+    /// main sorted indexes first, then the appendix — appends never re-sort
+    /// the 70MB vectors. A restart re-scans the grown file (blk_len cache
+    /// invalidation) and folds the appendix into the main index.
+    appendix: std::sync::RwLock<Vec<AppendedFrame>>,
+    /// false when the blocks file could not be opened writable (perm/ro fs) —
+    /// append_block errors cleanly instead of writing
+    writable: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Debug)]
+struct AppendedFrame {
+    key: u64, // key8 of the block hash
+    off: u64,
+    seq: u32,
+    height: Option<u64>,
+    tx_keys: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -761,17 +782,27 @@ impl BlockStore {
         })();
         match outcome {
             Ok(b) => {
-                let file = File::open(self.path.as_ref().unwrap())
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(self.path.as_ref().unwrap())
+                    .or_else(|_| File::open(self.path.as_ref().unwrap()))
                     .map_err(|e| format!("open blocks file: {}", e));
                 match file {
                     Ok(file) => {
+                        // probe writability with a throwaway append handle
+                        let writable = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(self.path.as_ref().unwrap())
+                            .is_ok();
                         eprintln!(
                             "[blockidx] ready: {} frames, {} txs, heights_ok={}, \
-                             threaded_tip={:?}, built in {}s",
+                             threaded_tip={:?}, writable={}, built in {}s",
                             b.frames,
                             b.txs_indexed,
                             b.heights_ok,
                             b.blocks.tip_height(),
+                            writable,
                             started.elapsed().as_secs()
                         );
                         let inner = StoreInner {
@@ -780,6 +811,8 @@ impl BlockStore {
                             heights_ok: b.heights_ok,
                             file,
                             build_secs: started.elapsed().as_secs(),
+                            appendix: std::sync::RwLock::new(Vec::new()),
+                            writable: std::sync::atomic::AtomicBool::new(writable),
                         };
                         *self.state.write().unwrap() = Some(Arc::new(inner));
                     }
@@ -847,7 +880,8 @@ impl BlockStore {
     }
 
     /// Locate a block by its full internal hash: candidate frames via the
-    /// truncated key, full Hash9 verification on the bytes.
+    /// truncated key, full Hash9 verification on the bytes. Post-build
+    /// appended frames (gap recovery) are consulted after the main index.
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
         for e in inner.blocks.candidates_by_key(key8(hash)) {
@@ -866,6 +900,25 @@ impl BlockStore {
                 height,
             }));
         }
+        for f in inner.appendix.read().unwrap().iter() {
+            if f.key != key8(hash) {
+                continue;
+            }
+            let body = Self::read_frame(&inner, f.off)?;
+            let h = header_hash(&body)?;
+            if &h != hash {
+                continue;
+            }
+            let block = Self::parse_frame(&body)?;
+            let height = f.height.or(inner.blocks.height_of_seq(f.seq));
+            return Ok(Some(BlockHit {
+                block,
+                hash: h,
+                off: f.off,
+                body_len: body.len(),
+                height,
+            }));
+        }
         Ok(None)
     }
 
@@ -879,7 +932,25 @@ impl BlockStore {
         }
         let off = match inner.blocks.offset_by_height(h) {
             Some(o) => o,
-            None => return Ok(None),
+            None => {
+                // main height map ended below h — consult the appendix (a
+                // gap-recovery append above the threaded tip)
+                for f in inner.appendix.read().unwrap().iter() {
+                    if f.height == Some(h) {
+                        let body = Self::read_frame(&inner, f.off)?;
+                        let hash = header_hash(&body)?;
+                        let block = Self::parse_frame(&body)?;
+                        return Ok(Some(BlockHit {
+                            block,
+                            hash,
+                            off: f.off,
+                            body_len: body.len(),
+                            height: Some(h),
+                        }));
+                    }
+                }
+                return Ok(None);
+            }
         };
         let body = Self::read_frame(&inner, off)?;
         let hash = header_hash(&body)?;
@@ -902,7 +973,15 @@ impl BlockStore {
         }
         let off = match inner.blocks.offset_by_height(h) {
             Some(o) => o,
-            None => return Ok(None),
+            None => {
+                for f in inner.appendix.read().unwrap().iter() {
+                    if f.height == Some(h) {
+                        let body = Self::read_frame(&inner, f.off)?;
+                        return Ok(Some(crate::p2p::internal_to_display(&header_hash(&body)?)));
+                    }
+                }
+                return Ok(None);
+            }
         };
         let mut hdr = [0u8; 8];
         let mut head80 = [0u8; 80];
@@ -955,13 +1034,23 @@ impl BlockStore {
             })?;
             if let Some(tx) = found {
                 // height of the containing frame: find this frame's own
-                // BlockEntry by (block-key, offset) and read its seq height
+                // BlockEntry by (block-key, offset) and read its seq height,
+                // falling back to the appendix (gap-recovery appends)
                 let block_height = inner
                     .blocks
                     .candidates_by_key(key8(&bhash))
                     .iter()
                     .find(|b| b.off == e.off)
-                    .and_then(|b| inner.blocks.height_of_seq(b.seq));
+                    .and_then(|b| inner.blocks.height_of_seq(b.seq))
+                    .or_else(|| {
+                        inner
+                            .appendix
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .find(|f| f.off == e.off)
+                            .and_then(|f| f.height)
+                    });
                 return Ok(Some(TxHit {
                     tx,
                     txid: *txid,
@@ -971,7 +1060,119 @@ impl BlockStore {
                 }));
             }
         }
+        // appendix pass: txids of gap-recovery appends are not in the main
+        // tx index (never re-sorted)
+        for f in inner.appendix.read().unwrap().iter() {
+            if !f.tx_keys.contains(&key) {
+                continue;
+            }
+            let body = Self::read_frame(&inner, f.off)?;
+            let bhash = header_hash(&body)?;
+            let block_time = if body.len() >= 72 {
+                u32::from_le_bytes(body[68..72].try_into().unwrap())
+            } else {
+                0
+            };
+            let mut found: Option<Tx> = None;
+            walk_tx_ranges(&body, &mut |start, end| {
+                if found.is_some() {
+                    return Ok(());
+                }
+                let id = sha256d(&body[start..end]);
+                if &id == txid {
+                    let mut r = Reader::new(&body[start..end]);
+                    let tx = Tx::read(&mut r)?;
+                    r.expect_done()?;
+                    found = Some(tx);
+                }
+                Ok(())
+            })?;
+            if let Some(tx) = found {
+                return Ok(Some(TxHit {
+                    tx,
+                    txid: *txid,
+                    block_hash: bhash,
+                    block_height: f.height,
+                    block_time,
+                }));
+            }
+        }
         Ok(None)
+    }
+
+    /// Height the main height map reached (= highest contiguous threaded
+    /// height from the scan), extended by any appendix frames carrying a
+    /// height — the "where do disk bodies end" oracle for gap recovery.
+    pub fn threaded_tip(&self) -> Option<u64> {
+        let inner = self.inner()?;
+        let main = inner.blocks.tip_height();
+        let app = inner
+            .appendix
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f.height)
+            .max();
+        match (main, app) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Append a raw block body (header + vtx + block_sig, NO frame header) to
+    /// the blocks file and the appendix index. Idempotent on hash: re-appends
+    /// return Ok with the existing hash. `height` assigns the height-thread
+    /// entry for gap fills above the threaded tip.
+    pub fn append_block(&self, body: &[u8], height: Option<u64>) -> Result<Hash, String> {
+        let inner = self.inner().ok_or("block index not ready")?;
+        if body.len() < 80 {
+            return Err(format!("append: body too short ({})", body.len()));
+        }
+        let hash = header_hash(body)?;
+        if self.block_by_hash(&hash)?.is_some() {
+            return Ok(hash); // already on disk — nothing to do
+        }
+        if !inner.writable.load(Ordering::SeqCst) {
+            return Err(
+                "blocks file is not writable (append needs a tri7-owned blk file)".into(),
+            );
+        }
+        let f = &inner.file;
+        let off = f
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
+        let mut frame = Vec::with_capacity(8 + body.len());
+        frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(body);
+        use std::io::Seek;
+        let mut fh = f
+            .try_clone()
+            .map_err(|e| format!("append: clone handle: {}", e))?;
+        fh.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| format!("append: seek: {}", e))?;
+        fh.write_all(&frame)
+            .map_err(|e| format!("append: write: {}", e))?;
+        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // index the frame
+        let mut tx_keys = Vec::new();
+        walk_tx_ranges(body, &mut |start, end| {
+            tx_keys.push(key8(&sha256d(&body[start..end])));
+            Ok(())
+        })?;
+        let seq = inner.blocks.frames as u32 + {
+            let a = inner.appendix.read().unwrap();
+            a.len() as u32
+        };
+        inner.appendix.write().unwrap().push(AppendedFrame {
+            key: key8(&hash),
+            off,
+            seq,
+            height,
+            tx_keys,
+        });
+        Ok(hash)
     }
 }
 
@@ -1108,6 +1309,89 @@ mod tests {
 
     fn header_hash_ok(frame: &[u8]) -> Hash {
         header_hash(&frame[8..]).unwrap()
+    }
+
+    // ---- gap recovery: missing tip frame + appendix append -------------------
+
+    #[test]
+    fn gap_recovery_missing_tip_frame_append_restores_serving() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("gapappend");
+        let path = dir.join("blk.dat");
+        // rebuild b3's frame exactly as synthetic_chain built it (the helpers
+        // are deterministic) so we can hold the file WITHOUT the tip body —
+        // the DNS2 shape: tipstate's tip frame absent from disk
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        assert!(frames.ends_with(&b3_frame));
+        let truncated = &frames[..frames.len() - b3_frame.len()];
+        std::fs::write(&path, truncated).unwrap();
+
+        // oracle covering genesis..b3 (tip = b3, whose frame is missing)
+        let oracle = BuildOracle {
+            base: 2,
+            hashes: vec![hashes[2], hashes[3]],
+            tip: 3,
+        };
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        let mut waited = 0;
+        while waited < 100 && !matches!(store.status(), StoreStatus::Ready { .. }) {
+            std::thread::sleep(Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(matches!(store.status(), StoreStatus::Ready { .. }));
+
+        // NEW SEMANTICS: the missing tip frame shortens the height map, it
+        // does NOT invalidate it — heights below the gap serve normally
+        let hit2 = store.block_by_height(2).unwrap().unwrap();
+        assert_eq!(hit2.hash, hashes[2]);
+        assert_eq!(
+            store.hash_at_height(2).unwrap().unwrap(),
+            internal_to_display(&hashes[2])
+        );
+        // the gap itself is absent
+        assert!(store.block_by_height(3).unwrap().is_none());
+        assert!(store.block_by_hash(&hashes[3]).unwrap().is_none());
+        assert_eq!(store.threaded_tip(), Some(2));
+
+        // GAP FILL: append the tip body (as gap recovery does after a peer
+        // serves it) with its height assignment
+        let body = &b3_frame[8..];
+        let appended = store.append_block(body, Some(3)).expect("append");
+        assert_eq!(appended, hashes[3]);
+        // idempotent: a re-append is a no-op
+        let again = store.append_block(body, Some(3)).expect("re-append");
+        assert_eq!(again, hashes[3]);
+
+        // the gap now serves by hash AND height; the tx inside is indexed
+        let hit3 = store.block_by_hash(&hashes[3]).unwrap().expect("gap filled");
+        assert_eq!(hit3.height, Some(3));
+        let hit3h = store.block_by_height(3).unwrap().expect("by height");
+        assert_eq!(hit3h.hash, hashes[3]);
+        assert_eq!(store.threaded_tip(), Some(3));
+        let txid3 = txid(&hit3.block.vtx[0]);
+        let thit = store.tx_by_id(&txid3).unwrap().expect("appended tx found");
+        assert_eq!(thit.block_height, Some(3));
+
+        // RESTART: a fresh store re-scans the grown file (blk_len cache miss)
+        // and finds the appended frame in the MAIN index — no appendix needed
+        let store2 = BlockStore::new(Some(path.clone()), Some(dir.join("idx2")));
+        store2.spawn_build(Some(BuildOracle {
+            base: 2,
+            hashes: vec![hashes[2], hashes[3]],
+            tip: 3,
+        }));
+        let mut waited2 = 0;
+        while waited2 < 100 && !matches!(store2.status(), StoreStatus::Ready { .. }) {
+            std::thread::sleep(Duration::from_millis(50));
+            waited2 += 1;
+        }
+        let hit3r = store2.block_by_height(3).unwrap().expect("post-restart");
+        assert_eq!(hit3r.hash, hashes[3]);
+        assert_eq!(store2.threaded_tip(), Some(3));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

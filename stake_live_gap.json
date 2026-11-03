@@ -1,0 +1,125 @@
+{
+  "acceptance": {
+    "accepted": true,
+    "best_hash": "dfe7c38c018da11f7a6ae40f6f3f1c57de0a322e41f10e5f2c7fd13857661783",
+    "elapsed_secs": 2.001588421,
+    "tip_height": 2204068,
+    "via": "p2p-block"
+  },
+  "block": {
+    "bits": "2000ffff",
+    "block_sig_len": 70,
+    "coinbase_scriptsig_hex": "03a4a121",
+    "hash": "dfe7c38c018da11f7a6ae40f6f3f1c57de0a322e41f10e5f2c7fd13857661783",
+    "merkle": "862473357eb71a8cd8034aa8e0eec522ab1ef29679e049517e7f9698904ddc90",
+    "nonce": 0,
+    "prev": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "time": 1793673572,
+    "vtx": 2
+  },
+  "coinstake": {
+    "coin_age_sat_days": "962609640",
+    "coin_day_weight": "5",
+    "credit_sats": 23193145,
+    "hash_proof_of_stake": "0366b026d0eeb24f25d857163b08984cc4554b6e7a74908a80873beb1db52606",
+    "inputs": [
+      {
+        "height": 2203890,
+        "n": 1,
+        "txid": "f8bbddfcbd532940d51d2128902f7753a28c7470c360cfc249b9658c29507d61",
+        "value_sats": 11690000
+      },
+      {
+        "height": 2203893,
+        "n": 2,
+        "txid": "91f7d4e09841c24e643442716480b1212e9323193107af2399b58f781d3e5a16",
+        "value_sats": 10632841
+      }
+    ],
+    "kernel_block_height": 2203890,
+    "kernel_block_time": 1789947521,
+    "kernel_coin_sats": 11690000,
+    "kernel_n": 1,
+    "kernel_tx_offset": 149,
+    "kernel_txid": "f8bbddfcbd532940d51d2128902f7753a28c7470c360cfc249b9658c29507d61",
+    "modifier": "962b22915ddde52a",
+    "n_time": 1793673572,
+    "reward_sats": 870304,
+    "seconds_back": 9,
+    "split": false
+  },
+  "kernel_search": {
+    "attempts": 370,
+    "coins_considered": 7,
+    "coins_meeting_min_age": 7,
+    "credit_over_balance_aborts": 0,
+    "kernel_hits": 1,
+    "search_secs": 60,
+    "search_time": 1793673581,
+    "zero_reward_aborts": 0
+  },
+  "mode": "dry-run — no network, nothing broadcast, daemon untouched",
+  "modifier_oracle": {
+    "archive_prefix_blocks": 2199469,
+    "archive_window_blocks_reconstructed": 4599,
+    "checksum_steps_verified": 143,
+    "genesis_checksum_ok": true,
+    "window_heights_checked": 4599
+  },
+  "n_bits": "2000ffff",
+  "next_height": 2204068,
+  "note": "LIVE: block accepted into the legacy daemon's chain (no retries were performed)",
+  "self_validation": {
+    "coin_age_sat_days": "962609640",
+    "coinstake_input_sigs_verified": 2,
+    "finality_ok": true,
+    "kernel_meets_target": true,
+    "link_ok": true,
+    "merkle_ok": true,
+    "n_bits_ok": true,
+    "reward_ok": true,
+    "signature_ok": true,
+    "size_ok": true,
+    "stake_reward_calculated": 870304,
+    "stake_reward_paid": 870304,
+    "structure_ok": true,
+    "time_ok": true,
+    "verdict": "PASSED — candidate block fully valid against the tri7 acceptance path"
+  },
+  "solution_found": true,
+  "submit": {
+    "p2p": {
+      "addr": "127.0.0.1:24113",
+      "block_bytes": 515,
+      "path": "p2p-block",
+      "peer_subver": "/tri7:0.2.0/",
+      "post_send_msgs": [
+        "sendheaders",
+        "inv"
+      ]
+    },
+    "submitblock_rpc": {
+      "method_found": false,
+      "reply": {
+        "error": {
+          "code": -32601,
+          "message": "method not found: submitblock (tri7 native: [\"gettip\", \"getblockcount\", \"getbestblockhash\", \"getblockhash\", \"getblock\", \"getrawtransaction\", \"getinfo\", \"getdifficulty\", \"getconnectioncount\", \"getstakemodifier\", \"getbalance\", \"listunspent\", \"listwalletaddresses\", \"getreceivedbyaddress\", \"validateaddress\", \"health\"]; legacy-proxy fallback: [\"getblock\", \"getblockhash\", \"getrawtransaction\", \"gettransaction\", \"getreceivedbyaddress\", \"validateaddress\", \"getinfo\", \"getdifficulty\", \"getconnectioncount\", \"listunspent\", \"getrawmempool\", \"getmempoolinfo\", \"getstakinginfo\", \"getnetworkhashps\", \"getwalletinfo\"]; wallet-write and unknown methods are never forwarded)"
+        },
+        "id": "stake_mint",
+        "result": null,
+        "source": "tri7"
+      }
+    }
+  },
+  "tip": {
+    "blockhash": "0f67543090749ba77cebc918241e1e25553d10bd4ea7da395df8aabbada14a3f",
+    "height": 2204067,
+    "time": 1793656833
+  },
+  "wallet": {
+    "balance_sats": 3081244023,
+    "candidates": 176,
+    "keys": 248,
+    "live_utxos": 176
+  }
+}

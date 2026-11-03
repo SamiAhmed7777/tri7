@@ -418,6 +418,17 @@ pub trait BlockDataProvider: Send + Sync {
     /// verbose legacy-style block JSON (hash or height); Ok(None) = not found.
     fn block_by_hash(&self, hash_display: &str) -> Result<Option<Value>, String>;
     fn block_by_height(&self, h: u64) -> Result<Option<Value>, String>;
+    /// Raw wire hex (header+vtx+sig) by 64-hex hash or height — the legacy
+    /// `getblock <id> false` form. Default: unsupported (Ok(None), reported
+    /// as "Block not found").
+    fn raw_block(
+        &self,
+        _hash_display: Option<&str>,
+        _height: Option<u64>,
+    ) -> Result<Option<String>, String> {
+        let _ = (_hash_display, _height);
+        Ok(None)
+    }
     /// verbose object, or raw hex string when verbose=false; Ok(None) = not found.
     fn tx(&self, txid_display: &str, verbose: bool) -> Result<Option<Value>, String>;
     /// main-chain hash (display) at height; Ok(None) = height unavailable.
@@ -758,8 +769,19 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 }
                 None => (false, height_from_num),
             };
+            let verbose = ptry!(p_bool(params, 1, "verbose")).unwrap_or(true);
             if !deps.blocks.ready() {
                 return NativeOutcome::Miss("block index warming up".into());
+            }
+            if !verbose {
+                // legacy raw-hex form: getblock <hash|height> false
+                let hd = if is_hex_hash { raw.as_deref() } else { None };
+                let hh = if is_hex_hash { None } else { height };
+                return match deps.blocks.raw_block(hd, hh) {
+                    Ok(Some(hex)) => NativeOutcome::Ok(json!(hex)),
+                    Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
+                    Err(e) => NativeOutcome::Err(-1, e),
+                };
             }
             let res = if is_hex_hash {
                 deps.blocks
