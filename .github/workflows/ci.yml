@@ -43,7 +43,11 @@ jobs:
         run: |
           choco install nsis -y --no-progress
           Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe deploy\windows\
-          & "$env:ChocolateyInstall\bin\makensis.exe" deploy\windows\tri7-wallet.nsi
+          if (-not (Test-Path ':ChocolateyInstall\bin\makensis.exe')) {
+             = Get-ChildItem 'C:\Program Files*\NSIS\makensis.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+             = 
+          }
+          & ':ChocolateyInstall\bin\makensis.exe' deploy\windows\tri7-wallet.nsi
       - uses: actions/upload-artifact@v4
         with:
           name: tri7-wallet-setup-7.0.0.exe
