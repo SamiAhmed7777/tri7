@@ -1,0 +1,3 @@
+active
+c69f195f6d65cfb8824c23b2883e20a4478245166ded6880b410fc07bba017af  /opt/tri7/bin/follow_tip
+{"error":null,"id":1,"result":2204155,"source":"tri7"}

@@ -1,0 +1,506 @@
+===== FILE: /root/tri7/src/bin/follow_tip.rs — region: stake_tick + mirror-set deadlock fix (lines 2809-2951) =====
+fn stake_tick(
+    cfg: &Config,
+    stg: &mut ChainState,
+    rpc: &Rpc,
+    stats: &mut Stats,
+    wl: &mut WalletLive,
+    pool: &mut tri7_core::txpool::TxPool,
+    stake_st: &mut StakeState,
+    store: &BlockStore,
+    peers: &mut [Peer],
+    recent: &mut RecentBlocks,
+) -> Result<bool, String> {
+    let now = now_secs() as u32;
+    let tip_height = stg.tip_height;
+    let Some(tip_entry) = stg.entry_abs(tip_height).cloned() else {
+        return Err("tip entry missing".into());
+    };
+    stake_st.last_search_utc = Some(now_iso());
+    let (candidates, _no_key, _unloc, _nonstd) = wl.candidates();
+    stake_st.coins_considered = candidates.len() as u64;
+    let balance = wl.balance();
+    if balance <= tri7_core::stake::RESERVE_BALANCE {
+        stake_st.searches += 1;
+        return Ok(false);
+    }
+    let n_bits = get_next_target_required(&stg.rel_index(), true);
+    let median_time_past = stg
+        .median_time_past(tip_height)
+        .ok_or("median time past unavailable")?;
+    let started = Instant::now();
+    let fees = pool.total_fees();
+    // create_coinstake indexes each candidate's block_height into the passed
+    // index — the rel_index is window-relative (entries[i] == rel height i),
+    // so translate absolute candidate heights to rel and skip coins that
+    // predate the window base (their modifier walk is unknowable here; the
+    // skipped count keeps getstakinginfo honest).
+    let out_of_window = candidates.iter().filter(|c| (c.block_height as u64) < stg.base).count();
+    if out_of_window > 0 {
+        log(&format!(
+            "stake: {} candidate coin(s) below window base {} — skipped (modifier walk out of range)",
+            out_of_window, stg.base
+        ));
+    }
+    let candidates_rel: Vec<tri7_core::stake::StakeCandidate> = candidates
+        .iter()
+        .filter(|c| (c.block_height as u64) >= stg.base)
+        .map(|c| {
+            let mut r = c.clone();
+            r.block_height = stg.rel(c.block_height as u64);
+            r
+        })
+        .collect();
+    let (plan, rep) = tri7_core::stake::create_coinstake(
+        &stg.rel_index(),
+        &candidates_rel,
+        n_bits,
+        fees,
+        now,
+        tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
+        balance,
+        tip_height as usize + 1,
+    )?;
+    stake_st.attempts += rep.attempts;
+    stake_st.coins_meeting_min_age = rep.coins_meeting_min_age;
+    stake_st.searches += 1;
+    stake_st.last_search_secs = started.elapsed().as_secs_f64();
+    let Some(plan) = plan else {
+        return Ok(false);
+    };
+    stake_st.last_hit_utc = Some(now_iso());
+    log(&format!(
+        "STAKE: kernel solved after {} attempts ({}s) — coin {}:{} ({} sats, {} coin-days), reward {} sats, fees {}",
+        rep.attempts,
+        stake_st.last_search_secs,
+        tri7_core::p2p::internal_to_display(&plan.signer.txid),
+        plan.signer.n,
+        plan.signer.value,
+        plan.coin_age / (tri7_core::consensus::COIN as u64 * 14_400), // coin-days at cap
+        plan.reward,
+        fees,
+    ));
+    // extra txs from the relay pool (fees attach to the coinstake)
+    let extra: Vec<Tx> = pool
+        .txs_for_block(400_000, 250)
+        .into_iter()
+        .map(|(_h, tx)| tx)
+        .collect();
+    let mut block = tri7_core::stake::assemble_pos_block(&tip_entry, median_time_past, &plan.tx, &extra, n_bits)?;
+    tri7_core::stake::sign_block(&mut block, &plan.signer.secret)?;
+    // full self-validation through the SAME gate peer blocks pass
+    let height_abs = tip_height + 1;
+    let prev_entry = tip_entry;
+    let outcome = validate_block(
+        stg,
+        rpc,
+        stats,
+        &block,
+        &BlockCtx {
+            height_abs,
+            header: None,
+            prev_entry: prev_entry.clone(),
+            live: true,
+        },
+    )?;
+    let raw = block.serialize();
+    advance_with_block(stg, rpc, stats, &block, &outcome)?;
+    stats.blocks_validated_live += 1;
+    // durability + live-set + pool maintenance for OUR block
+    if let Err(e) = store.append_block(&raw, Some(height_abs)) {
+        log(&format!(
+            "stake: accepted h{} NOT appended to the store: {}",
+            height_abs, e
+        ));
+    }
+    recent.insert(block.hash(), height_abs, &raw);
+    wl.apply_block(&block, height_abs);
+    let mut spent: Vec<(Hash, u32)> = Vec::new();
+    for tx in block.vtx.iter().skip(1) {
+        for vin in &tx.vin {
+            if vin.prev_n != u32::MAX {
+                spent.push((vin.prev_hash, vin.prev_n));
+            }
+        }
+    }
+    pool.confirm_spend(&spent);
+    let file = stg.to_file();
+    write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
+    stake_st.last_stake = Some((
+        height_abs,
+        tri7_core::p2p::internal_to_display(&block.hash()),
+        now_iso(),
+    ));
+    log(&format!(
+        "STAKE MINTED → h{} {} (self-validated: kernel {}, nbits enforced) — relaying to {} peer(s)",
+        height_abs,
+        tri7_core::p2p::internal_to_display(&block.hash()),
+        if outcome.kernel_enforced { "enforced" } else { "seeded" },
+        peers.len(),
+    ));
+    Ok(true)
+}
+
+/// Network weight estimate — GetPoSKernelPS parity (rpcblockchain.cpp:98):
+
+===== FILE: /root/tri7/src/bin/follow_tip.rs — region: getstakinginfo handler (lines 3050-3125) =====
+            "getstakinginfo" => {
+                let (tip_height, entry) = self.tip();
+                let wl = self.wl.lock().unwrap();
+                let stake_st = self.stake_st.lock().unwrap();
+                let now = now_secs() as u32;
+                let (weight, mature) = match wl.as_ref() {
+                    Some(w) => w.stake_weight(now),
+                    None => (0, 0),
+                };
+                let (net, n_bits, modifier) = {
+                    let mut out = (0u64, 0u32, 0u64);
+                    if let Ok(g) = self.st.try_lock() {
+                        out.0 = net_stake_weight(&g.entries);
+                        out.1 = get_next_target_required(&g.rel_index(), true);
+                        if let Some(e) = g.entries.last() {
+                            out.2 = e.stake_modifier;
+                        }
+                    } else if let Some(e) = &entry {
+                        out.2 = e.stake_modifier;
+                    }
+                    out
+                };
+                let enabled = stake_st.enabled;
+                let staking = enabled && weight > 0;
+                let expected_time: i64 = if staking && net > 0 {
+                    (tri7_core::consensus::TARGET_SPACING as u64)
+                        .saturating_mul(net.saturating_div(weight.max(1))) as i64
+                } else {
+                    -1
+                };
+                let mut reasons: Vec<serde_json::Value> = Vec::new();
+                if !enabled {
+                    reasons.push(serde_json::json!("staking disabled (stake=0; enable via the staking RPC or conf)"));
+                }
+                if weight == 0 {
+                    reasons.push(serde_json::json!("no mature in-window coins available (min age 3600s)"));
+                }
+                Ok(serde_json::json!({
+                    "enabled": enabled,
+                    "staking": staking,
+                    "errors": "",
+                    "currentblocksize": 0,
+                    "currentblocktx": 0,
+                    "pooledtx": self.pool.lock().map(|p| p.len()).unwrap_or(0),
+                    "difficulty": entry.as_ref().map(|e| tri7_core::rpc::difficulty_from_bits(e.bits)).unwrap_or(0.0),
+                    "search-interval": tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
+                    "weight": weight,
+                    "netstakeweight": net,
+                    "expectedtime": expected_time,
+                    "walletlocked": false,
+                    "connections": self.peers_table.lock().map(|t| t.len()).unwrap_or(0),
+                    "initialblockdownload": false,
+                    "maturecoins": mature > 0,
+                    "staking_disabled_reasons": reasons,
+                    // tri7 extensions (honest boundaries + live counters)
+                    "modifier": format!("{:016x}", modifier),
+                    "target": format!("{:08x}", n_bits),
+                    "attempts": stake_st.attempts,
+                    "searches": stake_st.searches,
+                    "last_search_secs": stake_st.last_search_secs,
+                    "last_search_utc": stake_st.last_search_utc,
+                    "last_hit_utc": stake_st.last_hit_utc,
+                    "last_stake": stake_st.last_stake.as_ref().map(|(h, hash, t)| serde_json::json!({
+                        "height": h, "hash": hash, "at_utc": t,
+                    })),
+                    "coins_considered": stake_st.coins_considered,
+                    "coins_meeting_min_age": stake_st.coins_meeting_min_age,
+                    "coins_without_key": match wl.as_ref() {
+                        Some(w) => { let (_, nk, _u, _ns) = w.candidates(); nk }
+                        None => 0,
+                    },
+                    "in_window_only": true,
+                    "tip_height": tip_height,
+                }))
+            }
+            "staking" => {
+
+===== NOT FOUND: validate_block pre-window oracle skip =====
+
+===== FILE: /root/tri7/src/bin/follow_tip.rs — region: pre-window oracle skip =====
+           None => {
+                // No external proof oracle in the tri7-only topology: the rpc
+                // client points at THIS node (self-comparison is vacuous) or
+                // is absent during seed. Accept the pre-window coinstake on
+                // the independent evidence already checked (header linkage +
+                // modifier checksum chain + block signature) and record the
+                // skip honestly. The old path errored out ("no proofhash in
+                // rpc") which made every freshly-seeded node fail startup.
+                log(&format!(
+                    "h{}: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only)",
+                    h
+                ));
+                proof = [0u8; 32];
+                stats.kernel_skipped_no_oracle += 1;
+            }
+        }
+        // 8. block signature (required above the last hard checkpoint)
+        if h > LAST_HARDCODED_CHECKPOINT as u64 {
+            check_pos_block_signature(block).map_err(|e| format!("h{}: block sig: {}", h, e))?;
+            stats.sigs_checked += 1;
+        }
+    } else {
+        // 7b. PoW: header hash must meet the nBits target (CheckProofOfWork)
+        
+
+===== FILE: /root/tri7/src/bin/follow_tip.rs — region: deadlock fix (single lock for mirror set) =====
+rs,
+                        &mut recent_shared.lock().unwrap(),
+                    )
+                };
+                match stake_result {
+                    Ok(true) => {
+                        // ONE lock acquisition for BOTH fields: two temporary
+                        // st_shared.lock() guards in the same expression live
+                        // until the statement ends → the second lock() waits
+                        // on the first → the whole follow loop wedges (live
+                        // deadlock at h2204069, 2026-11-02 — RPC stalling on
+                        // wl/stake_st held across this arm).
+                        let g = st_shared.lock().unwrap();
+                        tip_mirror.set(
+                            g.tip_height,
+                            &tri7_core::p2p::internal_to_display(&g.tip_hash),
+                        );
+                    }
+  
+
+===== FILE: /root/tri7/src/kernel.rs — region: bounds-guarded modifier walk (lines 279-318) =====
+pub fn get_kernel_stake_modifier_with(
+    idx: &ReplayIndex,
+    block_from_height: usize,
+    window: i64,
+) -> Result<u64, String> {
+    // Bounds-guard the entry index: callers stake from candidate heights that
+    // must index `idx.entries` (window-relative in the follow-loop, absolute
+    // in stake_mint). A foreign/out-of-range height must take the wallet.cpp
+    // 2269-2271 skip-coin Err path, NOT panic the process (a panicked staking
+    // loop killed the live daemon on 2026-11-02).
+    let from = idx.entries.get(block_from_height).ok_or_else(|| {
+        format!(
+            "GetKernelStakeModifier: block height {} outside the index ({} entries) — coin skipped",
+            block_from_height,
+            idx.entries.len()
+        )
+    })?;
+    let threshold = from.time as i64 + window;
+    let mut p = block_from_height;
+    let mut modifier_time = from.time as i64;
+    loop {
+        if modifier_time >= threshold {
+            return Ok(idx.entries[p].stake_modifier);
+        }
+        if p + 1 >= idx.entries.len() {
+            // kernel.cpp:256-268 — reached best chain end during replay.
+            return Err(format!(
+                "GetKernelStakeModifier: reached best block at height {} from block {}",
+                p, block_from_height
+            ));
+        }
+        p += 1;
+        if idx.entries[p].generated_stake_modifier {
+            modifier_time = idx.entries[p].time as i64;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CheckStakeKernelHash / CheckProofOfStake (kernel.cpp:311-421)
+
+===== FILE: /root/tri7/src/blockindex.rs — region: pending-append buffer + flush (append_block/flush_pending/append_ready) =====
+pub fn append_block(&self, body: &[u8], height: Option<u64>) -> Result<Hash, String> {
+        if body.len() < 80 {
+            return Err(format!("append: body too short ({})", body.len()));
+        }
+        let inner = match self.inner() {
+            Some(i) => i,
+            None => {
+                // Index still building: buffer the body, flush on ready. The
+                // frame is durable in RAM only until then — same assumption
+                // the recent-blocks cache makes — but NOTHING is lost to the
+                // disk store once the build lands.
+                let hash = header_hash(body)?;
+                let mut p = self.pending.lock().unwrap();
+                if p.iter().any(|(b, _)| header_hash(b).as_ref() == Ok(&hash)) {
+                    return Ok(hash); // already buffered
+                }
+                p.push((body.to_vec(), height));
+                return Ok(hash);
+            }
+        };
+        // arrival-order guarantee: anything buffered during the build lands
+        // before the first post-ready append
+        self.flush_pending(&inner);
+        let hash = header_hash(body)?;
+        if self.block_by_hash(&hash)?.is_some() {
+            return Ok(hash); // already on disk — nothing to do
+        }
+        if !inner.writable.load(Ordering::SeqCst) {
+            return Err(
+                "blocks file is not writable (append needs a tri7-owned blk file)".into(),
+            );
+        }
+        let f = &inner.file;
+        let off = f
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
+        let mut frame = Vec::with_capacity(8 + body.len());
+        frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(body);
+        use std::io::Seek;
+        let mut fh = f
+            .try_clone()
+            .map_err(|e| format!("append: clone handle: {}", e))?;
+        fh.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| format!("append: seek: {}", e))?;
+        fh.write_all(&frame)
+            .map_err(|e| format!("append: write: {}", e))?;
+        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // index the frame
+        let mut tx_keys = Vec::new();
+        walk_tx_ranges(body, &mut |start, end| {
+            tx_keys.push(key8(&sha256d(&body[start..end])));
+            Ok(())
+        })?;
+        let seq = inner.blocks.frames as u32 + {
+            let a = inner.appendix.read().unwrap();
+            a.len() as u32
+        };
+        inner.appendix.write().unwrap().push(AppendedFrame {
+            key: key8(&hash),
+            off,
+            seq,
+            height,
+            tx_keys,
+        });
+        Ok(hash)
+    }
+
+    /// Drain bodies buffered during the index build into the now-ready store
+    /// (FIFO — same append path as direct appends, dedup via block_by_hash).
+    fn flush_pending(&self, inner: &Arc<StoreInner>) {
+        let drained: Vec<(Vec<u8>, Option<u64>)> = {
+            let mut p = self.pending.lock().unwrap();
+            std::mem::take(&mut *p)
+        };
+        for (body, height) in drained {
+            if let Err(e) = self.append_ready(&inner, &body, height) {
+                eprintln!("[blockidx] pending append flush failed: {}", e);
+            }
+        }
+    }
+
+    /// The ready-store append path (extracted from append_block).
+    fn append_ready(
+        &self,
+        inner: &Arc<StoreInner>,
+        body: &[u8],
+        height: Option<u64>,
+    ) -> Result<Hash, String> {
+        let hash = header_hash(body)?;
+        if self.block_by_hash(&hash)?.is_some() {
+            return Ok(hash); // already on disk — nothing to do
+        }
+        if !inner.writable.load(Ordering::SeqCst) {
+            return Err(
+                "blocks file is not writable (append needs a tri7-owned blk file)".into(),
+            );
+        }
+        let f = &inner.file;
+        let off = f
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
+        let mut frame = Vec::with_capacity(8 + body.len());
+        frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(body);
+        use std::io::Seek;
+        let mut fh = f
+            .try_clone()
+            .map_err(|e| format!("append: clone handle: {}", e))?;
+        fh.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| format!("append: seek: {}", e))?;
+        fh.write_all(&frame)
+            .map_err(|e| format!("append: write: {}", e))?;
+        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // index the frame
+        let mut tx_keys = Vec::new();
+        walk_tx_ranges(body, &mut |start, end| {
+            tx_keys.push(key8(&sha256d(&body[start..end])));
+            Ok(())
+        })?;
+        let seq = inner.blocks.frames as u32 + {
+            let a = inner.appendix.read().unwrap();
+            a.len() as u32
+        };
+        inner.appendix.write().unwrap().push(AppendedFrame {
+            key: key8(&hash),
+            off,
+            seq,
+            height,
+            tx_keys,
+        });
+        Ok(hash)
+    }
+}
+
+
+
+===== FILE: /root/tri7/src/blockindex.rs — region: regression test =====
+est]
+    fn append_during_index_build_buffers_and_flushes_on_ready() {
+        // Fresh-node onboarding shape: blocks get accepted while the cold
+        // index build is still scanning. They must land in the store once it
+        // is ready — not vanish into a permanent hole (the bug that kept a
+        // freshly-seeded node's wallet live view from ever seeding).
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("pendingappend");
+        let path = dir.join("blk.dat");
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        let truncated = &frames[..frames.len() - b3_frame.len()];
+        std::fs::write(&path, truncated).unwrap();
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(None);
+        // append while the build may still be running — either order is fine:
+        // pre-ready buffers into `pending`, post-ready appends directly
+        let body = &b3_frame[8..];
+        let first = store.append_block(body, Some(3)).expect("append");
+        assert_eq!(first, hashes[3]);
+
+        let mut waited = 0;
+        while waited < 200 && !matches!(store.status(), StoreStatus::Ready { .. }) {
+            std::thread::sleep(Duration::from_millis(25));
+            waited += 1;
+        }
+        assert!(matches!(store.status(), StoreStatus::Ready { .. }));
+        // post-ready append flushes anything buffered and dedups
+        let again = store.append_block(body, Some(3)).expect("flush append");
+        assert_eq!(again, hashes[3]);
+
+        let hit = store.block_by_height(3).unwrap().expect("served after ready");
+        assert_eq!(hit.hash, hashes[3]);
+        let txid3 = txid(&hit.block.vtx[0]);
+        let thit = store.tx_by_id(&txid3).unwrap().expect("tx indexed");
+        assert_eq!(thit.block_height, Some(3));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tx_range_walk_matches_block_read() {
+        let b1_txs = vec![
+            coin_tx(vec![], 0, vec![]),
+            coin_tx(vec![0x11; 20], 500, vec![0xac]),
+        ];
+        let b = block([3u8; 32], b1_txs.clone());
+        le

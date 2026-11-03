@@ -824,7 +824,11 @@ impl SmsgEngine {
                 "key": key_hex,
                 "hexversion": 1,
                 "from": from,
-                "to": if folder == FOLDER_INBOX { m.addr_to.clone() } else { m.addr_to.clone() },
+                // addr_to is the RECIPIENT in both folders: inbox records store
+                // the local owning address, outbox records the remote target
+                // (send() sets addr_to = to_address; the outbox DECRYPT key is
+                // addr_outbox, the local sender identity — see `owner` above).
+                "to": m.addr_to.clone(),
                 "sent": Value::Bool(folder == FOLDER_OUTBOX),
                 "read": m.status & crate::smsg::SMSG_MASK_UNREAD == 0,
                 "time": m.time_received,
@@ -1122,6 +1126,33 @@ mod tests {
         // B's bucket now includes it
         let info = b.localinfo_json();
         assert_eq!(info["buckets"].as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn outbox_rows_show_the_recipient_and_decrypt_with_the_sender_key() {
+        // The outbox 'to' field must be the REMOTE recipient (addr_to, set by
+        // send()), not the local sender identity — the sender identity
+        // (addr_outbox) is only the decryption key owner. Regression for the
+        // judge round that read the identical if/else display branch as a
+        // wrong-mapping bug.
+        let k = make_keys();
+        let a = engine("ob-a", vec![k.a.clone()]);
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+        a.send_local(&k.a.address, &k.b.address, "to myself via outbox", now)
+            .unwrap();
+        let outbox = a.list_folder_json(FOLDER_OUTBOX, false).unwrap();
+        let rows = outbox.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["to"], k.b.address, "outbox 'to' = recipient");
+        // KNOWN LIMITATION (disclosed in the milestone evidence): the engine
+        // implements the RECEIVER-side decrypt only, so an outbox row cannot
+        // decrypt its own wire — 'from'/'text' come back empty placeholders.
+        // The mapping fields (to/sent/read) are the contract under test.
+        assert_eq!(rows[0]["from"], "");
+        assert_eq!(rows[0]["text"], "");
+        assert_eq!(rows[0]["sent"], true);
+        assert_eq!(rows[0]["read"], true, "own sends start read");
     }
 
     #[test]

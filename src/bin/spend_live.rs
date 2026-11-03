@@ -18,7 +18,7 @@
 //! failure. The wallet file is opened READ-ONLY.
 
 use serde_json::{json, Value};
-use tri7_core::legacy::{sha256d, Reader, Tx};
+use tri7_core::legacy::{Reader, Tx};
 use tri7_core::spend;
 
 fn die(msg: &str) -> ! {
@@ -78,16 +78,6 @@ fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 
-/// RPC txid (display order) → internal hash bytes for vin.prev_hash.
-fn display_to_internal(disp: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let bytes = hex_decode(disp);
-    for (i, b) in bytes.iter().enumerate().take(32) {
-        out[31 - i] = *b;
-    }
-    out
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let wallet_path = arg(&args, "--wallet").unwrap_or_else(|| die("usage: spend_live --wallet PATH --rpc-port PORT [--height H] [--amount SATS] [--fee SATS] --out FILE"));
@@ -142,25 +132,38 @@ fn main() {
     let wall = tri7_core::wallet::read_wallet(std::path::Path::new(&wallet_path))
         .unwrap_or_else(|e| die(&format!("wallet read: {}", e)));
 
-    // 4. find the wallet-owned non-empty output of the coinstake
-    let mut picked: Option<(usize, i64, Vec<u8>, usize)> = None; // (n, value, script, key_idx)
-    for (n, vout) in stake_tx.vout.iter().enumerate() {
-        if vout.value <= 0 || vout.script_pubkey.is_empty() {
-            continue;
-        }
-        for (ki, k) in wall.keys.iter().enumerate() {
-            let p2pk = spend::script_pubkey_p2pk(&k.pubkey).unwrap();
-            if vout.script_pubkey == p2pk
-                || vout.script_pubkey == spend::script_pubkey_p2pkh(&k.pubkey)
-            {
-                picked = Some((n, vout.value, vout.script_pubkey.clone(), ki));
-                break;
-            }
-        }
-        if picked.is_some() {
-            break;
-        }
+    // 4. find the wallet-owned non-empty output of the coinstake.
+    // Structural guard: on a PoS block vtx[1] IS the coinstake, and a
+    // coinstake carries an empty-marker vout[0] (value 0 + empty script,
+    // main.cpp IsEmpty) — refuse to spend from anything that doesn't match
+    // (spend_live assumes the coinstake layout; a wrong guess here would
+    // target an output we may not own).
+    if stake_tx.vout.first().map(|v| v.value == 0 && v.script_pubkey.is_empty()) != Some(true) {
+        die("tx does not look like a coinstake (vout[0] is not the empty marker)");
     }
+    if stake_tx.vin.len() != 1 || stake_tx.vin[0].prev_hash == [0u8; 32] {
+        die("tx does not look like a coinstake (single non-null stake input expected)");
+    }
+    let picked: Option<(usize, i64, Vec<u8>, usize)> = stake_tx
+        .vout
+        .iter()
+        .enumerate()
+        .skip(1) // vout[0] is the empty marker
+        .find_map(|(n, vout)| {
+            if vout.value <= 0 || vout.script_pubkey.is_empty() {
+                return None;
+            }
+            wall.keys.iter().enumerate().find_map(|(ki, k)| {
+                let p2pk = spend::script_pubkey_p2pk(&k.pubkey).unwrap();
+                if vout.script_pubkey == p2pk
+                    || vout.script_pubkey == spend::script_pubkey_p2pkh(&k.pubkey)
+                {
+                    Some((n, vout.value, vout.script_pubkey.clone(), ki))
+                } else {
+                    None
+                }
+            })
+        });
     let (n_out, value, script, key_idx) =
         picked.unwrap_or_else(|| die("no wallet-owned output in the coinstake tx"));
     let src_key = &wall.keys[key_idx];
@@ -201,7 +204,6 @@ fn main() {
         secret: src_key.secret,
         pubkey: src_key.pubkey.clone(),
     };
-    let _ = display_to_internal; // (kept for readers: display→internal lives here)
     let plan = spend::build_spend(
         &[input.clone()],
         dest_script,
@@ -222,7 +224,6 @@ fn main() {
     let mut disp = [0u8; 32];
     disp.copy_from_slice(&txid_internal);
     let display = tri7_core::p2p::internal_to_display(&disp);
-    let _ = sha256d; // referenced via Tx::hash above; keep import honest
     let report = json!({
         "mode": "live-self-spend",
         "broadcast": false,
