@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/nuspec.xsd">
+  <metadata>
+    <id>cryptographictriangles</id>
+    <version>7.0.0</version>
+    <packageSourceUrl>https://github.com/SamiAhmed7777/tri7/tree/main/packaging/chocolatey</packageSourceUrl>
+    <owners>SamiAhmed7777</owners>
+    <title>Cryptographic Triangles (tri7)</title>
+    <authors>Triangles</authors>
+    <projectUrl>https://github.com/SamiAhmed7777/tri7</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/SamiAhmed7777/tri7/main/docs/logo.png</iconUrl>
+    <copyright>Copyright (c) 2014-2026 Triangles developers</copyright>
+    <licenseUrl>https://github.com/SamiAhmed7777/tri7/blob/main/LICENSE</licenseUrl>
+    <projectSourceUrl>https://github.com/SamiAhmed7777/tri7</projectSourceUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <summary>Cryptographic Triangles (TRI) node + wallet — tri7 Rust rewrite with PoS staking, Tor and I2P, encrypted messaging, built-in explorer.</summary>
+    <description>
+Cryptographic Triangles (TRI) is a privacy-focused cryptocurrency featuring
+Proof-of-Stake consensus, Tor v3 onion routing AND I2P (dual-network,
+first-class), encrypted peer-to-peer messaging (smsg), and a built-in local
+block explorer.
+
+tri7 is the modern Rust rewrite of the original 2014 client (Hash9 algorithm):
+a lightweight daemon (tri7d) and an egui wallet GUI. This package installs the
+official NSIS setup (per-user, into %LOCALAPPDATA%\Tri7Wallet, with Start
+Menu / Desktop shortcuts and Add/Remove Programs entries).
+    </description>
+    <releaseNotes>https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.0</releaseNotes>
+    <tags>cryptocurrency tri triangles pos wallet staking tor i2p</tags>
+    <docsUrl>https://github.com/SamiAhmed7777/tri7#readme</docsUrl>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

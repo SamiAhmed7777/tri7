@@ -1,0 +1,515 @@
+name: Distribute Release (tri7)
+
+# Port of the legacy triangles_v5 distribute.yml pipeline to tri7.
+# Ships new tri7 releases to WinGet, Chocolatey, Homebrew (tap) and the AUR.
+#
+# Triggers:
+#   - tag push (e.g. v7.1.0) — the normal release flow
+#   - workflow_dispatch — manual run for testing/backports
+#
+# Each step that needs a secret checks for it and skips gracefully with a
+# clear warning if it is not set, so the workflow can be merged and tested
+# before secrets are configured (same pattern as the legacy pipeline).
+#
+# IMPORTANT (visibility): package-manager submissions fetch the release
+# assets from a PUBLIC url. While the tri7 repo is private, the "wait for
+# release artifacts" steps will 404 and each job aborts with a clear error.
+# Flip the repo public (Settings → Danger Zone) before expecting real
+# submissions to succeed.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version (e.g. 7.0.0). Leave blank to use tag.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # Release-asset base URL (public once the repo is public).
+  RELEASE_URL_BASE: https://github.com/SamiAhmed7777/tri7/releases/download
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+      - run: echo "Distributing tri7 v${{ steps.v.outputs.version }}"
+
+  winget:
+    name: WinGet (Triangles.CryptographicTriangles)
+    needs: version
+    runs-on: ubuntu-22.04
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check WINGET_TOKEN
+        run: |
+          if [ -z "$WINGET_TOKEN" ]; then
+            echo "::warning::WINGET_TOKEN not set — skipping WinGet PR. Add a GitHub PAT with 'public_repo' scope at Settings → Secrets → Actions."
+          fi
+
+      - name: Wait for release artifacts
+        if: env.WINGET_TOKEN != ''
+        run: |
+          URL="$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          for i in {1..90}; do
+            if curl -fsSL --head "$URL" >/dev/null 2>&1; then
+              echo "✓ Release setup.exe available: $URL"
+              exit 0
+            fi
+            echo "  waiting for release v${VERSION} setup.exe... ($i/90)"
+            sleep 20
+          done
+          echo "::error::Release v${VERSION} setup.exe never became publicly available after 30 minutes (is the tri7 repo still private?)"
+          exit 1
+
+      - name: Compute installer SHA256
+        if: env.WINGET_TOKEN != ''
+        id: sha
+        run: |
+          curl -fsSL -o /tmp/tri7-setup.exe \
+            "$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          SHA=$(sha256sum /tmp/tri7-setup.exe | awk '{print $1}')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "WinGet installer SHA256: $SHA"
+
+      - name: Pre-flight check for existing failed WinGet PRs
+        if: env.WINGET_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          set -e
+          echo "Checking existing open blocker-labelled PRs from SamiAhmed7777 on microsoft/winget-pkgs..."
+          BLOCKING=$(gh api -X GET \
+            'repos/microsoft/winget-pkgs/issues?state=open&labels=PullRequest-Error,Needs-Author-Feedback&per_page=30' \
+            --jq '.[] | select(.user.login=="SamiAhmed7777") | "#\(.number) [\(.state)] \(.title)"' \
+            || echo "")
+          if [ -n "$BLOCKING" ]; then
+            echo "::error::Existing WinGet PR(s) with blocker labels — fix or close those first:"
+            echo "$BLOCKING"
+            exit 1
+          fi
+          echo "✓ No blocker-labelled PRs found — safe to submit."
+
+      - name: Fork + update WinGet manifest + open PR
+        if: env.WINGET_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          PUBLISHER_INITIAL: t
+          PACKAGE_ID: Triangles.CryptographicTriangles
+          PACKAGE_SHORT: CryptographicTriangles
+          INSTALLER_URL: ${{ env.RELEASE_URL_BASE }}/v${{ env.VERSION }}/CryptographicTriangles-${{ env.VERSION }}-win64-setup.exe
+        run: |
+          set -e
+
+          # Skip if a PR for THIS version already exists (avoid duplicates).
+          echo "Checking for existing PR for version ${VERSION}..."
+          if gh api 'repos/microsoft/winget-pkgs/pulls?state=open&per_page=60' \
+              --jq ".[] | select(.head.ref | startswith(\"tri7-${VERSION}-\")) | .number" \
+              | grep -q .; then
+            echo "::notice::PR for v${VERSION} already exists — skipping to avoid duplicate."
+            exit 0
+          fi
+          echo "✓ No existing PR for v${VERSION}."
+
+          # winget-pkgs path convention: manifests/<lowercase first letter>/<Publisher>/<Package>/<version>
+          MANIFEST_DIR="manifests/$PUBLISHER_INITIAL/Triangles/CryptographicTriangles/$VERSION"
+
+          # tri7's Windows installer is NSIS-built (deploy/windows/tri7-wallet.nsi);
+          # standard NSIS silent flag is /S.
+          NSIS_SILENT="/S"
+
+          echo "Forking microsoft/winget-pkgs (if needed)..."
+          if ! gh repo view SamiAhmed7777/winget-pkgs >/dev/null 2>&1; then
+            gh repo fork microsoft/winget-pkgs --remote=false || true
+          fi
+          rm -rf winget-pkgs
+          git clone --depth 1 "https://x-access-token:${WINGET_TOKEN}@github.com/SamiAhmed7777/winget-pkgs" winget-pkgs
+          cd winget-pkgs
+          git config user.name "Sami Ahmed"
+          git config user.email "SamiAhmed7777@users.noreply.github.com"
+
+          BRANCH="tri7-${VERSION}-${{ github.run_number }}"
+          git checkout -b "$BRANCH"
+          mkdir -p "$MANIFEST_DIR"
+
+          # Manifest schema 1.12.0 (same rules the legacy pipeline validated by hand):
+          #   version file: DefaultLocale (NOT PackageLocale), ManifestType "version"
+          #   defaultLocale file: Publisher, PackageName, License, ShortDescription REQUIRED
+          #   installer file: InstallModes array
+          SCHEMA_BASE="https://raw.githubusercontent.com/microsoft/winget-cli/master/schemas/JSON/manifests/v1.12.0"
+
+          cat > "$MANIFEST_DIR/${PACKAGE_ID}.yaml" <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+          PackageIdentifier: ${PACKAGE_ID}
+          PackageVersion: ${VERSION}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.12.0
+          EOF
+
+          cat > "$MANIFEST_DIR/${PACKAGE_ID}.locale.en-US.yaml" <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+          PackageIdentifier: ${PACKAGE_ID}
+          PackageVersion: ${VERSION}
+          PackageLocale: en-US
+          Publisher: Triangles
+          PublisherUrl: https://cryptographic-triangles.org
+          PackageName: Cryptographic Triangles (tri7)
+          License: MIT
+          ShortDescription: Cryptographic Triangles (TRI) node + wallet — tri7 Rust rewrite with PoS staking, Tor and I2P, encrypted messaging, and a built-in explorer.
+          Description: |-
+            Cryptographic Triangles (TRI) is a privacy-focused cryptocurrency
+            featuring Proof-of-Stake consensus, Tor v3 onion routing AND I2P
+            (dual-network, first-class), encrypted peer-to-peer messaging (smsg),
+            and a built-in local block explorer. tri7 is the modern Rust rewrite
+            of the original 2014 client (Hash9 algorithm), with a lightweight
+            daemon (tri7d) and an egui wallet GUI.
+          ManifestType: defaultLocale
+          ManifestVersion: 1.12.0
+          EOF
+
+          cat > "$MANIFEST_DIR/${PACKAGE_ID}.installer.yaml" <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+          PackageIdentifier: ${PACKAGE_ID}
+          PackageVersion: ${VERSION}
+          InstallModes:
+            - interactive
+            - silent
+          InstallerSwitches:
+            Silent: ${NSIS_SILENT}
+            SilentWithProgress: ${NSIS_SILENT}
+          Installers:
+            - Architecture: x64
+              InstallerType: exe
+              InstallerUrl: ${INSTALLER_URL}
+              InstallerSha256: ${SHA}
+          ManifestType: installer
+          ManifestVersion: 1.12.0
+          EOF
+
+          git add "$MANIFEST_DIR"
+          git commit -m "${PACKAGE_ID} version ${VERSION}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo microsoft/winget-pkgs \
+            --head "SamiAhmed7777:${BRANCH}" \
+            --base master \
+            --title "${PACKAGE_ID} version ${VERSION}" \
+            --body "Automated update of ${PACKAGE_ID} to v${VERSION}. Artifacts at ${INSTALLER_URL} (SHA256: ${SHA})."
+
+          echo "✓ WinGet PR opened"
+
+      - name: ✓ Summary
+        if: always()
+        run: |
+          if [ -z "$WINGET_TOKEN" ]; then
+            echo "::notice::WinGet job skipped (WINGET_TOKEN not set)."
+          else
+            echo "::notice::WinGet PR flow completed."
+          fi
+
+  chocolatey:
+    name: Chocolatey (cryptographictriangles)
+    needs: version
+    runs-on: windows-latest
+    env:
+      CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CHOCO_API_KEY
+        shell: bash
+        run: |
+          if [ -z "$CHOCO_API_KEY" ]; then
+            echo "::warning::CHOCO_API_KEY not set — skipping Chocolatey push. Add it at Settings → Secrets → Actions."
+          fi
+
+      - name: Wait for release artifacts
+        if: env.CHOCO_API_KEY != ''
+        shell: bash
+        run: |
+          URL="$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          for i in {1..90}; do
+            if curl -fsSL --head "$URL" >/dev/null 2>&1; then
+              echo "✓ Release setup.exe available: $URL"
+              exit 0
+            fi
+            echo "  waiting for release v${VERSION} setup.exe... ($i/90)"
+            sleep 20
+          done
+          echo "::error::Release v${VERSION} setup.exe never became publicly available after 30 minutes (is the tri7 repo still private?)"
+          exit 1
+
+      - name: Compute installer SHA256
+        if: env.CHOCO_API_KEY != ''
+        id: sha
+        shell: bash
+        run: |
+          curl -fsSL -o /tmp/tri7-setup.exe \
+            "$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          SHA=$(sha256sum /tmp/tri7-setup.exe | awk '{print $1}')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Chocolatey installer SHA256: $SHA"
+
+      - name: Update nuspec version + install script checksum
+        if: env.CHOCO_API_KEY != ''
+        shell: bash
+        working-directory: ${{ github.workspace }}/packaging/chocolatey
+        run: |
+          python3 -c "
+          import re
+          with open('cryptographictriangles.nuspec') as f: c = f.read()
+          c = re.sub(r'<version>[\\d.]+</version>', '<version>${VERSION}</version>', c)
+          with open('cryptographictriangles.nuspec', 'w') as f: f.write(c)
+          with open('tools/chocolateyInstall.ps1') as f: c = f.read()
+          c = c.replace('__CHECKSUM_PLACEHOLDER__', '${{ steps.sha.outputs.sha }}')
+          with open('tools/chocolateyInstall.ps1', 'w') as f: f.write(c)
+          print('updated nuspec version + install script checksum')
+          "
+          grep -E "<version>|<id>" cryptographictriangles.nuspec
+          grep checksum64 tools/chocolateyInstall.ps1
+
+      - name: Pack Chocolatey package
+        if: env.CHOCO_API_KEY != ''
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/packaging/chocolatey
+        run: |
+          choco pack
+          Get-ChildItem *.nupkg
+
+      - name: Push to Chocolatey
+        if: env.CHOCO_API_KEY != ''
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/packaging/chocolatey
+        run: |
+          $apiKey = [System.Environment]::GetEnvironmentVariable('CHOCO_API_KEY', 'Process')
+          choco apikey add --key="$apiKey" --source='https://push.chocolatey.org/'
+          Get-ChildItem *.nupkg | ForEach-Object {
+            Write-Host "Pushing $($_.Name)..."
+            choco push $_.Name --source='https://push.chocolatey.org/'
+          }
+
+      - name: ✓ Summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -z "$CHOCO_API_KEY" ]; then
+            echo "::notice::Chocolatey job skipped (CHOCO_API_KEY not set)."
+          else
+            echo "::notice::Chocolatey push completed (subject to moderator review)."
+          fi
+
+  homebrew:
+    name: Homebrew tap (SamiAhmed7777/homebrew-tap)
+    needs: version
+    runs-on: ubuntu-22.04
+    env:
+      HOMEBREW_GITHUB_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check HOMEBREW_GITHUB_TOKEN
+        run: |
+          if [ -z "$HOMEBREW_GITHUB_TOKEN" ]; then
+            echo "::warning::HOMEBREW_GITHUB_TOKEN not set — skipping Homebrew push. Add a GitHub PAT with 'repo' scope at Settings → Secrets → Actions."
+          fi
+
+      - name: Wait for release artifacts
+        if: env.HOMEBREW_GITHUB_TOKEN != ''
+        run: |
+          URL="$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          for i in {1..90}; do
+            if curl -fsSL --head "$URL" >/dev/null 2>&1; then
+              echo "✓ Release setup.exe available: $URL"
+              exit 0
+            fi
+            echo "  waiting for release v${VERSION} setup.exe... ($i/90)"
+            sleep 20
+          done
+          echo "::error::Release v${VERSION} setup.exe never became publicly available after 30 minutes (is the tri7 repo still private?)"
+          exit 1
+
+      - name: Compute installer SHA256
+        if: env.HOMEBREW_GITHUB_TOKEN != ''
+        id: sha
+        run: |
+          curl -fsSL -o /tmp/tri7-setup.exe \
+            "$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          SHA=$(sha256sum /tmp/tri7-setup.exe | awk '{print $1}')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Cask installer SHA256: $SHA"
+
+      - name: Clone homebrew-tap
+        if: env.HOMEBREW_GITHUB_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_GITHUB_TOKEN}@github.com/SamiAhmed7777/homebrew-tap" /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+          git --no-pager log --oneline | head -3
+
+      - name: Update Cask
+        if: env.HOMEBREW_GITHUB_TOKEN != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          cd /tmp/homebrew-tap
+          python3 - <<'PYEOF'
+          import os, re
+          path = 'Casks/cryptographic-triangles.rb'
+          version = os.environ['VERSION']
+          sha = os.environ['SHA']
+          with open(path) as f:
+              content = f.read()
+          content = re.sub(r'^\s*version\s+"[\d.]+"', f'  version "{version}"', content, count=1, flags=re.MULTILINE)
+          content = re.sub(r'^\s*sha256\s+"[a-f0-9]+"', f'  sha256 "{sha}"', content, count=1, flags=re.MULTILINE)
+          content = re.sub(r'https://github\.com/SamiAhmed7777/tri7/releases/download/v[\d.]+/', f'https://github.com/SamiAhmed7777/tri7/releases/download/v{version}/', content)
+          with open(path, 'w') as f:
+              f.write(content)
+          PYEOF
+          head -5 Casks/cryptographic-triangles.rb
+          git --no-pager diff --stat
+
+      - name: Commit and push
+        if: env.HOMEBREW_GITHUB_TOKEN != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd /tmp/homebrew-tap
+          git config user.name "Sami Ahmed"
+          git config user.email "SamiAhmed7777@users.noreply.github.com"
+          git add Casks/cryptographic-triangles.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit (Homebrew tap already at this version)"
+            exit 0
+          fi
+          git commit -m "cryptographic-triangles ${VERSION}"
+          git push origin main
+
+      - name: ✓ Summary
+        if: always()
+        run: |
+          if [ -z "$HOMEBREW_GITHUB_TOKEN" ]; then
+            echo "::notice::Homebrew job skipped (HOMEBREW_GITHUB_TOKEN not set)."
+          else
+            echo "::notice::Homebrew tap update completed."
+          fi
+
+  aur:
+    name: AUR (tri7d-bin)
+    needs: version
+    runs-on: ubuntu-22.04
+    container:
+      image: archlinux:latest
+    env:
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check AUR_SSH_KEY
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::warning::AUR_SSH_KEY secret not set — skipping AUR push. Add it at Settings → Secrets → Actions."
+            echo "::warning::The key should be the contents of ~/.ssh/aur_key (private key, not .pub)."
+          fi
+
+      - name: Install build tools + create non-root user
+        if: env.AUR_SSH_KEY != ''
+        run: |
+          pacman -Syu --noconfirm --needed git openssh base-devel python sudo
+          # makepkg refuses to run as root — create a build user
+          useradd -m -s /bin/bash build
+          echo 'build ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chown -R build:build "$GITHUB_WORKSPACE"
+
+      - name: Stage PKGBUILD + generate .SRCINFO
+        if: env.AUR_SSH_KEY != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cp "$GITHUB_WORKSPACE/packaging/aur/PKGBUILD" /tmp/PKGBUILD
+          chown build:build /tmp/PKGBUILD
+          sudo -u build bash -c '
+            set -e
+            cd /tmp
+            mkdir -p pkgbuild
+            cp PKGBUILD pkgbuild/
+            cd pkgbuild
+            makepkg --printsrcinfo > .SRCINFO
+            echo "--- generated .SRCINFO ---"
+            cat .SRCINFO
+          '
+
+      - name: Setup SSH key for AUR
+        if: env.AUR_SSH_KEY != ''
+        run: |
+          mkdir -p /home/build/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > /home/build/.ssh/aur_key
+          chmod 600 /home/build/.ssh/aur_key
+          ssh-keyscan -t ed25519 aur.archlinux.org > /home/build/.ssh/known_hosts 2>/dev/null
+          chown -R build:build /home/build/.ssh
+
+      - name: Clone AUR repo
+        if: env.AUR_SSH_KEY != ''
+        run: |
+          sudo -u build bash -c '
+            cd /tmp
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes" \
+              git clone ssh://aur@aur.archlinux.org/tri7d-bin.git
+            ls -la /tmp/tri7d-bin
+          '
+
+      - name: Commit and push to AUR
+        if: env.AUR_SSH_KEY != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cp /tmp/pkgbuild/PKGBUILD /tmp/tri7d-bin/PKGBUILD
+          cp /tmp/pkgbuild/.SRCINFO /tmp/tri7d-bin/.SRCINFO
+          chown -R build:build /tmp/tri7d-bin
+          sudo -u build bash -c '
+            cd /tmp/tri7d-bin
+            git --no-pager diff --stat
+            git config user.name "Sami Ahmed"
+            git config user.email "SamiAhmed7777@users.noreply.github.com"
+            git add PKGBUILD .SRCINFO
+            if git diff --cached --quiet; then
+              echo "No changes to commit (AUR already at this version)"
+              exit 0
+            fi
+            git commit -m "tri7d-bin '"$VERSION"'-1"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes" \
+              git push origin master
+          '
+          echo "::notice::AUR distribution completed."
+
+      - name: ✓ Summary
+        if: always()
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::notice::AUR job was skipped because AUR_SSH_KEY is not set."
+          fi
