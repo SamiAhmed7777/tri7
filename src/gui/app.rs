@@ -21,6 +21,7 @@ use crate::gui::explorer as ex;
 use crate::gui::state as s;
 use crate::gui::state::{Screen, UiConfig, UtxoRec};
 use crate::gui::theme as th;
+use crate::updater::UpdatePhase as UpdatePhaseKind;
 use eframe::egui;
 use egui::{
     Color32, Rounding, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
@@ -647,6 +648,9 @@ impl Tri7App {
                         .show(ui, |ui| {
                             let w = ui.available_width().min(1120.0);
                             ui.allocate_ui(Vec2::new(w, ui.available_height()), |ui| {
+                                // auto-update banner (non-intrusive; state machine
+                                // in src/updater.rs decides when it shows)
+                                self.update_banner(ui);
                                 match self.st.screen {
                                     Screen::Overview => self.page_overview(ui),
                                     Screen::Send => self.page_send(ui),
@@ -666,6 +670,102 @@ impl Tri7App {
                     self.load_screen(ui);
                 }
             });
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-update banner (spec: "Cryptographic Triangles <ver> available —
+    // Download & Install / Skip this version / View release notes"). Shows
+    // ONLY when the pure state machine in src/updater.rs holds a banner
+    // phase; never downloads or installs without the user's click.
+    // -----------------------------------------------------------------------
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(line) = self.st.updater_banner_line() else {
+            return;
+        };
+        let phase = self.st.updater.phase.clone();
+        let (kind, title) = match &phase {
+            UpdatePhaseKind::Available => (th::Notice::Info, line),
+            UpdatePhaseKind::Downloading { .. } => (th::Notice::Info, line),
+            UpdatePhaseKind::ReadyToInstall => (th::Notice::Success, line),
+            UpdatePhaseKind::Failed(_) => (th::Notice::Error, line),
+            _ => return,
+        };
+        th::inline_notice(ui, kind, &title, "");
+        // release notes preview: the user sees WHAT they are getting before
+        // any download button does anything
+        let notes: Option<(String, String, String)> = self.st.updater.release.as_ref().map(|r| {
+            (
+                r.version.to_string_short(),
+                r.html_url.clone(),
+                r.body.lines().take(6).collect::<Vec<_>>().join("\n"),
+            )
+        });
+        if let Some((ver, url, body)) = notes {
+            if !body.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(body).size(12.0).color(th::TEXT_MUTED),
+                    )
+                    .wrap(),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("v{ver}")).color(th::TEXT_SECONDARY),
+                );
+                if th::ghost_button(ui, "View release notes").clicked() {
+                    self.st.updater_view_notes_action();
+                }
+                let _ = url;
+            });
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            match &phase {
+                UpdatePhaseKind::Available => {
+                    if th::primary_button(ui, "Download & Install").clicked() {
+                        if let Err(e) = self.st.updater_download_action() {
+                            self.st.status_log.push(format!("update: {e}"));
+                        }
+                    }
+                    if th::ghost_button(ui, "Skip this version").clicked() {
+                        self.st.updater_skip_action();
+                    }
+                    if th::ghost_button(ui, "Dismiss").clicked() {
+                        self.st.updater_dismiss_action();
+                    }
+                }
+                UpdatePhaseKind::Downloading { .. } => {
+                    ui.label(
+                        egui::RichText::new("verifying checksum when done…")
+                            .size(12.0)
+                            .color(th::TEXT_MUTED),
+                    );
+                }
+                UpdatePhaseKind::ReadyToInstall => {
+                    if th::primary_button(ui, "Install now & restart").clicked() {
+                        match self.st.updater_install_action() {
+                            Ok(desc) => self.st.status_log.push(format!("update: {desc}")),
+                            Err(e) => self.st.status_log.push(format!("update: {e}")),
+                        }
+                    }
+                    if th::ghost_button(ui, "Skip this version").clicked() {
+                        self.st.updater_skip_action();
+                    }
+                }
+                UpdatePhaseKind::Failed(err) => {
+                    if th::secondary_button(ui, "Retry").clicked() {
+                        self.st.updater_retry_action();
+                    }
+                    if th::ghost_button(ui, "Dismiss").clicked() {
+                        self.st.updater_dismiss_action();
+                    }
+                    let _ = err;
+                }
+                _ => {}
+            }
+        });
+        ui.add_space(8.0);
     }
 }
 
@@ -688,6 +788,8 @@ impl eframe::App for Tri7App {
             self.st.staking_poll_action();
             self.st.peers_poll_action();
         }
+        // auto-update: startup + every 6h auto-check, event drain (non-blocking)
+        self.st.updater_tick();
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
@@ -743,6 +845,35 @@ impl Tri7App {
                 );
                 if th::text_input(ui, 420.0, &mut self.st.cfg.wallet_path).changed() {
                     self.st.load_error = None;
+                }
+                if ui.button("Browse...").clicked() {
+                    if let Some(picked) =
+                        rfd::FileDialog::new()
+                            .add_filter("Wallet files", &["dat"])
+                            .set_title("Choose wallet.dat")
+                            .pick_file()
+                    {
+                        self.st.cfg.wallet_path = picked.display().to_string();
+                        self.st.load_error = None;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("State folder:").color(th::TEXT_SECONDARY),
+                );
+                if th::text_input(ui, 420.0, &mut self.st.cfg.state_dir).changed() {
+                    self.st.load_error = None;
+                }
+                if ui.button("Browse folder...").clicked() {
+                    if let Some(picked) =
+                        rfd::FileDialog::new()
+                            .set_title("Choose the state folder")
+                            .pick_folder()
+                    {
+                        self.st.cfg.state_dir = picked.display().to_string();
+                        self.st.load_error = None;
+                    }
                 }
             });
             ui.add_space(8.0);
@@ -3225,6 +3356,56 @@ impl Tri7App {
                         ui.end_row();
                     });
                 th::text_meta(ui, "Staking reserve belongs here (daemon integration pending).");
+                ui.add_space(8.0);
+                ui.separator();
+                // ---- Software updates (src/updater.rs) ----
+                ui.label(
+                    egui::RichText::new("Software updates")
+                        .strong()
+                        .color(th::TEXT_PRIMARY),
+                );
+                ui.label(
+                    egui::RichText::new(self.st.updater_options_line())
+                        .size(12.0)
+                        .color(th::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Checked on startup and every 6 hours from GitHub Releases; \
+                         nothing downloads or installs without your confirmation.",
+                    )
+                    .size(12.0)
+                    .color(th::TEXT_MUTED),
+                );
+                ui.horizontal(|ui| {
+                    if th::secondary_button(ui, "Check for updates").clicked() {
+                        self.st.updater_manual_check_action();
+                    }
+                    if th::ghost_button(ui, "Restore previous version")
+                        .clicked()
+                    {
+                        match self.st.updater_restore_previous_action() {
+                            Ok(desc) => self.st.status_log.push(format!("update: {desc}")),
+                            Err(e) => self.st.status_log.push(format!("update: {e}")),
+                        }
+                    }
+                });
+                if th::ghost_button(ui, "View latest release notes").clicked() {
+                    self.st.updater_view_notes_action();
+                }
+                if matches!(
+                    self.st.updater.phase,
+                    crate::updater::UpdatePhase::Available
+                ) {
+                    if th::primary_button(ui, "Download & Install").clicked() {
+                        if let Err(e) = self.st.updater_download_action() {
+                            self.st.status_log.push(format!("update: {e}"));
+                        }
+                    }
+                }
+                if let crate::updater::UpdatePhase::Failed(err) = &self.st.updater.phase {
+                    th::inline_notice(ui, th::Notice::Error, "Update failed", err);
+                }
             }
             1 => {
                 // Network

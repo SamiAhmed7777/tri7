@@ -20,6 +20,7 @@ pub mod smsg_net;
 pub mod spend;
 pub mod stake;
 pub mod txpool;
+pub mod updater;
 pub mod wallet;
 
 pub use legacy::{Block, Tx, Vin, Vout};

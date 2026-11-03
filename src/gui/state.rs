@@ -148,14 +148,33 @@ pub struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig {
-            wallet_path: "/root/.triangles/wallet.dat".into(),
-            state_dir: "/var/lib/tri7".into(),
-            stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
-            rpc_addr: Some("127.0.0.1:19112".into()),
-            profile_dir: "/root/.tri7_gui".into(),
-            balances_path: "/root/tri7/balances.json".into(),
-            explorer_endpoints: explorer_defaults(),
+        // Platform-native defaults: Linux paths on unix, %APPDATA%/-style paths
+        // on Windows (the hardcoded /root/... defaults made the Windows build
+        // unusable — the load screen fought the operator with unix paths).
+        if cfg!(windows) {
+            let appdata = std::env::var("APPDATA")
+                .unwrap_or_else(|_| format!("{}\\AppData\\Roaming", std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into())));
+            let local = std::env::var("LOCALAPPDATA")
+                .unwrap_or_else(|_| format!("{}\\AppData\\Local", std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into())));
+            UiConfig {
+                wallet_path: format!("{appdata}\\Triangles\\wallet.dat"),
+                state_dir: format!("{local}\\Tri7Wallet\\state"),
+                stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
+                rpc_addr: Some("127.0.0.1:19114".into()),
+                profile_dir: format!("{local}\\Tri7Wallet\\profile"),
+                balances_path: format!("{local}\\Tri7Wallet\\balances.json"),
+                explorer_endpoints: explorer_defaults(),
+            }
+        } else {
+            UiConfig {
+                wallet_path: "/root/.triangles/wallet.dat".into(),
+                state_dir: "/var/lib/tri7".into(),
+                stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
+                rpc_addr: Some("127.0.0.1:19112".into()),
+                profile_dir: "/root/.tri7_gui".into(),
+                balances_path: "/root/tri7/balances.json".into(),
+                explorer_endpoints: explorer_defaults(),
+            }
         }
     }
 }

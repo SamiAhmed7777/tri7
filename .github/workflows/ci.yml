@@ -22,11 +22,53 @@ jobs:
       - name: rustfmt
         run: cargo fmt -- --check || true
 
+  # Auto-updater release-asset job: packages the Linux GUI wallet into the
+  # release-asset convention the in-app updater resolves
+  # (CryptographicTriangles-<ver>-linux-x64.tar.gz) + SHA256SUMS for digest
+  # pinning (src/updater.rs).
+  linux-gui-tarball:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build GUI wallet (egui — links only base libs, GL is dlopen'd)
+        run: cargo build --release --features gui --bin tri7_wallet_gui
+      - name: Package tarball + SHA256SUMS
+        run: |
+          VER=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print([p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='tri7-core'][0])")
+          ASSET="CryptographicTriangles-${VER}-linux-x64.tar.gz"
+          mkdir -p pkg
+          cp target/release/tri7_wallet_gui pkg/
+          tar czf "$ASSET" -C pkg tri7_wallet_gui
+          # digest pinning keyed by the RELEASE ASSET (the tarball itself —
+          # the updater downloads and hashes the asset, not its contents)
+          sha256sum "$ASSET" > SHA256SUMS
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "SHA256:"; cat SHA256SUMS
+        id: pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.asset }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}
+            SHA256SUMS
+
   windows-build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Auto-updater version metadata: every artifact below is named from the
+      # SINGLE source (Cargo.toml) so the in-app updater can match assets
+      # (src/updater.rs resolves CryptographicTriangles-<ver>-*).
+      - name: Resolve version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $v = ($meta.packages | Where-Object { $_.name -eq 'tri7-core' }).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$v"
       - name: Build daemon (follow_tip)
         run: cargo build --release --bins
       - name: Build GUI wallet (egui)
@@ -39,7 +81,13 @@ jobs:
           path: |
             target/release/follow_tip.exe
             target/release/tri7_wallet_gui.exe
-      - name: Build Windows installer (NSIS)
+      # Updater release-asset shapes (src/updater.rs resolves exactly these
+      # names on GitHub Releases):
+      #   CryptographicTriangles-<ver>-win64-setup.exe        (NSIS /S)
+      #   CryptographicTriangles-<ver>-win64-gui-portable.exe (portable exe)
+      #   CryptographicTriangles-<ver>-win64-tri7d.exe        (daemon)
+      # plus SHA256SUMS — the digest-pinning source the release body quotes.
+      - name: Build Windows installer (NSIS with version metadata)
         run: |
           choco install nsis -y --no-progress
           Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe deploy\windows\
@@ -48,11 +96,40 @@ jobs:
           } else {
             $mk = "$env:ChocolateyInstall\bin\makensis.exe"
           }
-          & "$mk" deploy\windows\tri7-wallet.nsi
+          & "$mk" -DVERSION=${{ steps.ver.outputs.version }} deploy\windows\tri7-wallet.nsi
+          Copy-Item target\release\tri7_wallet_gui.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe"
+          Copy-Item target\release\follow_tip.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-tri7d.exe"
+      - name: SHA256SUMS (digest pinning for the updater)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $names = @(
+            "CryptographicTriangles-$v-win64-setup.exe",
+            "CryptographicTriangles-$v-win64-gui-portable.exe",
+            "CryptographicTriangles-$v-win64-tri7d.exe"
+          )
+          $files = @(
+            "deploy\windows\CryptographicTriangles-$v-win64-setup.exe",
+            "CryptographicTriangles-$v-win64-gui-portable.exe",
+            "CryptographicTriangles-$v-win64-tri7d.exe"
+          )
+          $lines = 0..2 | ForEach-Object {
+            $h = (Get-FileHash $files[$_] -Algorithm SHA256).Hash.ToLower()
+            "$h  $($names[$_])"
+          }
+          $lines | Set-Content SHA256SUMS
+          Get-Content SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: tri7-wallet-setup-7.0.0.exe
-          path: deploy/windows/tri7-wallet-setup-7.0.0.exe
+          name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-setup.exe
+          path: deploy/windows/CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-portable-and-digests
+          path: |
+            CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe
+            CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-tri7d.exe
+            SHA256SUMS
 
   macos-build:
     runs-on: macos-latest
@@ -63,3 +140,21 @@ jobs:
         run: cargo build --release --features gui --bin tri7_wallet_gui
       - name: Run lib tests
         run: cargo test --release --lib
+      - name: Package tarball (updater asset shape)
+        run: |
+          VER=$(cargo metadata --no-deps --format-version 1 | /usr/bin/python3 -c "import json,sys; print([p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='tri7-core'][0])")
+          ASSET="CryptographicTriangles-${VER}-macos-arm64.tar.gz"
+          mkdir -p pkg
+          cp target/release/tri7_wallet_gui pkg/
+          tar czf "$ASSET" -C pkg tri7_wallet_gui
+          # digest pinning keyed by the RELEASE ASSET (the tarball itself)
+          shasum -a 256 "$ASSET" > SHA256SUMS
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "SHA256:"; cat SHA256SUMS
+        id: pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.asset }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}
+            SHA256SUMS

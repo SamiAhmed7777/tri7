@@ -199,6 +199,10 @@ pub struct AppState {
     pub peers_live: PeersLive,
     pub messages: MessagesState,
     pub broadcast: BroadcastState,
+    // ---- auto-update (src/updater.rs) ----
+    pub updater: crate::updater::UpdateState,
+    /// Events from the check/download worker threads (gui feature only).
+    pub updater_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateEvent>>,
 }
 
 impl AppState {
@@ -215,6 +219,15 @@ impl AppState {
             }
         }
         let explorer = super::explorer::ExplorerState::new(endpoints);
+        // updater: persistence + download work dir live under profile_dir;
+        // on Windows detect the NSIS install root for installer-vs-portable
+        #[allow(unused_mut)]
+        let mut updater = crate::updater::UpdateState::new(Path::new(&cfg.profile_dir));
+        #[cfg(target_os = "windows")]
+        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+            updater.windows_install_root =
+                Some(std::path::PathBuf::from(lad).join("Tri7Wallet"));
+        }
         AppState {
             cfg,
             screen: Screen::Overview,
@@ -243,6 +256,8 @@ impl AppState {
             peers_live: PeersLive::default(),
             messages: MessagesState::default(),
             broadcast: BroadcastState::default(),
+            updater,
+            updater_rx: None,
         }
     }
 
@@ -411,6 +426,271 @@ impl AppState {
         });
         self.broadcast.busy = false;
         self.broadcast.result = Some(r);
+    }
+
+    // ===========================================================================
+    // Auto-update actions (src/updater.rs). The banner state machine is pure;
+    // these methods are the glue: scheduling, worker threads, guards, and the
+    // user-confirmed download/install flow. NOTHING downloads or installs
+    // without the user having seen the version + notes and clicked through.
+    // ===========================================================================
+
+    /// GUI tick: auto-check on startup + every 6h, then drain worker events.
+    /// Called from the egui update loop only.
+    pub fn updater_tick(&mut self) {
+        if !self.updater.is_inflight() && self.updater.needs_check() {
+            self.updater_spawn_check(false);
+        }
+        self.updater_poll();
+    }
+
+    fn updater_spawn_check(&mut self, manual: bool) {
+        if self.updater.request_check().is_err() {
+            return;
+        }
+        #[cfg(feature = "gui")]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match crate::updater::runtime::spawn_check(tx) {
+                Ok(()) => self.updater_rx = Some(rx),
+                Err(e) => {
+                    self.updater.abort_inflight();
+                    if manual {
+                        self.status_log.push(format!("update check: {e}"));
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            let _ = manual;
+            self.updater.abort_inflight();
+        }
+    }
+
+    /// Drain worker events into the state machine.
+    pub fn updater_poll(&mut self) {
+        let Some(rx) = &self.updater_rx else {
+            return;
+        };
+        let mut done = false;
+        while let Ok(ev) = rx.try_recv() {
+            self.updater.handle_event(ev);
+            if matches!(
+                self.updater.phase,
+                crate::updater::UpdatePhase::ReadyToInstall
+                    | crate::updater::UpdatePhase::Failed(_)
+            ) {
+                done = true;
+            }
+        }
+        if done {
+            self.updater_rx = None;
+        }
+    }
+
+    /// Manual "Check for updates" (Options) — result surfaces immediately.
+    pub fn updater_manual_check_action(&mut self) {
+        if self.updater.request_check_manual().is_err() {
+            return;
+        }
+        #[cfg(feature = "gui")]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match crate::updater::runtime::spawn_check(tx) {
+                Ok(()) => self.updater_rx = Some(rx),
+                Err(e) => {
+                    self.updater.abort_inflight();
+                    self.status_log.push(format!("update check: {e}"));
+                }
+            }
+        }
+        #[cfg(not(feature = "gui"))]
+        self.updater.abort_inflight();
+    }
+
+    /// Banner "Download & Install": guard the in-flight broadcast, then spawn
+    /// the download worker. The user has SEEN version + notes at this point.
+    pub fn updater_download_action(&mut self) -> Result<(), String> {
+        let busy = self.broadcast.busy;
+        self.updater.request_download(busy)?;
+        self.updater_spawn_download()
+    }
+
+    /// Spawn the download worker for a request the state machine already
+    /// accepted (request_download / retry already transitioned phases).
+    fn updater_spawn_download(&mut self) -> Result<(), String> {
+        let (dest, flavor, pinned) = self.updater.download_started_meta();
+        let Some(rel) = self.updater.release.clone() else {
+            self.updater.abort_inflight();
+            return Err("no release on offer".into());
+        };
+        let Some(asset) = crate::updater::pick_asset(&rel, flavor).cloned() else {
+            self.updater.abort_inflight();
+            return Err(format!(
+                "no asset for this platform (expected {})",
+                flavor.asset_name(&rel.version)
+            ));
+        };
+        #[cfg(feature = "gui")]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match crate::updater::runtime::spawn_download(
+                tx,
+                asset,
+                dest,
+                pinned,
+                flavor,
+                rel.version.clone(),
+            ) {
+                Ok(()) => self.updater_rx = Some(rx),
+                Err(e) => {
+                    self.updater.abort_inflight();
+                    return Err(format!("spawn download: {e}"));
+                }
+            }
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            let _ = (asset, dest, pinned, flavor);
+            self.updater.abort_inflight();
+        }
+        Ok(())
+    }
+
+    /// Options/banner "Install now": THE SAFETY GATE.
+    /// 1. refuse while a send/broadcast is in flight,
+    /// 2. flush wallet state first (drop the RW session → SQLite close),
+    /// 3. hand the payload to the platform installer (exit + relaunch).
+    pub fn updater_install_action(&mut self) -> Result<String, String> {
+        let busy = self.broadcast.busy;
+        // guard FIRST (refusal must not disturb the wallet session), flush
+        // the RW wallet only once the install is actually accepted
+        let plan = self.updater.request_install(busy)?;
+        self.wallet_rw = None; // close wallet.dat before any payload runs
+        #[cfg(feature = "gui")]
+        if let Err(e) = crate::updater::runtime::execute_install(&plan) {
+            self.updater.phase = crate::updater::UpdatePhase::Failed(e.clone());
+            return Err(e);
+        }
+        #[cfg(not(feature = "gui"))]
+        let _ = &plan;
+        Ok(plan.describe)
+    }
+
+    /// "Skip this version" — persisted; banner stays quiet for that version.
+    pub fn updater_skip_action(&mut self) {
+        self.updater.skip_version();
+        self.status_log
+            .push("update: version skipped".into());
+    }
+
+    /// Dismiss the banner without skipping (returns on the next check).
+    pub fn updater_dismiss_action(&mut self) {
+        self.updater.dismiss();
+    }
+
+    /// Retry a failed check/download. A failed download re-enters the
+    /// download worker; a failed CHECK has nothing to retry — reset the
+    /// in-flight slot and start a fresh manual check (no hang).
+    pub fn updater_retry_action(&mut self) {
+        let busy = self.broadcast.busy;
+        if self.updater.release.is_some() {
+            // retry() re-runs the pure download transition; we only spawn the
+            // worker thread here (single spawn, no double request)
+            if self.updater.retry(busy).is_ok() {
+                self.updater_spawn_download()
+                    .unwrap_or_else(|e| self.status_log.push(format!("update: {e}")));
+            }
+        } else {
+            // failed check: retry() reports Err (nothing to re-run); clear the
+            // state machine and run a fresh MANUAL check
+            self.updater.abort_inflight();
+            self.updater_spawn_check(true);
+        }
+    }
+
+    /// Banner "View release notes" — opens the GitHub release page.
+    pub fn updater_view_notes_action(&mut self) {
+        let Some(url) = self.updater.release.as_ref().map(|r| r.html_url.clone()) else {
+            return;
+        };
+        #[cfg(feature = "gui")]
+        if let Err(e) = crate::updater::runtime::open_url(&url) {
+            self.status_log.push(format!("release notes: {e}"));
+        }
+        #[cfg(not(feature = "gui"))]
+        let _ = url;
+    }
+
+    /// Options "Restore previous version" — one-click rollback from <exe>.bak.
+    pub fn updater_restore_previous_action(&mut self) -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+        let plan = crate::updater::restore_previous_plan(&exe)?;
+        self.wallet_rw = None;
+        #[cfg(feature = "gui")]
+        if let Err(e) = crate::updater::runtime::execute_install(&plan) {
+            return Err(e);
+        }
+        #[cfg(not(feature = "gui"))]
+        let _ = &plan;
+        Ok(plan.describe)
+    }
+
+    /// One-line banner text for the view layer (None = no banner).
+    pub fn updater_banner_line(&self) -> Option<String> {
+        let ver = self.updater.release.as_ref().map(|r| r.version.to_string_short());
+        match &self.updater.phase {
+            crate::updater::UpdatePhase::Available => {
+                ver.map(|v| format!("Cryptographic Triangles {v} available"))
+            }
+            crate::updater::UpdatePhase::Downloading { received, total } => Some(format!(
+                "Downloading Cryptographic Triangles {} — {}/{} MiB",
+                ver.unwrap_or_default(),
+                received / (1024 * 1024),
+                (total / (1024 * 1024)).max(1)
+            )),
+            crate::updater::UpdatePhase::ReadyToInstall => {
+                ver.map(|v| format!("Cryptographic Triangles {v} downloaded — install to restart"))
+            }
+            crate::updater::UpdatePhase::Failed(e) => Some(format!("Update failed: {e}")),
+            _ => None,
+        }
+    }
+
+    /// Options "Software updates" status line.
+    pub fn updater_options_line(&self) -> String {
+        let checked = match self.updater.last_check_age_secs() {
+            None => "never".into(),
+            Some(s) if s < 90 => format!("{s}s ago"),
+            Some(s) => format!("{}m ago", s / 60),
+        };
+        let skipped = self
+            .updater
+            .skipped_version()
+            .map(|v| format!(" (skipped: {v})"))
+            .unwrap_or_default();
+        match &self.updater.phase {
+            crate::updater::UpdatePhase::Available => format!(
+                "Cryptographic Triangles {} available — checked {}{}",
+                self.updater
+                    .release
+                    .as_ref()
+                    .map(|r| r.version.to_string_short())
+                    .unwrap_or_default(),
+                checked,
+                skipped
+            ),
+            crate::updater::UpdatePhase::UpToDate => {
+                format!("Up to date (v{}) — checked {}", crate::updater::current_version(), checked)
+            }
+            _ => format!(
+                "Current version: v{} — checked {}{}",
+                crate::updater::current_version(),
+                checked,
+                skipped
+            ),
+        }
     }
 
     pub fn loaded(&self) -> bool {

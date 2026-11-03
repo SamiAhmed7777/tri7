@@ -1,13 +1,19 @@
 ; tri7 Wallet — Cryptographic Triangles (TRI) NSIS installer
-; v7.0.0 — installs the GUI wallet + tri7d daemon like a normal Windows program
+; installs the GUI wallet + tri7d daemon like a normal Windows program
+; VERSION: overridable from CI (makensis -DVERSION=<ver>) so the installer
+; metadata AND the output filename carry the Cargo.toml version — the in-app
+; auto-updater (src/updater.rs) resolves release assets as
+; CryptographicTriangles-<ver>-win64-setup.exe.
 
 !define APPNAME "Cryptographic Triangles"
 !define COMPANY "Triangles"
+!ifndef VERSION
 !define VERSION "7.0.0"
+!endif
 !define EXEDIR "."
 
 Name "${APPNAME} ${VERSION}"
-OutFile "tri7-wallet-setup-7.0.0.exe"
+OutFile "CryptographicTriangles-${VERSION}-win64-setup.exe"
 InstallDir "$LOCALAPPDATA\Tri7Wallet"
 InstallDirRegKey HKCU "Software\Tri7Wallet" "InstallDir"
 RequestExecutionLevel user

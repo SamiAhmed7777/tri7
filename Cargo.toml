@@ -14,6 +14,9 @@ ripemd = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 secp256k1 = { version = "0.29", features = ["recovery"] }
 getrandom = "0.2"
+rfd = { version = "0.15", optional = true }
+arboard = { version = "3", optional = true }
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: legacy RPC parity — getbalance/listunspent amounts must
 # survive a JSON round trip bit-exactly (default formatting loses ULPs)
@@ -32,10 +35,22 @@ eframe = { version = "=0.29.1", default-features = false, features = [
 ], optional = true }
 # PNG decode for the legacy Qt asset carry-over (header logo, menu icons)
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# Auto-updater (src/updater.rs): HTTPS to api.github.com + release-asset
+# downloads. Optional, folded into the gui feature so headless builds (and
+# tri7d) never link a TLS stack. rustls + bundled webpki roots: no system
+# trust store dependency on Windows.
+ureq = { version = "2.12", default-features = false, features = [
+    "tls",
+], optional = true }
+# Tarball payloads for the linux/macos update path (pure rust: miniz_oxide
+# backend, no system tar dependency). Always-on so the extraction path is
+# unit-tested in the headless suite too.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
 
 [features]
 default = []
-gui = ["dep:egui", "dep:eframe", "dep:image"]
+gui = ["dep:egui", "dep:eframe", "dep:image", "dep:rfd", "dep:ureq", "dep:arboard"]
 
 [profile.release]
 opt-level = 3

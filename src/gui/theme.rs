@@ -363,7 +363,46 @@ pub fn danger_button(ui: &mut Ui, label: &str) -> egui::Response {
 /// Styled single-line input: INPUT_BG, 1 px BORDER, hover #7A2B19,
 /// focus 1.5 px BRAND_RED, 10 px horizontal padding, radius 4.
 pub fn text_input(ui: &mut Ui, width: f32, buf: &mut String) -> egui::Response {
-    text_input_h(ui, width, buf, None)
+    let r = text_input_h(ui, width, buf, None);
+    attach_edit_menu(ui, &r, buf);
+    r
+}
+
+/// Right-click context menu for path/text fields: Select all, Copy,
+/// Paste (replace contents), Clear - the load screen must behave like a
+/// normal Windows edit box (Sami directive). Paste reads the system
+/// clipboard via arboard (same backend egui/eframe uses).
+pub fn attach_edit_menu(ui: &mut Ui, response: &egui::Response, buf: &mut String) {
+    response.context_menu(|ui| {
+        let select_all = ui.button("Select all");
+        let copy_all = ui.button("Copy");
+        let paste_replace = ui.button("Paste (replace contents)");
+        let clear = ui.button("Clear");
+        if select_all.clicked() {
+            let id = response.id;
+            let mut st = egui::TextEdit::load_state(ui.ctx(), id);
+            if let Some(mut s) = st.take() {
+                s.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::default(),
+                    egui::text::CCursor::new(buf.chars().count()),
+                )));
+                egui::TextEdit::store_state(ui.ctx(), id, s);
+            }
+        }
+        if copy_all.clicked() {
+            ui.ctx().copy_text(buf.clone());
+        }
+        if paste_replace.clicked() {
+            if let Ok(mut clip) = arboard::Clipboard::new() {
+                if let Ok(text) = clip.get_text() {
+                    *buf = text;
+                }
+            }
+        }
+        if clear.clicked() {
+            buf.clear();
+        }
+    });
 }
 
 /// Styled single-line input with an optional in-field placeholder.
@@ -394,7 +433,9 @@ pub fn text_input_h(
         if let Some(h) = hint {
             te = te.hint_text(h);
         }
-        ui.add(te)
+        let r = ui.add(te);
+        attach_edit_menu(ui, &r, buf);
+        r
     })
     .inner
 }

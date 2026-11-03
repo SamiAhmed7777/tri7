@@ -1121,3 +1121,135 @@ fn locked_wallet_falls_back_to_keystore() {
     drop(blocker);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// auto-update integration (src/updater.rs + AppState glue)
+// ---------------------------------------------------------------------------
+
+fn upd_test_cfg(dir: &std::path::Path) -> UiConfig {
+    UiConfig {
+        wallet_path: dir.join("wallet.dat").display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    }
+}
+
+#[test]
+fn appstate_starts_with_quiet_updater() {
+    let dir = gui_test_dir("upd_quiet");
+    let st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    assert_eq!(
+        st.updater.phase,
+        crate::updater::UpdatePhase::Idle
+    );
+    assert_eq!(
+        st.updater.current,
+        crate::updater::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+    );
+    assert!(st.updater_banner_line().is_none());
+    assert!(st.updater_rx.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn updater_banner_line_pins_the_offered_jump() {
+    use crate::updater::{UpdateEvent, UpdatePhase};
+    let dir = gui_test_dir("upd_banner");
+    let mut st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    st.updater.flavor_override = Some(crate::updater::UpdateFlavor::WindowsInstaller);
+    st.updater.request_check().unwrap();
+    let rel = crate::updater::parse_release_json(&serde_json::from_value(serde_json::json!({
+        "tag_name": "v7.0.1",
+        "name": "Cryptographic Triangles 7.0.1",
+        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.1",
+        "body": "## SHA256\n",
+        "assets": [{"name": "CryptographicTriangles-7.0.1-win64-setup.exe",
+                    "size": 12345678,
+                    "browser_download_url": "https://example.com/x.exe"}]
+    })).unwrap()).unwrap();
+    st.updater.handle_event(UpdateEvent::Checked(Ok(rel)));
+    assert_eq!(st.updater.phase, UpdatePhase::Available);
+    assert_eq!(
+        st.updater_banner_line().as_deref(),
+        Some("Cryptographic Triangles 7.0.1 available")
+    );
+    // download refused while a broadcast is in flight — banner stays honest
+    st.broadcast.busy = true;
+    assert!(st.updater_download_action().is_err());
+    assert_eq!(st.updater.phase, UpdatePhase::Available);
+    st.broadcast.busy = false;
+    // headless host: the action validates + transitions but aborts the worker
+    // (no thread spawn without the gui feature) → back to Idle. The full
+    // Downloading flow is pinned by src/updater.rs tests with the runtime
+    // flavor override driving handle_event directly.
+    st.updater_download_action().unwrap();
+    assert_eq!(st.updater.phase, crate::updater::UpdatePhase::Idle);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
+    use crate::updater::{DownloadedUpdate, UpdateFlavor, Version};
+    let dir = gui_test_dir("upd_install");
+    let mut st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    // a verified payload ready to install
+    let payload = dir.join("CryptographicTriangles-7.0.1-win64-setup.exe");
+    std::fs::write(&payload, b"p").unwrap();
+    st.updater.downloaded = Some(DownloadedUpdate {
+        flavor: UpdateFlavor::WindowsInstaller,
+        version: Version::parse("7.0.1").unwrap(),
+        path: payload.clone(),
+        size: 1,
+        pinned_digest: None,
+    });
+    st.updater.phase = crate::updater::UpdatePhase::ReadyToInstall;
+    // THE GUARD: broadcast in flight → refused, nothing executes
+    st.broadcast.busy = true;
+    assert!(st.updater_install_action().is_err());
+    assert_eq!(st.updater.phase, crate::updater::UpdatePhase::ReadyToInstall);
+    // free → transition to InstallPending (plan built; headless host does not
+    // execute — the plan's describe pins the flow)
+    st.broadcast.busy = false;
+    let desc = st.updater_install_action().unwrap();
+    assert!(desc.contains("/S"));
+    assert_eq!(st.updater.phase, crate::updater::UpdatePhase::InstallPending);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn updater_skip_persists_across_appstate_rebuild() {
+    use crate::updater::UpdateEvent;
+    let dir = gui_test_dir("upd_skip");
+    let mut st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    st.updater.request_check().unwrap();
+    let rel = crate::updater::parse_release_json(&serde_json::from_value(serde_json::json!({
+        "tag_name": "v7.0.9",
+        "name": "Cryptographic Triangles 7.0.9",
+        "html_url": "https://example.com/r",
+        "body": "",
+        "assets": []
+    })).unwrap()).unwrap();
+    st.updater.handle_event(UpdateEvent::Checked(Ok(rel)));
+    st.updater_skip_action();
+    // a fresh AppState in the same profile stays quiet for the skipped version
+    let st2 = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    assert_eq!(
+        st2.updater.skipped_version(),
+        Some(&crate::updater::Version::parse("7.0.9").unwrap())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn updater_options_line_reports_state() {
+    let dir = gui_test_dir("upd_opts");
+    let st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
+    let line = st.updater_options_line();
+    assert!(line.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))), "{line}");
+    assert!(line.contains("never"), "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
