@@ -42,8 +42,8 @@ jobs:
       - name: Build Windows installer (NSIS)
         run: |
           choco install nsis -y --no-progress
-          cp target/release/tri7_wallet_gui.exe, target/release/follow_tip.exe deploy/windows/
-          makensis deploy/windows/tri7-wallet.nsi
+          Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe deploy\windows\
+          & "$env:ChocolateyInstall\bin\makensis.exe" deploy\windows\tri7-wallet.nsi
       - uses: actions/upload-artifact@v4
         with:
           name: tri7-wallet-setup-7.0.0.exe
