@@ -1941,8 +1941,13 @@ fn validate_block(
                 stats.kernel_skipped_no_oracle += 1;
             }
         }
-        // 8. block signature (required above the last hard checkpoint)
-        if h > LAST_HARDCODED_CHECKPOINT as u64 {
+        // 8. block signature (required above the checkpoint horizon).
+        // The deployed client gates this on Checkpoints::GetTotalBlocksEstimate()
+        // (= the HIGHEST checkpoint, 2203924) — everything below skips sig
+        // verification, which is why the instamine-era bad signature at h9003
+        // (6e218830...) is IN the chain and must stay tolerated here.
+        const CHECKPOINT_HORIZON: u64 = 2203924; // = Checkpoints::GetTotalBlocksEstimate() on the deployed client
+        if h > CHECKPOINT_HORIZON {
             check_pos_block_signature(block).map_err(|e| format!("h{}: block sig: {}", h, e))?;
             stats.sigs_checked += 1;
         }
@@ -1964,7 +1969,8 @@ fn validate_block(
         // 8. PoW blocks carry an empty signature (era rule: only enforced
         // above the last hard checkpoint — the pre-revival chain's PoW
         // blocks serialized a legacy vchBlockSig field that is not empty)
-        if h > LAST_HARDCODED_CHECKPOINT as u64 {
+        const CHECKPOINT_HORIZON: u64 = 2203924;
+        if h > CHECKPOINT_HORIZON {
             check_pow_block_signature(block).map_err(|e| format!("h{}: {}", h, e))?;
         }
         stats.sigs_checked += 1;
