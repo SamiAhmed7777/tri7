@@ -1,0 +1,6 @@
+/target
+/target-*/
+*.exe
+*.pdb
+wallet_utxos.json
+logs/

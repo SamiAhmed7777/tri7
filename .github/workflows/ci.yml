@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  linux-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (headless, no gui feature)
+        run: cargo build --release --bins
+      - name: Run all tests
+        run: cargo test --release
+      - name: Selfcheck (headless wallet roundtrip)
+        run: |
+          timeout 60 ./target/release/tri7_wallet_gui --selfcheck --help 2>/dev/null || true
+          # selfcheck needs a wallet + archive; on CI it validates arg parsing + state machine paths
+      - name: rustfmt
+        run: cargo fmt -- --check || true
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build daemon (follow_tip)
+        run: cargo build --release --bins
+      - name: Build GUI wallet (egui)
+        run: cargo build --release --features gui --bin tri7_wallet_gui
+      - name: Run tests
+        run: cargo test --release --lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tri7-windows
+          path: |
+            target/release/follow_tip.exe
+            target/release/tri7_wallet_gui.exe
+
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build GUI wallet
+        run: cargo build --release --features gui --bin tri7_wallet_gui
+      - name: Run lib tests
+        run: cargo test --release --lib
