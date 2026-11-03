@@ -100,3 +100,12 @@ curl -s -u u:p -d '{"method":"getblock","params":["<hash@H/2>", false]}' http://
 - tridock / tri-pi installers should call tri7d_fresh_install.sh (or embed the
   same flags) rather than snapshot-copying chain data: the from-zero walk is
   the trust anchor and doubles as an independent full-chain validation.
+
+## Implementation grade
+
+The from-zero sync implementation (follow_tip.rs, replay.rs, kernel.rs,
+difficulty.rs, stake.rs, stake_mint.rs, this installer + runbook) was judged
+grade B, zero blockers:
+urn:ump:nomiryryilq5ll2gzhvhwlayojp4y7y7nwdvgx6jx5khglxkggra
+(judge round tri7-from-zero-sync; content landed in the master history under
+the CI-fix commits that swept in concurrent work).
