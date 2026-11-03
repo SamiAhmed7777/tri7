@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 220" role="img" aria-labelledby="title desc">
+  <title id="title">Triangles full brand lockup</title>
+  <desc id="desc">The red-orange triangle mark beside a heavy copper Triangles wordmark.</desc>
+  <defs>
+    <linearGradient id="markFace" gradientUnits="userSpaceOnUse" x1="48" y1="28" x2="190" y2="180">
+      <stop offset="0" stop-color="#F03A18"/>
+      <stop offset="0.43" stop-color="#E32105"/>
+      <stop offset="1" stop-color="#A01000"/>
+    </linearGradient>
+    <linearGradient id="markFacet" gradientUnits="userSpaceOnUse" x1="116" y1="22" x2="202" y2="177">
+      <stop offset="0" stop-color="#FF5A2E" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#6E180D" stop-opacity="0.28"/>
+    </linearGradient>
+    <linearGradient id="copper" gradientUnits="userSpaceOnUse" x1="0" y1="46" x2="0" y2="172">
+      <stop offset="0" stop-color="#F0B27A"/>
+      <stop offset="0.20" stop-color="#E99A52"/>
+      <stop offset="0.55" stop-color="#E08A3C"/>
+      <stop offset="1" stop-color="#8C4A1E"/>
+    </linearGradient>
+  </defs>
+
+  <g aria-label="triangle mark">
+    <path d="M116 22 L207 181 Q210 187 203 189 L29 189 Q22 187 25 181 Z" fill="#43150D"/>
+    <path d="M116 17 L208 177 Q211 183 204 184 L28 184 Q21 183 24 177 L111 21 Q113 17 116 17 Z"
+          fill="#E32105" stroke="#5B2013" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M116 22 L30 176 L116 176 Z" fill="#F03A18" fill-opacity="0.24"/>
+    <path d="M116 22 L201 176 L116 176 Z" fill="#A01000" fill-opacity="0.42"/>
+    <path d="M34 176 L116 30" fill="none" stroke="#FF6742" stroke-opacity="0.22" stroke-width="3" stroke-linecap="round"/>
+    <path d="M35 179 H196" fill="none" stroke="#6F1C10" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- A hard offset underprint creates the chunky, screen-printed depth of the 2014 lockup. -->
+  <text x="246" y="164" dx="5" dy="7"
+        font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif" font-size="130" font-weight="900"
+        letter-spacing="-5" fill="#4A170E" stroke="#35100B" stroke-width="7" stroke-linejoin="round"
+        paint-order="stroke fill">Triangles</text>
+  <text x="246" y="164"
+        font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif" font-size="130" font-weight="900"
+        letter-spacing="-5" fill="url(#copper)" stroke="#5B2013" stroke-width="6" stroke-linejoin="round"
+        paint-order="stroke fill">Triangles</text>
+</svg>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 224" role="img" aria-labelledby="title desc">
+  <title id="title">Cryptographic Triangles brand mark</title>
+  <desc id="desc">A dimensional red-orange equilateral triangle with a dark red-brown edge.</desc>
+  <defs>
+    <linearGradient id="face" gradientUnits="userSpaceOnUse" x1="48" y1="30" x2="208" y2="200">
+      <stop offset="0" stop-color="#F03A18"/>
+      <stop offset="0.42" stop-color="#E32105"/>
+      <stop offset="1" stop-color="#A01000"/>
+    </linearGradient>
+    <linearGradient id="facet" gradientUnits="userSpaceOnUse" x1="128" y1="20" x2="230" y2="200">
+      <stop offset="0" stop-color="#F84B27" stop-opacity="0.22"/>
+      <stop offset="0.58" stop-color="#C81A05" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#6E180D" stop-opacity="0.28"/>
+    </linearGradient>
+    <linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="18" y1="0" x2="240" y2="0">
+      <stop offset="0" stop-color="#7B2A18"/>
+      <stop offset="1" stop-color="#3B120C"/>
+    </linearGradient>
+  </defs>
+  <!-- The lower edge is deliberately offset: it supplies depth without a soft shadow. -->
+  <path d="M128 12 L238 204 Q241 210 234 212 L22 212 Q15 210 18 204 Z" fill="url(#edge)"/>
+  <path d="M128 8 L239 201 Q242 207 235 208 L21 208 Q14 207 17 201 L122 12 Q125 8 128 8 Z"
+        fill="#E32105" stroke="#5B2013" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M128 13 L24 200 L128 200 Z" fill="#F03A18" fill-opacity="0.26"/>
+  <!-- Crisp two-tone facet: a quiet nod to the shaded historical raster mark. -->
+  <path d="M128 13 L232 200 L128 200 Z" fill="#A01000" fill-opacity="0.42"/>
+  <path d="M26 199 L128 19" fill="none" stroke="#FF6A45" stroke-opacity="0.24" stroke-width="3" stroke-linecap="round"/>
+  <path d="M31 202 H226" fill="none" stroke="#6F1C10" stroke-opacity="0.72" stroke-width="3" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 150" role="img" aria-labelledby="title desc">
+  <title id="title">Cryptographic Triangles compact lockup</title>
+  <desc id="desc">A flat red triangle beside the words Cryptographic Triangles on two lines.</desc>
+  <g fill="#E32105">
+    <path d="M82 16 L146 127 Q149 133 142 134 L22 134 Q15 133 18 127 L77 20 Q79 16 82 16 Z"/>
+    <text x="175" y="67"
+          font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif" font-size="45" font-weight="900"
+          letter-spacing="-1.5">Cryptographic</text>
+    <text x="248" y="122"
+          font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif" font-size="48" font-weight="900"
+          letter-spacing="-1.5">Triangles</text>
+  </g>
+</svg>
