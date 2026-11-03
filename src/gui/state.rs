@@ -1587,17 +1587,15 @@ fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
 /// Generate a fresh offline key for receiving (legacy "New Address"): the key
 /// lives in the GUI keystore (0600 JSON), NOT in the legacy wallet.dat —
 /// documented so the operator can sweep it into wallet.dat later. Entropy is
-/// raw /dev/urandom (32 bytes → SecretKey, retried on the ~2^-128 invalid
-/// scalar chance).
+/// the OS CSPRNG via the getrandom crate (/dev/urandom on unix, BCryptGenRandom
+/// on windows) — 32 bytes → SecretKey, retried on the ~2^-128 invalid scalar
+/// chance.
 pub fn generate_new_address() -> Result<AbEntry, String> {
-    use std::io::Read;
-    let mut file =
-        std::fs::File::open("/dev/urandom").map_err(|e| format!("open /dev/urandom: {}", e))?;
     let secp = secp256k1::Secp256k1::signing_only();
     let sk = loop {
         let mut buf = [0u8; 32];
-        file.read_exact(&mut buf)
-            .map_err(|e| format!("urandom: {}", e))?;
+        getrandom::getrandom(&mut buf)
+            .map_err(|e| format!("csprng: {}", e))?;
         match secp256k1::SecretKey::from_slice(&buf) {
             Ok(k) => break k,
             Err(_) => continue, // astronomically rare; retry with fresh bytes
