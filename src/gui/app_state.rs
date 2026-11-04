@@ -1119,6 +1119,8 @@ impl AppState {
         if wallet.keys.is_empty() {
             return Err(format!("wallet {} has zero keys", self.cfg.wallet_path));
         }
+        // remember for next launch (Sami: reopen the wallet that exists)
+        remember_last_wallet(&self.cfg.profile_dir, &self.cfg.wallet_path);
         let payloads: HashSet<[u8; 21]> = wallet
             .keys
             .iter()
@@ -1966,6 +1968,24 @@ fn persist_options(path: &Path, o: &OptionsState) -> Result<(), String> {
 // the REAL wallet, derives balances, builds ONE signed tx, exercises QR/PNG/
 // signing roundtrips, probes tri7d read-only — then exits 0. No display.
 // ===========================================================================
+
+/// Remembered-wallet memory (Sami: "unless there's already one in existence
+/// from the registry or whatever saves the memory of it"). A tiny file in the
+/// GUI profile dir records the last successfully opened wallet path; the next
+/// launch reopens it automatically.
+pub fn remembered_wallet_path(profile_dir: &str) -> Option<String> {
+    let p = Path::new(profile_dir).join("last_wallet.txt");
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn remember_last_wallet(profile_dir: &str, wallet_path: &str) {
+    let dir = Path::new(profile_dir);
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("last_wallet.txt"), wallet_path);
+}
 
 pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
     let t0 = std::time::Instant::now();

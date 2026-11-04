@@ -212,6 +212,8 @@ pub struct Tri7App {
     node: Option<crate::gui::node_supervisor::EmbeddedNode>,
     /// true after the first successful ensure_running attempt this session
     node_bootstrapped: bool,
+    /// first-run logic (remembered wallet / auto-generate) ran once
+    first_run_checked: bool,
 
     // ---- view-only state (spec §10/§12.3; no engine logic) ----
     send_step: SendStep,
@@ -1675,6 +1677,46 @@ impl eframe::App for Tri7App {
                             {
                                 self.st.status_log.push(format!("embedded node: {}", e));
                             }
+                        }
+                    }
+                }
+            }
+        }
+        // ---- FIRST RUN (Sami: "on first open it should generate a wallet,
+        // unless there's already one in existence from the registry or whatever
+        // saves the memory of it") ----
+        // remembered wallet (profile/last_wallet.txt) exists on disk -> auto-
+        // open it. Otherwise the target path (--wallet/default) is generated
+        // on first open: the seed-create flow auto-begins so the user sees
+        // the 24 words immediately; confirming creates wallet.dat and loads.
+        if !self.first_run_checked {
+            self.first_run_checked = true;
+            if self.st.wallet.is_none() && self.st.seed_flow.is_none() {
+                let profile = self.st.cfg.profile_dir.clone();
+                let remembered = crate::gui::app_state::remembered_wallet_path(&profile);
+                let target_exists = Path::new(&self.st.cfg.wallet_path).exists();
+                match remembered {
+                    Some(p) if Path::new(&p).exists() => {
+                        // reopen the remembered wallet silently
+                        self.st.cfg.wallet_path = p;
+                        if let Err(e) = self.st.load_wallet_action() {
+                            self.st.load_error = Some(e);
+                        }
+                    }
+                    _ if target_exists => {
+                        // the --wallet/default path exists: auto-open it
+                        if let Err(e) = self.st.load_wallet_action() {
+                            self.st.load_error = Some(e);
+                        }
+                    }
+                    _ => {
+                        // FIRST OPEN: auto-begin wallet generation (24 words
+                        // revealed on the seed screen; confirm -> created)
+                        let target = self.st.cfg.wallet_path.clone();
+                        self.st.seed_flow =
+                            Some(crate::gui::seed_flow::SeedFlow::new(target));
+                        if let Some(f) = &mut self.st.seed_flow {
+                            f.begin_create();
                         }
                     }
                 }
@@ -5479,6 +5521,7 @@ pub fn run(cfg: UiConfig) {
             ex_tab: ExTab::Overview,
             node: None,
             node_bootstrapped: false,
+            first_run_checked: false,
         }))
     });
     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {

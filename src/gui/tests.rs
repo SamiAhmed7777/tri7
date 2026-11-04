@@ -1620,3 +1620,22 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
     let lbl2 = st.status_blocks_label();
     assert!(!lbl2.contains("Syncing"), "{}", lbl2);
 }
+
+#[test]
+fn remembered_wallet_roundtrip_and_first_open_logic() {
+    use crate::gui::app_state::{remember_last_wallet, remembered_wallet_path};
+    let dir = std::env::temp_dir().join(format!("tri7gui_remember_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // nothing remembered yet -> first open generates a wallet
+    assert_eq!(remembered_wallet_path(dir.to_str().unwrap()), None);
+    // after a successful open the path is remembered
+    remember_last_wallet(dir.to_str().unwrap(), "E:\\Coins\\TRI-LAPTOP\\wallet.dat");
+    assert_eq!(
+        remembered_wallet_path(dir.to_str().unwrap()).as_deref(),
+        Some("E:\\Coins\\TRI-LAPTOP\\wallet.dat")
+    );
+    // a remembered path whose file no longer exists -> first-open generate
+    let remembered = remembered_wallet_path(dir.to_str().unwrap()).unwrap();
+    assert!(!std::path::Path::new(&remembered).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
