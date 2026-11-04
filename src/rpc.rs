@@ -1026,6 +1026,7 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                         "amount": sats_to_tri(u.value_sats),
                         "amount_sats": u.value_sats,
                         "confirmations": conf,
+                        "height": u.height,
                         "spendable": true,
                         "solvable": true,
                         "prev_kind": u.prev_kind,

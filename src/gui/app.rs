@@ -16,6 +16,8 @@
 //! methods. No network broadcast exists anywhere; the only outbound traffic
 //! is read-only JSON-RPC to the local tri7d (via AppState).
 
+use std::path::{Path, PathBuf};
+
 use crate::gui::app_state::AppState;
 use crate::gui::explorer as ex;
 use crate::gui::state as s;
@@ -205,6 +207,11 @@ pub struct Tri7App {
     console_open: bool,
     /// repaint ticks since start — paces the live-panel polls (10 ticks ≈ 5s)
     poll_ticker: u32,
+    /// embedded node supervisor — the wallet works INDIVIDUALLY (Sami): one
+    /// app spawns and manages its own node; balance/history/staking read it
+    node: Option<crate::gui::node_supervisor::EmbeddedNode>,
+    /// true after the first successful ensure_running attempt this session
+    node_bootstrapped: bool,
 
     // ---- view-only state (spec §10/§12.3; no engine logic) ----
     send_step: SendStep,
@@ -1604,6 +1611,63 @@ impl eframe::App for Tri7App {
         // syncs regardless of whether a wallet is open
         if self.poll_ticker % 10 == 5 {
             self.st.refresh_debug_info_action();
+        }
+        // ---- embedded node: the wallet works INDIVIDUALLY (Sami) ----
+        // once a wallet is loaded, ensure its own node is running for it
+        // (spawned next to the GUI exe; state lives in the wallet folder).
+        // Cheap no-op while the node answers RPC.
+        if self.st.wallet.is_some() {
+            if !self.node_bootstrapped {
+                self.node_bootstrapped = true;
+                let wallet = self.st.cfg.wallet_path.clone();
+                let node_dir = Path::new(&wallet)
+                    .parent()
+                    .map(|p| p.join("node"))
+                    .unwrap_or_else(|| PathBuf::from("node"));
+                let port = self
+                    .st
+                    .cfg
+                    .rpc_addr
+                    .clone()
+                    .unwrap_or_else(|| "127.0.0.1:19114".into())
+                    .split(':')
+                    .next_back()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(19114);
+                self.node = Some(crate::gui::node_supervisor::EmbeddedNode::new(
+                    port,
+                    node_dir.join("node.log"),
+                ));
+            }
+            if let Some(n) = &mut self.node {
+                let wallet = self.st.cfg.wallet_path.clone();
+                let node_dir = Path::new(&wallet)
+                    .parent()
+                    .map(|p| p.join("node"))
+                    .unwrap_or_else(|| PathBuf::from("node"));
+                // re-arm only every ~15s (a failed spawn cycle is expensive)
+                if self.poll_ticker % 30 == 0 {
+                    match n.ensure_running(
+                        Path::new(&wallet),
+                        &node_dir,
+                        &[crate::gui::node_supervisor::DEFAULT_PEER],
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // surface once; don't spam every tick
+                            if self
+                                .st
+                                .status_log
+                                .last()
+                                .map(|l| !l.contains(&e))
+                                .unwrap_or(true)
+                            {
+                                self.st.status_log.push(format!("embedded node: {}", e));
+                            }
+                        }
+                    }
+                }
+            }
         }
         // auto-update: startup + every 6h auto-check, event drain (non-blocking)
         self.st.updater_tick();
@@ -5396,6 +5460,8 @@ pub fn run(cfg: UiConfig) {
             options_tab: 0,
             options_return: None,
             ex_tab: ExTab::Overview,
+            node: None,
+            node_bootstrapped: false,
         }))
     });
     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {
