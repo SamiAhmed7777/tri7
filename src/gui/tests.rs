@@ -1072,6 +1072,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: 0,
+        seed_migrated: false,
     });
     st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&wallet).unwrap());
     st.set_label_action(&seed_addr, "renamed-in-wallet".into())
@@ -1170,7 +1171,7 @@ fn updater_banner_line_pins_the_offered_jump() {
         "name": "Cryptographic Triangles 7.0.1",
         "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.1",
         "body": "## SHA256\n",
-        "assets": [{"name": "CryptographicTriangles-7.0.1-win64-setup.exe",
+        "assets": [{"name": "CryptographicTriangles-7.0.2-win64-setup.exe",
                     "size": 12345678,
                     "browser_download_url": "https://example.com/x.exe"}]
     })).unwrap()).unwrap();
@@ -1178,7 +1179,7 @@ fn updater_banner_line_pins_the_offered_jump() {
     assert_eq!(st.updater.phase, UpdatePhase::Available);
     assert_eq!(
         st.updater_banner_line().as_deref(),
-        Some("Cryptographic Triangles 7.0.1 available")
+        Some("Cryptographic Triangles 7.0.2 available")
     );
     // download refused while a broadcast is in flight — banner stays honest
     st.broadcast.busy = true;
@@ -1200,7 +1201,7 @@ fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
     let dir = gui_test_dir("upd_install");
     let mut st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
     // a verified payload ready to install
-    let payload = dir.join("CryptographicTriangles-7.0.1-win64-setup.exe");
+    let payload = dir.join("CryptographicTriangles-7.0.2-win64-setup.exe");
     std::fs::write(&payload, b"p").unwrap();
     st.updater.downloaded = Some(DownloadedUpdate {
         flavor: UpdateFlavor::WindowsInstaller,

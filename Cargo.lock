@@ -3300,7 +3300,7 @@ dependencies = [
 
 [[package]]
 name = "tri7-core"
-version = "7.0.0"
+version = "7.0.1"
 dependencies = [
  "arboard",
  "base58",
