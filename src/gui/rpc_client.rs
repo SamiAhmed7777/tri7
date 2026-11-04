@@ -28,6 +28,7 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "getstakemodifier",
     "getbalance",
     "listunspent",
+    "listwallettx",
     "listwalletaddresses",
     "getreceivedbyaddress",
     "validateaddress",
@@ -75,7 +76,10 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
     }
     let mut stream = stream.ok_or_else(|| last_err)?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        // history.json can be several MB (tens of thousands of rows);
+        // loopback is fast but the whole body must arrive inside one
+        // read window, so allow more than a health-check timeout
+        .set_read_timeout(Some(Duration::from_secs(15)))
         .map_err(|e| e.to_string())?;
     stream
         .set_write_timeout(Some(Duration::from_secs(3)))

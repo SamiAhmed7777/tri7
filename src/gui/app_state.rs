@@ -248,6 +248,9 @@ pub struct AppState {
     pub console: Vec<ConsoleEntry>,
     pub console_input: String,
     pub debug_info: Option<DebugInfo>,
+    /// last time the full wallet history was pulled (multi-MB payload —
+    /// fetched at most every 30 s, not on every status tick)
+    pub last_history_fetch: Option<std::time::Instant>,
     pub dialogs: Dialogs,
     pub status_log: Vec<String>,
     pub explorer: super::explorer::ExplorerState,
@@ -327,6 +330,7 @@ impl AppState {
             console: Vec::new(),
             console_input: String::new(),
             debug_info: None,
+            last_history_fetch: None,
             dialogs: Dialogs::default(),
             status_log: Vec::new(),
             explorer,
@@ -1693,7 +1697,15 @@ impl AppState {
                         }
                     }
                     // full wallet history (history.json via the daemon)
-                    if let Ok(vh) = rpc_client::rpc_call(&addr, "listwallettx", &[]) {
+                    // 30 s throttle: the payload is every history row ever
+                    // seen (multi-MB), not something to pull each tick
+                    let history_due = self
+                        .last_history_fetch
+                        .map(|t| t.elapsed().as_secs() >= 30)
+                        .unwrap_or(true);
+                    if history_due {
+                        self.last_history_fetch = Some(std::time::Instant::now());
+                        if let Ok(vh) = rpc_client::rpc_call(&addr, "listwallettx", &[]) {
                         let rows = vh
                             .get("rows")
                             .and_then(|r| r.as_array())
@@ -1713,8 +1725,9 @@ impl AppState {
                             };
                             out.push(rec);
                         }
-                        if !out.is_empty() {
-                            info.wallet_history = Some(out);
+                            if !out.is_empty() {
+                                info.wallet_history = Some(out);
+                            }
                         }
                     }
                     // live daemon-side wallet balance (getbalance returns TRI;
