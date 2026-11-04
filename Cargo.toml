@@ -6,6 +6,13 @@ description = "Modern full-node core for the Triangles chain — replays the leg
 
 [build-dependencies]
 cc = "1"
+# unconditional: build.rs runs on the HOST even when cross-compiling, so the
+# target gate in cfg() would hide it exactly when needed; the runtime
+# CARGO_CFG_WINDOWS check inside build.rs decides whether to embed
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7"
 
 [dependencies]
 base58 = "0.2"

@@ -4,6 +4,7 @@
 use super::rpc_client;
 use super::state::*;
 use crate::gui::explorer;
+use crate::gui::notify::stake_alert_decision;
 use crate::spend;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -52,6 +53,14 @@ pub struct OptionsState {
     pub reserve: String,         // Main tab: "Reserve" (staking reserve) — noted
     pub display_addresses: bool, // Display tab
     pub coin_control: bool,      // Display tab: "Display coin &control features"
+    /// system notification on every received stake/payment (Sami: alert to
+    /// the tray like the old wallet, with a user preference to disable)
+    #[serde(default = "default_true")]
+    pub notifications: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for OptionsState {
@@ -61,6 +70,7 @@ impl Default for OptionsState {
             reserve: "0.000000".into(),
             display_addresses: true,
             coin_control: true,
+            notifications: true,
         }
     }
 }
@@ -245,6 +255,19 @@ pub struct AppState {
     pub peers_live: PeersLive,
     pub messages: MessagesState,
     pub broadcast: BroadcastState,
+    /// stake/payment watcher: last daemon balance observed (sats). When the
+    /// daemon balance INCREASES while fully synced and notifications are on,
+    /// fire a system notification (Sami: "alert to the system tray every
+    /// time they receive a new stake, like the old wallet").
+    pub notify_last_balance_sats: Option<i64>,
+    /// in-app notification banner (also mirrored as a system toast). None =
+    /// nothing pending; Some((title, text)) = show + allow dismiss.
+    pub notify_flash: Option<(String, String)>,
+    /// last staking-toggle error (button feedback when the daemon refuses,
+    /// e.g. started without --wallet)
+    pub stake_toggle_error: Option<String>,
+    /// true while a staking on/off toggle RPC is in flight (button guard)
+    pub staking_toggle_inflight: bool,
     // ---- auto-update (src/updater.rs) ----
     pub updater: crate::updater::UpdateState,
     /// Events from the check/download worker threads (gui feature only).
@@ -304,6 +327,10 @@ impl AppState {
             allow_wallet_writes: true,
             staking_live: StakingLive::default(),
             peers_live: PeersLive::default(),
+            notify_last_balance_sats: None,
+            notify_flash: None,
+            stake_toggle_error: None,
+            staking_toggle_inflight: false,
             messages: MessagesState::default(),
             broadcast: BroadcastState::default(),
             updater,
@@ -1627,6 +1654,29 @@ impl AppState {
             }
         } else {
             info.error = Some("RPC disabled in config".into());
+        }
+        // ---- stake/payment watcher (Sami: alert like the old wallet) ----
+        let syncing = info
+            .sync
+            .as_ref()
+            .map(|s| s.syncing)
+            .unwrap_or(false);
+        if let Some(bal) = info.daemon_balance_sats {
+            let enabled = self.options.notifications;
+            let syncing = syncing || !info.reachable;
+            if let Some(delta) =
+                stake_alert_decision(self.notify_last_balance_sats, bal, syncing, enabled)
+            {
+                let title = "Coins received — Cryptographic Triangles".to_string();
+                let text = format!(
+                    "+{} TRI received (balance {} TRI)",
+                    format_tri(delta),
+                    format_tri(bal)
+                );
+                self.notify_flash = Some((title.clone(), text.clone()));
+                crate::gui::notify::fire_system_notification(&title, &text);
+            }
+            self.notify_last_balance_sats = Some(bal);
         }
         self.debug_info = Some(info);
     }

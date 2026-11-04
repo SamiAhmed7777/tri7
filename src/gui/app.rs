@@ -563,7 +563,55 @@ impl Tri7App {
                         ("icons/staking_off", "Staking off", th::TEXT_MUTED)
                     };
                     let stake_tex = self.tex(ui.ctx(), stake_icon);
-                    th::status_cluster(ui, stake_tex.as_ref(), stake_label, stake_color);
+                    // CLICKABLE STAKING TOGGLE (Sami: "I should be able to
+                    // click where it shows Staking off and turn it on and it
+                    // should animate to show that") — the whole cluster is a
+                    // button; when ON it PULSES (breathing glow), the toggle
+                    // animates via egui's animated color transition.
+                    let pulse_t = ui.input(|i| i.time) as f32;
+                    let pulse = if staking_on {
+                        0.5 + 0.5 * (pulse_t * 2.2).sin()
+                    } else {
+                        0.0
+                    };
+                    let animated_color = if staking_on {
+                        // breathing between full success and a brighter mint
+                        egui::Color32::from_rgb(
+                            th::SUCCESS.r() + (pulse * 60.0) as u8,
+                            th::SUCCESS.g() + (pulse * 70.0) as u8,
+                            th::SUCCESS.b(),
+                        )
+                    } else {
+                        stake_color
+                    };
+                    let btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{}  {}",
+                                if staking_on { "▲" } else { "△" },
+                                stake_label
+                            ))
+                            .size(11.0)
+                            .strong()
+                            .color(animated_color),
+                        )
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::new(1.0, animated_color.gamma_multiply(0.4 + 0.6 * pulse)))
+                        .small(),
+                    );
+                    if btn.clicked() {
+                        // existing daemon-toggle API (staking on/off, persisted)
+                        self.st.staking_toggle_action(!staking_on);
+                    }
+                    btn.on_hover_text("Click to toggle staking on/off (persists in the daemon config)");
+                    if let Some(err) = &self.st.stake_toggle_error {
+                        ui.label(
+                            egui::RichText::new(err)
+                                .size(10.0)
+                                .color(th::WARNING),
+                        )
+                        .on_hover_text(err);
+                    }
                     ui.separator();
                     // 4. encryption cluster (wallet encryption is not tracked
                     // by this build — honest idle state)
@@ -1559,7 +1607,24 @@ impl eframe::App for Tri7App {
         }
         // auto-update: startup + every 6h auto-check, event drain (non-blocking)
         self.st.updater_tick();
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        ctx.request_repaint_after(std::time::Duration::from_millis(
+            // smooth staking pulse when on; modest idle cadence otherwise
+            if self
+                .st
+                .staking_live
+                .info
+                .as_ref()
+                .map(|i| {
+                    i.get("enabled").and_then(|e| e.as_str()) == Some("true")
+                        && i.get("staking").and_then(|e| e.as_str()) == Some("true")
+                })
+                .unwrap_or(false)
+            {
+                120
+            } else {
+                500
+            },
+        ));
     }
 }
 
@@ -1710,6 +1775,18 @@ impl Tri7App {
     // -----------------------------------------------------------------------
     fn page_overview(&mut self, ui: &mut egui::Ui) {
         th::page_header(ui, "Overview", "Wallet balance and recent activity");
+        // stake/payment notification banner (Sami: alert like the old wallet,
+        // user-controllable) — dismissible; the system toast already fired
+        if let Some((title, text)) = self.st.notify_flash.clone() {
+            ui.add_space(4.0);
+            th::inline_notice(ui, th::Notice::Info, &title, &text);
+            ui.horizontal(|ui| {
+                if ui.small_button("Dismiss").clicked() {
+                    self.st.notify_flash = None;
+                }
+            });
+            ui.add_space(4.0);
+        }
         let avail = ui.available_width();
         if avail >= 900.0 {
             let left_w = (avail - 16.0) * 0.42;
@@ -4359,6 +4436,10 @@ impl Tri7App {
                 ui.checkbox(
                     &mut self.st.options.coin_control,
                     "Display coin control features (experts only!)",
+                );
+                ui.checkbox(
+                    &mut self.st.options.notifications,
+                    "Notify when coins are received (system notification)",
                 );
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Language:").color(th::TEXT_SECONDARY));
