@@ -93,6 +93,9 @@ pub struct DebugInfo {
     /// daemon-side wallet balance (getbalance, sats) — the live truth when
     /// the daemon tracks this wallet's keys (local snapshot may be absent)
     pub daemon_balance_sats: Option<i64>,
+    /// daemon-side unspent set (listunspent) — the Transactions/history truth
+    /// when the wallet folder has no local snapshot (fresh installs)
+    pub daemon_utxos: Option<Vec<crate::gui::state::UtxoRec>>,
     pub error: Option<String>,
 }
 
@@ -1648,6 +1651,38 @@ impl AppState {
                                 eta_secs: body.get("eta_secs").and_then(|e| e.as_u64()).unwrap_or(0),
                                 syncing: true,
                             });
+                        }
+                    }
+                    // daemon-side unspent set for the Transactions page
+                    // (fresh installs have no local snapshot; the daemon's
+                    // live view is the truth)
+                    if let Ok(vu) = rpc_client::rpc_call(&addr, "listunspent", &[]) {
+                        if let Some(rows) = vu.as_array() {
+                            let mut out: Vec<crate::gui::state::UtxoRec> = Vec::new();
+                            for r in rows {
+                                let Some(txid_hex) = r.get("txid").and_then(|x| x.as_str()) else { continue };
+                                if txid_hex.len() != 64 { continue; }
+                                let bytes: Vec<u8> = (0..32)
+                                    .filter_map(|i| u8::from_str_radix(&txid_hex[i * 2..i * 2 + 2], 16).ok())
+                                    .collect();
+                                if bytes.len() != 32 { continue; }
+                                let mut h = [0u8; 32];
+                                h.copy_from_slice(&bytes);
+                                h.reverse(); // display order -> internal order
+                                out.push(crate::gui::state::UtxoRec {
+                                    txid: h,
+                                    n: r.get("vout").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                                    value_sats: r.get("amount_sats").and_then(|x| x.as_i64()).unwrap_or(0),
+                                    script: Vec::new(),
+                                    address: r.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                    height: r.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                                    tx_time: 0,
+                                    prev_kind: r.get("prev_kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
+                                });
+                            }
+                            if !out.is_empty() {
+                                info.daemon_utxos = Some(out);
+                            }
                         }
                     }
                     // live daemon-side wallet balance (getbalance returns TRI;

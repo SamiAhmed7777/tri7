@@ -3264,7 +3264,7 @@ impl Tri7App {
             ui.add_space(4.0);
             th::text_meta(
                 ui,
-                "wallet outputs currently unspent (credits) — full sent/history view lands with daemon integration",
+                "unspent outputs from the node’s live wallet view — newest first",
             );
             ui.add_space(6.0);
             let Some(derived) = self.st.derived.clone() else {
@@ -3286,8 +3286,20 @@ impl Tri7App {
                 .unwrap_or(0);
             let search = self.tx_search.to_lowercase();
             // newest first (existing order), then view filters
-            let mut rows: Vec<(usize, &UtxoRec)> = derived
-                .utxos
+            // history source: the local snapshot's derived set when present,
+            // else the daemon's LIVE unspent set (fresh wallet folders have no
+            // snapshot files at all - Sami: "I see nothing at all under
+            // Transactions")
+            let utxos: Vec<UtxoRec> = if !derived.utxos.is_empty() {
+                derived.utxos.clone()
+            } else {
+                self.st
+                    .debug_info
+                    .as_ref()
+                    .and_then(|d| d.daemon_utxos.clone())
+                    .unwrap_or_default()
+            };
+            let mut rows: Vec<(usize, &UtxoRec)> = utxos
                 .iter()
                 .enumerate()
                 .rev()

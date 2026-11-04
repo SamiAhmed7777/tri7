@@ -3983,6 +3983,18 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn coverage(&self) -> Option<(u64, String)> {
+        // live view present: the window IS the coverage (tip + its hash) —
+        // confirmations are keyed against the live tip, not a stale snapshot
+        if let Ok(g) = self.wl.lock() {
+            if g.is_some() {
+                if let Ok(s) = self.st.try_lock() {
+                    return Some((
+                        s.tip_height,
+                        tri7_core::p2p::internal_to_display(&s.tip_hash),
+                    ));
+                }
+            }
+        }
         self.snap.coverage()
     }
 
@@ -3999,6 +4011,39 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn utxos(&self) -> Vec<UtxoRow> {
+        // live view present: serve the LIVE unspent set (the Transactions
+        // page / listunspent then shows real history without any snapshot
+        // files - a fresh wallet folder has none)
+        if let Ok(g) = self.wl.lock() {
+            if let Some(w) = g.as_ref() {
+                let kb = w.key_by_payload();
+                let mut rows: Vec<UtxoRow> = Vec::new();
+                for ((txid, n), o) in w.live.iter() {
+                    let addr = tri7_core::address::script_to_dest(&o.script)
+                        .map(|d| tri7_core::address::payload_to_address(&d.payload()))
+                        .filter(|a| {
+                            tri7_core::address::script_to_dest(&o.script)
+                                .map(|d| kb.contains_key(&d.payload()))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or_default();
+                    if addr.is_empty() {
+                        continue; // not ours
+                    }
+                    rows.push(UtxoRow {
+                        txid: tri7_core::p2p::internal_to_display(txid),
+                        n: *n,
+                        address: addr,
+                        script_hex: o.script.iter().map(|b| format!("{:02x}", b)).collect(),
+                        value_sats: o.value,
+                        height: o.height,
+                        prev_kind: if o.tx_time == 0 { "stake" } else { "regular" }.into(),
+                    });
+                }
+                rows.sort_by(|a, b| b.height.cmp(&a.height));
+                return rows;
+            }
+        }
         self.snap.utxos()
     }
 }
