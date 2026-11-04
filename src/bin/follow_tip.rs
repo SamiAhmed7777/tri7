@@ -74,7 +74,7 @@ use tri7_core::legacy::{hash_to_display, Block, Hash, Reader, Tx};
 use tri7_core::replay::{IndexEntry, ReplayIndex};
 use tri7_core::rpc;
 use tri7_core::rpc::{
-    load_balances_snap, load_utxos_snap, BlockDataProvider, EntryView, Proxy, SnapshotWallet,
+    load_balances_snap, load_utxos_snap, AddressEntry, BalanceView, BlockDataProvider, EntryView, Proxy, SnapshotWallet, UtxoRow, WalletProvider,
     TipProvider, TipView,
 };
 
@@ -3927,6 +3927,81 @@ struct StakeState {
 
 type SharedStake = Arc<Mutex<StakeState>>;
 type SharedWalletLive = Arc<Mutex<Option<WalletLive>>>;
+
+/// Live-preferring wallet provider (Sami: "why am I not seeing the number go
+/// up or the staking notifications"): getbalance serves the LIVE window view
+/// when the wallet-seed thread has populated it, so stakes won by the staker
+/// appear immediately; balances.json snapshots lag by design (regenerated
+/// only by the balances pass). Snapshot data keeps serving everything the
+/// live view cannot cover (per-address receipts, membership, coverage-gated
+/// listunspent).
+struct LiveWalletProvider {
+    snap: Arc<SnapshotWallet>,
+    wl: SharedWalletLive,
+    st: SharedState,
+}
+
+impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+    fn balance(&self) -> Option<BalanceView> {
+        if let Ok(g) = self.wl.lock() {
+            if let Some(w) = g.as_ref() {
+                let b = &self.snap.balances;
+                let (tip, tip_hash) = match self.st.try_lock() {
+                    Ok(s) => (
+                        s.tip_height,
+                        tri7_core::p2p::internal_to_display(&s.tip_hash),
+                    ),
+                    Err(_) => match self.snap.balance() {
+                        // follow loop holds the state mutex (validation
+                        // batch) — fall back to snapshot coverage info
+                        Some(bv) => (bv.coverage_height, bv.coverage_hash.clone()),
+                        None => (0, String::new()),
+                    },
+                };
+                // distinct owned addresses among live outputs
+                let kb = w.key_by_payload();
+                let mut owned = std::collections::HashSet::new();
+                for o in w.live.values() {
+                    if let Some(d) = tri7_core::address::script_to_dest(&o.script) {
+                        let pl = d.payload();
+                        if kb.contains_key(&pl) {
+                            owned.insert(pl);
+                        }
+                    }
+                }
+                return Some(BalanceView {
+                    sats: w.balance(),
+                    supply_sats: b.total_supply_sats,
+                    coverage_height: tip,
+                    coverage_hash: tip_hash,
+                    addresses: owned.len(),
+                    utxos: w.live.len(),
+                });
+            }
+        }
+        self.snap.balance()
+    }
+
+    fn coverage(&self) -> Option<(u64, String)> {
+        self.snap.coverage()
+    }
+
+    fn address_entries(&self) -> Vec<AddressEntry> {
+        self.snap.address_entries()
+    }
+
+    fn received_regular(&self, addr: &str) -> Option<i64> {
+        self.snap.received_regular(addr)
+    }
+
+    fn is_mine(&self, addr: &str) -> bool {
+        self.snap.is_mine(addr)
+    }
+
+    fn utxos(&self) -> Vec<UtxoRow> {
+        self.snap.utxos()
+    }
+}
 type SharedPool = Arc<Mutex<tri7_core::txpool::TxPool>>;
 type TxAnnounce = Arc<Mutex<std::collections::VecDeque<Hash>>>;
 
@@ -5683,9 +5758,13 @@ fn main() {
                 peers: Arc::clone(&peers_shared),
                 mirror: Arc::clone(&tip_mirror),
             }),
-            wallet: Arc::new(SnapshotWallet {
-                balances: balances_snap,
-                utxos: utxos_snap,
+            wallet: Arc::new(LiveWalletProvider {
+                snap: Arc::new(SnapshotWallet {
+                    balances: balances_snap,
+                    utxos: utxos_snap,
+                }),
+                wl: Arc::clone(&wl_shared),
+                st: Arc::clone(&st_shared),
             }),
             blocks: Arc::new(StoreAdapter {
                 store: Arc::clone(&store),

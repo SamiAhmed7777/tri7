@@ -147,6 +147,11 @@ impl EmbeddedNode {
             .arg("--rpc-port")
             .arg(self.rpc_port.to_string())
             .arg("--no-listen")
+            // the node keeps its own block store in the node state dir: full
+            // function (staking/smsg/balance live view) needs bodies, not
+            // headers-only (Sami laptop: ops engine never warmed without it)
+            .arg("--blocks-file")
+            .arg(state_dir.join("blk0001.dat"))
             .arg("--backfill")
             .arg("6000")
             .arg("--wallet")
