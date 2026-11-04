@@ -24,6 +24,8 @@ const MAX_RESTARTS: u32 = 5;
 pub struct EmbeddedNode {
     pub rpc_port: u16,
     child: Option<Child>,
+    snapshot_child: Option<Child>,
+    snapshot_done: bool,
     started_at: Option<Instant>,
     restarts: u32,
     log_path: PathBuf,
@@ -34,6 +36,8 @@ impl EmbeddedNode {
         EmbeddedNode {
             rpc_port,
             child: None,
+            snapshot_child: None,
+            snapshot_done: false,
             started_at: None,
             restarts: 0,
             log_path,
@@ -174,6 +178,82 @@ impl EmbeddedNode {
             }
         }
         Ok(false) // still warming (first sync/index build) — UI shows progress
+    }
+
+    /// After the embedded node's first sync completes, generate the balance /
+    /// UTXO snapshots IN THE NODE'S OWN STATE DIR (Sami: a fresh install must
+    /// show real balance and history without anyone running snapshot tooling
+    /// by hand). Runs once; the node itself keeps its snapshots fresh in
+    /// follow mode afterwards via the balances files it re-reads on restart.
+    pub fn ensure_snapshots(
+        &mut self,
+        wallet_path: &Path,
+        node_dir: &Path,
+    ) -> Result<(), String> {
+        if self.snapshot_done {
+            return Ok(());
+        }
+        // a previous generation pass still running? let it finish
+        if let Some(c) = &mut self.snapshot_child {
+            if c.try_wait().map(|x| x.is_none()).unwrap_or(false) {
+                return Ok(());
+            }
+            self.snapshot_child = None;
+            self.snapshot_done = true; // finished (success or not — no retry storm)
+            return Ok(());
+        }
+        let exe = Self::node_exe()
+            .and_then(|p| p.parent().map(|d| d.join("balances.exe")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| node_dir.join("balances.exe"));
+        if !exe.exists() {
+            self.snapshot_done = true; // not shipped — skip silently
+            return Ok(());
+        }
+        let blk = node_dir.join("state").join("blk0001.dat");
+        if !blk.exists() {
+            return Ok(()); // node still syncing its store from nothing
+        }
+        // only after the node reports itself synced (getsyncinfo syncing=false
+        // or the sync snapshot absent + chain advancing) — poll cheaply
+        let synced = crate::gui::rpc_client::rpc_call(
+            &format!("127.0.0.1:{}", self.rpc_port),
+            "getsyncinfo",
+            &[],
+        )
+        .map(|v| v.get("syncing").and_then(|s| s.as_bool()) == Some(false))
+        .unwrap_or(false);
+        if !synced {
+            return Ok(());
+        }
+        let tip: u64 = crate::gui::rpc_client::rpc_call(
+            &format!("127.0.0.1:{}", self.rpc_port),
+            "getblockcount",
+            &[],
+        )
+        .ok()
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+        if tip == 0 {
+            return Ok(());
+        }
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+            .map_err(|e| format!("open node log: {}", e))?;
+        let child = std::process::Command::new(exe)
+            .arg(&blk)
+            .arg(tip.to_string())
+            .arg("--allow-stale")
+            .arg("--wallet")
+            .arg(wallet_path)
+            .current_dir(node_dir.join("state"))
+            .stdout(log)
+            .spawn()
+            .map_err(|e| format!("spawn balances pass: {}", e))?;
+        self.snapshot_child = Some(child);
+        Ok(())
     }
 
     pub fn running(&mut self) -> bool {

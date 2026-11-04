@@ -1652,7 +1652,12 @@ impl eframe::App for Tri7App {
                         &node_dir,
                         &[crate::gui::node_supervisor::DEFAULT_PEER],
                     ) {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            // first-sync finished? generate the wallet
+                            // snapshots in the node's own state dir so
+                            // balance/history show without manual tooling
+                            let _ = n.ensure_snapshots(Path::new(&wallet), &node_dir);
+                        }
                         Err(e) => {
                             // surface once; don't spam every tick
                             if self
