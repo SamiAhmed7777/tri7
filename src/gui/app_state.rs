@@ -1104,12 +1104,17 @@ impl AppState {
         let wallet = load_wallet(Path::new(&self.cfg.wallet_path))?;
         // ONE-FOLDER DESIGN (Sami): the chosen folder IS the wallet
         // environment - state files live beside wallet.dat automatically.
-        let parent = Path::new(&self.cfg.wallet_path)
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        if !parent.is_empty() {
-            self.cfg.state_dir = parent;
+        // Only when the user did NOT pass --state-dir explicitly (power users
+        // / selfcheck / fleet daemons point at their own state) - the flag
+        // always wins.
+        if !self.cfg.state_dir_explicit {
+            let parent = Path::new(&self.cfg.wallet_path)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            if !parent.is_empty() {
+                self.cfg.state_dir = parent;
+            }
         }
         if wallet.keys.is_empty() {
             return Err(format!("wallet {} has zero keys", self.cfg.wallet_path));

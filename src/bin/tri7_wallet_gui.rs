@@ -50,6 +50,7 @@ fn main() {
     }
     if let Some(v) = get("--state-dir", &args) {
         cfg.state_dir = v;
+        cfg.state_dir_explicit = true;
     }
     if let Some(v) = get("--stake-dryrun", &args) {
         cfg.stake_dryrun_path = v;

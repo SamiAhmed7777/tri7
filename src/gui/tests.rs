@@ -829,6 +829,7 @@ fn derivation_falls_back_to_snapshot_without_index() {
     let cfg = UiConfig {
         wallet_path: "/nonexistent/wallet.dat".into(),
         state_dir: dir.join("state").display().to_string(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.join("profile").display().to_string(),
@@ -861,6 +862,7 @@ fn keystore_side_files_persist_new_addresses() {
     let cfg = UiConfig {
         wallet_path: "/nonexistent".into(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -991,6 +993,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -1029,6 +1032,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
     let cfg2 = UiConfig {
         wallet_path: wallet.display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -1052,6 +1056,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -1107,6 +1112,7 @@ fn locked_wallet_falls_back_to_keystore() {
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -1134,6 +1140,7 @@ fn upd_test_cfg(dir: &std::path::Path) -> UiConfig {
     UiConfig {
         wallet_path: dir.join("wallet.dat").display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr: None,
         profile_dir: dir.display().to_string(),
@@ -1267,6 +1274,7 @@ fn sweep_test_cfg(dir: &std::path::Path, rpc_addr: Option<String>) -> UiConfig {
     UiConfig {
         wallet_path: dir.join("wallet.dat").display().to_string(),
         state_dir: "/nonexistent".into(),
+        state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
         rpc_addr,
         profile_dir: dir.display().to_string(),

@@ -139,6 +139,9 @@ impl Screen {
 pub struct UiConfig {
     pub wallet_path: String,
     pub state_dir: String, // tipstate.json, wallet_utxos.json, blk0001.dat, index/
+    /// explicit --state-dir was passed: the one-folder auto-derivation (from
+    /// the wallet file's parent) must NOT override it (CLI-flag only)
+    pub state_dir_explicit: bool,
     pub stake_dryrun_path: String,
     pub rpc_addr: Option<String>, // tri7d native RPC (loopback), None = disable
     pub profile_dir: String,      // GUI side files (keystore/addressbook/options)
@@ -159,6 +162,7 @@ impl Default for UiConfig {
             UiConfig {
                 wallet_path: format!("{appdata}\\Triangles\\wallet.dat"),
                 state_dir: format!("{local}\\Tri7Wallet\\state"),
+                state_dir_explicit: false,
                 stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
                 rpc_addr: Some("127.0.0.1:19114".into()),
                 profile_dir: format!("{local}\\Tri7Wallet\\profile"),
@@ -169,6 +173,7 @@ impl Default for UiConfig {
             UiConfig {
                 wallet_path: "/root/.triangles/wallet.dat".into(),
                 state_dir: "/var/lib/tri7".into(),
+                state_dir_explicit: false,
                 stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
                 rpc_addr: Some("127.0.0.1:19112".into()),
                 profile_dir: "/root/.tri7_gui".into(),
