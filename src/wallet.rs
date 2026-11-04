@@ -273,6 +273,45 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
     Ok(w)
 }
 
+/// The wallet's legacy `setting` rows (name, raw value) — a targeted query,
+/// NOT part of read_wallet (the key-reader surface stays untouched; legacy
+/// setting rows are "read if present, ignore if absent" compat records).
+/// A malformed row is skipped, never fatal.
+pub fn read_settings(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let conn = rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open sqlite: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+            // hex() comparison on BOTH predicates — substr() on a BLOB
+            // returns a BLOB, and a BLOB never string-compares equal to the
+            // TEXT literal 'setting' (SQLite type ordering; the format spec
+            // documents exactly this trap).
+            "SELECT key, value FROM main
+             WHERE hex(substr(key,1,1))='07' AND hex(substr(key,2,7))='73657474696E67'",
+        )
+        .map_err(|e| format!("select settings: {}", e))?;
+    let mut rows = stmt.query([]).map_err(|e| format!("query settings: {}", e))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| format!("row iteration: {}", e))? {
+        let key: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+        let value: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+        // suffix = everything after the "setting" type string
+        if let Ok(name) = parse_setting_name(&key[8..]) {
+            out.push((name, value));
+        }
+    }
+    Ok(out)
+}
+
+/// Seed-migration completion flag: setting "seedmigrated" == int32 LE 1
+/// (the live wallet's numeric-setting shape, `addrIncoming` parity). The
+/// read-side mirror of WalletHandle::mark_seed_migrated.
+pub fn seed_migration_done(path: &Path) -> Result<bool, String> {
+    Ok(read_settings(path)?.iter().any(|(n, v)| {
+        n == SEED_MIGRATED_SETTING && v == &encode_setting_value_i32(1)
+    }))
+}
+
 // ===========================================================================
 // READ-WRITE wallet access (tri7 GUI "New Address" / labels / bestblock)
 //
@@ -487,6 +526,35 @@ pub fn encode_defaultkey_value(pubkey: &[u8]) -> Vec<u8> {
     v
 }
 
+/// tri7's single wallet setting name: the seed-migration sweep-completion
+/// marker (the double-sweep guard).
+pub const SEED_MIGRATED_SETTING: &str = "seedmigrated";
+
+/// `setting` row key blob: 07 "setting" + CS(name len) + name — byte-shape
+/// copied from the live wallet (`07 "setting" 0C "addrIncoming"`).
+pub fn encode_setting_keyblob(name: &str) -> Vec<u8> {
+    let mut s = Vec::new();
+    push_compact_size(&mut s, name.len() as u64);
+    s.extend_from_slice(name.as_bytes());
+    encode_key_blob("setting", &s)
+}
+
+/// Numeric setting value: RAW int32 LE (live parity: `addrIncoming` = 4-byte
+/// int, no CompactSize wrapper).
+pub fn encode_setting_value_i32(v: i32) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// `setting` row suffix → the setting name (CS(len) + name bytes).
+fn parse_setting_name(suffix: &[u8]) -> Result<String, String> {
+    let mut pos = 0usize;
+    let len = decode_compact_size(suffix, &mut pos)? as usize;
+    if suffix.len() < pos + len {
+        return Err("setting record: name overruns suffix".into());
+    }
+    Ok(String::from_utf8_lossy(&suffix[pos..pos + len]).to_string())
+}
+
 /// base58check address decode + version check (PUBKEY_ADDRESS = 65). Used to
 /// refuse garbage before a `name` row is written for it.
 fn decode_address_payload(s: &str) -> Result<[u8; 21], String> {
@@ -554,6 +622,9 @@ pub struct WalletHandle {
     pub hd_mnemonic: Option<String>,
     pub hd_passphrase: Option<String>,
     pub hd_chain_index: i64,
+    /// Sweep-completion marker loaded from the `seedmigrated` setting row at
+    /// open — the double-sweep guard.
+    pub seed_migrated: bool,
 }
 
 fn now_unix() -> i64 {
@@ -691,6 +762,15 @@ impl WalletHandle {
                 }
             })
             .unwrap_or(0);
+        // Sweep-completion marker (the double-sweep guard for seed migration).
+        let seed_migrated: bool = conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![encode_setting_keyblob(SEED_MIGRATED_SETTING)],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map(|v| v == encode_setting_value_i32(1))
+            .unwrap_or(false);
 
         Ok(WalletHandle {
             conn,
@@ -700,6 +780,7 @@ impl WalletHandle {
             hd_mnemonic,
             hd_passphrase,
             hd_chain_index,
+            seed_migrated,
         })
     }
 
@@ -1267,6 +1348,68 @@ impl WalletHandle {
             address,
             created: Some(now),
         })
+    }
+
+    /// Raise the `hdchain` counter to at least `min_next` (idempotent — a
+    /// re-run that finds the counter already ≥ min_next is a no-op). Seed
+    /// migration inserts indices 0..9 via add_key, so the counter MUST jump
+    /// past them or the next GenerateNewKey (qt or tri7) re-derives an
+    /// existing key row.
+    pub fn advance_hdchain_to(&mut self, min_next: i64) -> Result<(), String> {
+        if min_next < 0 {
+            return Err(format!("advance_hdchain_to: negative target {}", min_next));
+        }
+        if self.hd_chain_index >= min_next {
+            return Ok(());
+        }
+        let row = (
+            encode_key_blob("hdchain", &[]),
+            encode_hdchain_value(min_next),
+        );
+        self.ensure_backup()?;
+        self.write_rows(&[row], "advance_hdchain_to")?;
+        let w = read_wallet(&self.path)?;
+        match w.hd_chain_index {
+            Some(v) if v >= min_next => {}
+            other => {
+                return Err(format!(
+                    "advance_hdchain_to verify: reader sees {:?}, expected ≥ {}",
+                    other, min_next
+                ))
+            }
+        }
+        self.hd_chain_index = min_next;
+        self.log(format!(
+            "advance_hdchain_to: hdchain={} wallet={}",
+            min_next,
+            self.path.display()
+        ));
+        Ok(())
+    }
+
+    /// Write the seed-migration completion marker: setting "seedmigrated" =
+    /// int32 LE 1 (the live wallet's numeric-setting shape). Written ONLY
+    /// after the sweep broadcast succeeds — a failed broadcast leaves the
+    /// marker unset so the migration can be retried.
+    pub fn mark_seed_migrated(&mut self) -> Result<(), String> {
+        let row = (
+            encode_setting_keyblob(SEED_MIGRATED_SETTING),
+            encode_setting_value_i32(1),
+        );
+        self.ensure_backup()?;
+        self.write_rows(&[row], "mark_seed_migrated")?;
+        if !seed_migration_done(&self.path)? {
+            return Err(
+                "mark_seed_migrated verify: the reader does not see the marker".into(),
+            );
+        }
+        self.seed_migrated = true;
+        self.log(format!(
+            "mark_seed_migrated: setting '{}'=1 wallet={}",
+            SEED_MIGRATED_SETTING,
+            self.path.display()
+        ));
+        Ok(())
     }
 
     /// Fresh-wallet identity rows (their CreateWalletDatabase + first-open
@@ -1966,6 +2109,70 @@ mod tests {
 
     fn key_row_key_blob_len(pubkey: &[u8]) -> usize {
         encode_key_keyblob(pubkey).len()
+    }
+
+    // ---- seed-migration marker + hdchain advance ----------------------------
+
+    #[test]
+    fn setting_row_encoders_match_the_live_legacy_shape() {
+        // byte-shape copied from the live wallet's observed row:
+        // 07 "setting" 0C "addrIncoming" | 84 57 3D 00
+        let kb = encode_setting_keyblob("addrIncoming");
+        let mut want = Vec::new();
+        want.push(0x07);
+        want.extend_from_slice(b"setting");
+        want.push(0x0C);
+        want.extend_from_slice(b"addrIncoming");
+        assert_eq!(kb, want);
+        // numeric value = RAW int32 LE (no CompactSize wrapper);
+        // live bytes 84 57 3D 00 = 4_020_100 little-endian
+        assert_eq!(encode_setting_value_i32(4_020_100), [0x84, 0x57, 0x3D, 0x00]);
+        // the marker roundtrips through the targeted reader
+        let dir = test_dir("setting_row");
+        let path = synth_wallet(&dir, "setting_row");
+        assert!(!seed_migration_done(&path).unwrap());
+        let mut h = WalletHandle::open_readwrite(&path).unwrap();
+        assert!(!h.seed_migrated);
+        h.mark_seed_migrated().unwrap();
+        assert!(h.seed_migrated);
+        assert!(seed_migration_done(&path).unwrap());
+        // idempotent re-mark is a no-op success
+        h.mark_seed_migrated().unwrap();
+        // the whole wallet still parses; the key reader surface is unchanged
+        let w = read_wallet(&path).unwrap();
+        assert_eq!(w.keys.len(), 1);
+        // other settings rows on the file are visible through read_settings
+        let row = (
+            encode_setting_keyblob("addrIncoming"),
+            encode_setting_value_i32(4_020_100),
+        );
+        h.write_rows(&[row], "test_setting").unwrap();
+        let settings = read_settings(&path).unwrap();
+        let names: Vec<&str> = settings.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"seedmigrated"));
+        assert!(names.contains(&"addrIncoming"));
+        h.close();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_hdchain_to_is_an_idempotent_raise() {
+        let dir = test_dir("hdchain_raise");
+        let path = synth_wallet(&dir, "hdchain_raise");
+        let mut h = WalletHandle::open_readwrite(&path).unwrap();
+        assert_eq!(h.hd_chain_index, 0);
+        h.advance_hdchain_to(10).unwrap();
+        assert_eq!(h.hd_chain_index, 10);
+        assert_eq!(read_wallet(&path).unwrap().hd_chain_index, Some(10));
+        // raising to a LOWER target is a no-op (monotonic)
+        h.advance_hdchain_to(3).unwrap();
+        assert_eq!(h.hd_chain_index, 10);
+        assert_eq!(read_wallet(&path).unwrap().hd_chain_index, Some(10));
+        // raising to the same target: no-op
+        h.advance_hdchain_to(10).unwrap();
+        assert_eq!(h.hd_chain_index, 10);
+        h.close();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

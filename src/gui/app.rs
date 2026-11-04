@@ -666,6 +666,8 @@ impl Tri7App {
                                 }
                             });
                         });
+                } else if self.st.sweep_flow.is_some() {
+                    self.sweep_screen(ui);
                 } else if self.st.seed_flow.is_some() {
                     self.seed_screen(ui);
                 } else {
@@ -962,6 +964,472 @@ impl Tri7App {
     }
 
     // -----------------------------------------------------------------------
+    // Seed migration wizard (sweep-to-seed) — state machine in
+    // src/gui/sweep_flow.rs, money math in src/sweep.rs. Thin view layer over
+    // AppState's sweep_* actions. Replaces the app content while active.
+    // -----------------------------------------------------------------------
+    fn sweep_screen(&mut self, ui: &mut egui::Ui) {
+        use crate::gui::sweep_flow::{SweepFlow, SweepStep as Step};
+        // take() the flow out of AppState for the render so view closures can
+        // reach self.st freely; handed back before any AppState action, then
+        // taken again (the actions operate on the STORED flow).
+        let mut flow = match self.st.sweep_flow.take() {
+            Some(f) => f,
+            None => return,
+        };
+        let mut consumed = false;
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.add(egui::Label::new(
+                egui::RichText::new("Add a seed phrase to this wallet")
+                    .size(22.0)
+                    .strong()
+                    .color(th::TEXT_PRIMARY),
+            ));
+            th::text_meta(
+                ui,
+                "Sweep migration — ONE transaction moves the balance to seed-derived \
+                 addresses (m/44'/2222'/0'/0/i, identical to the original qt)",
+            );
+            ui.add_space(8.0);
+            th::inline_notice(
+                ui,
+                th::Notice::Info,
+                "How this works",
+                "A wallet's random keys can never be re-derived from a phrase, so migration \
+                 SWEEPS instead of converting: the seed phrase is added to this same \
+                 wallet.dat, and one transaction moves the whole balance to its first 10 \
+                 addresses. The old keys stay in the file — harmless, empty afterwards. \
+                 Your coins become as recoverable as the phrase.",
+            );
+            ui.add_space(10.0);
+        });
+
+        match flow.step.clone() {
+            Step::Menu => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Create a new seed phrase (24 words)").clicked()
+                        {
+                            flow.begin_create();
+                        }
+                        if ui.button("Use an existing seed phrase").clicked() {
+                            flow.begin_restore();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Could not start", e);
+                    }
+                });
+            }
+            Step::CreateReveal => {
+                let words = flow.revealed_words().unwrap_or_default();
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Warning,
+                        "These 24 words are shown ONCE",
+                        "Anyone who sees them can spend every coin this migration moves. \
+                         Save them now — no one can recover them, not even tri7.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        egui::TextEdit::multiline(&mut words.as_str())
+                            .desired_rows(6)
+                            .interactive(true)
+                            .show(ui);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy to clipboard").clicked() {
+                            match arboard::Clipboard::new() {
+                                Ok(mut cb) => {
+                                    if let Err(e) = cb.set_text(words.clone()) {
+                                        flow.error =
+                                            Some(format!("clipboard copy failed: {}", e));
+                                    }
+                                }
+                                Err(e) => {
+                                    flow.error = Some(format!("clipboard unavailable: {}", e))
+                                }
+                            }
+                        }
+                        if ui.button("Save to file...").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .set_file_name("tri7-seed-backup.txt")
+                                .set_title("Save your seed phrase backup")
+                                .save_file()
+                            {
+                                if let Err(e) = std::fs::write(p, &words) {
+                                    flow.error = Some(format!("save failed: {}", e));
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(
+                            &mut flow.saved_confirmed,
+                            "I wrote the words down (paper or file) and stored them safely",
+                        )
+                        .changed()
+                    {
+                        flow.error = None;
+                    }
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "I saved it — continue").clicked() {
+                            flow.confirm_saved();
+                        }
+                        if ui.button("Cancel (discard these words)").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Hold on", e);
+                    }
+                });
+            }
+            Step::CreateConfirm => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Info,
+                        "Verify your backup",
+                        "Type the 24 words in order (spaces or newlines). This proves the \
+                         backup you saved is correct — the sweep will move the ENTIRE \
+                         balance under this phrase's control.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        ui.allocate_ui(Vec2::new(760.0, 140.0), |ui| {
+                            egui::TextEdit::multiline(&mut flow.words_input)
+                                .desired_rows(6)
+                                .desired_width(760.0)
+                                .show(ui);
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Verify words").clicked() {
+                            flow.submit_create_confirm();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            consumed = true;
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Words do not match", e);
+                    }
+                });
+            }
+            Step::RestoreInput => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Info,
+                        "Use an existing seed phrase",
+                        "Paste or type the 12/24 words in order, then the optional \
+                         passphrase (\"25th word\") if the phrase has one. The words must \
+                         match EXACTLY — including the passphrase — or a different (empty) \
+                         address set is derived.",
+                    );
+                    ui.add_space(8.0);
+                    ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+                        ui.allocate_ui(Vec2::new(760.0, 140.0), |ui| {
+                            egui::TextEdit::multiline(&mut flow.words_input)
+                                .desired_rows(6)
+                                .desired_width(760.0)
+                                .show(ui);
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Passphrase (optional):")
+                                .color(th::TEXT_SECONDARY),
+                        );
+                        th::text_input(ui, 320.0, &mut flow.passphrase);
+                    });
+                    ui.horizontal(|ui| {
+                        if th::primary_button(ui, "Validate phrase").clicked() {
+                            flow.submit_restore();
+                        }
+                        if ui.button("Back").clicked() {
+                            flow.abandon();
+                        }
+                    });
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Invalid phrase", e);
+                    }
+                });
+            }
+            Step::SeedVerified => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Warning,
+                        "Before anything is signed",
+                        "tri7 will now prove the phrase reproduces its own addresses \
+                         (fresh-wallet restore roundtrip), insert the 10 derived keys into \
+                         wallet.dat, and build the sweep — the exact amounts are then shown \
+                         for YOUR review. Nothing is broadcast from this step.",
+                    );
+                    ui.add_space(10.0);
+                    if th::primary_button_large(ui, "Verify backup & build sweep plan").clicked()
+                    {
+                        flow.error = None;
+                        self.st.sweep_flow = Some(std::mem::take(&mut flow));
+                        self.st.sweep_prepare_action();
+                        flow = self.st.sweep_flow.take().unwrap_or_else(SweepFlow::new);
+                    }
+                    if ui.button("Cancel (nothing has moved)").clicked() {
+                        consumed = true;
+                    }
+                    if let Some(e) = &flow.error {
+                        ui.add_space(6.0);
+                        th::inline_notice(ui, th::Notice::Error, "Could not build the sweep", e);
+                    }
+                });
+            }
+            Step::PlanReview => {
+                if flow.plan.is_none() {
+                    // inconsistent state (plan lost) — close the wizard rather
+                    // than render an empty review
+                    consumed = true;
+                }
+                if let Some(plan) = flow.plan.clone() {
+                    let busy = false; // rpc is synchronous; the button disables on click
+                    ui.vertical_centered(|ui| {
+                        th::inline_notice(
+                            ui,
+                            th::Notice::Warning,
+                            "This ONE transaction moves your ENTIRE balance",
+                            "Every output below goes to a seed-derived address. After the \
+                             broadcast, the seed phrase is the ONLY way to recover these \
+                             coins. Review the exact amounts — the same sign → review → \
+                             broadcast discipline as the Send screen.",
+                        );
+                        ui.add_space(8.0);
+                        th::card_titled(ui, "Sweep plan (signed — NOT broadcast)", |ui| {
+                            egui::Grid::new("sweep_plan_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("Amount swept:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.label(egui::RichText::new(format!(
+                                        "{} {}",
+                                        s::format_tri(plan.inputs_total),
+                                        s::TICKER
+                                    ))
+                                    .monospace()
+                                    .color(th::TEXT_PRIMARY));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Fee:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.label(egui::RichText::new(format!(
+                                        "{} {} ({} bytes)",
+                                        s::format_tri(plan.fee),
+                                        s::TICKER,
+                                        plan.n_bytes
+                                    ))
+                                    .monospace()
+                                    .color(th::TEXT_PRIMARY));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("You receive:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.label(egui::RichText::new(format!(
+                                        "{} {} across {} seed addresses",
+                                        s::format_tri(plan.inputs_total - plan.fee),
+                                        s::TICKER,
+                                        plan.outputs.len()
+                                    ))
+                                    .monospace()
+                                    .color(th::TEXT_PRIMARY));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Inputs:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.label(egui::RichText::new(format!(
+                                        "{} UTXOs — no change output, the sweep \
+                                         consolidates everything",
+                                        plan.inputs.len()
+                                    ))
+                                    .color(th::TEXT_PRIMARY));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Keys written:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.label(egui::RichText::new(format!(
+                                        "{} new + {} already in wallet.dat (seed row set, \
+                                         hdchain at {})",
+                                        plan.keys_inserted,
+                                        plan.keys_already_present,
+                                        flow.addresses.len()
+                                    ))
+                                    .color(th::TEXT_PRIMARY));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("TxID:")
+                                        .color(th::TEXT_SECONDARY));
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&plan.txid_display)
+                                            .monospace()
+                                            .color(th::TEXT_PRIMARY));
+                                        if th::ghost_button(ui, "Copy TxID").clicked() {
+                                            ui.output_mut(|o| {
+                                                o.copied_text = plan.txid_display.clone()
+                                            });
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                            // outputs table
+                            ui.add_space(6.0);
+                            let w = ui.available_width();
+                            let cols = [
+                                th::TableCol::new("#", 30.0, false),
+                                th::TableCol::new("Seed-derived address", w - 30.0 - 170.0, false),
+                                th::TableCol::new("Amount", 170.0, true),
+                            ];
+                            th::table_header(ui, &cols, w);
+                            egui::ScrollArea::vertical()
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    for (i, (addr, val)) in plan.outputs.iter().enumerate() {
+                                        let row = i;
+                                        th::table_row(ui, row, false, w, |rui| {
+                                            th::table_cell_text(rui, 0.0, cols[0].width, &format!("{}", i + 1), false, th::TEXT_SECONDARY, true);
+                                            th::table_cell_text(rui, 30.0, cols[1].width, addr, false, th::TEXT_PRIMARY, true);
+                                            th::table_cell_text(rui, w - 170.0, cols[2].width, &format!("{} {}", s::format_tri(*val), s::TICKER), true, th::TEXT_PRIMARY, true);
+                                        });
+                                    }
+                                });
+                            // inputs, collapsed by default
+                            let inputs = plan.inputs.clone();
+                            egui::CollapsingHeader::new(format!(
+                                "Inputs swept ({})",
+                                inputs.len()
+                            ))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for line in &inputs {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!(
+                                            "{}:{}",
+                                            truncate_chars(&line.txid_display, 18),
+                                            line.n
+                                        ))
+                                        .monospace()
+                                        .color(th::TEXT_PRIMARY));
+                                        ui.label(egui::RichText::new(format!(
+                                            "{} {}",
+                                            s::format_tri(line.value_sats),
+                                            s::TICKER
+                                        ))
+                                        .monospace()
+                                        .color(th::TEXT_SECONDARY));
+                                        if !line.address.is_empty() {
+                                            ui.label(egui::RichText::new(&line.address)
+                                                .small()
+                                                .color(th::TEXT_SECONDARY));
+                                        }
+                                    });
+                                }
+                            });
+                            let raw = plan.tx_hex.clone();
+                            egui::CollapsingHeader::new("Raw signed transaction")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new(&raw)
+                                            .monospace()
+                                            .small()
+                                            .color(th::TEXT_SECONDARY),
+                                    )
+                                    .wrap());
+                                    if th::ghost_button(ui, "Copy hex to clipboard").clicked() {
+                                        ui.output_mut(|o| o.copied_text = raw.clone());
+                                    }
+                                });
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if th::secondary_button(ui, "Cancel (nothing has moved)").clicked() {
+                                consumed = true;
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let clicked = primary_button_enabled(ui, !busy, "Broadcast sweep").clicked();
+                                    if clicked {
+                                        self.st.sweep_flow = Some(std::mem::take(&mut flow));
+                                        self.st.sweep_broadcast_action();
+                                        flow = self
+                                            .st
+                                            .sweep_flow
+                                            .take()
+                                            .unwrap_or_else(SweepFlow::new);
+                                    }
+                                },
+                            );
+                        });
+                        // same-frame feedback for both outcomes
+                        if let Step::Done { txid } = &flow.step {
+                            ui.add_space(4.0);
+                            th::inline_notice(
+                                ui,
+                                th::Notice::Success,
+                                "Broadcasted",
+                                &format!(
+                                    "txid {} — the balance is now controlled by the \
+                                     seed-derived keys",
+                                    txid
+                                ),
+                            );
+                        }
+                        if let Some(e) = &flow.error {
+                            ui.add_space(4.0);
+                            th::inline_notice(ui, th::Notice::Error, "Broadcast failed", e);
+                        }
+                    });
+                }
+            }
+            Step::Done { txid } => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Success,
+                        "Seed migration complete",
+                        &format!(
+                            "The sweep was broadcast and confirmed by your tri7d. txid {}. \
+                             Your balance now lives on seed-derived addresses \
+                             (m/44'/2222'/0'/0/i) and the 'seedmigrated' marker is set — \
+                             the wallet cannot be swept twice. The OLD random keys remain in \
+                             wallet.dat: harmless, now empty; leave them there.",
+                            txid
+                        ),
+                    );
+                    th::text_meta(
+                        ui,
+                        "back up by storing the 24 words (and this wallet.dat) — the phrase \
+                         alone restores every address this wallet will ever derive",
+                    );
+                    ui.add_space(8.0);
+                    if th::primary_button(ui, "Back to wallet").clicked() {
+                        consumed = true;
+                    }
+                });
+            }
+        }
+        if !consumed {
+            self.st.sweep_flow = Some(flow);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Auto-update banner (spec: "Cryptographic Triangles <ver> available —
     // Download & Install / Skip this version / View release notes"). Shows
     // ONLY when the pure state machine in src/updater.rs holds a banner
@@ -1182,6 +1650,20 @@ impl Tri7App {
                 };
                 self.st.seed_flow =
                     Some(crate::gui::seed_flow::SeedFlow::new(default_path));
+            }
+            ui.add_space(4.0);
+            th::text_meta(
+                ui,
+                "Seed migration — give ANY existing wallet a seed phrase: its balance is \
+                 swept in one transaction to the phrase's own addresses",
+            );
+            ui.add_space(4.0);
+            if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
+                .clicked()
+            {
+                if let Err(e) = self.st.begin_seed_migration_action() {
+                    self.st.load_error = Some(e);
+                }
             }
             ui.add_space(4.0);
             th::text_meta(
@@ -2053,35 +2535,69 @@ impl Tri7App {
             "Manage receiving addresses and create payment requests",
         );
         // HD seed status strip: what this wallet's keys derive from (or the
-        // honest no-seed note for pre-HD random-key wallets).
-        let hd_line = match (
-            self.st.wallet.as_ref().map(|w| w.hd_mnemonic.clone()).unwrap_or(None),
-            self.st.wallet.as_ref().map(|w| w.hd_chain_index).unwrap_or(0),
-        ) {
-            (Some(_), next) => Some(format!(
-                "Seed-derived wallet — new addresses derive at m/44'/2222'/0'/0/{} from the stored phrase (passphrase: {}).",
-                next,
-                self.st
-                    .wallet
-                    .as_ref()
-                    .map(|w| if w.hd_passphrase.is_some() { "set" } else { "none" })
-                    .unwrap_or("none")
-            )),
-            (None, _) if self.st.loaded() => None,
-            _ => None,
-        };
-        if let Some(line) = hd_line {
-            th::inline_notice(ui, th::Notice::Info, "HD wallet", &line);
-            ui.add_space(4.0);
-        } else if self.st.loaded() {
+        // honest no-seed note for pre-HD random-key wallets) + the seed
+        // migration state and its entry point.
+        let migrated = self
+            .st
+            .wallet
+            .as_ref()
+            .map(|w| w.seed_migrated)
+            .unwrap_or(false);
+        if migrated {
             th::inline_notice(
                 ui,
-                th::Notice::Info,
-                "Backup",
-                "This wallet uses individual backup keys - back it up by copying \
-                 wallet.dat itself. New wallets created here include a seed phrase.",
+                th::Notice::Success,
+                "Seed migration complete",
+                "The balance is on seed-derived addresses (m/44'/2222'/0'/0/i) and the \
+                 'seedmigrated' marker refuses a second sweep. The old random keys remain \
+                 in wallet.dat — harmless, now empty. The seed phrase is the backup.",
             );
             ui.add_space(4.0);
+        } else {
+            let hd_line = match (
+                self.st.wallet.as_ref().map(|w| w.hd_mnemonic.clone()).unwrap_or(None),
+                self.st.wallet.as_ref().map(|w| w.hd_chain_index).unwrap_or(0),
+            ) {
+                (Some(_), next) => Some(format!(
+                    "Seed-derived wallet — new addresses derive at m/44'/2222'/0'/0/{} from the stored phrase (passphrase: {}); any coins still on the old random keys can be swept to the seed addresses below.",
+                    next,
+                    self.st
+                        .wallet
+                        .as_ref()
+                        .map(|w| if w.hd_passphrase.is_some() { "set" } else { "none" })
+                        .unwrap_or("none")
+                )),
+                (None, _) if self.st.loaded() => None,
+                _ => None,
+            };
+            if let Some(line) = hd_line {
+                th::inline_notice(ui, th::Notice::Info, "HD wallet", &line);
+                ui.add_space(4.0);
+                if th::secondary_button(ui, "Sweep remaining balance to the seed addresses…")
+                    .clicked()
+                {
+                    if let Err(e) = self.st.begin_seed_migration_action() {
+                        self.st.status_log.push(format!("seed migration: {}", e));
+                    }
+                }
+                ui.add_space(4.0);
+            } else if self.st.loaded() {
+                th::inline_notice(
+                    ui,
+                    th::Notice::Info,
+                    "Backup",
+                    "This wallet uses individual backup keys - back it up by copying \
+                     wallet.dat itself. Or give it a seed phrase: one sweep transaction \
+                     moves the balance to seed-derived addresses.",
+                );
+                ui.add_space(4.0);
+                if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
+                    if let Err(e) = self.st.begin_seed_migration_action() {
+                        self.st.status_log.push(format!("seed migration: {}", e));
+                    }
+                }
+                ui.add_space(4.0);
+            }
         }
         let avail = ui.available_width();
         if avail >= 900.0 {

@@ -504,6 +504,9 @@ pub struct WalletData {
     pub hd_passphrase: Option<String>,
     /// Next HD derivation index (legacy `hdchain` counter).
     pub hd_chain_index: i64,
+    /// Seed-migration sweep completed (the `seedmigrated` setting row) —
+    /// doubles as the double-sweep guard on the GUI surface.
+    pub seed_migrated: bool,
 }
 
 pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
@@ -518,6 +521,7 @@ pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
         hd_mnemonic: w.hd_mnemonic,
         hd_passphrase: w.hd_passphrase,
         hd_chain_index: w.hd_chain_index.unwrap_or(0),
+        seed_migrated: crate::wallet::seed_migration_done(path)?,
     })
 }
 

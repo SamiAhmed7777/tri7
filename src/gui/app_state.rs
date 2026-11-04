@@ -205,6 +205,8 @@ pub struct AppState {
     pub updater_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateEvent>>,
     /// Seed-phrase create/restore flow (load screen). None = hidden.
     pub seed_flow: Option<super::seed_flow::SeedFlow>,
+    /// Seed-migration (sweep-to-seed) wizard. None = hidden.
+    pub sweep_flow: Option<super::sweep_flow::SweepFlow>,
 }
 
 impl AppState {
@@ -261,6 +263,7 @@ impl AppState {
             updater,
             updater_rx: None,
             seed_flow: None,
+            sweep_flow: None,
         }
     }
 
@@ -429,6 +432,268 @@ impl AppState {
         });
         self.broadcast.busy = false;
         self.broadcast.result = Some(r);
+    }
+
+    // ===========================================================================
+    // Seed migration ("sweep-to-seed") — the wizard state machine lives in
+    // gui::sweep_flow, the money math in crate::sweep; these are the glue
+    // actions. Ordering rule: keys → plan+sign (in memory) → operator review
+    // → broadcast → ONLY THEN the 'seedmigrated' marker.
+    // ===========================================================================
+
+    fn now_unix_u32() -> u32 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(1_400_000_000)
+    }
+
+    /// 'Add seed phrase' entry — the load screen (for any wallet) and the
+    /// seed panel of an opened wallet. Loads the wallet first when needed,
+    /// runs the entry guards, opens the wizard. Every refusal happens BEFORE
+    /// any value can move.
+    pub fn begin_seed_migration_action(&mut self) -> Result<(), String> {
+        if !self.loaded() {
+            self.load_wallet_action()?;
+        }
+        let w = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| "wallet not loaded".to_string())?;
+        if w.seed_migrated {
+            return Err(
+                "this wallet already completed seed migration — the 'seedmigrated' marker \
+                 row refuses a second sweep"
+                    .into(),
+            );
+        }
+        if self.wallet_rw.is_none() {
+            return Err(
+                "wallet.dat is not writable this session — seed migration writes the derived \
+                 keys into wallet.dat and refuses to proceed without it (close any other \
+                 wallet app using this file and reopen)"
+                    .into(),
+            );
+        }
+        // entry pre-check: at least one spendable UTXO must exist. The exact
+        // source set (minus the destination addresses) is computed in
+        // prepare() once the phrase — and its addresses — are known.
+        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+        let any_spendable = self
+            .derived
+            .as_ref()
+            .map(|d| {
+                d.utxos
+                    .iter()
+                    .any(|u| crate::sweep::sweep_spendable(&u.prev_kind, u.height, tip_height + 1))
+            })
+            .unwrap_or(false);
+        if !any_spendable {
+            return Err(
+                "no spendable UTXOs found for this wallet — nothing to migrate (zero \
+                 balance, immature coinbase/coinstake, or an empty/missing UTXO snapshot)"
+                    .into(),
+            );
+        }
+        let mut flow = crate::gui::sweep_flow::SweepFlow::new();
+        if let Some(m) = &w.hd_mnemonic {
+            // a stored seed exists (mid-migration retry, or a phrase
+            // previously restored onto this wallet): the wizard CANNOT
+            // create or replace it — it locks to the stored phrase and the
+            // sweep targets that seed's own address set.
+            flow.lock_to_stored_seed(m, w.hd_passphrase.as_deref())?;
+        }
+        self.sweep_flow = Some(flow);
+        Ok(())
+    }
+
+    /// The candidate sweep source set: every spendable wallet UTXO as a
+    /// SpendInput (destination exclusion happens inside prepare(), where the
+    /// seed addresses are known). Maturity uses the exact rule
+    /// ConnectInputs enforces — coinbase AND coinstake need
+    /// COINBASE_MATURITY depth — so an immature input is refused at
+    /// SELECTION, never at consensus.
+    pub fn sweep_source_candidates(&self) -> Result<Vec<spend::SpendInput>, String> {
+        let derived = self.derived.as_ref().ok_or("wallet not loaded")?;
+        let keys = self.key_map();
+        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+        let spend_height = tip_height + 1;
+        let mut out = Vec::new();
+        for u in &derived.utxos {
+            if !crate::sweep::sweep_spendable(&u.prev_kind, u.height, spend_height) {
+                continue;
+            }
+            let Some((pubkey, secret)) = keys.get(&u.address) else {
+                return Err(format!(
+                    "UTXO {}:{} pays to {} but the wallet holds no key for it — refusing \
+                     to sweep (a coin that cannot be signed must not be built)",
+                    u.txid_display(),
+                    u.n,
+                    u.address
+                ));
+            };
+            out.push(spend::SpendInput {
+                txid: u.txid,
+                n: u.n,
+                value: u.value_sats,
+                script_pubkey: u.script.clone(),
+                height: u.height,
+                tx_time: u.tx_time,
+                is_coinbase: u.prev_kind == "coinbase",
+                is_coinstake: u.prev_kind == "coinstake",
+                secret: *secret,
+                pubkey: pubkey.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Verify backup → insert seed keys into wallet.dat → build + sign the
+    /// sweep plan (in memory, deterministic). Advances the wizard to the
+    /// exact-amounts review; nothing is broadcast here.
+    pub fn sweep_prepare_action(&mut self) {
+        let outcome = (|| -> Result<(), String> {
+            let inputs = self.sweep_source_candidates()?;
+            let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+            let now = Self::now_unix_u32();
+            let (Some(flow), Some(h)) = (self.sweep_flow.as_mut(), self.wallet_rw.as_mut())
+            else {
+                return Err(
+                    "wallet.dat is not writable this session — seed migration refuses to \
+                     proceed without its write session"
+                        .into(),
+                );
+            };
+            flow.prepare(h, &inputs, tip_height, now)
+        })();
+        match outcome {
+            Ok(()) => {
+                self.drain_wallet_journal();
+                if let Err(e) = self.reload_wallet_keys() {
+                    self.status_log
+                        .push(format!("reload after prepare: {}", e));
+                }
+                if let Some(p) = self
+                    .sweep_flow
+                    .as_ref()
+                    .and_then(|f| f.plan.as_ref())
+                {
+                    self.status_log.push(format!(
+                        "sweep plan READY (signed, not broadcast): {} inputs {} TRI → {} \
+                         outputs, fee {} TRI, txid {}",
+                        p.inputs.len(),
+                        format_tri(p.inputs_total),
+                        p.outputs.len(),
+                        format_tri(p.fee),
+                        p.txid_display
+                    ));
+                }
+            }
+            Err(e) => {
+                self.drain_wallet_journal();
+                if let Some(f) = self.sweep_flow.as_mut() {
+                    f.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Broadcast the signed sweep via tri7d sendrawtransaction (the SAME
+    /// live path the Send screen uses), then — and only then — write the
+    /// 'seedmigrated' marker. A broadcast failure loses nothing: keys are
+    /// already in wallet.dat, coins remain on the old keys, retry works.
+    pub fn sweep_broadcast_action(&mut self) {
+        let hex = self
+            .sweep_flow
+            .as_ref()
+            .and_then(|f| f.plan.as_ref())
+            .map(|p| p.tx_hex.clone());
+        let Some(hex) = hex else {
+            if let Some(f) = self.sweep_flow.as_mut() {
+                f.error = Some("no signed sweep plan — build it first".into());
+            }
+            return;
+        };
+        let Some(addr) = self.live_rpc_addr() else {
+            if let Some(f) = self.sweep_flow.as_mut() {
+                f.error =
+                    Some("RPC disabled in config — point the GUI at your tri7d".into());
+            }
+            return;
+        };
+        let r = crate::gui::rpc_client::rpc_call(
+            &addr,
+            "sendrawtransaction",
+            &[serde_json::json!(hex)],
+        );
+        match r {
+            Ok(v) => {
+                let txid = v
+                    .get("txid")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let acks = v.get("announced_to").and_then(|a| a.as_u64()).unwrap_or(0);
+                // strict ordering: the completion marker is written ONLY
+                // after the broadcast was accepted by the daemon
+                let Some(h) = self.wallet_rw.as_mut() else {
+                    if let Some(f) = self.sweep_flow.as_mut() {
+                        f.error = Some(
+                            "wallet.dat is not writable this session — cannot write the \
+                             completion marker (the broadcast DID go out; do not re-sweep)"
+                                .into(),
+                        );
+                    }
+                    return;
+                };
+                if let Err(e) = h.mark_seed_migrated() {
+                    let msg = format!(
+                        "broadcast SUCCEEDED (txid {}, {} relay acks) but writing the \
+                         'seedmigrated' marker failed: {} — the coins ARE on the seed \
+                         addresses; do NOT re-run the sweep",
+                        txid, acks, e
+                    );
+                    self.status_log.push(msg.clone());
+                    if let Some(f) = self.sweep_flow.as_mut() {
+                        f.error = Some(msg);
+                    }
+                    return;
+                }
+                if let Some(f) = self.sweep_flow.as_mut() {
+                    f.complete(txid.clone());
+                }
+                self.drain_wallet_journal();
+                self.status_log.push(format!(
+                    "seed migration complete: txid {} — the balance is now controlled by \
+                     the seed-derived keys (old random keys remain in wallet.dat, now \
+                     empty)",
+                    txid
+                ));
+                if let Err(e) = self.refresh_chain_action() {
+                    self.status_log
+                        .push(format!("refresh after sweep: {}", e));
+                }
+            }
+            Err(e) => {
+                let msg = format!(
+                    "broadcast failed — NOTHING is lost: the derived keys are already in \
+                     wallet.dat and the coins remain on the old keys. Get tri7d's \
+                     sendrawtransaction reachable and retry. ({})",
+                    e
+                );
+                if let Some(f) = self.sweep_flow.as_mut() {
+                    f.error = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Cancel/close the wizard (scrubs the phrase; nothing was broadcast).
+    pub fn sweep_cancel_action(&mut self) {
+        if let Some(f) = self.sweep_flow.as_mut() {
+            f.abandon();
+        }
+        self.sweep_flow = None;
     }
 
     // ===========================================================================
@@ -848,7 +1113,9 @@ impl AppState {
     /// Re-read wallet keys/labels from wallet.dat (after a write) so the
     /// Receive/Address Book/Send surfaces show the new state immediately.
     fn reload_wallet_keys(&mut self) -> Result<(), String> {
-        let w = crate::wallet::read_wallet(Path::new(&self.cfg.wallet_path))?;
+        let path = self.cfg.wallet_path.clone();
+        let w = crate::wallet::read_wallet(Path::new(&path))?;
+        let seed_migrated = crate::wallet::seed_migration_done(Path::new(&path))?;
         match &mut self.wallet {
             Some(cur) => {
                 cur.keys = w.keys;
@@ -856,6 +1123,10 @@ impl AppState {
                 cur.default_key = w.default_key;
                 cur.version = w.version;
                 cur.best_block = w.best_block;
+                cur.hd_mnemonic = w.hd_mnemonic;
+                cur.hd_passphrase = w.hd_passphrase;
+                cur.hd_chain_index = w.hd_chain_index.unwrap_or(0);
+                cur.seed_migrated = seed_migrated;
             }
             None => {
                 self.wallet = Some(WalletData {
@@ -868,6 +1139,7 @@ impl AppState {
                     hd_mnemonic: w.hd_mnemonic,
                     hd_passphrase: w.hd_passphrase,
                     hd_chain_index: w.hd_chain_index.unwrap_or(0),
+                    seed_migrated,
                 });
             }
         }
@@ -1678,6 +1950,35 @@ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
                 "GUI tx bytes differ from direct spend.rs construction: {:?}",
                 eq.err()
             ),
+        );
+    }
+
+    // --- seed migration must REFUSE without a writable wallet --------------
+    // (selfcheck never mutates the live wallet; the sweep writes key rows
+    // into wallet.dat and therefore must fail closed here)
+    let sweep_refused = match st.begin_seed_migration_action() {
+        Err(e) => {
+            report.insert(
+                "seed_migration_refusal".into(),
+                json!({"refused": true, "reason": e}),
+            );
+            true
+        }
+        Ok(()) => {
+            // must never happen with allow_wallet_writes=false — close the
+            // wizard defensively and fail
+            st.sweep_cancel_action();
+            report.insert(
+                "seed_migration_refusal".into(),
+                json!({"refused": false, "reason": "wizard opened without a writable wallet"}),
+            );
+            false
+        }
+    };
+    if !sweep_refused {
+        return fail(
+            &mut report,
+            "seed migration did NOT refuse without a writable wallet (guard failed)".into(),
         );
     }
 

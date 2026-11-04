@@ -675,6 +675,11 @@ pub struct BlockStore {
     /// the index and the file — the wallet live view could never seed and the
     /// ops surface (staking/smsg/broadcast) stayed down forever.
     pending: std::sync::Mutex<Vec<(Vec<u8>, Option<u64>)>>,
+    /// header hashes of the buffered bodies — O(1) duplicate detection. The
+    /// old linear scan re-hashed EVERY buffered body per append (Hash9 ≈
+    /// 30µs each), so a restart-time rebuild buffer made appends crawl at
+    /// ~11 blk/s and degrade linearly (measured live on DNS3).
+    pending_keys: std::sync::Mutex<std::collections::HashSet<Hash>>,
 }
 
 pub struct StoreInner {
@@ -688,6 +693,16 @@ pub struct StoreInner {
     /// the 70MB vectors. A restart re-scans the grown file (blk_len cache
     /// invalidation) and folds the appendix into the main index.
     appendix: std::sync::RwLock<Vec<AppendedFrame>>,
+    /// key8 → appendix index (FIRST arrival wins, matching the linear scan
+    /// this accelerates). The from-zero append path does one hash-dedup
+    /// lookup per accepted block; a linear scan over a million-frame
+    /// appendix made appends degrade linearly (O(n²) over the walk).
+    appendix_by_key: std::sync::RwLock<std::collections::HashMap<u64, usize>>,
+    /// accepted-but-not-yet-fsynced frame count (fsync is amortized: every
+    /// SYNC_EVERY appends — process-crash durability comes from the written
+    /// page cache; a host crash may lose the tail, same envelope as the
+    /// buffered-append path)
+    unsynced: std::sync::atomic::AtomicU64,
     /// false when the blocks file could not be opened writable (perm/ro fs) —
     /// append_block errors cleanly instead of writing
     writable: std::sync::atomic::AtomicBool,
@@ -758,6 +773,7 @@ impl BlockStore {
             started: Instant::now(),
             failure: RwLock::new(None),
             pending: std::sync::Mutex::new(Vec::new()),
+            pending_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -829,6 +845,10 @@ impl BlockStore {
                             file,
                             build_secs: started.elapsed().as_secs(),
                             appendix: std::sync::RwLock::new(Vec::new()),
+                            appendix_by_key: std::sync::RwLock::new(
+                                std::collections::HashMap::new(),
+                            ),
+                            unsynced: std::sync::atomic::AtomicU64::new(0),
                             writable: std::sync::atomic::AtomicBool::new(writable),
                         };
                         *self.state.write().unwrap() = Some(Arc::new(inner));
@@ -916,6 +936,33 @@ impl BlockStore {
                 body_len: body.len(),
                 height,
             }));
+        }
+        // appendix: the by_key map is the O(1) accelerator for the linear
+        // scan (first arrival wins — same semantics). The from-zero append
+        // path runs this lookup once per accepted block; a linear scan over
+        // a million-frame appendix degraded appends linearly (O(n²)).
+        let key = key8(hash);
+        let hit_idx = inner.appendix_by_key.read().unwrap().get(&key).copied();
+        if let Some(idx) = hit_idx {
+            let a = inner.appendix.read().unwrap();
+            if idx < a.len() {
+                let f = a[idx].clone();
+                if f.key == key {
+                    let body = Self::read_frame(&inner, f.off)?;
+                    let h = header_hash(&body)?;
+                    if &h == hash {
+                        let block = Self::parse_frame(&body)?;
+                        let height = f.height.or(inner.blocks.height_of_seq(f.seq));
+                        return Ok(Some(BlockHit {
+                            block,
+                            hash: h,
+                            off: f.off,
+                            body_len: body.len(),
+                            height,
+                        }));
+                    }
+                }
+            }
         }
         for f in inner.appendix.read().unwrap().iter() {
             if f.key != key8(hash) {
@@ -1153,7 +1200,8 @@ impl BlockStore {
                 // disk store once the build lands.
                 let hash = header_hash(body)?;
                 let mut p = self.pending.lock().unwrap();
-                if p.iter().any(|(b, _)| header_hash(b).as_ref() == Ok(&hash)) {
+                let mut keys = self.pending_keys.lock().unwrap();
+                if !keys.insert(hash) {
                     return Ok(hash); // already buffered
                 }
                 p.push((body.to_vec(), height));
@@ -1189,7 +1237,19 @@ impl BlockStore {
             .map_err(|e| format!("append: seek: {}", e))?;
         fh.write_all(&frame)
             .map_err(|e| format!("append: write: {}", e))?;
-        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // amortized fsync: write_all already landed the frame in the page
+        // cache (process-crash durable); sync every SYNC_EVERY appends so a
+        // host crash loses at most the tail. The old per-append sync_all
+        // flushed the disk once per BLOCK and capped from-zero throughput
+        // well under the fetch rate.
+        const SYNC_EVERY: u64 = 256;
+        let un = inner
+            .unsynced
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if un % SYNC_EVERY == 0 {
+            fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        }
         // index the frame
         let mut tx_keys = Vec::new();
         walk_tx_ranges(body, &mut |start, end| {
@@ -1200,13 +1260,24 @@ impl BlockStore {
             let a = inner.appendix.read().unwrap();
             a.len() as u32
         };
-        inner.appendix.write().unwrap().push(AppendedFrame {
-            key: key8(&hash),
-            off,
-            seq,
-            height,
-            tx_keys,
-        });
+        let akey = key8(&hash);
+        {
+            let mut a = inner.appendix.write().unwrap();
+            // first arrival wins (matches the linear-scan lookup semantics)
+            inner
+                .appendix_by_key
+                .write()
+                .unwrap()
+                .entry(akey)
+                .or_insert(a.len());
+            a.push(AppendedFrame {
+                key: akey,
+                off,
+                seq,
+                height,
+                tx_keys,
+            });
+        }
         Ok(hash)
     }
 
@@ -1215,6 +1286,8 @@ impl BlockStore {
     fn flush_pending(&self, inner: &Arc<StoreInner>) {
         let drained: Vec<(Vec<u8>, Option<u64>)> = {
             let mut p = self.pending.lock().unwrap();
+            let mut keys = self.pending_keys.lock().unwrap();
+            keys.clear();
             std::mem::take(&mut *p)
         };
         for (body, height) in drained {
@@ -1257,7 +1330,19 @@ impl BlockStore {
             .map_err(|e| format!("append: seek: {}", e))?;
         fh.write_all(&frame)
             .map_err(|e| format!("append: write: {}", e))?;
-        fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        // amortized fsync: write_all already landed the frame in the page
+        // cache (process-crash durable); sync every SYNC_EVERY appends so a
+        // host crash loses at most the tail. The old per-append sync_all
+        // flushed the disk once per BLOCK and capped from-zero throughput
+        // well under the fetch rate.
+        const SYNC_EVERY: u64 = 256;
+        let un = inner
+            .unsynced
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if un % SYNC_EVERY == 0 {
+            fh.sync_all().map_err(|e| format!("append: sync: {}", e))?;
+        }
         // index the frame
         let mut tx_keys = Vec::new();
         walk_tx_ranges(body, &mut |start, end| {
@@ -1268,13 +1353,24 @@ impl BlockStore {
             let a = inner.appendix.read().unwrap();
             a.len() as u32
         };
-        inner.appendix.write().unwrap().push(AppendedFrame {
-            key: key8(&hash),
-            off,
-            seq,
-            height,
-            tx_keys,
-        });
+        let akey = key8(&hash);
+        {
+            let mut a = inner.appendix.write().unwrap();
+            // first arrival wins (matches the linear-scan lookup semantics)
+            inner
+                .appendix_by_key
+                .write()
+                .unwrap()
+                .entry(akey)
+                .or_insert(a.len());
+            a.push(AppendedFrame {
+                key: akey,
+                off,
+                seq,
+                height,
+                tx_keys,
+            });
+        }
         Ok(hash)
     }
 }

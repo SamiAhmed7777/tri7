@@ -21,6 +21,7 @@ pub mod smsg;
 pub mod smsg_net;
 pub mod spend;
 pub mod stake;
+pub mod sweep;
 pub mod txpool;
 pub mod updater;
 pub mod wallet;

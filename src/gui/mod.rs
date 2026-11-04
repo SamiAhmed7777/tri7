@@ -20,6 +20,7 @@ pub mod explorer;
 pub mod rpc_client;
 pub mod seed_flow;
 pub mod state;
+pub mod sweep_flow;
 
 #[cfg(test)]
 mod tests;
