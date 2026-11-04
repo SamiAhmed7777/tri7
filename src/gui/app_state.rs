@@ -1634,6 +1634,51 @@ impl AppState {
     }
 
     /// Connection info refresh (status bar + Chain/Debug information page).
+    /// Full wallet history straight from `<wallet folder>/history.json`.
+    ///
+    /// The daemon route (listwallettx) is an optimisation, not the source of
+    /// truth: the file sits next to wallet.dat, we wrote it there, and the GUI
+    /// must never depend on an RPC round-trip to show a receipt from 2021.
+    /// Returns (rows, note) where note explains why it is empty when it is.
+    pub fn load_history_file(&self) -> (Vec<crate::history::HistoryRec>, String) {
+        let wp = self.cfg.wallet_path.clone();
+        if wp.trim().is_empty() {
+            return (Vec::new(), "no wallet path configured".into());
+        }
+        let dir = std::path::Path::new(&wp)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // the wallet folder is the source of truth; the daemon's state dir
+        // (where txhistory wrote) is the same folder in the one-folder design,
+        // but check both so a legacy layout still resolves
+        let mut candidates = vec![crate::history::cache_path(&dir)];
+        if !self.cfg.state_dir.trim().is_empty() {
+            candidates.push(crate::history::cache_path(std::path::Path::new(
+                &self.cfg.state_dir,
+            )));
+        }
+        for path in candidates {
+            if let Some(cache) = crate::history::load_cache(path.parent().unwrap_or(&dir)) {
+                if !cache.rows.is_empty() {
+                    let mut rows = cache.rows;
+                    rows.sort_by(|a, b| b.time.cmp(&a.time).then(b.height.cmp(&a.height)));
+                    return (
+                        rows,
+                        format!(
+                            "history.json: {} rows (scanned to h{})",
+                            cache.scanned_height, cache.scanned_height
+                        ),
+                    );
+                }
+            }
+        }
+        (
+            Vec::new(),
+            format!("no history.json in {}", dir.display()),
+        )
+    }
+
     pub fn refresh_debug_info_action(&mut self) {
         let mut info = DebugInfo::default();
         if let Some(addr) = self.cfg.rpc_addr.clone() {

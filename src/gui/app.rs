@@ -3276,18 +3276,35 @@ impl Tri7App {
             ui.add_space(4.0);
             th::text_meta(
                 ui,
-                "unspent outputs from the node’s live wallet view — newest first",
+                "every receive and spend recorded for these keys — click the Date header to reverse the order",
             );
             ui.add_space(6.0);
-            let Some(derived) = self.st.derived.clone() else {
-                th::empty_state(
-                    ui,
-                    None,
-                    "No wallet loaded",
-                    "Open a wallet to see transactions",
-                );
-                return;
-            };
+            // NO local derived wallet is required to show history: the rows
+            // come from <wallet folder>/history.json (or the daemon). Requiring
+            // derived data here was the second filter - on a machine without
+            // wallet_utxos.json the page bailed out before reading history at
+            // all, so only the live unspent window ever appeared.
+            let derived = self.st.derived.clone().unwrap_or_else(|| {
+                crate::gui::state::DerivedWallet {
+                    utxos: Vec::new(),
+                    balances: crate::gui::state::Balances {
+                        total_sats: 0,
+                        per_address: Vec::new(),
+                    },
+                    snapshot_height: 0,
+                    coverage_height: 0,
+                    reconcile: crate::gui::state::ReconcileReport {
+                        enabled: false,
+                        blocks_applied: 0,
+                        additions_found: 0,
+                        additions_kept: 0,
+                        spends_applied: 0,
+                        heights: (0, 0),
+                        source: "history".into(),
+                        note: "no local snapshot - history.json / daemon rows".into(),
+                    },
+                }
+            });
             let tip = self.st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
             let min_amount_sats: i64 = self
                 .tx_min_amount
@@ -3304,12 +3321,19 @@ impl Tri7App {
             //  2. local derived snapshot
             //  3. daemon listunspent (live unspent only)
             // A holder from 2021 must see those rows, not just today's.
-            let hist: Vec<crate::history::HistoryRec> = self
-                .st
-                .debug_info
-                .as_ref()
-                .and_then(|d| d.wallet_history.clone())
-                .unwrap_or_default();
+            // The FILE wins: it is in the wallet's own folder and cannot be
+            // gated by an RPC allow-list, a timeout or a throttle. The daemon
+            // copy is only a fallback when the file is absent.
+            let (hist, hist_note) = self.st.load_history_file();
+            let hist: Vec<crate::history::HistoryRec> = if hist.is_empty() {
+                self.st
+                    .debug_info
+                    .as_ref()
+                    .and_then(|d| d.wallet_history.clone())
+                    .unwrap_or_default()
+            } else {
+                hist
+            };
             let utxos: Vec<UtxoRec> = if !derived.utxos.is_empty() {
                 derived.utxos.clone()
             } else {
