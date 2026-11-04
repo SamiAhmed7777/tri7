@@ -720,6 +720,15 @@ impl AppState {
     /// The load-screen action: wallet + UTXO derivation pass + tip + stake.
     pub fn load_wallet_action(&mut self) -> Result<(), String> {
         let wallet = load_wallet(Path::new(&self.cfg.wallet_path))?;
+        // ONE-FOLDER DESIGN (Sami): the chosen folder IS the wallet
+        // environment - state files live beside wallet.dat automatically.
+        let parent = Path::new(&self.cfg.wallet_path)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if !parent.is_empty() {
+            self.cfg.state_dir = parent;
+        }
         if wallet.keys.is_empty() {
             return Err(format!("wallet {} has zero keys", self.cfg.wallet_path));
         }

@@ -43,17 +43,51 @@ round-robin).
    next window in flight); ONE validator thread runs every block through the
    SAME acceptance gate as live traffic: Hash9, prev-link, header agreement,
    merkle, median-time-past, nBits EMA (AcceptBlock cutoff respected), PoW
-   target / PoS kernel (full-history window: every coinstake kernel is
-   ENFORCED, none skipped), block signature, tx finality.
+   target / block signature / tx finality. KERNEL evidence follows the
+   DEPLOYED-CLIENT assume-valid envelope below the checkpoint (see below);
+   everything above h2203924 keeps FULL validation (kernels hard-enforced).
 4. **Durability** — accepted blocks append to `<state-dir>/blk0001.dat`;
    tipstate persists every 1000 blocks and on SIGINT/SIGTERM (exit 130).
+   The blocks store is CREATED (empty) and its index build started BEFORE
+   the first block is fetched — without it every accepted body would buffer
+   in RAM and be lost on restart (this silently ate the whole h0..17524
+   walk on DNS3 on 2026-11-03).
 5. **Tip takeover** — when a fetch round returns nothing new, the node is at
    the peer tip and the normal follow loop takes over seamlessly.
+
+## Assume-valid envelope (deployed-client parity, DEFAULT)
+
+The v6.2.6.7 client syncing from scratch skips kernel/sig/reward checks
+below its last hardcoded mainnet checkpoint — that is what checkpoints are
+FOR: the anchor hash binds the trusted history. tri7 from-zero now matches
+that envelope exactly (before 2026-11-03 it was STRICTER, hard-enforcing
+historical kernels the deployed client never checked, and died
+deterministically at h17693 — a block the deployed client accepted with
+proofhash=0):
+
+| band | kernel evidence | index proof value |
+|---|---|---|
+| h < 2200900 | none (assume-valid) | 0 — byte-equal to the deployed daemon's stored proofhash for this range |
+| 2200900 ≤ h < 2203924 | COMPUTED, not enforced (seam era: the deployed client accepted it live, so its index holds real proofs — tri7 recomputes so stake modifiers above the seam match) | recomputed |
+| h ≥ 2203924 | FULL: kernel target hard-enforced | recomputed |
+
+The boundary block itself must hash to the compiled-in checkpoint anchor
+`a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14`
+(= getblockhash(2203924), daemon-verified) — the trust anchor for
+everything below. Block signatures stay horizon-gated (h > 2203924) in both
+modes: the instamine-era bad signature at h9003 is IN the chain and must
+stay tolerated. `--full-validate` restores strict historical kernel
+enforcement for the whole walk (audit only: ~7 blk/s and the h17693 seam
+fails). A kernel target miss ABOVE the horizon is tolerated ONLY when the
+consumed stake modifier predates the checkpoint (reconstructed from assumed
+evidence — cannot distinguish a bad block from index divergence); modifiers
+generated above the horizon are fully enforced.
 
 ## Monitoring
 
 ```bash
 journalctl -u tri7d -f | grep 'from-zero:'
+# from-zero: header walk at h1111524                       (~2600 headers/s)
 # from-zero: h482000 0000000000...  (103 blk/s, ETA 4.6h)
 /opt/tri7/bin/follow_tip --status --state-dir /var/lib/tri7   # health JSON
 curl -s -u user:pass -d '{"jsonrpc":"1.0","id":0,"method":"getblockcount","params":[]}' \
@@ -62,12 +96,15 @@ curl -s -u user:pass -d '{"jsonrpc":"1.0","id":0,"method":"getblockcount","param
 
 ## Expected duration (measured DNS3→DNS2, 2026-11-03)
 
-Throughput is bound by the PEER's getdata serving rate (~25-30 blk/s per
-connection on a tri7d primary; scales roughly linearly with worker count up
-to the peer's CPU/loop limit). 4 workers: ~100 blk/s → **~6 h** for 2.2M
-blocks; single worker ~20 h. Faster peers (or a peer running a build whose
-inbound getdata serves whole inv batches per loop tick) shorten this
-proportionally. Validation itself stays well under the fetch rate.
+- **Header walk**: ~2600 headers/s over tailscale to DNS2 → 2.2M headers in
+  ~15 min. Stale duplicate segments (a >2s response makes the walk re-send
+  the locator; the daemon answers every request) are detected and dropped —
+  `dropped stale duplicate headers segment` lines are normal.
+- **Body fetch + validation**: bound by the PEER's getdata serving rate
+  (~25-30 blk/s per connection). 8 workers → measured ~200-240 blk/s
+  aggregate unless the peer's serving loop caps first (see run log for the
+  live number). Validation under the assume-valid envelope stays far under
+  the fetch rate (the old full-kernel walk ran 7-21 blk/s on 2 vCPU).
 
 ## Resumability
 

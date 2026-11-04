@@ -413,8 +413,29 @@ struct TipEntryLight {
 }
 
 pub fn load_tipstate(path: &Path) -> Result<TipInfo, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // MISSING STATE FILE IS FINE: a brand-new wallet folder has no
+            // chain state yet. Open with an empty local state - live chain
+            // data flows from tri7d RPC. (Sami directive: the chosen folder
+            // IS the wallet environment; nothing blocks opening the wallet.)
+            return Ok(TipInfo {
+                height: 0,
+                blockhash: String::new(),
+                updated_utc: String::new(),
+                last_advance_utc: String::new(),
+                window_base: 0,
+                daemon_tip: None,
+                tip_time: 0,
+                tip_bits: 0,
+                tip_modifier: 0,
+                tip_generated: false,
+                tip_pos: false,
+            });
+        }
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
     let f: TipStateLight =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
     let last = f.entries.last();
@@ -566,8 +587,23 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn load_utxo_dump(path: &Path) -> Result<UtxoDump, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // no UTXO snapshot in the folder yet - the GUI shows balances via
+            // the wallet keys + tri7d RPC instead (Sami directive: the chosen
+            // folder is the whole wallet environment; missing side files never
+            // block opening)
+            return Ok(UtxoDump {
+                height: 0,
+                covered_tip_hash: String::new(),
+                count: 0,
+                total_value_sats: 0,
+                utxos: Vec::new(),
+            });
+        }
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
     let d: UtxoDump =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
     if d.utxos.is_empty() {

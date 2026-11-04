@@ -1147,24 +1147,10 @@ impl Tri7App {
                     }
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("State folder:").color(th::TEXT_SECONDARY),
-                );
-                if th::text_input(ui, 420.0, &mut self.st.cfg.state_dir).changed() {
-                    self.st.load_error = None;
-                }
-                if ui.button("Browse folder...").clicked() {
-                    if let Some(picked) =
-                        rfd::FileDialog::new()
-                            .set_title("Choose the state folder")
-                            .pick_folder()
-                    {
-                        self.st.cfg.state_dir = picked.display().to_string();
-                        self.st.load_error = None;
-                    }
-                }
-            });
+            ui.label(
+                egui::RichText::new("Everything lives in the wallet's folder - state, chain data and backups.")
+                    .color(th::TEXT_SECONDARY),
+            );
             ui.add_space(8.0);
             if th::primary_button(ui, "Open Wallet").clicked() {
                 if let Err(e) = self.st.load_wallet_action() {
@@ -1200,7 +1186,7 @@ impl Tri7App {
             ui.add_space(4.0);
             th::text_meta(
                 ui,
-                "existing wallets created with random keys have NO seed phrase — one can never be added to them",
+                "Seed phrase wallet - BIP39 create/restore, identical keys to the original qt (m/44'/2222'/0'/0/i)",
             );
             ui.add_space(6.0);
             th::text_meta(
@@ -2091,10 +2077,9 @@ impl Tri7App {
             th::inline_notice(
                 ui,
                 th::Notice::Info,
-                "No seed phrase",
-                "This wallet's keys were created randomly — it has no seed phrase and one \
-                 can never be added. Back this wallet up by copying wallet.dat itself. \
-                 New seed-phrase wallets are created from the load screen.",
+                "Backup",
+                "This wallet uses individual backup keys - back it up by copying \
+                 wallet.dat itself. New wallets created here include a seed phrase.",
             );
             ui.add_space(4.0);
         }

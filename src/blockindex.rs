@@ -340,7 +340,17 @@ pub fn build_index(
     }
     progress(seq as usize);
 
-    if blocks.is_empty() {
+    // An EMPTY file is a VALID store state, not an error: the from-zero
+    // sync starts with a freshly created (0-byte) blocks file and grows it
+    // append-only. Rejecting it here made the index build fail forever on a
+    // bare machine, so append_block buffered EVERY accepted body in RAM,
+    // nothing ever reached disk, and a restart lost the whole validated
+    // walk (DNS3, 2026-11-03: tip h17524 fully validated, zero bytes on
+    // disk). A 0-frame index is immediately replaced by real frames through
+    // the append path; heights_ok=false until real frames thread.
+    if blocks.is_empty() && skipped == 0 && seq == 0 && off == 0 {
+        // completely empty file: fall through with a 0-frame build
+    } else if blocks.is_empty() {
         return Err("no frames found".into());
     }
 

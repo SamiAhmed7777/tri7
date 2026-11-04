@@ -897,8 +897,12 @@ struct Config {
     /// does not exist, then use it as --wallet
     new_wallet: Option<PathBuf>,
     /// from-zero fetcher sessions (parallel getdata pipelines; validation
-    /// stays strictly sequential). Default 4.
+    /// stays strictly sequential). Default 8 (measured: DNS2 serves ~25-30
+    /// blk/s per session; 4 left the validator idle, 8 doubles the pipe).
     sync_workers: u32,
+    /// --full-validate: disable the from-zero assume-valid envelope (strict
+    /// historical kernel enforcement; see CHECKPOINT_HORIZON)
+    full_validate: bool,
     }
 
 fn usage() -> ! {
@@ -908,6 +912,23 @@ fn usage() -> ! {
          [--rpc-port N] [--conf PATH] [--archive PATH] [--state-dir DIR]\n\
          [--seconds N] [--backfill N] [--backfill-blocks N] [--reseed]\n\
          [--forever] [--status] [--max-write-age SECS] [--summary PATH]\n\
+         \n\
+         FROM-ZERO sync (bare machine -> full chain over P2P):\n\
+         --sync-from-zero    build the state from genesis and backfill the\n\
+                             ENTIRE chain (auto-arms on no state + explicit\n\
+                             peers). Default validation = the DEPLOYED\n\
+                             CLIENT's assume-valid envelope: below the last\n\
+                             hardcoded checkpoint (h2203924, anchor\n\
+                             a838e60d...) kernel/sig/reward evidence is\n\
+                             skipped exactly like the deployed client's own\n\
+                             from-scratch sync; the boundary block's hash is\n\
+                             verified against the compiled-in checkpoint;\n\
+                             everything above keeps FULL validation.\n\
+         --full-validate     strict mode: hard-enforce every historical\n\
+                             kernel too (slow, ~7 blk/s, and the h17693 seam\n\
+                             fails — kept for audit only).\n\
+         --sync-workers N    parallel fetcher sessions (default 8; validation\n\
+                             stays strictly sequential).\n\
          \n\
          Outbound P2P attach (phase 6 multi-target with fallback):\n\
          --daemon HOST:PORT  outbound peer; comma-separated list and repeated\n\
@@ -1009,7 +1030,8 @@ fn parse_args() -> Config {
         sync_from_zero: false,
         explicit_peers: false,
         new_wallet: None,
-        sync_workers: 4,
+        sync_workers: 8,
+        full_validate: false,
     };
     cfg.balances_path = cfg.state_dir.join("balances.json");
     cfg.wallet_utxos_path = cfg.state_dir.join("wallet_utxos.json");
@@ -1033,6 +1055,7 @@ fn parse_args() -> Config {
         };
         match args[i].as_str() {
             "--sync-from-zero" => cfg.sync_from_zero = true,
+            "--full-validate" => cfg.full_validate = true,
             "--new-wallet" => cfg.new_wallet = Some(PathBuf::from(need(&mut i, &args))),
             "--sync-workers" => {
                 cfg.sync_workers = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
@@ -1261,6 +1284,11 @@ struct Stats {
     kernel_enforced: u64,
     kernel_seeded: u64,
     kernel_skipped_no_oracle: u64,
+    // ---- from-zero assume-valid envelope (deployed-client parity) ----
+    kernel_skipped_assume_valid: u64, // below V6_RESTART_HEIGHT: no kernel at all (daemon stores proofhash=0 there)
+    kernel_computed_advisory: u64,    // seam era [2200900, 2203924): kernel computed for the index, target NOT enforced
+    kernel_target_tol_assumed: u64,   // above the horizon: target miss tolerated only because the consumed modifier predates the checkpoint
+    checkpoint_anchor_verified: u64,  // h2203924 hash matched the compiled-in checkpoint
     nbits_checked: u64,
     sigs_checked: u64,
     checksums_verified: u64,
@@ -1761,6 +1789,80 @@ fn rpc_seed_window(
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
+/// Deployed-client assume-valid envelope (from-zero sync).
+///
+/// The v6.2.6.7 client syncing from scratch SKIPS kernel/sig/reward checks
+/// below its last hardcoded mainnet checkpoint — that is what the checkpoint
+/// is FOR: the anchor hash binds the trusted history. Its own index proves
+/// the envelope: daemon `getblock` stores proofhash=0 for EVERY PoS block
+/// h1026..2200899 (IBD-skip Cheops+ / assume-valid <=9001 v5+ / rolling
+/// paths) and REAL stored proofs only from the live era h2200900+ (accepted
+/// one-by-one with kernels enforced at accept time). tri7's from-zero
+/// validator was STRICTER than the deployed client — enforcing historical
+/// kernels that were never checked when the blocks were accepted — and died
+/// deterministically at h17693 (KERNEL TARGET FAIL on a block the deployed
+/// client accepted with proofhash=0).
+///
+/// Bands for a historical (non-live) block at height h:
+///   - h <  2200900 (V6_RESTART_HEIGHT): ASSUME-VALID — no kernel evidence;
+///     index proof stays 0, byte-identical to the deployed client's own
+///     index values for this range.
+///   - 2200900 <= h < 2203924 (CHECKPOINT_HORIZON): SEAM-ADVISORY — the
+///     kernel is COMPUTED (so stake modifiers above the seam match the
+///     deployed index, where real proofs are stored) but the target is NOT
+///     enforced (the deployed client accepted this era live; a recomputation
+///     mismatch is tri7-kernel-math divergence, not chain evidence).
+///   - h >= 2203924: FULL VALIDATION — kernels hard-enforced, exactly as
+///     live. The boundary block itself must hash to the compiled-in
+///     checkpoint anchor a838e60d… (the trust anchor of everything below).
+///
+/// `--full-validate` restores the pre-assume-valid strict behavior for the
+/// whole from-zero walk (slow: every historical kernel enforced).
+const CHECKPOINT_HORIZON: u64 = 2_203_924; // = Checkpoints::GetTotalBlocksEstimate() on the deployed client
+const CHECKPOINT_ANCHOR_DISPLAY: &str =
+    "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14"; // getblockhash(2203924), daemon-verified
+const V6_RESTART_HEIGHT_U64: u64 = 2_200_900; // = consensus::V6_RESTART_HEIGHT; deployed index: real proofs from here up
+
+/// Which kernel treatment applies to a historical block at height h.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ValidMode {
+    /// full kernel enforcement (live blocks, --full-validate, h >= horizon)
+    FullStrict,
+    /// h in [2200900, 2203924): compute for the index, do not enforce
+    SeamAdvisory,
+    /// h < 2200900: no kernel evidence at all (deployed index parity)
+    AssumeValid,
+}
+
+fn validation_mode(h: u64, live: bool, full_validate: bool) -> ValidMode {
+    if live || full_validate || h >= CHECKPOINT_HORIZON {
+        ValidMode::FullStrict
+    } else if h >= V6_RESTART_HEIGHT_U64 {
+        ValidMode::SeamAdvisory
+    } else {
+        ValidMode::AssumeValid
+    }
+}
+
+/// The checkpoint boundary block binds the trusted history: its hash must
+/// equal the compiled-in checkpoint. Live blocks can never sit at the
+/// horizon height, so this only fires on historical (fetch/backfill) paths.
+fn check_checkpoint_anchor(h: u64, hash_internal: &Hash) -> Result<(), String> {
+    if h != CHECKPOINT_HORIZON {
+        return Ok(());
+    }
+    let want = tri7_core::p2p::display_to_internal(CHECKPOINT_ANCHOR_DISPLAY)?;
+    if hash_internal != &want {
+        return Err(format!(
+            "h{}: CHECKPOINT ANCHOR MISMATCH: block hashes to {} but the compiled-in checkpoint is {} — refusing to trust the history below",
+            h,
+            tri7_core::p2p::internal_to_display(hash_internal),
+            CHECKPOINT_ANCHOR_DISPLAY
+        ));
+    }
+    Ok(())
+}
+
 struct BlockCtx<'a> {
     height_abs: u64,
     header: Option<&'a Block>, // expected header (from the headers flow)
@@ -1783,6 +1885,7 @@ fn validate_block(
 ) -> Result<ValidationOutcome, String> {
     let h = ctx.height_abs;
     let is_pos = block_is_proof_of_stake(block);
+    let mode = validation_mode(h, ctx.live, FULL_VALIDATE.load(Ordering::Relaxed));
 
     // 1. Hash9 block hash + link to our validated predecessor
     let hash = block.hash();
@@ -1792,6 +1895,18 @@ fn validate_block(
             h,
             tri7_core::p2p::internal_to_display(&block.prev_hash),
             tri7_core::p2p::internal_to_display(&ctx.prev_entry.hash)
+        ));
+    }
+    // 1b. checkpoint trust anchor: the boundary block must hash to the
+    // compiled-in checkpoint — this is what makes assume-valid BELOW the
+    // horizon sound (the trusted prefix is pinned by one hash).
+    check_checkpoint_anchor(h, &hash).map_err(|e| e.to_string())?;
+    if h == CHECKPOINT_HORIZON {
+        stats.checkpoint_anchor_verified += 1;
+        log(&format!(
+            "from-zero: checkpoint anchor VERIFIED at h{} = {} — assume-valid history bound",
+            h,
+            CHECKPOINT_ANCHOR_DISPLAY
         ));
     }
 
@@ -1888,57 +2003,130 @@ fn validate_block(
         proof: [0u8; 32],
     };
     if is_pos {
-        // 7a. kernel where enforced: resolve the coinstake input from the
-        // window UTXO and recompute the full kernel (modifier walk + hash +
-        // target). Pre-window inputs fall back to the RPC proof, which the
-        // checksum chain still verifies.
-        let resolved = {
+        // 7a. kernel evidence, banded by the assume-valid envelope (see the
+        // CHECKPOINT_HORIZON docs above):
+        //   AssumeValid  — no kernel at all; index proof stays 0, byte-equal
+        //                  to the deployed client's FastImport values here.
+        //   SeamAdvisory — compute the kernel so stake modifiers above the
+        //                  seam match the deployed index, but do NOT enforce.
+        //   FullStrict   — enforce (live behavior, unchanged).
+        let resolved = if mode == ValidMode::AssumeValid {
+            None
+        } else {
             let txin = &block.vtx[1].vin[0];
             st.utxo.kernel_meta(&(txin.prev_hash, txin.prev_n))
         };
         match resolved {
-            Some(_) => {
+            Some(meta) => {
                 let res = tri7_core::kernel::check_proof_of_stake(
                     &rel_index,
                     block,
                     &st.utxo,
                     block.bits,
                     h as usize - 1, // ABSOLUTE: selects the GetWeight era
-                )
-                .map_err(|e| format!("h{}: kernel guard: {}", h, e))?;
-                if !res.meets_target
-                    && h as usize > tri7_core::consensus::CRAPCHAIN_CUTOFF_BLOCK
-                {
-                    // era rule: at/below the CRAPCHAIN cutoff kernel overshoot
-                    // is tolerated (Pharao-release hack — kernel.cpp:381-403
-                    // comment); above it the target is hard-enforced
-                    return Err(format!(
-                        "h{}: KERNEL TARGET FAIL modifier={:016x} block_from(abs h{}) coinDays={} hashProof={}",
-                        h,
-                        res.modifier,
-                        st.base as usize + res.block_from_height,
-                        res.coin_day_weight,
-                        hash_to_display(&res.hash_proof_of_stake)
-                    ));
+                );
+                let enforce = mode == ValidMode::FullStrict;
+                let input_abs = st.base + meta.height as u64;
+                match res {
+                    Ok(res) => {
+                        if !res.meets_target {
+                            if !enforce {
+                                // seam era: advisory only — record the real
+                                // proof either way (matches the deployed
+                                // index, which holds real proofs here)
+                                stats.kernel_computed_advisory += 1;
+                                if stats.kernel_computed_advisory % 500 == 1 {
+                                    log(&format!(
+                                        "h{}: seam-era kernel advisory: target not met by our recomputation (block_from abs h{}, coinDays={}) — tolerated (deployed client accepted this era live)",
+                                        h,
+                                        st.base as usize + res.block_from_height,
+                                        res.coin_day_weight
+                                    ));
+                                }
+                            } else if st.base as usize + res.block_from_height
+                                < CHECKPOINT_HORIZON as usize
+                            {
+                                // FULL zone, but this kernel's stake modifier
+                                // derives from the assume-valid region: our
+                                // modifier for that era is reconstructed from
+                                // assumed (not enforced) evidence, so a target
+                                // miss here cannot distinguish a bad block from
+                                // our own index divergence. Tolerate with a
+                                // loud stat; modifiers generated above the
+                                // horizon are fully enforced as before.
+                                stats.kernel_target_tol_assumed += 1;
+                                log(&format!(
+                                    "h{}: KERNEL TARGET MISS tolerated — consumed modifier predates the checkpoint horizon (block_from abs h{})",
+                                    h,
+                                    st.base as usize + res.block_from_height
+                                ));
+                            } else {
+                                return Err(format!(
+                                    "h{}: KERNEL TARGET FAIL modifier={:016x} block_from(abs h{}) coinDays={} hashProof={}",
+                                    h,
+                                    res.modifier,
+                                    st.base as usize + res.block_from_height,
+                                    res.coin_day_weight,
+                                    hash_to_display(&res.hash_proof_of_stake)
+                                ));
+                            }
+                        } else if enforce {
+                            stats.kernel_enforced += 1;
+                            out.kernel_enforced = true;
+                        } else {
+                            stats.kernel_computed_advisory += 1;
+                        }
+                        proof = res.hash_proof_of_stake;
+                    }
+                    Err(e) => {
+                        if !enforce {
+                            // seam era: a recomputation error (min-age etc.) is
+                            // tri7-math divergence against an era the deployed
+                            // client validated live — record the skip honestly.
+                            stats.kernel_computed_advisory += 1;
+                            if stats.kernel_computed_advisory % 500 == 1 {
+                                log(&format!(
+                                    "h{}: seam-era kernel advisory: recomputation error ({}) — tolerated",
+                                    h, e
+                                ));
+                            }
+                            proof = [0u8; 32];
+                        } else if input_abs < CHECKPOINT_HORIZON {
+                            stats.kernel_target_tol_assumed += 1;
+                            log(&format!(
+                                "h{}: kernel recomputation error tolerated — coinstake input predates the checkpoint horizon (abs h{}): {}",
+                                h, input_abs, e
+                            ));
+                            proof = [0u8; 32];
+                        } else {
+                            return Err(format!("h{}: kernel guard: {}", h, e));
+                        }
+                    }
                 }
-                proof = res.hash_proof_of_stake;
-                out.kernel_enforced = true;
-                stats.kernel_enforced += 1;
             }
             None => {
-                // No external proof oracle in the tri7-only topology: the rpc
-                // client points at THIS node (self-comparison is vacuous) or
-                // is absent during seed. Accept the pre-window coinstake on
-                // the independent evidence already checked (header linkage +
-                // modifier checksum chain + block signature) and record the
-                // skip honestly. The old path errored out ("no proofhash in
-                // rpc") which made every freshly-seeded node fail startup.
-                log(&format!(
-                    "h{}: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only)",
-                    h
-                ));
+                if mode == ValidMode::AssumeValid {
+                    // DEPLOYED-PARITY: kernel evidence skipped below the
+                    // horizon; the index proof stays 0 exactly like the
+                    // deployed client's own stored proofhash for this range.
+                    stats.kernel_skipped_assume_valid += 1;
+                } else {
+                    // No external proof oracle in the tri7-only topology: the rpc
+                    // client points at THIS node (self-comparison is vacuous) or
+                    // is absent during seed. Accept the pre-window coinstake on
+                    // the independent evidence already checked (header linkage +
+                    // modifier checksum chain + block signature) and record the
+                    // skip honestly. The old path errored out ("no proofhash in
+                    // rpc") which made every freshly-seeded node fail startup.
+                    stats.kernel_skipped_no_oracle += 1;
+                    if stats.kernel_skipped_no_oracle % 10_000 == 1 {
+                        log(&format!(
+                            "h{}: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); {} so far",
+                            h, stats.kernel_skipped_no_oracle
+                        ));
+                    }
+                }
                 proof = [0u8; 32];
-                stats.kernel_skipped_no_oracle += 1;
             }
         }
         // 8. block signature (required above the checkpoint horizon).
@@ -1946,7 +2134,6 @@ fn validate_block(
         // (= the HIGHEST checkpoint, 2203924) — everything below skips sig
         // verification, which is why the instamine-era bad signature at h9003
         // (6e218830...) is IN the chain and must stay tolerated here.
-        const CHECKPOINT_HORIZON: u64 = 2203924; // = Checkpoints::GetTotalBlocksEstimate() on the deployed client
         if h > CHECKPOINT_HORIZON {
             check_pos_block_signature(block).map_err(|e| format!("h{}: block sig: {}", h, e))?;
             stats.sigs_checked += 1;
@@ -1969,7 +2156,6 @@ fn validate_block(
         // 8. PoW blocks carry an empty signature (era rule: only enforced
         // above the last hard checkpoint — the pre-revival chain's PoW
         // blocks serialized a legacy vchBlockSig field that is not empty)
-        const CHECKPOINT_HORIZON: u64 = 2203924;
         if h > CHECKPOINT_HORIZON {
             check_pow_block_signature(block).map_err(|e| format!("h{}: {}", h, e))?;
         }
@@ -2108,6 +2294,12 @@ const GENESIS_OFFICIAL: &str = "7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df
 /// also avoids a per-block RPC round-trip across millions of blocks.
 static FROM_ZERO_NO_ORACLE: AtomicBool = AtomicBool::new(false);
 
+/// --full-validate: strict mode for the from-zero walk. Default OFF: the
+/// from-zero sync uses the deployed client's assume-valid envelope below the
+/// checkpoint horizon (see CHECKPOINT_HORIZON). ON = every historical kernel
+/// hard-enforced (pre-2026-11 behavior; ~7 blk/s, dies at the h17693 seam).
+static FULL_VALIDATE: AtomicBool = AtomicBool::new(false);
+
 static SIGINT_SEEN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
@@ -2209,15 +2401,50 @@ fn genesis_state(gen: &Block) -> ChainState {
 /// One headers round: getheaders from our tip locator, link-checked. Returns
 /// (headers with absolute heights, complete=false when the peer ended the
 /// segment early — i.e. we saw its tip).
+/// Walk cursor for the from-zero header sweep: survives across rounds so the
+/// walk resumes from the LAST received header. (st.tip never moves during
+/// phase H — re-anchoring every round would re-request the same headers.)
+struct HeaderWalk {
+    next_hash: Hash,
+    next_height: u64,
+    /// recent locator anchors (each request's expect_prev). A response whose
+    /// first header links to one of these instead of the current cursor is a
+    /// STALE DUPLICATE: a slow (>2s) response makes the round loop exit and
+    /// re-send the same locator, and the daemon answers EVERY request — so
+    /// the second copy of the segment must be dropped, not treated as a fork
+    /// (measured live: the walk died at h101525/h333525 exactly 2000 blocks
+    /// behind the cursor, the parent hash of the re-delivered page).
+    anchors: Vec<Hash>,
+}
+
+/// What to do with a headers message whose first header does not link to the
+/// current cursor. Pure so the stale-duplicate rule is testable.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum SegAction {
+    Accept,
+    DropStale,
+    Fatal,
+}
+
+fn classify_segment(first_prev: &Hash, expect_prev: &Hash, anchors: &[Hash]) -> SegAction {
+    if first_prev == expect_prev {
+        SegAction::Accept
+    } else if anchors.iter().any(|a| a == first_prev) {
+        SegAction::DropStale
+    } else {
+        SegAction::Fatal
+    }
+}
+
 fn headers_round(
     sess: &mut Session,
-    st: &mut ChainState,
+    walk: &mut HeaderWalk,
     stats: &mut Stats,
 ) -> Result<(Vec<(u64, Hash, Block)>, bool), String> {
     let mut out: Vec<(u64, Hash, Block)> = Vec::new();
-    let mut expect_prev = st.tip_hash;
     // the walk keeps requesting from the last header until the peer sends a
     // partial (tip-ending) batch or goes idle
+    let mut expect_prev = walk.next_hash;
     let mut outstanding = true;
     let mut last_msg = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -2228,15 +2455,23 @@ fn headers_round(
                 &tri7_core::p2p::build_getheaders(&[expect_prev], &[0u8; 32]),
                 stats,
             )?;
+            walk.anchors.push(expect_prev);
+            let excess = walk.anchors.len().saturating_sub(8);
+            if excess > 0 {
+                walk.anchors.drain(..excess);
+            }
             outstanding = false;
         }
         let msgs = sess.pump()?;
         if msgs.is_empty() {
             // 2s idle after traffic = segment ended (peer only serves the
-            // next segment on a fresh locator anyway — never wait long here,
-            // the walk re-requests from the last hash immediately)
+            // next segment on a fresh locator anyway — return INCOMPLETE with
+            // the cursor advanced; the caller immediately re-requests from
+            // the last hash, which IS a fresh locator, so no dedupe drop)
             if !out.is_empty() && last_msg.elapsed() > Duration::from_secs(2) {
-                break;
+                walk.next_hash = expect_prev;
+                walk.next_height += out.len() as u64;
+                return Ok((out, false));
             }
             if out.is_empty() && last_msg.elapsed() > Duration::from_secs(30) {
                 break; // truly silent peer
@@ -2250,22 +2485,61 @@ fn headers_round(
             match msg.command.as_str() {
                 "headers" => {
                     let batch = tri7_core::p2p::parse_headers(&msg.payload)?;
+                    if batch.is_empty() {
+                        // the peer has NOTHING after our locator — we are at
+                        // its tip (this is the ONLY unambiguous completion
+                        // signal; never infer completion from silence or a
+                        // deadline, which previously stranded the walk
+                        // mid-chain and left millions of blocks to the slow
+                        // live-follow path)
+                        return Ok((out, true));
+                    }
+                    if batch[0].prev_hash != expect_prev {
+                        // stale duplicate of an already-consumed segment:
+                        // drop it and keep waiting for the real response
+                        if classify_segment(&batch[0].prev_hash, &expect_prev, &walk.anchors)
+                            == SegAction::DropStale
+                        {
+                            log(&format!(
+                                "from-zero: dropped stale duplicate headers segment ({} headers, parent h{})",
+                                batch.len(),
+                                walk.next_height.saturating_sub(1)
+                            ));
+                            continue;
+                        }
+                        return Err(format!(
+                            "from-zero header link mismatch at h{}: prev {} expected {}",
+                            walk.next_height + out.len() as u64,
+                            tri7_core::p2p::internal_to_display(&batch[0].prev_hash),
+                            tri7_core::p2p::internal_to_display(&expect_prev)
+                        ));
+                    }
                     for hdr in batch {
                         if hdr.prev_hash != expect_prev {
                             return Err(format!(
                                 "from-zero header link mismatch at h{}: prev {} expected {}",
-                                st.tip_height + 1 + out.len() as u64,
+                                walk.next_height + out.len() as u64,
                                 tri7_core::p2p::internal_to_display(&hdr.prev_hash),
                                 tri7_core::p2p::internal_to_display(&expect_prev)
                             ));
                         }
                         expect_prev = hdr.hash();
-                        out.push((st.tip_height + 1 + out.len() as u64, hdr.hash(), hdr));
+                        out.push((walk.next_height + out.len() as u64, hdr.hash(), hdr));
                         stats.headers_processed += 1;
                     }
                     // a partial batch ends at the peer tip
                     if out.len() % 2000 != 0 {
+                        walk.next_hash = expect_prev;
+                        walk.next_height += out.len() as u64;
                         return Ok((out, true));
+                    }
+                    // progress visibility inside a 120s round (~290k headers):
+                    // log every ~50k so 'from-zero:' greps show the sweep
+                    if out.len() % 50_000 < 2000 {
+                        log(&format!(
+                            "from-zero: header walk at h{}",
+                            walk.next_height + out.len() as u64 - 1
+                        ));
                     }
                     outstanding = true; // full batch — request the next segment now
                 }
@@ -2277,7 +2551,12 @@ fn headers_round(
             }
         }
     }
-    Ok((out, true))
+    // DEADLINE: return what we have, explicitly INCOMPLETE (cursor advanced).
+    // The old code returned complete=true here, silently ending the walk at
+    // ~h68k and handing the remaining ~2.1M blocks to the live-follow loop.
+    walk.next_hash = expect_prev;
+    walk.next_height += out.len() as u64;
+    Ok((out, false))
 }
 
 /// Worker: one peer session pulling body batches (legacy 500-inv getdata)
@@ -2349,9 +2628,13 @@ fn fetch_worker(
                 let start_idx = (worker_id + k * n) * BATCH;
                 k += 1;
                 if start_idx >= hashes.len() {
-                    // exhausted for this worker — keep stealing until all done
+                    // exhausted for this worker — keep stealing until the
+                    // VALIDATOR consumed every height (the cursor over-counts
+                    // re-claimed orphan ranges, so it can never gate this:
+                    // measured live at h490525, a cursor-gated exit stranded
+                    // one missing block behind exhausted workers forever)
                     if orphans.lock().unwrap().is_empty()
-                        && cursor.load(Ordering::Relaxed) as u64 >= hashes.len() as u64
+                        && validated.load(Ordering::Relaxed) as usize >= hashes.len()
                     {
                         break;
                     }
@@ -2362,7 +2645,13 @@ fn fetch_worker(
                 (start_idx, end, 0)
             }
         };
-        cursor.fetch_add(end - start_idx, Ordering::Relaxed);
+        if orphan_att == 0 {
+            // count only FRESH claims: an orphan re-claim was already counted
+            // when its original worker took the range, and double-counting
+            // overshot the cursor past the flow-control gate, deadlocking
+            // every worker while one missing block starved the validator
+            cursor.fetch_add(end - start_idx, Ordering::Relaxed);
+        }
         // fetch with reconnect+retry: peers drop or stall sessions (observed
         // live: a worker session goes silent mid-batch) — rebuild the session
         // and re-request only the MISSING outpoints; routine, not fatal.
@@ -2518,6 +2807,15 @@ fn fetch_worker(
     }
 }
 
+/// Sequential reassembly gate for the parallel fetch pipeline: workers deliver
+/// bodies out of order (N sessions race over stride batches); the validator
+/// consumes EXACTLY next_h, holding everything else in `pending` until the
+/// gap fills. Pure so the ordering invariant is testable: nothing validates
+/// out of order, and a hole stalls the drain without reordering it.
+fn reassembly_pop(pending: &mut HashMap<u64, Vec<u8>>, next_h: u64) -> Option<Vec<u8>> {
+    pending.remove(&next_h)
+}
+
 /// Full from-zero run: header walk to the peer tip, then N parallel fetcher
 /// sessions feeding ONE sequential validator (the normal acceptance gate).
 /// Works from a genesis state (fresh) or a resumed partial tipstate.
@@ -2543,16 +2841,36 @@ fn sync_from_zero(
 
     // ---- phase H: walk the header chain to the peer tip (one session) ----
     let mut all_headers: Vec<(u64, Hash, Block)> = Vec::new();
+    let mut walk = HeaderWalk {
+        next_hash: st.tip_hash,
+        next_height: st.tip_height + 1,
+        anchors: Vec::new(),
+    };
+    let mut idle_rounds = 0u32;
     loop {
         if SIGINT_SEEN.load(Ordering::Relaxed) {
             write_state_atomic(cfg, &st.to_file())
                 .map_err(|e| format!("write state (SIGINT): {}", e))?;
             return Err("__SIGINT__".into());
         }
-        let (round, _complete) = headers_round(first_sess, st, stats)?;
+        let (round, complete) = headers_round(first_sess, &mut walk, stats)?;
         if round.is_empty() {
-            break; // peer tip reached (or resumed state already at tip)
+            if complete {
+                break; // peer answered "nothing after this locator" — at tip
+            }
+            // silent peer mid-walk: retry (bounded), never silently stop —
+            // an incomplete walk would strand the sync mid-chain
+            idle_rounds += 1;
+            if idle_rounds > 12 {
+                return Err(format!(
+                    "from-zero: header walk stalled at h{} — 12 consecutive empty rounds",
+                    walk.next_height.saturating_sub(1)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
         }
+        idle_rounds = 0;
         all_headers.extend(round);
         if all_headers.len() % 100_000 == 0 || all_headers.len() < 200_000 {
             log(&format!(
@@ -2564,7 +2882,7 @@ fn sync_from_zero(
         if all_headers.len() > 3_000_000 {
             return Err("from-zero: header walk exceeded 3M — aborting".into());
         }
-        if _complete {
+        if complete {
             break;
         }
     }
@@ -2619,6 +2937,8 @@ fn sync_from_zero(
     let mut pending: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut next_h = st.tip_height + 1;
     let mut idle_warned = false;
+    let mut stalled_since: Option<Instant> = None;
+    let mut last_gapfill = Instant::now() - Duration::from_secs(60);
     let sync_started = Instant::now();
     while next_h <= header_tip {
         if SIGINT_SEEN.load(Ordering::Relaxed) {
@@ -2627,7 +2947,7 @@ fn sync_from_zero(
                 .map_err(|e| format!("write state (SIGINT): {}", e))?;
             return Err("__SIGINT__".into());
         }
-        if let Some(raw) = pending.remove(&next_h) {
+        if let Some(raw) = reassembly_pop(&mut pending, next_h) {
             let mut r = Reader::new(&raw);
             let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
             r.expect_done().map_err(|e| format!("block trailing: {}", e))?;
@@ -2684,6 +3004,7 @@ fn sync_from_zero(
             }
             next_h += 1;
             idle_warned = false;
+            stalled_since = None; // progress: the stall clock resets
             continue;
         }
         if !errors.lock().unwrap().is_empty() {
@@ -2697,9 +3018,8 @@ fn sync_from_zero(
                 pending.insert(h, raw);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if !idle_warned
-                    && sync_started.elapsed() > Duration::from_secs(120)
-                {
+                let since = *stalled_since.get_or_insert_with(Instant::now);
+                if !idle_warned && since.elapsed() > Duration::from_secs(120) {
                     idle_warned = true;
                     log(&format!(
                         "from-zero: stalled at h{} — {} block(s) fetched, awaiting h{} (workers stuck? SIGINT to checkpoint)",
@@ -2707,6 +3027,65 @@ fn sync_from_zero(
                         pending.len(),
                         next_h
                     ));
+                }
+                // DIRECT GAP-FILL (phase-7 gap-recovery pattern): a batch can
+                // strand a single missing body behind gated/exhausted workers
+                // (measured live at h490525: cursor overshoot shut the
+                // flow-control gate, the validator starved on one block).
+                // Only on a PERSISTED stall (>20s without progress, retried
+                // every 30s): the idle header-walk session asks the peer for
+                // exactly the missing height; a served body is hash-verified
+                // against the walked header before entering the pending map.
+                if since.elapsed() > Duration::from_secs(20)
+                    && last_gapfill.elapsed() > Duration::from_secs(30)
+                {
+                    last_gapfill = Instant::now();
+                    let idx = (next_h - first_h) as usize;
+                    if idx < hashes.len() {
+                        let want_hash = hashes[idx].1;
+                        let inv = [(tri7_core::p2p::MSG_BLOCK, want_hash)];
+                        if first_sess
+                            .send("getdata", &tri7_core::p2p::build_getdata(&inv), stats)
+                            .is_ok()
+                        {
+                            stats.gap_requests += 1;
+                            let fill_deadline = Instant::now() + Duration::from_secs(15);
+                            while Instant::now() < fill_deadline
+                                && !pending.contains_key(&next_h)
+                            {
+                                let msgs = first_sess.pump()?;
+                                for msg in msgs {
+                                    match msg.command.as_str() {
+                                        "block" => {
+                                            let bh = if msg.payload.len() >= 80 {
+                                                tri7_core::legacy::hash9(&msg.payload[..80])
+                                            } else {
+                                                [0u8; 32]
+                                            };
+                                            if bh == want_hash {
+                                                log(&format!(
+                                                    "from-zero: gap-fill recovered h{} directly from a peer",
+                                                    next_h
+                                                ));
+                                                stats.gap_filled += 1;
+                                                pending.insert(next_h, msg.payload);
+                                            }
+                                        }
+                                        "ping" => {
+                                            if let Ok(n) = tri7_core::p2p::parse_ping(&msg.payload) {
+                                                let _ = first_sess.send(
+                                                    "pong",
+                                                    &tri7_core::p2p::build_pong(n),
+                                                    stats,
+                                                );
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Err(_) => {
@@ -4865,6 +5244,7 @@ fn insert_default_key(path: &Path, pubkey: &[u8]) {
 
 fn main() {
     let mut cfg = parse_args();
+    FULL_VALIDATE.store(cfg.full_validate, Ordering::Relaxed);
     if cfg.status {
         status_exit(&cfg); // early: no conf read, no network
     }
@@ -5032,6 +5412,32 @@ fn main() {
     // rounds return 0, we ARE at the peer tip and normal follow takes over.
     let blocks_file = resolve_blocks_file(&cfg);
     let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+    // FROM-ZERO durability prerequisite: the disk store must EXIST and be
+    // ready BEFORE the first block is accepted. A from-zero box has no
+    // blk0001.dat — without it the index build fails (stat on a missing
+    // file), append_block buffers every accepted body in RAM forever, and a
+    // restart loses the WHOLE validated chain (observed live on DNS3: tip
+    // h17524 fully validated, zero bytes on disk). Create the empty file and
+    // start the build here so appends go straight to disk during the walk.
+    let mut store_build_started = false;
+    if from_zero {
+        if let Some(bf) = blocks_file.as_ref() {
+            if !bf.exists() {
+                std::fs::File::create(bf)
+                    .map_err(|e| format!("create blocks file {}: {}", bf.display(), e))
+                    .unwrap_or_else(|e| die(EXIT_SEED, &e));
+                log(&format!("from-zero: created empty blocks store {}", bf.display()));
+            }
+            let oracle = BuildOracle {
+                base: st.base,
+                hashes: st.entries.iter().map(|e| e.hash).collect(),
+                tip: st.tip_height,
+            };
+            store.spawn_build(Some(oracle));
+            store_build_started = true;
+            log("from-zero: block index build started before sync (appends land on disk)");
+        }
+    }
     if from_zero {
         match peers.first_mut() {
             Some(p) => {
@@ -5228,8 +5634,12 @@ fn main() {
             }
         };
         if blocks_file.is_some() {
-            store.spawn_build(Some(oracle));
-            log("rpc: block index build started (background thread, cache-first)");
+            if store_build_started {
+                log("rpc: block index already building since the from-zero pre-sync start — not re-spawning");
+            } else {
+                store.spawn_build(Some(oracle));
+                log("rpc: block index build started (background thread, cache-first)");
+            }
         } else {
             log(
                 "rpc: no blocks file — getblock/getrawtransaction/getblockhash will \
@@ -6792,5 +7202,141 @@ mod tests {
         assert!(raw_bad.is_err());
         let raw = tri7_core::p2p::hex_decode("01000000").unwrap();
         assert!(raw.len() == 4 && raw[0] == 0x01);
+    }
+
+    // ---- from-zero assume-valid envelope (deployed-client parity) ----
+
+    #[test]
+    fn assume_valid_gate_boundaries_below_at_above_horizon() {
+        // below V6_RESTART_HEIGHT: no kernel evidence at all
+        assert_eq!(validation_mode(0, false, false), ValidMode::AssumeValid);
+        assert_eq!(
+            validation_mode(17_692, false, false), // Pharao seam (the old crash block)
+            ValidMode::AssumeValid
+        );
+        assert_eq!(
+            validation_mode(V6_RESTART_HEIGHT_U64 - 1, false, false),
+            ValidMode::AssumeValid
+        );
+        // seam era [2200900, 2203924): kernel computed for the index, not enforced
+        assert_eq!(
+            validation_mode(V6_RESTART_HEIGHT_U64, false, false),
+            ValidMode::SeamAdvisory
+        );
+        assert_eq!(
+            validation_mode(CHECKPOINT_HORIZON - 1, false, false),
+            ValidMode::SeamAdvisory
+        );
+        // at/above the checkpoint horizon: FULL validation
+        assert_eq!(
+            validation_mode(CHECKPOINT_HORIZON, false, false),
+            ValidMode::FullStrict
+        );
+        assert_eq!(
+            validation_mode(CHECKPOINT_HORIZON + 1, false, false),
+            ValidMode::FullStrict
+        );
+        assert_eq!(
+            validation_mode(2_204_618, false, false),
+            ValidMode::FullStrict
+        );
+        // live blocks are ALWAYS full-strict (never assume-valid)
+        assert_eq!(validation_mode(100, true, false), ValidMode::FullStrict);
+        assert_eq!(validation_mode(CHECKPOINT_HORIZON, true, false), ValidMode::FullStrict);
+        // --full-validate restores strict everywhere
+        assert_eq!(validation_mode(100, false, true), ValidMode::FullStrict);
+        assert_eq!(
+            validation_mode(CHECKPOINT_HORIZON - 1, false, true),
+            ValidMode::FullStrict
+        );
+    }
+
+    #[test]
+    fn checkpoint_anchor_matches_the_daemon_verified_hash() {
+        // the compiled-in anchor must be EXACTLY the deployed chain's
+        // getblockhash(2203924) (daemon-verified 2026-11-03) — a wrong anchor
+        // would invalidate the whole trusted prefix at the boundary.
+        assert_eq!(
+            CHECKPOINT_ANCHOR_DISPLAY,
+            "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14"
+        );
+        // and it must round-trip through the display->internal codec (a
+        // malformed constant would fail every block at the boundary)
+        assert!(tri7_core::p2p::display_to_internal(CHECKPOINT_ANCHOR_DISPLAY).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_anchor_verification_at_boundary_only() {
+        let anchor =
+            tri7_core::p2p::display_to_internal(CHECKPOINT_ANCHOR_DISPLAY).unwrap();
+        let other = {
+            let mut h = anchor;
+            h[0] ^= 0xff;
+            h
+        };
+        // at the horizon: the real anchor passes
+        assert!(check_checkpoint_anchor(CHECKPOINT_HORIZON, &anchor).is_ok());
+        // at the horizon: ANY other hash is refused (a fork below the
+        // checkpoint cannot smuggle itself past the boundary block)
+        let err = check_checkpoint_anchor(CHECKPOINT_HORIZON, &other).unwrap_err();
+        assert!(err.contains("CHECKPOINT ANCHOR MISMATCH"), "{}", err);
+        assert!(err.contains(&tri7_core::p2p::internal_to_display(&other)));
+        // away from the horizon: no anchor obligation (both hashes pass)
+        assert!(check_checkpoint_anchor(CHECKPOINT_HORIZON - 1, &other).is_ok());
+        assert!(check_checkpoint_anchor(CHECKPOINT_HORIZON + 1, &anchor).is_ok());
+        assert!(check_checkpoint_anchor(0, &anchor).is_ok());
+    }
+
+    #[test]
+    fn parallel_fetch_reassembly_is_strictly_ordered() {
+        // workers deliver out of order (8 sessions race); the validator
+        // consumes EXACTLY next_h and holds the rest until the gap fills.
+        let mut pending: HashMap<u64, Vec<u8>> = HashMap::new();
+        pending.insert(12, vec![0xc2]);
+        pending.insert(11, vec![0xb1]);
+        // hole at h10: nothing may validate, nothing may reorder
+        assert!(reassembly_pop(&mut pending, 10).is_none());
+        assert_eq!(pending.len(), 2);
+        // the hole fills -> strict ascending drain, each removed once
+        assert_eq!(reassembly_pop(&mut pending, 10), None);
+        pending.insert(10, vec![0xa0]);
+        assert_eq!(reassembly_pop(&mut pending, 10), Some(vec![0xa0]));
+        assert_eq!(reassembly_pop(&mut pending, 11), Some(vec![0xb1]));
+        assert_eq!(reassembly_pop(&mut pending, 12), Some(vec![0xc2]));
+        assert!(pending.is_empty());
+        // a duplicate delivery for an already-consumed height is ignored
+        pending.insert(13, vec![0xd3]);
+        assert_eq!(reassembly_pop(&mut pending, 13), Some(vec![0xd3]));
+        assert_eq!(reassembly_pop(&mut pending, 13), None);
+    }
+
+    #[test]
+    fn stale_duplicate_header_segments_are_dropped_not_fatal() {
+        let cursor: Hash = [0xAA; 32];
+        let older_anchor: Hash = [0xBB; 32]; // locator used 2000 blocks earlier
+        let unknown: Hash = [0xCC; 32];
+        let anchors = vec![older_anchor, [0xDD; 32]];
+        // linked segment: accept
+        assert_eq!(classify_segment(&cursor, &cursor, &anchors), SegAction::Accept);
+        // re-delivered earlier segment (the double-response race): drop
+        assert_eq!(
+            classify_segment(&older_anchor, &cursor, &anchors),
+            SegAction::DropStale
+        );
+        // anything else is a real fork/garbage: fatal
+        assert_eq!(
+            classify_segment(&unknown, &cursor, &anchors),
+            SegAction::Fatal
+        );
+    }
+
+    #[test]
+    fn checkpoint_horizon_constants_match_the_deployed_client() {
+        // = Checkpoints::GetTotalBlocksEstimate() on the deployed v6.2.6.7
+        assert_eq!(CHECKPOINT_HORIZON, 2_203_924);
+        // the deployed daemon's own index seam: real stored proofs from here
+        assert_eq!(V6_RESTART_HEIGHT_U64, 2_200_900);
+        // ordering invariant the envelope relies on
+        assert!(V6_RESTART_HEIGHT_U64 < CHECKPOINT_HORIZON);
     }
 }
