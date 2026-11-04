@@ -2846,6 +2846,15 @@ fn sync_from_zero(
         peer_tip.saturating_sub(st.tip_height),
         workers
     ));
+    // publish the sync snapshot for getsyncinfo (Sami: "it should show this
+    // on the UI") — header-walk phase starts now
+    tri7_core::sync_progress::set(tri7_core::sync_progress::Snapshot {
+        height: st.tip_height,
+        target_height: peer_tip,
+        blocks_per_sec: 0.0,
+        eta_secs: 0,
+        phase: tri7_core::sync_progress::SyncPhase::HeaderWalk,
+    });
 
     // ---- phase H: walk the header chain to the peer tip (one session) ----
     let mut all_headers: Vec<(u64, Hash, Block)> = Vec::new();
@@ -3000,6 +3009,14 @@ fn sync_from_zero(
                 } else {
                     0.0
                 };
+                // live progress for getsyncinfo (GUI renders height/%/rate/ETA)
+                tri7_core::sync_progress::set(tri7_core::sync_progress::Snapshot {
+                    height: st.tip_height,
+                    target_height: header_tip,
+                    blocks_per_sec: rate,
+                    eta_secs: eta as u64,
+                    phase: tri7_core::sync_progress::SyncPhase::BodyFetch,
+                });
                 log(&format!(
                     "from-zero: h{} {} ({:.0} blk/s, ETA {:.1}h)",
                     st.tip_height,
@@ -3115,6 +3132,8 @@ fn sync_from_zero(
         started.elapsed().as_secs_f64(),
         stats.blocks_validated_hist as f64 / started.elapsed().as_secs_f64().max(0.001)
     ));
+    // caught up — clear the syncing snapshot so getsyncinfo reports follow
+    tri7_core::sync_progress::clear();
     Ok(())
 }
 

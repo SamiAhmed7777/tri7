@@ -18,6 +18,7 @@ pub mod replay;
 pub mod rpc;
 pub mod seed;
 pub mod smsg;
+pub mod sync_progress;
 pub mod smsg_net;
 pub mod spend;
 pub mod stake;

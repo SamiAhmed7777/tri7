@@ -77,7 +77,50 @@ pub struct DebugInfo {
     pub reachable: bool,
     pub connections: Option<u64>,
     pub blocks: Option<u64>,
+    /// daemon sync progress (getsyncinfo) — Sami: "it should show this on
+    /// the UI": live height/percent/rate/ETA while the daemon from-zeroes
+    pub sync: Option<GuiSync>,
     pub error: Option<String>,
+}
+
+/// GUI-side copy of the daemon's sync snapshot (getsyncinfo).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuiSync {
+    pub height: u64,
+    pub target_height: u64,
+    pub blocks_per_sec: f64,
+    pub eta_secs: u64,
+    pub syncing: bool,
+}
+
+impl GuiSync {
+    /// 0.0..=1.0 progress fraction.
+    pub fn fraction(&self) -> f32 {
+        if self.target_height == 0 || self.height >= self.target_height {
+            return 1.0;
+        }
+        (self.height as f32 / self.target_height as f32).clamp(0.0, 1.0)
+    }
+
+    /// Human one-liner: "Syncing 1,234,567 / 2,204,751 (56%) · 914 blk/s · ETA 18m 4s"
+    pub fn label(&self) -> String {
+        let pct = (self.fraction() * 100.0) as u32;
+        let eta = if self.eta_secs >= 3600 {
+            format!("{}h {:02}m", self.eta_secs / 3600, (self.eta_secs % 3600) / 60)
+        } else if self.eta_secs >= 60 {
+            format!("{}m {:02}s", self.eta_secs / 60, self.eta_secs % 60)
+        } else {
+            format!("{}s", self.eta_secs)
+        };
+        format!(
+            "Syncing {} / {} ({}%) · {:.0} blk/s · ETA {}",
+            self.height,
+            self.target_height,
+            pct,
+            self.blocks_per_sec,
+            eta
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1550,6 +1593,26 @@ impl AppState {
                     if let Ok(v2) = rpc_client::rpc_call(&addr, "getblockcount", &[]) {
                         info.blocks = v2.as_u64();
                     }
+                    // live sync progress (Sami: "it should show this on the UI")
+                    if let Ok(v3) = rpc_client::rpc_call(&addr, "getsyncinfo", &[]) {
+                        let syncing = v3.get("syncing").and_then(|s| s.as_bool()).unwrap_or(false);
+                        if syncing {
+                            let body = v3.get("body").cloned().unwrap_or(serde_json::Value::Null);
+                            info.sync = Some(GuiSync {
+                                height: body.get("height").and_then(|h| h.as_u64()).unwrap_or(0),
+                                target_height: body
+                                    .get("target_height")
+                                    .and_then(|h| h.as_u64())
+                                    .unwrap_or(0),
+                                blocks_per_sec: body
+                                    .get("blocks_per_sec")
+                                    .and_then(|r| r.as_f64())
+                                    .unwrap_or(0.0),
+                                eta_secs: body.get("eta_secs").and_then(|e| e.as_u64()).unwrap_or(0),
+                                syncing: true,
+                            });
+                        }
+                    }
                 }
                 Err(e) => info.error = Some(e),
             }
@@ -1656,6 +1719,17 @@ impl AppState {
     }
 
     pub fn status_blocks_label(&self) -> String {
+        // live daemon sync progress wins over the static counters (Sami:
+        // "it should show this on the UI" — height/%/rate/ETA while syncing)
+        if let Some(di) = &self.debug_info {
+            if di.reachable {
+                if let Some(s) = &di.sync {
+                    if s.syncing {
+                        return s.label();
+                    }
+                }
+            }
+        }
         match (&self.tip, &self.debug_info) {
             (Some(tip), Some(di)) if di.reachable => {
                 if di.blocks == Some(tip.height) {

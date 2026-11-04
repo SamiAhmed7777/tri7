@@ -84,6 +84,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getreceivedbyaddress",
     "validateaddress",
     "health",
+    "getsyncinfo",
     // ---- phase 7 milestone 2: broadcast / staking / connections / smsg ----
     "sendrawtransaction",
     "getstakinginfo",
@@ -1055,6 +1056,30 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 "balance_coverage_height": bal.as_ref().map(|b| b.coverage_height),
                 "paytxfee": 0.0,
                 "errors": "",
+            }))
+        }
+
+        "getsyncinfo" => {
+            let t = deps.tip.tip();
+            let sp = crate::sync_progress::snapshot();
+            let (syncing, phase_str, body) = match sp {
+                Some(s) => (
+                    s.phase != crate::sync_progress::SyncPhase::Follow,
+                    s.phase.as_str(),
+                    json!({
+                        "height": s.height,
+                        "target_height": s.target_height,
+                        "blocks_per_sec": s.blocks_per_sec,
+                        "eta_secs": s.eta_secs,
+                    }),
+                ),
+                None => (false, "follow", json!({})),
+            };
+            NativeOutcome::Ok(json!({
+                "syncing": syncing,
+                "phase": phase_str,
+                "height": t.height,
+                "body": body,
             }))
         }
 

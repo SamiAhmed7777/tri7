@@ -1564,3 +1564,49 @@ fn seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry() {
     assert!(!crate::wallet::seed_migration_done(&dir.join("wallet.dat")).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+#[test]
+fn gui_sync_progress_drives_status_bar_and_fraction() {
+    use crate::gui::app_state::{DebugInfo, GuiSync};
+
+    // mid-walk snapshot: 1,234,567 of 2,204,751 at 914 blk/s, ETA 18m
+    let s = GuiSync {
+        height: 1_234_567,
+        target_height: 2_204_751,
+        blocks_per_sec: 914.0,
+        eta_secs: 1_104,
+        syncing: true,
+    };
+    let frac = s.fraction();
+    assert!((frac - 0.560).abs() < 0.01, "fraction {}", frac);
+    let label = s.label();
+    assert!(label.contains("Syncing 1234567 / 2204751"), "{}", label);
+    assert!(label.contains("55%"), "{}", label);
+    assert!(label.contains("914 blk/s"), "{}", label);
+    assert!(label.contains("18m 24s"), "{}", label);
+
+    // status_blocks_label prefers the live sync line when the daemon reports it
+    let mut st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
+    st.debug_info = Some(DebugInfo {
+        reachable: true,
+        connections: Some(1),
+        blocks: Some(2_204_751),
+        sync: Some(s),
+        error: None,
+    });
+    let lbl = st.status_blocks_label();
+    assert!(lbl.contains("Syncing"), "{}", lbl);
+    assert!(lbl.contains("55%"), "{}", lbl);
+
+    // a follow-phase daemon (sync: None) falls back to the static counters
+    st.debug_info = Some(DebugInfo {
+        reachable: true,
+        connections: Some(1),
+        blocks: Some(2_204_751),
+        sync: None,
+        error: None,
+    });
+    let lbl2 = st.status_blocks_label();
+    assert!(!lbl2.contains("Syncing"), "{}", lbl2);
+}

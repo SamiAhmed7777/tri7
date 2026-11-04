@@ -1550,6 +1550,13 @@ impl eframe::App for Tri7App {
             self.st.staking_poll_action();
             self.st.peers_poll_action();
         }
+        // live sync progress: poll getsyncinfo every ~5s so the status bar
+        // tracks the daemon's from-zero walk in near-real-time (Sami: "it
+        // should show this on the UI") — also on the load screen: the daemon
+        // syncs regardless of whether a wallet is open
+        if self.poll_ticker % 10 == 5 {
+            self.st.refresh_debug_info_action();
+        }
         // auto-update: startup + every 6h auto-check, event drain (non-blocking)
         self.st.updater_tick();
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -1563,6 +1570,16 @@ impl eframe::App for Tri7App {
 
 impl Tri7App {
     fn sync_progress(&self) -> (f32, String) {
+        // live daemon sync progress (from-zero walk) drives the bar directly
+        if let Some(di) = &self.st.debug_info {
+            if di.reachable {
+                if let Some(s) = &di.sync {
+                    if s.syncing {
+                        return (s.fraction(), s.label());
+                    }
+                }
+            }
+        }
         match (&self.st.tip, &self.st.debug_info) {
             (Some(tip), Some(di)) if di.reachable && di.blocks == Some(tip.height) => {
                 (1.0, self.st.status_blocks_label())
