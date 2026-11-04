@@ -526,7 +526,10 @@ impl AppState {
             let Some((pubkey, secret)) = keys.get(&u.address) else {
                 return Err(format!(
                     "UTXO {}:{} pays to {} but the wallet holds no key for it — refusing \
-                     to sweep (a coin that cannot be signed must not be built)",
+                     to sweep. Migration cannot SKIP this coin: a skipped balance would be \
+                     left on the old keys while the 'seedmigrated' marker blocks a second \
+                     sweep. Resolve the key first (restore/import it into wallet.dat), \
+                     then run the migration again",
                     u.txid_display(),
                     u.n,
                     u.address
@@ -634,6 +637,12 @@ impl AppState {
                     .unwrap_or("?")
                     .to_string();
                 let acks = v.get("announced_to").and_then(|a| a.as_u64()).unwrap_or(0);
+                // remember the acknowledged txid BEFORE the marker write: if
+                // the marker then fails, a retry can recognize "tx already
+                // known" responses as a MARKER problem, not a value problem
+                if let Some(f) = self.sweep_flow.as_mut() {
+                    f.broadcast_txid = Some(txid.clone());
+                }
                 // strict ordering: the completion marker is written ONLY
                 // after the broadcast was accepted by the daemon
                 let Some(h) = self.wallet_rw.as_mut() else {
@@ -675,6 +684,41 @@ impl AppState {
                 }
             }
             Err(e) => {
+                // An earlier attempt may have been ACCEPTED but failed on the
+                // completion marker (recorded in broadcast_txid). If the
+                // daemon now answers "already known"-shaped text for the SAME
+                // plan, the tx IS broadcast — retry ONLY the marker write and
+                // complete on success instead of scaring the operator.
+                let prior = self
+                    .sweep_flow
+                    .as_ref()
+                    .and_then(|f| f.broadcast_txid.clone());
+                let same_plan = prior
+                    .as_ref()
+                    .map(|txid| e.contains(txid) || e.to_lowercase().contains("already") || e.to_lowercase().contains("already known") || e.to_lowercase().contains("known"))
+                    .unwrap_or(false);
+                if let (Some(txid), true) = (prior, same_plan) {
+                    let marker = self
+                        .wallet_rw
+                        .as_mut()
+                        .map(|h| h.mark_seed_migrated());
+                    if let Some(Ok(())) = marker {
+                        if let Some(f) = self.sweep_flow.as_mut() {
+                            f.complete(txid.clone());
+                        }
+                        self.drain_wallet_journal();
+                        self.status_log.push(format!(
+                            "seed migration complete: txid {} (the tx was already \
+                             broadcast; the completion marker is now set)",
+                            txid
+                        ));
+                        if let Err(e2) = self.refresh_chain_action() {
+                            self.status_log
+                                .push(format!("refresh after sweep: {}", e2));
+                        }
+                        return;
+                    }
+                }
                 let msg = format!(
                     "broadcast failed — NOTHING is lost: the derived keys are already in \
                      wallet.dat and the coins remain on the old keys. Get tri7d's \

@@ -1167,9 +1167,9 @@ fn updater_banner_line_pins_the_offered_jump() {
     st.updater.flavor_override = Some(crate::updater::UpdateFlavor::WindowsInstaller);
     st.updater.request_check().unwrap();
     let rel = crate::updater::parse_release_json(&serde_json::from_value(serde_json::json!({
-        "tag_name": "v7.0.1",
-        "name": "Cryptographic Triangles 7.0.1",
-        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.1",
+        "tag_name": "v7.0.2",
+        "name": "Cryptographic Triangles 7.0.2",
+        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.2",
         "body": "## SHA256\n",
         "assets": [{"name": "CryptographicTriangles-7.0.2-win64-setup.exe",
                     "size": 12345678,
@@ -1255,5 +1255,312 @@ fn updater_options_line_reports_state() {
     let line = st.updater_options_line();
     assert!(line.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))), "{line}");
     assert!(line.contains("never"), "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Seed migration (sweep-to-seed) — AppState-level integration: entry guards,
+// full prepare→broadcast→marker happy path against a canned tri7d.
+// ---------------------------------------------------------------------------
+
+fn sweep_test_cfg(dir: &std::path::Path, rpc_addr: Option<String>) -> UiConfig {
+    UiConfig {
+        wallet_path: dir.join("wallet.dat").display().to_string(),
+        state_dir: "/nonexistent".into(),
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr,
+        profile_dir: dir.display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    }
+}
+
+/// A synthetic random-key wallet (the pre-migration shape) with ONE funded
+/// address, built through the real writers.
+fn sweep_fixture_wallet(dir: &std::path::Path, tag: &str) -> String {
+    let path = dir.join("wallet.dat");
+    crate::wallet::create_wallet_file(&path).unwrap();
+    let mut h = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+    h.write_fresh_identity_rows().unwrap();
+    let secret = crate::legacy::sha256d(format!("sweep-fixture/{}", tag).as_bytes());
+    let k = h.add_key(&secret, "funded").unwrap();
+    h.close();
+    k.address
+}
+
+/// Canned tri7d: answers ONE sendrawtransaction with the tri7d envelope.
+fn canned_tri7d(txid: &str, acks: u64) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let body = format!(
+        r#"{{"result":{{"txid":"{}","announced_to":{}}},"error":null}}"#,
+        txid, acks
+    );
+    let http = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = Read::read(&mut s, &mut buf);
+            let _ = s.write_all(http.as_bytes());
+            let _ = s.flush();
+        }
+    });
+    (addr, handle)
+}
+
+fn sweep_fixture_derived(funded_addr: &str, script: Vec<u8>) -> gs::DerivedWallet {
+    let utxo = gs::UtxoRec {
+        txid: crate::legacy::sha256d(b"sweep-fixture-prevout"),
+        n: 1,
+        value_sats: 50_000_000,
+        script,
+        address: funded_addr.to_string(),
+        height: 100,
+        tx_time: 1_400_000_000,
+        prev_kind: "regular".into(),
+    };
+    gs::DerivedWallet {
+        balances: gs::compute_balances(&[utxo.clone()], &|_: &str| None),
+        utxos: vec![utxo],
+        snapshot_height: 100,
+        coverage_height: 150,
+        reconcile: gs::ReconcileReport::default(),
+    }
+}
+
+#[test]
+fn seed_migration_entry_guards_refuse_before_any_value_moves() {
+    const MN12: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let dir = gui_test_dir("sweep_guards");
+    let funded = sweep_fixture_wallet(&dir, "guards");
+    let wread = crate::wallet::read_wallet(&dir.join("wallet.dat")).unwrap();
+    let script = crate::spend::script_pubkey_p2pkh(&wread.keys[0].pubkey);
+    let mut st = crate::gui::app_state::AppState::new(sweep_test_cfg(&dir, None));
+    st.wallet = Some(crate::gui::state::WalletData {
+        path: dir.join("wallet.dat").display().to_string(),
+        keys: wread.keys,
+        names: wread.names,
+        default_key: wread.default_key,
+        version: wread.version,
+        best_block: wread.best_block,
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: 0,
+        seed_migrated: false,
+    });
+    st.derived = Some(sweep_fixture_derived(&funded, script));
+    st.tip = Some(gs::TipInfo {
+        height: 150,
+        blockhash: String::new(),
+        updated_utc: String::new(),
+        last_advance_utc: String::new(),
+        window_base: 0,
+        daemon_tip: None,
+        tip_time: 1_400_000_500,
+        tip_bits: 0x2000ffff,
+        tip_modifier: 0,
+        tip_generated: false,
+        tip_pos: false,
+    });
+
+    // 1. no writable wallet.dat session → refuse
+    let err = st.begin_seed_migration_action().unwrap_err();
+    assert!(err.contains("not writable"), "{}", err);
+
+    // 2. writable but zero spendable UTXOs → refuse (an immature coinbase
+    // at a tip below maturity is filtered at SELECTION, never at consensus)
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap());
+    st.derived.as_mut().unwrap().utxos[0].prev_kind = "coinbase".into();
+    st.tip.as_mut().unwrap().height = 100; // depth 0 for the h100 coin
+    let err = st.begin_seed_migration_action().unwrap_err();
+    assert!(err.contains("no spendable UTXOs"), "{}", err);
+
+    // 3. already-migrated marker → refuse before anything else
+    st.tip.as_mut().unwrap().height = 150; // depth 51 → the coin IS mature
+    let mut h = crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap();
+    h.mark_seed_migrated().unwrap();
+    h.close();
+    st.wallet.as_mut().unwrap().seed_migrated = true;
+    let err = st.begin_seed_migration_action().unwrap_err();
+    assert!(err.contains("seedmigrated"), "{}", err);
+    assert!(st.sweep_flow.is_none());
+
+    // sanity: the phrase the happy-path test will use is valid
+    assert!(crate::seed::check_mnemonic(MN12));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn seed_migration_full_path_prepare_broadcast_marker() {
+    const MN12: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let dir = gui_test_dir("sweep_full");
+    let funded = sweep_fixture_wallet(&dir, "full");
+    let wread = crate::wallet::read_wallet(&dir.join("wallet.dat")).unwrap();
+    let script = crate::spend::script_pubkey_p2pkh(&wread.keys[0].pubkey);
+    let (rpc_addr, server) = canned_tri7d("sweeptx_deadbeef0000", 2);
+    let mut st = crate::gui::app_state::AppState::new(sweep_test_cfg(&dir, Some(rpc_addr)));
+    st.wallet = Some(crate::gui::state::WalletData {
+        path: dir.join("wallet.dat").display().to_string(),
+        keys: wread.keys,
+        names: wread.names,
+        default_key: wread.default_key,
+        version: wread.version,
+        best_block: wread.best_block,
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: 0,
+        seed_migrated: false,
+    });
+    st.derived = Some(sweep_fixture_derived(&funded, script));
+    st.tip = Some(gs::TipInfo {
+        height: 150,
+        blockhash: String::new(),
+        updated_utc: String::new(),
+        last_advance_utc: String::new(),
+        window_base: 0,
+        daemon_tip: None,
+        tip_time: 1_400_000_500,
+        tip_bits: 0x2000ffff,
+        tip_modifier: 0,
+        tip_generated: false,
+        tip_pos: false,
+    });
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap());
+
+    // ENTRY: opens the wizard (no stored seed → Menu)
+    st.begin_seed_migration_action().unwrap();
+    assert!(st.sweep_flow.is_some());
+
+    // wizard: restore the phrase (the same one the sweep targets)
+    {
+        let f = st.sweep_flow.as_mut().unwrap();
+        f.begin_restore();
+        f.words_input = MN12.into();
+        f.submit_restore();
+        assert_eq!(f.step, crate::gui::sweep_flow::SweepStep::SeedVerified);
+    }
+
+    // PREPARE: roundtrip proof + key insertion + signed plan (in memory)
+    st.sweep_prepare_action();
+    {
+        let f = st.sweep_flow.as_ref().unwrap();
+        assert!(f.error.is_none(), "{:?}", f.error);
+        assert_eq!(f.step, crate::gui::sweep_flow::SweepStep::PlanReview);
+        let plan = f.plan.as_ref().unwrap();
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(plan.inputs_total, 50_000_000);
+        let out_sum: i64 = plan.outputs.iter().map(|(_, v)| v).sum();
+        assert_eq!(out_sum + plan.fee, 50_000_000);
+    }
+    // wallet.dat now carries the seed + 10 derived keys, hdchain at 10
+    {
+        let w = crate::wallet::read_wallet(&dir.join("wallet.dat")).unwrap();
+        assert_eq!(w.keys.len(), 11);
+        assert!(w.hd_mnemonic.is_some());
+        assert_eq!(w.hd_chain_index, Some(10));
+        assert!(!crate::wallet::seed_migration_done(&dir.join("wallet.dat")).unwrap());
+    }
+
+    // BROADCAST via the canned tri7d: success → marker written, step Done
+    st.sweep_broadcast_action();
+    server.join().unwrap();
+    {
+        let f = st.sweep_flow.as_ref().unwrap();
+        assert!(
+            f.error.is_none(),
+            "broadcast failed: {:?}",
+            f.error
+        );
+        assert_eq!(
+            f.step,
+            crate::gui::sweep_flow::SweepStep::Done {
+                txid: "sweeptx_deadbeef0000".into()
+            }
+        );
+        // the phrase is scrubbed after completion
+        assert!(f.mnemonic.is_none());
+    }
+    // the marker (double-sweep guard) is now on disk, and the in-memory
+    // wallet row was reloaded with it
+    assert!(crate::wallet::seed_migration_done(&dir.join("wallet.dat")).unwrap());
+    assert!(st.wallet.as_ref().unwrap().seed_migrated);
+    // re-entry is now refused
+    let err = st.begin_seed_migration_action().unwrap_err();
+    assert!(err.contains("seedmigrated"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry() {
+    const MN12: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let dir = gui_test_dir("sweep_fail");
+    let funded = sweep_fixture_wallet(&dir, "fail");
+    let wread = crate::wallet::read_wallet(&dir.join("wallet.dat")).unwrap();
+    let script = crate::spend::script_pubkey_p2pkh(&wread.keys[0].pubkey);
+    // RPC points at a dead port — the broadcast must fail cleanly
+    let mut st = crate::gui::app_state::AppState::new(sweep_test_cfg(
+        &dir,
+        Some("127.0.0.1:9".into()),
+    ));
+    st.wallet = Some(crate::gui::state::WalletData {
+        path: dir.join("wallet.dat").display().to_string(),
+        keys: wread.keys,
+        names: wread.names,
+        default_key: wread.default_key,
+        version: wread.version,
+        best_block: wread.best_block,
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: 0,
+        seed_migrated: false,
+    });
+    st.derived = Some(sweep_fixture_derived(&funded, script));
+    st.tip = Some(gs::TipInfo {
+        height: 150,
+        blockhash: String::new(),
+        updated_utc: String::new(),
+        last_advance_utc: String::new(),
+        window_base: 0,
+        daemon_tip: None,
+        tip_time: 1_400_000_500,
+        tip_bits: 0x2000ffff,
+        tip_modifier: 0,
+        tip_generated: false,
+        tip_pos: false,
+    });
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap());
+    st.begin_seed_migration_action().unwrap();
+    {
+        let f = st.sweep_flow.as_mut().unwrap();
+        f.begin_restore();
+        f.words_input = MN12.into();
+        f.submit_restore();
+    }
+    st.sweep_prepare_action();
+    assert!(st.sweep_flow.as_ref().unwrap().error.is_none());
+    let hex_before = st
+        .sweep_flow
+        .as_ref()
+        .unwrap()
+        .plan
+        .as_ref()
+        .unwrap()
+        .tx_hex
+        .clone();
+
+    // broadcast fails (no daemon) — NOTHING is lost: plan retained for retry,
+    // no marker written
+    st.sweep_broadcast_action();
+    let f = st.sweep_flow.as_ref().unwrap();
+    let err = f.error.as_deref().unwrap();
+    assert!(err.contains("NOTHING is lost"), "{}", err);
+    assert_eq!(f.step, crate::gui::sweep_flow::SweepStep::PlanReview);
+    assert_eq!(f.plan.as_ref().unwrap().tx_hex, hex_before);
+    assert!(!crate::wallet::seed_migration_done(&dir.join("wallet.dat")).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }

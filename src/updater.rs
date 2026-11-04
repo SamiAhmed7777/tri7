@@ -1679,9 +1679,10 @@ mod tests {
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
         assert_eq!(st.phase, UpdatePhase::Idle);
-        // a FURTHER new version un-suppresses
+        // a FURTHER new version un-suppresses (strictly newer than the
+        // skipped 7.0.2)
         let mut newer = newer_release();
-        newer.version = v("7.0.2");
+        newer.version = v("7.0.3");
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer)));
         assert_eq!(st.phase, UpdatePhase::Available);

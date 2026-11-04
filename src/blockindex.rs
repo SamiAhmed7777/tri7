@@ -281,9 +281,33 @@ pub fn build_index(
         // decide accept / skip for HEIGHT threading
         let accepted_here;
         if last_accepted.is_none() {
-            genesis_sane(&body)?;
-            accepted_here = true; // frame 0 anchors height 0
-            height = 0;
+            // Frame 0 anchors the thread. Genesis (the normal snapshot case)
+            // anchors height 0. A MID-CHAIN store — a from-zero resume whose
+            // file starts at an arbitrary height — anchors at the FIRST frame
+            // whose hash matches the oracle window; frames before that anchor
+            // stay hash-indexed but height-less (HEIGHT_UNSET), and the chain
+            // threads upward from the anchor. Without this, genesis_sane
+            // failed the whole build on every resumed from-zero store and
+            // append_block buffered bodies in RAM forever (DNS3: three runs
+            // lost their bodies to exactly this).
+            match genesis_sane(&body) {
+                Ok(()) => {
+                    accepted_here = true; // frame 0 anchors height 0
+                    height = 0;
+                }
+                Err(_) => match oracle.and_then(|o| {
+                    o.hashes
+                        .iter()
+                        .position(|h| *h == hash)
+                        .map(|i| o.base + i as u64)
+                }) {
+                    Some(h0) => {
+                        accepted_here = true;
+                        height = h0;
+                    }
+                    None => accepted_here = false,
+                },
+            }
         } else {
             let cand = height + 1;
             let in_window = oracle
@@ -356,16 +380,19 @@ pub fn build_index(
 
     // Heights are usable from genesis up to the height the thread actually
     // REACHED: every in-window accept requires an exact oracle-hash match and
-    // every below-window accept requires prev-hash chaining from genesis, so
-    // the map is authoritative wherever it is populated. A frame missing ABOVE
-    // the reached height (e.g. a body that lived only in a memory cache and
-    // was lost on restart) shortens the map — heights below it stay valid and
-    // servable (gap recovery appends the missing body later; CACHE_VERSION 2).
-    // The old gate (map valid only when the thread ended exactly at the window
-    // tip) voided ALL height lookups whenever one tip frame was missing, which
-    // blanked every getblock/getblockhash on the node.
+    // every below-window accept requires prev-hash chaining from genesis (or
+    // from a mid-chain oracle anchor), so the map is authoritative wherever it
+    // is populated. A frame missing ABOVE the reached height (e.g. a body that
+    // lived only in a memory cache and was lost on restart) shortens the map —
+    // heights below it stay valid and servable (gap recovery appends the
+    // missing body later; CACHE_VERSION 2). The old gate (map valid only when
+    // the thread ended exactly at the window tip) voided ALL height lookups
+    // whenever one tip frame was missing, which blanked every
+    // getblock/getblockhash on the node.
+    // Reached-window-base rule (generalized for the mid-chain anchor): the
+    // anchor height + last threaded height must reach the oracle window base.
     let heights_ok = match oracle {
-        Some(o) => height_off.len() as u64 > o.base,
+        Some(o) => height >= o.base as u64,
         None => true, // oracle-less build: the sequential run IS the truth
     };
 

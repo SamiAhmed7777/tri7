@@ -295,6 +295,12 @@ pub fn read_settings(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     while let Some(row) = rows.next().map_err(|e| format!("row iteration: {}", e))? {
         let key: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
         let value: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+        // defense in depth for the "skipped, never fatal" contract: the
+        // query prefix already implies ≥ 8 bytes, but a truncated row must
+        // be SKIPPED here, never sliced out of bounds
+        if key.len() < 8 {
+            continue;
+        }
         // suffix = everything after the "setting" type string
         if let Ok(name) = parse_setting_name(&key[8..]) {
             out.push((name, value));

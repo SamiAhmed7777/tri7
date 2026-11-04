@@ -642,7 +642,12 @@ impl Tri7App {
                     }),
             )
             .show(ctx, |ui| {
-                if self.st.loaded() {
+                // the seed-migration wizard outranks everything (it is opened
+                // from the load screen, which LOADS the wallet first — the
+                // wizard must stay visible once the wallet is loaded)
+                if self.st.sweep_flow.is_some() {
+                    self.sweep_screen(ui);
+                } else if self.st.loaded() {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -666,8 +671,6 @@ impl Tri7App {
                                 }
                             });
                         });
-                } else if self.st.sweep_flow.is_some() {
-                    self.sweep_screen(ui);
                 } else if self.st.seed_flow.is_some() {
                     self.seed_screen(ui);
                 } else {
@@ -1203,7 +1206,9 @@ impl Tri7App {
                     consumed = true;
                 }
                 if let Some(plan) = flow.plan.clone() {
-                    let busy = false; // rpc is synchronous; the button disables on click
+                    // rpc is fully synchronous — there is no in-flight window
+                    // in which the button could fire twice; the click handler
+                    // completes (Done or error) before the next frame renders
                     ui.vertical_centered(|ui| {
                         th::inline_notice(
                             ui,
@@ -1363,7 +1368,7 @@ impl Tri7App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let clicked = primary_button_enabled(ui, !busy, "Broadcast sweep").clicked();
+                                    let clicked = primary_button_enabled(ui, true, "Broadcast sweep").clicked();
                                     if clicked {
                                         self.st.sweep_flow = Some(std::mem::take(&mut flow));
                                         self.st.sweep_broadcast_action();

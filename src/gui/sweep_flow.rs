@@ -105,6 +105,11 @@ pub struct SweepFlow {
     pub addresses: Vec<String>,
     /// The signed plan (also the broadcast payload), set by prepare().
     pub plan: Option<SweepPlanView>,
+    /// The txid the daemon acknowledged on the LAST successful broadcast
+    /// attempt — set even when the completion marker then failed, so a retry
+    /// can distinguish "tx already known" (marker problem) from a real
+    /// broadcast failure (value problem).
+    pub broadcast_txid: Option<String>,
     pub error: Option<String>,
 }
 
@@ -120,6 +125,7 @@ impl SweepFlow {
             dests: Vec::new(),
             addresses: Vec::new(),
             plan: None,
+            broadcast_txid: None,
             error: None,
         }
     }
@@ -374,6 +380,7 @@ impl SweepFlow {
         self.passphrase.clear();
         self.error = None;
         self.plan = None;
+        self.broadcast_txid = None;
         self.dests.clear();
         self.addresses.clear();
         self.step = SweepStep::Menu;
@@ -412,7 +419,15 @@ fn roundtrip_verify(mnemonic: &str, passphrase: &str) -> Result<Vec<String>, Str
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("roundtrip temp dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "roundtrip temp dir {} could not be created: {} — the address roundtrip \
+             proof REQUIRES a writable temp dir (it restores the phrase on a fresh \
+             wallet file) and migration refuses to run without that proof (fail-closed)",
+            dir.display(),
+            e
+        )
+    })?;
     let path = dir.join("wallet.dat");
     let result = (|| -> Result<Vec<String>, String> {
         // restore_wallet_from_seed refuses an EXISTING file — a fresh path is

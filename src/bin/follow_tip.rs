@@ -1445,6 +1445,10 @@ impl Session {
             {
                 return Ok(Vec::new())
             }
+            // EINTR is recoverable (a signal arrived mid-syscall): treat like
+            // would-block and retry on the next pump. DNS3 lost a 44s-old
+            // resumed run at h1.84M to this surfacing as fatal exit 3.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Vec::new()),
             Err(e) => return Err(format!("read: {}", e)),
         };
         self.dec.feed(&buf[..n])
@@ -2134,6 +2138,10 @@ fn validate_block(
         // (= the HIGHEST checkpoint, 2203924) — everything below skips sig
         // verification, which is why the instamine-era bad signature at h9003
         // (6e218830...) is IN the chain and must stay tolerated here.
+        // `>` matches the deployed client's GetTotalBlocksEstimate() semantics:
+        // the checkpoint block itself (h == horizon) is NOT assumed — and its
+        // hash is pinned against the compiled anchor before any band logic
+        // runs, so the >=/> distinction is immaterial at the boundary.
         if h > CHECKPOINT_HORIZON {
             check_pos_block_signature(block).map_err(|e| format!("h{}: block sig: {}", h, e))?;
             stats.sigs_checked += 1;
@@ -2158,8 +2166,8 @@ fn validate_block(
         // blocks serialized a legacy vchBlockSig field that is not empty)
         if h > CHECKPOINT_HORIZON {
             check_pow_block_signature(block).map_err(|e| format!("h{}: {}", h, e))?;
+            stats.sigs_checked += 1; // count only actual checks, not skips
         }
-        stats.sigs_checked += 1;
     }
     out.proof = proof;
 
