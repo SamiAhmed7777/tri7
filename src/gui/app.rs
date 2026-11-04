@@ -1657,6 +1657,12 @@ impl eframe::App for Tri7App {
                             // snapshots in the node's own state dir so
                             // balance/history show without manual tooling
                             let _ = n.ensure_snapshots(Path::new(&wallet), &node_dir);
+                            // explorer/rich-list read the node's snapshots,
+                            // not the (absent) profile-dir copy
+                            let node_bal = node_dir.join("state").join("balances.json");
+                            if node_bal.exists() {
+                                self.st.cfg.balances_path = node_bal.display().to_string();
+                            }
                         }
                         Err(e) => {
                             // surface once; don't spam every tick
