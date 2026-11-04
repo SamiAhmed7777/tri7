@@ -1773,8 +1773,8 @@ impl Tri7App {
     // -----------------------------------------------------------------------
     // §10.1 Overview
     // -----------------------------------------------------------------------
-    fn page_overview(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Overview", "Wallet balance and recent activity");
+fn page_overview(&mut self, ui: &mut egui::Ui) {
+        th::page_header(ui, "Overview", "Wallet balance and network status");
         // stake/payment notification banner (Sami: alert like the old wallet,
         // user-controllable) — dismissible; the system toast already fired
         if let Some((title, text)) = self.st.notify_flash.clone() {
@@ -1787,41 +1787,9 @@ impl Tri7App {
             });
             ui.add_space(4.0);
         }
-        let avail = ui.available_width();
-        if avail >= 900.0 {
-            let left_w = (avail - 16.0) * 0.42;
-            ui.horizontal(|ui| {
-                // at_least, NOT fixed height: the balance card (grid + total)
-                // must grow to its content — a fixed 200px squeezed it and
-                // made the Total row overlap the Stake row
-                // grow-to-content child UIs (fixed 200px squeezed the balance
-                // card and made the Total row overlap the Stake row)
-                ui.allocate_new_ui(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            Vec2::new(left_w, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| self.overview_balance(ui),
-                );
-                ui.allocate_new_ui(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            Vec2::new(avail - left_w - 16.0, ui.available_height()),
-                        ))
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| {
-                        self.overview_recent(ui);
-                    },
-                );
-            });
-        } else {
-            self.overview_balance(ui);
-            ui.add_space(8.0);
-            self.overview_recent(ui);
-        }
+        // ONE full-width balance card, no side panels (Sami: nothing bleeds
+        // into another panel; transaction history lives under Transactions)
+        self.overview_balance(ui);
         ui.add_space(8.0);
         self.overview_wallet_actions(ui);
         ui.add_space(8.0);
@@ -1953,78 +1921,6 @@ impl Tri7App {
         }
     }
 
-    /// Recent transactions card with a View all action (spec §10.1).
-    fn overview_recent(&mut self, ui: &mut egui::Ui) {
-        let confirmed_tex = self.tex(ui.ctx(), "icons/tx_confirmed");
-        let pending_tex = self.tex(ui.ctx(), "icons/clock1");
-        let st = &mut self.st;
-        th::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                th::text_section(ui, "Recent transactions");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if th::ghost_button(ui, "View all").clicked() {
-                        st.goto(Screen::Transactions);
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            let rows = recent_utxos(st, 8);
-            if rows.is_empty() {
-                th::empty_state(
-                    ui,
-                    None,
-                    "No transactions yet",
-                    "Incoming payments will appear here",
-                );
-                return;
-            }
-            let w = ui.available_width();
-            let addr_w = (w - 24.0 - 150.0 - 120.0).max(120.0);
-            let cols = [
-                th::TableCol::new("", 24.0, false),
-                th::TableCol::new("Time", 150.0, false),
-                th::TableCol::new("Address", addr_w, false),
-                th::TableCol::new("Amount", 120.0, true),
-            ];
-            th::table_header(ui, &cols, w);
-            let tip_h = st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
-            for (i, u) in rows.iter().enumerate() {
-                let depth = tip_h.saturating_sub(u.height);
-                let tex = if depth >= 6 { &confirmed_tex } else { &pending_tex };
-                let color = if depth >= 6 {
-                    th::TX_IN_GREEN_BRIGHT
-                } else {
-                    th::TX_IN_GREEN
-                };
-                th::table_row(ui, i, false, w, |rui| {
-                    if let Some(tex) = tex {
-                        egui::Image::from_texture(egui::load::SizedTexture::new(
-                            tex.id(),
-                            Vec2::splat(16.0),
-                        ))
-                        .paint_at(
-                            rui,
-                            egui::Rect::from_min_size(
-                                egui::pos2(rui.max_rect().left() + 4.0, rui.max_rect().top() + 11.0),
-                                Vec2::splat(16.0),
-                            ),
-                        );
-                    }
-                    th::table_cell_text(rui, 24.0, cols[1].width, &fmt_unix(u.tx_time), false, th::TEXT_SECONDARY, false);
-                    th::table_cell_text(rui, 174.0, cols[2].width, &u.address, false, th::TEXT_PRIMARY, true);
-                    th::table_cell_text(
-                        rui,
-                        174.0 + addr_w,
-                        cols[3].width,
-                        &format!("+{} {}", s::format_tri(u.value_sats), s::TICKER),
-                        true,
-                        color,
-                        true,
-                    );
-                });
-            }
-        });
-    }
 
     /// Wallet actions card (backup) — spec §10.1.
     fn overview_wallet_actions(&mut self, ui: &mut egui::Ui) {
