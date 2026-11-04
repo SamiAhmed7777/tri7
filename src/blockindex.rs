@@ -1013,6 +1013,13 @@ impl BlockStore {
         Ok(None)
     }
 
+    /// Frame byte offset for a main-chain height (store maintenance: trim a
+    /// stale tail after a reorg — see examples/store_trim.rs).
+    pub fn frame_offset(&self, h: u64) -> Option<u64> {
+        self.inner()
+            .and_then(|inner| inner.blocks.offset_by_height(h))
+    }
+
     /// Locate a block by main-chain height (height map authoritative inside
     /// the window, frame-order-derived below it — see module docs). Unavailable
     /// when the build's chain-threading anchor failed.
