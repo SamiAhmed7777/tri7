@@ -224,6 +224,10 @@ pub struct Tri7App {
     msg_selected: Option<usize>,
     tx_selected: Option<usize>,
     tx_search: String,
+    /// Transactions date order: true = newest first (default), false =
+    /// oldest first. Clicking the Date header flips it (Sami: "oldest to the
+    /// newest and then back again").
+    tx_sort_desc: bool,
     tx_min_amount: String,
     tx_type_filter: usize,
     tx_status_filter: usize,
@@ -3305,7 +3309,6 @@ impl Tri7App {
             let mut rows: Vec<(usize, &UtxoRec)> = utxos
                 .iter()
                 .enumerate()
-                .rev()
                 .filter(|(_, u)| {
                     if min_amount_sats > 0 && u.value_sats < min_amount_sats {
                         return false;
@@ -3338,7 +3341,18 @@ impl Tri7App {
                     true
                 })
                 .collect();
-            let _ = &mut rows;
+            // date order: oldest<->newest. Keyed on the created epoch (the
+            // same stamp the row shows) with height as the tie-break, so the
+            // order always matches what the Date column says.
+            rows.sort_by(|a, b| {
+                let ka = (a.1.tx_time, a.1.height, a.1.txid, a.1.n);
+                let kb = (b.1.tx_time, b.1.height, b.1.txid, b.1.n);
+                if self.tx_sort_desc {
+                    kb.cmp(&ka)
+                } else {
+                    ka.cmp(&kb)
+                }
+            });
             let w = ui.available_width();
             let addr_w = (w - 24.0 - 170.0 - 110.0 - 110.0 - 100.0).max(140.0);
             let cols = [
@@ -3349,7 +3363,36 @@ impl Tri7App {
                 th::TableCol::new("Amount", 110.0, true),
                 th::TableCol::new("Confs", 100.0, true),
             ];
-            th::table_header(ui, &cols, w);
+            // Date header is a real click target: flips newest<->oldest and
+            // shows an arrow for the current direction.
+            let date_hdr = if self.tx_sort_desc {
+                "Date ▼"
+            } else {
+                "Date ▲"
+            };
+            let mut hdr_cols = cols;
+            hdr_cols[1] = th::TableCol::new(date_hdr, 170.0, false);
+            // capture the header strip's rect from the cursor before drawing
+            let hdr_top_left = ui.cursor().min;
+            let hdr_rect = egui::Rect::from_min_size(
+                hdr_top_left,
+                Vec2::new(w, 38.0),
+            );
+            th::table_header(ui, &hdr_cols, w);
+            // the Date cell sits after the 24px marker column
+            let date_rect = egui::Rect::from_min_size(
+                hdr_rect.min + Vec2::new(24.0, 0.0),
+                Vec2::new(170.0, hdr_rect.height()),
+            );
+            let resp = ui
+                .interact(date_rect, egui::Id::new("tx_date_sort"), Sense::click())
+                .on_hover_text("Click to reverse the date order");
+            if resp.clicked() {
+                self.tx_sort_desc = !self.tx_sort_desc;
+            }
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             if rows.is_empty() {
                 th::empty_state(
                     ui,
@@ -5523,6 +5566,7 @@ pub fn run(cfg: UiConfig) {
             msg_selected: None,
             tx_selected: None,
             tx_search: String::new(),
+            tx_sort_desc: true,
             tx_min_amount: String::new(),
             tx_type_filter: 0,
             tx_status_filter: 0,

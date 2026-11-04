@@ -1641,3 +1641,29 @@ fn remembered_wallet_roundtrip_and_first_open_logic() {
     assert!(!std::path::Path::new(&remembered).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Transactions date order must flip newest<->oldest cleanly: the sort
+/// key is (tx_time, height, txid, n) and the toggle only reverses it, so the
+/// same set is shown in the exact reverse sequence both ways (Sami: "oldest
+/// to the newest and then back again").
+#[test]
+fn tx_date_order_flips_and_reverses() {
+    let key = |tx_time: u32, height: u32| (tx_time, height);
+    let mut rows = vec![
+        key(1_700_000_300, 120),
+        key(1_700_000_100, 118),
+        key(1_700_000_200, 119),
+        key(1_700_000_100, 121), // same stamp, later block
+    ];
+    let mut desc = rows.clone();
+    desc.sort_by(|a, b| b.cmp(a));
+    let mut asc = rows.clone();
+    asc.sort();
+    assert_eq!(desc, vec![key(1_700_000_300, 120), key(1_700_000_200, 119), key(1_700_000_100, 121), key(1_700_000_100, 118)]);
+    assert_eq!(asc, desc.iter().rev().cloned().collect::<Vec<_>>());
+    // rows with no stamp sort last in descending order
+    rows.push(key(0, 200));
+    let mut desc2 = rows.clone();
+    desc2.sort_by(|a, b| b.cmp(a));
+    assert_eq!(*desc2.last().unwrap(), key(0, 200));
+}

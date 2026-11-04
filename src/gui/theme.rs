@@ -622,6 +622,7 @@ pub fn hairline(ui: &mut Ui) {
 // §7 Tables
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
 pub struct TableCol {
     pub label: &'static str,
     pub width: f32,
