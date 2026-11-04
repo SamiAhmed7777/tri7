@@ -216,6 +216,10 @@ pub struct UtxoRow {
     pub script_hex: String,
     pub value_sats: i64,
     pub height: u64,
+    /// transaction timestamp as the chain stores it (unix seconds). The
+    /// legacy client dates history rows from THIS field, so matching it keeps
+    /// dates identical across clients. 0 = unknown (pre-seed rows).
+    pub tx_time: i64,
     pub prev_kind: String,
 }
 
@@ -364,6 +368,7 @@ pub fn load_utxos_snap(path: &PathBuf) -> UtxosSnap {
                 script_hex: u["script_hex"].as_str().unwrap_or("").to_string(),
                 value_sats: u["value_sats"].as_i64().unwrap_or(0),
                 height: u["height"].as_u64().unwrap_or(0),
+                tx_time: u["tx_time"].as_i64().unwrap_or(0),
                 prev_kind: u["prev_kind"].as_str().unwrap_or("").to_string(),
             });
         }
@@ -1027,6 +1032,9 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                         "amount_sats": u.value_sats,
                         "confirmations": conf,
                         "height": u.height,
+                        "tx_time": u.tx_time,
+                        "time": u.tx_time,
+                        "blocktime": u.tx_time,
                         "spendable": true,
                         "solvable": true,
                         "prev_kind": u.prev_kind,
@@ -2168,6 +2176,7 @@ mod tests {
                     script_hex: "76a91486cb0e9408ee60c88d72a126801a29904d7770df88ac".into(),
                     value_sats: 100,
                     height: 2_031_567,
+                    tx_time: 1_700_000_000,
                     prev_kind: "regular".into(),
                 }],
             }

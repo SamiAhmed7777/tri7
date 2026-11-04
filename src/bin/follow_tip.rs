@@ -3733,6 +3733,10 @@ struct LiveOut {
     tx_offset: u32,
     value: i64,
     script: Vec<u8>,
+    /// Epoch the coin was created in, as the legacy wallet reckons it: the
+    /// block time capped by the containing block's own time (tx.nTime is 0 on
+    /// staker blocks, so the block time is the only usable stamp).
+    created_epoch: u32,
 }
 
 /// The wallet's live UTXO view: seeded by scanning the disk store from the
@@ -3793,17 +3797,19 @@ impl WalletLive {
         for tx in &block.vtx {
             for (n, vout) in tx.vout.iter().enumerate() {
                 if !(vout.value == 0 && vout.script_pubkey.is_empty()) {
-                    self.live.insert(
-                        (tx.hash(), n as u32),
-                        LiveOut {
-                            height,
-                            block_time: block.time,
-                            tx_time: tx.time,
-                            tx_offset: offset,
-                            value: vout.value,
-                            script: vout.script_pubkey.clone(),
+                    self.live.entry((tx.hash(), n as u32)).or_insert(LiveOut {
+                        height,
+                        block_time: block.time,
+                        tx_time: tx.time,
+                        tx_offset: offset,
+                        value: vout.value,
+                        script: vout.script_pubkey.clone(),
+                        created_epoch: if tx.time == 0 || tx.time > block.time {
+                            block.time
+                        } else {
+                            tx.time
                         },
-                    );
+                    });
                 }
             }
             offset += tx.serialize().len() as u32;
@@ -3894,7 +3900,9 @@ impl WalletLive {
                 continue;
             }
             mature += 1;
-            let age = now.saturating_sub(o.tx_time).min(tri7_core::consensus::STAKE_MAX_AGE);
+            let age = now
+                .saturating_sub(o.created_epoch)
+                .min(tri7_core::consensus::STAKE_MAX_AGE);
             weight += (o.value as u128 * age as u128) / tri7_core::consensus::COIN as u128 / 86_400;
         }
         (weight.min(u64::MAX as u128) as u64, mature)
@@ -4037,6 +4045,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                         script_hex: o.script.iter().map(|b| format!("{:02x}", b)).collect(),
                         value_sats: o.value,
                         height: o.height,
+                        // date history from the BLOCK time (nTime): stakers
+                        // leave the tx field at 0 and the legacy client dates
+                        // rows from the block, so this matches it exactly
+                        tx_time: o.created_epoch as i64,
                         prev_kind: if o.tx_time == 0 { "stake" } else { "regular" }.into(),
                     });
                 }

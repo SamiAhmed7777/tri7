@@ -555,6 +555,8 @@ pub struct UtxoRec {
     pub script: Vec<u8>,
     pub address: String,
     pub height: u32,
+    /// chain-stored transaction timestamp (unix seconds) — the same field the
+    /// legacy client dates its history from, so dates match across clients
     pub tx_time: u32,
     pub prev_kind: String, // "regular" | "coinbase" | "coinstake"
 }

@@ -130,6 +130,9 @@ fn load_icon() -> egui::IconData {
 /// UTC "YYYY-MM-DD HH:MM:SS" from unix seconds (Howard Hinnant
 /// civil-from-days; no chrono dependency).
 fn fmt_unix(secs: u32) -> String {
+    if secs == 0 {
+        return String::new();
+    }
     let secs = secs as i64;
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
@@ -3337,10 +3340,10 @@ impl Tri7App {
                 .collect();
             let _ = &mut rows;
             let w = ui.available_width();
-            let addr_w = (w - 24.0 - 150.0 - 110.0 - 110.0 - 100.0).max(140.0);
+            let addr_w = (w - 24.0 - 170.0 - 110.0 - 110.0 - 100.0).max(140.0);
             let cols = [
                 th::TableCol::new("", 24.0, false),
-                th::TableCol::new("Date", 150.0, false),
+                th::TableCol::new("Date", 170.0, false),
                 th::TableCol::new("Type", 110.0, false),
                 th::TableCol::new("Label/Address", addr_w, false),
                 th::TableCol::new("Amount", 110.0, true),
@@ -3456,7 +3459,8 @@ impl Tri7App {
                     ui.label(egui::RichText::new(depth.to_string()).monospace());
                     ui.end_row();
                     ui.label(egui::RichText::new("Date:").color(th::TEXT_SECONDARY));
-                    ui.label(fmt_unix(u.tx_time));
+                    let d = fmt_unix(u.tx_time);
+                    ui.label(if d.is_empty() { "—".to_string() } else { d });
                     ui.end_row();
                     ui.label(egui::RichText::new("Type:").color(th::TEXT_SECONDARY));
                     ui.label(Self::tx_type_name(&u.prev_kind));
@@ -3871,12 +3875,12 @@ impl Tri7App {
                 let sel = self.msg_selected;
                 th::card(ui, |ui| {
                     let w = ui.available_width();
-                    let preview_w = (w - 24.0 - 260.0 - 130.0).max(140.0);
+                    let preview_w = (w - 24.0 - 260.0 - 170.0).max(140.0);
                     let cols = [
                         th::TableCol::new("", 24.0, false),
                         th::TableCol::new("Contact", 260.0, false),
                         th::TableCol::new("Preview", preview_w, false),
-                        th::TableCol::new("Date", 130.0, true),
+                        th::TableCol::new("Date", 170.0, true),
                     ];
                     th::table_header(ui, &cols, w);
                     egui::ScrollArea::vertical()
@@ -3973,12 +3977,12 @@ impl Tri7App {
                 let sel = self.msg_selected;
                 th::card(ui, |ui| {
                     let w = ui.available_width();
-                    let preview_w = (w - 24.0 - 260.0 - 130.0).max(140.0);
+                    let preview_w = (w - 24.0 - 260.0 - 170.0).max(140.0);
                     let cols = [
                         th::TableCol::new("", 24.0, false),
                         th::TableCol::new("To", 260.0, false),
                         th::TableCol::new("Preview", preview_w, false),
-                        th::TableCol::new("Date", 130.0, true),
+                        th::TableCol::new("Date", 170.0, true),
                     ];
                     th::table_header(ui, &cols, w);
                     egui::ScrollArea::vertical()

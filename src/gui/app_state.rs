@@ -1676,7 +1676,7 @@ impl AppState {
                                     script: Vec::new(),
                                     address: r.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                                     height: r.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                                    tx_time: 0,
+                                    tx_time: r.get("tx_time").and_then(|x| x.as_i64()).unwrap_or(0) as u32,
                                     prev_kind: r.get("prev_kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
                                 });
                             }

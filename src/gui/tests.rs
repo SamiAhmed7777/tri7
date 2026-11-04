@@ -1602,6 +1602,7 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         blocks: Some(2_204_751),
         sync: Some(s),
         daemon_balance_sats: Some(3_036_990_591), // uTRI: 3,036.990591 TRI (COIN=1e6)
+        daemon_utxos: None,
         error: None,
     });
     let lbl = st.status_blocks_label();
@@ -1615,6 +1616,7 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         blocks: Some(2_204_751),
         sync: None,
         daemon_balance_sats: None,
+        daemon_utxos: None,
         error: None,
     });
     let lbl2 = st.status_blocks_label();
