@@ -5694,8 +5694,31 @@ fn main() {
                     (g.base, g.tip_height)
                 };
                 let Some(wp) = &wp2 else { return };
+                // CLAMP the seed tip: the tip block arrives as a HEADER first
+                // and its body lands a beat later (and live follow keeps the
+                // tip moving). Seeding base..tip hard-failed on that missing
+                // tail body and retried forever (sami-pc: "store missing block
+                // body at h<tip>"). Walk back to the highest height the store
+                // actually holds a body for.
+                let mut seed_tip = tip;
+                let mut back = 0u64;
+                while back < 64 && seed_tip > base {
+                    if store2
+                        .block_by_height(seed_tip)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {
+                        break;
+                    }
+                    seed_tip -= 1;
+                    back += 1;
+                }
+                if seed_tip <= base {
+                    continue; // store not ready for seeding yet
+                }
                 match tri7_core::wallet::read_wallet(wp) {
-                    Ok(keys) => match WalletLive::seed(&store2, keys, base, tip) {
+                    Ok(keys) => match WalletLive::seed(&store2, keys, base, seed_tip) {
                         Ok(w) => {
                             let bal = w.balance();
                             let (mut owned_n, mut funded_n) = (0usize, 0usize);
@@ -5708,7 +5731,7 @@ fn main() {
                             log(&format!(
                                 "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats",
                                 base,
-                                tip,
+                                seed_tip,
                                 funded_n,
                                 owned_n,
                                 bal
