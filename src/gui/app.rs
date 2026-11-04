@@ -1791,10 +1791,31 @@ impl Tri7App {
         if avail >= 900.0 {
             let left_w = (avail - 16.0) * 0.42;
             ui.horizontal(|ui| {
-                ui.allocate_ui(Vec2::new(left_w, 200.0), |ui| self.overview_balance(ui));
-                ui.allocate_ui(Vec2::new(avail - left_w - 16.0, 200.0), |ui| {
-                    self.overview_recent(ui);
-                });
+                // at_least, NOT fixed height: the balance card (grid + total)
+                // must grow to its content — a fixed 200px squeezed it and
+                // made the Total row overlap the Stake row
+                // grow-to-content child UIs (fixed 200px squeezed the balance
+                // card and made the Total row overlap the Stake row)
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            Vec2::new(left_w, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| self.overview_balance(ui),
+                );
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            Vec2::new(avail - left_w - 16.0, ui.available_height()),
+                        ))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        self.overview_recent(ui);
+                    },
+                );
             });
         } else {
             self.overview_balance(ui);

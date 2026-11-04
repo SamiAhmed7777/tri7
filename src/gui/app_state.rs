@@ -1643,10 +1643,12 @@ impl AppState {
                             });
                         }
                     }
-                    // live daemon-side wallet balance (getbalance returns TRI)
+                    // live daemon-side wallet balance (getbalance returns TRI;
+                    // TRI is a 6-decimal chain — COIN = 1_000_000 µTRI, NOT
+                    // 8 decimals. Store µTRI so format_tri (÷1e6) is exact.
                     if let Ok(v4) = rpc_client::rpc_call(&addr, "getbalance", &[]) {
                         if let Some(tri) = v4.as_f64() {
-                            info.daemon_balance_sats = Some((tri * 100_000_000.0).round() as i64);
+                            info.daemon_balance_sats = Some((tri * 1_000_000.0).round() as i64);
                         }
                     }
                 }
