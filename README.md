@@ -1,5 +1,10 @@
 # tri7 — Cryptographic Triangles (TRI) modern client + GUI wallet
 
+> **Build it yourself:** no pre-built binary is required. See
+> **[BUILDING.md](BUILDING.md)** for step-by-step instructions per platform
+> (clone -> install Rust -> one build command). Everything needed is in this
+> repository.
+
 A from-scratch Rust reimplementation of the Triangles full-node client:
 bit-exact chain replay, PoS staking, native JSON-RPC, P2P (clearnet/Tor/I2P),
 secure messaging (smsg), and a desktop GUI wallet carrying the original
@@ -16,6 +21,17 @@ docs/            specs (wallet format, PoS consensus)
 deploy/          systemd units + installers (DNS2, samihost variants)
 vendor/          vendored C hash implementations (Hash9 sphlib)
 ```
+
+## Quick start (build from source)
+
+```bash
+git clone https://github.com/SamiAhmed7777/tri7.git
+cd tri7
+cargo build --release --features gui --bins
+```
+
+That is the whole build. Full platform notes, Windows toolchain setup,
+cross-compiling and troubleshooting: **[BUILDING.md](BUILDING.md)**.
 
 ## Prerequisites (all platforms)
 
@@ -47,6 +63,9 @@ Headless servers: build without `--features gui` — the GUI code is feature-gat
 and adds egui/eframe dependencies only when requested.
 
 ## Windows
+
+Full Windows walk-through (rustup + MSVC Build Tools + commands): see
+**[BUILDING.md](BUILDING.md#2-install-the-rust-toolchain-once)**.
 
 ### Native build (recommended — this is what CI uses)
 
@@ -122,6 +141,12 @@ See `deploy/tri7d.service`, `deploy/tri7d-health.{service,timer}`, and
 Every push builds and tests on Linux, Windows, and macOS
 (`.github/workflows/ci.yml`); Windows runs produce `follow_tip.exe` +
 `tri7_wallet_gui.exe` artifacts on the Actions page.
+
+## Building from source
+
+If you would rather not use a release artifact, this repository builds
+everything from source with a standard Rust toolchain — GUI wallet and node
+daemon alike. Start at **[BUILDING.md](BUILDING.md)**.
 
 ## Notes
 

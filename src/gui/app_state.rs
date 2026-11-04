@@ -96,6 +96,10 @@ pub struct DebugInfo {
     /// daemon-side unspent set (listunspent) — the Transactions/history truth
     /// when the wallet folder has no local snapshot (fresh installs)
     pub daemon_utxos: Option<Vec<crate::gui::state::UtxoRec>>,
+    /// full wallet history from the daemon (listwallettx -> history.json).
+    /// Every receive/spend ever seen, dated from the containing block, so a
+    /// holder from 2014-2021 sees those rows, not just the live window.
+    pub wallet_history: Option<Vec<crate::history::HistoryRec>>,
     pub error: Option<String>,
 }
 
@@ -1583,7 +1587,10 @@ impl AppState {
     /// Only side-file entries are deletable; wallet keys always stay.
     pub fn delete_ab_entry_action(&mut self, address: &str) -> Result<(), String> {
         if self.wallet_label_exists(address) {
-            return Err("this address belongs to wallet.dat and cannot be deleted here".into());
+            return Err(
+                "wallet addresses cannot be deleted - those keys hold your coins.                  Only address-book entries can be removed."
+                    .into(),
+            );
         }
         self.addressbook.retain(|e| e.address != address);
         self.keystore.retain(|e| e.address != address);
@@ -1683,6 +1690,31 @@ impl AppState {
                             if !out.is_empty() {
                                 info.daemon_utxos = Some(out);
                             }
+                        }
+                    }
+                    // full wallet history (history.json via the daemon)
+                    if let Ok(vh) = rpc_client::rpc_call(&addr, "listwallettx", &[]) {
+                        let rows = vh
+                            .get("rows")
+                            .and_then(|r| r.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut out: Vec<crate::history::HistoryRec> = Vec::new();
+                        for r in rows {
+                            let rec = crate::history::HistoryRec {
+                                txid: r.get("txid").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                height: r.get("height").and_then(|x| x.as_u64()).unwrap_or(0),
+                                time: r.get("time").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                                value_sats: r.get("amount_sats").and_then(|x| x.as_i64()).unwrap_or(0),
+                                address: r.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                direction: r.get("direction").and_then(|x| x.as_str()).unwrap_or("in").to_string(),
+                                kind: r.get("kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
+                                spent: r.get("spent").and_then(|x| x.as_bool()).unwrap_or(false),
+                            };
+                            out.push(rec);
+                        }
+                        if !out.is_empty() {
+                            info.wallet_history = Some(out);
                         }
                     }
                     // live daemon-side wallet balance (getbalance returns TRI;

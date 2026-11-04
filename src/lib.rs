@@ -9,6 +9,7 @@ pub mod blkfile;
 pub mod blockindex;
 pub mod consensus;
 pub mod difficulty;
+pub mod history;
 pub mod gui;
 pub mod kernel;
 pub mod keytool;

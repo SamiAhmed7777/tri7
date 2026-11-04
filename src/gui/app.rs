@@ -3138,13 +3138,18 @@ impl Tri7App {
                         if th::ghost_button(ui, "Verify Message").clicked() {
                             self.st.goto(Screen::VerifyMessage);
                         }
-                        let del = th::danger_button(ui, "Delete");
-                        if del.clicked() && editable {
-                            self.ab_delete = Some(addr_s.clone());
-                        }
-                        if !editable {
-                            del.on_disabled_hover_text(
-                                "wallet rows are read-only this session (wallet.dat not writable)",
+                        // Deleting a WALLET address is never offered: those keys
+                        // are your money and the legacy client has no such
+                        // action either. Only address-book / GUI-keystore
+                        // entries (labels and receive-only contacts) can be
+                        // removed, and even they ask first.
+                        if *source != "wallet" {
+                            let del = th::danger_button(ui, "Delete entry");
+                            if del.clicked() {
+                                self.ab_delete = Some(addr_s.clone());
+                            }
+                            del.on_hover_text(
+                                "Removes this address-book entry (your wallet keys are unaffected)",
                             );
                         }
                     });
@@ -3293,10 +3298,18 @@ impl Tri7App {
                 .unwrap_or(0);
             let search = self.tx_search.to_lowercase();
             // newest first (existing order), then view filters
-            // history source: the local snapshot's derived set when present,
-            // else the daemon's LIVE unspent set (fresh wallet folders have no
-            // snapshot files at all - Sami: "I see nothing at all under
-            // Transactions")
+            // History source, in priority order:
+            //  1. daemon listwallettx (history.json: EVERY receive/spend since
+            //    2014, dated from the containing block — legacy parity)
+            //  2. local derived snapshot
+            //  3. daemon listunspent (live unspent only)
+            // A holder from 2021 must see those rows, not just today's.
+            let hist: Vec<crate::history::HistoryRec> = self
+                .st
+                .debug_info
+                .as_ref()
+                .and_then(|d| d.wallet_history.clone())
+                .unwrap_or_default();
             let utxos: Vec<UtxoRec> = if !derived.utxos.is_empty() {
                 derived.utxos.clone()
             } else {
@@ -3306,41 +3319,73 @@ impl Tri7App {
                     .and_then(|d| d.daemon_utxos.clone())
                     .unwrap_or_default()
             };
-            let mut rows: Vec<(usize, &UtxoRec)> = utxos
-                .iter()
-                .enumerate()
-                .filter(|(_, u)| {
-                    if min_amount_sats > 0 && u.value_sats < min_amount_sats {
-                        return false;
-                    }
-                    if self.tx_type_filter != 0
-                        && Self::tx_type_index(&u.prev_kind) != self.tx_type_filter
-                    {
-                        return false;
-                    }
-                    let depth = tip.saturating_sub(u.height);
-                    if self.tx_status_filter == 1 && depth < 6 {
-                        return false;
-                    }
-                    if self.tx_status_filter == 2 && depth >= 6 {
-                        return false;
-                    }
-                    if !search.is_empty() {
-                        let label_hit = self
-                            .st
-                            .label_of(&u.address)
-                            .map(|l| l.to_lowercase().contains(&search))
-                            .unwrap_or(false);
-                        if !label_hit
-                            && !u.address.to_lowercase().contains(&search)
-                            && !u.txid_display().to_lowercase().contains(&search)
+            let base_rows: Vec<UtxoRec> = if !hist.is_empty() {
+                hist.into_iter()
+                    .filter(|h| {
+                        if min_amount_sats > 0 && h.value_sats.abs() < min_amount_sats {
+                            return false;
+                        }
+                        if self.tx_type_filter != 0
+                            && Self::tx_type_index(&h.kind) != self.tx_type_filter
                         {
                             return false;
                         }
-                    }
-                    true
-                })
-                .collect();
+                        let depth = tip.saturating_sub(h.height as u32);
+                        if self.tx_status_filter == 1 && depth < 6 {
+                            return false;
+                        }
+                        if self.tx_status_filter == 2 && depth >= 6 {
+                            return false;
+                        }
+                        if !search.is_empty() {
+                            let label_hit = self
+                                .st
+                                .label_of(&h.address)
+                                .map(|l| l.to_lowercase().contains(&search))
+                                .unwrap_or(false);
+                            if !label_hit
+                                && !h.address.to_lowercase().contains(&search)
+                                && !h.txid.to_lowercase().contains(&search)
+                            {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .map(|h| {
+                        let mut r = UtxoRec {
+                            txid: [0u8; 32],
+                            n: 0,
+                            value_sats: h.value_sats,
+                            script: Vec::new(),
+                            address: h.address,
+                            height: h.height as u32,
+                            tx_time: h.time,
+                            prev_kind: h.kind,
+                        };
+                        // display-order hex is what the UI prints; UtxoRec keeps
+                        // internal order, so decode+reverse once here
+                        if h.txid.len() == 64 {
+                            let bytes: Vec<u8> = (0..32)
+                                .filter_map(|i| {
+                                    u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok()
+                                })
+                                .collect();
+                            if bytes.len() == 32 {
+                                let mut raw = [0u8; 32];
+                                raw.copy_from_slice(&bytes);
+                                raw.reverse();
+                                r.txid = raw;
+                            }
+                        }
+                        r
+                    })
+                    .collect()
+            } else {
+                utxos.iter().cloned().collect()
+            };
+            let mut rows: Vec<(usize, UtxoRec)> =
+                base_rows.into_iter().enumerate().collect();
             // date order: oldest<->newest. Keyed on the created epoch (the
             // same stamp the row shows) with height as the tie-break, so the
             // order always matches what the Date column says.
@@ -4385,21 +4430,29 @@ impl Tri7App {
         ui.horizontal(|ui| {
             for (i, label) in tabs.iter().enumerate() {
                 let selected = self.options_tab == i;
-                let ir = th::table_row(ui, 0, selected, 130.0, |rui| {
-                    th::row_click(rui, 30.0);
-                    th::table_cell_text(
-                        rui,
-                        0.0,
-                        130.0,
-                        label,
-                        false,
-                        if selected { th::TEXT_PRIMARY } else { th::TEXT_SECONDARY },
-                        false,
-                    );
-                    true
-                });
-                if ir.inner {
+                // REAL clickable tab. The previous table_row/row_click version
+                // returned true unconditionally every frame, so the last tab
+                // won every time and no click ever switched (Sami: "none of
+                // the tabs in options work").
+                let btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(*label)
+                            .size(12.0)
+                            .strong()
+                            .color(if selected { th::TEXT_PRIMARY } else { th::TEXT_SECONDARY }),
+                    )
+                    .min_size(Vec2::new(120.0, 30.0))
+                    .fill(if selected { th::DEEP_RED } else { th::PANEL_BG })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if selected { th::BRAND_RED } else { th::BORDER_SUBTLE },
+                    )),
+                );
+                if btn.clicked() {
                     self.options_tab = i;
+                }
+                if btn.hovered() && !selected {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
             }
         });

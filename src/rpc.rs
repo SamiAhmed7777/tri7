@@ -80,6 +80,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getstakemodifier",
     "getbalance",
     "listunspent",
+    "listwallettx",
     "listwalletaddresses",
     "getreceivedbyaddress",
     "validateaddress",
@@ -237,6 +238,12 @@ pub trait WalletProvider: Send + Sync {
     /// wallet membership (balances.json wallet address list).
     fn is_mine(&self, addr: &str) -> bool;
     fn utxos(&self) -> Vec<UtxoRow>;
+    /// Full wallet history (history.json, built by the txhistory bin).
+    /// Empty = no history file yet; the RPC then answers with an empty list
+    /// rather than an error so the GUI can render "run a rescan".
+    fn history(&self) -> Vec<crate::history::HistoryRec> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1049,30 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 })
                 .collect();
             NativeOutcome::Ok(json!(rows))
+        }
+
+        // full wallet history: every receive/spend ever seen for these keys,
+        // dated from the containing block (legacy client parity)
+        "listwallettx" => {
+            let rows = deps.wallet.history();
+            let out: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "txid": r.txid,
+                        "height": r.height,
+                        "time": r.time,
+                        "amount": sats_to_tri(r.value_sats),
+                        "amount_sats": r.value_sats,
+                        "address": r.address,
+                        "direction": r.direction,
+                        "category": r.direction,
+                        "kind": r.kind,
+                        "spent": r.spent,
+                    })
+                })
+                .collect();
+            NativeOutcome::Ok(json!({ "rows": out, "count": rows.len(), "source": "history.json" }))
         }
 
         // ---- composite ----

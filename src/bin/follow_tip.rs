@@ -3947,6 +3947,8 @@ struct LiveWalletProvider {
     snap: Arc<SnapshotWallet>,
     wl: SharedWalletLive,
     st: SharedState,
+    /// state dir holding history.json (full wallet history, txhistory bin)
+    state_dir: std::path::PathBuf,
 }
 
 impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
@@ -4057,6 +4059,19 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
             }
         }
         self.snap.utxos()
+    }
+
+    fn history(&self) -> Vec<tri7_core::history::HistoryRec> {
+        // history.json is produced by the txhistory bin (one sequential pass
+        // over the block store). Absent file -> empty list, never an error.
+        match tri7_core::history::load_cache(&self.state_dir) {
+            Some(c) => {
+                let mut rows = c.rows;
+                rows.sort_by(|a, b| b.time.cmp(&a.time).then(b.height.cmp(&a.height)));
+                rows
+            }
+            None => Vec::new(),
+        }
     }
 }
 type SharedPool = Arc<Mutex<tri7_core::txpool::TxPool>>;
@@ -5845,6 +5860,7 @@ fn main() {
                 }),
                 wl: Arc::clone(&wl_shared),
                 st: Arc::clone(&st_shared),
+                state_dir: cfg.state_dir.clone(),
             }),
             blocks: Arc::new(StoreAdapter {
                 store: Arc::clone(&store),
