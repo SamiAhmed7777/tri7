@@ -3734,24 +3734,30 @@ impl Tri7App {
             ];
             for (tab, label) in tabs {
                 let selected = self.msg_tab == tab;
-                let ir = th::table_row(ui, 0, selected, 120.0, |rui| {
-                    th::row_click(rui, 30.0);
-                    th::table_cell_text(
-                        rui,
-                        0.0,
-                        120.0,
-                        &label,
-                        false,
-                        if selected { th::TEXT_PRIMARY } else { th::TEXT_SECONDARY },
-                        false,
-                    );
-                    true
-                });
-                if ir.inner {
+                // REAL clickable tab: the old table_row/row_click combo
+                // unconditionally returned true every frame, so the last tab
+                // always won and clicks never switched (Sami: "clicking
+                // inbox sent or compose nothing happens")
+                let btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(&label)
+                            .size(12.0)
+                            .strong()
+                            .color(if selected { th::TEXT_PRIMARY } else { th::TEXT_SECONDARY }),
+                    )
+                    .fill(if selected { th::DEEP_RED } else { th::PANEL_BG })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if selected { th::BRAND_RED } else { th::BORDER_SUBTLE },
+                    )),
+                );
+                if btn.clicked() {
                     if self.msg_tab != tab {
                         self.msg_selected = None;
                     }
                     self.msg_tab = tab;
+                    // entering a tab refreshes it from the daemon
+                    self.st.messages_refresh_action();
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
