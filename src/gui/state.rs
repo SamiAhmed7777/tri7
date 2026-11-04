@@ -457,8 +457,22 @@ pub fn load_tipstate(path: &Path) -> Result<TipInfo, String> {
 /// Oracle for blockindex::load_caches — EXACTLY the construction tri7d uses
 /// (follow_tip.rs: daemon-anchored window hashes from tipstate entries).
 pub fn build_oracle(_tip: &TipInfo, path: &Path) -> Result<crate::blockindex::BuildOracle, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    // MISSING tipstate.json is fine (Sami directive: the chosen folder is the
+    // whole wallet environment; a fresh folder has no chain state yet). An
+    // empty oracle means the index caches can't be anchored -> tail
+    // reconciliation reports "showing the snapshot as-is" and balances come
+    // from the wallet keys + tri7d RPC. Never block opening the wallet.
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(crate::blockindex::BuildOracle {
+                base: 0,
+                hashes: Vec::new(),
+                tip: 0,
+            });
+        }
+        Err(e) => return Err(format!("read {}: {}", path.display(), e)),
+    };
     let f: TipStateLight =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
     let mut hashes = Vec::with_capacity(f.entries.len());
