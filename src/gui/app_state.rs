@@ -80,6 +80,9 @@ pub struct DebugInfo {
     /// daemon sync progress (getsyncinfo) — Sami: "it should show this on
     /// the UI": live height/percent/rate/ETA while the daemon from-zeroes
     pub sync: Option<GuiSync>,
+    /// daemon-side wallet balance (getbalance, sats) — the live truth when
+    /// the daemon tracks this wallet's keys (local snapshot may be absent)
+    pub daemon_balance_sats: Option<i64>,
     pub error: Option<String>,
 }
 
@@ -1613,6 +1616,12 @@ impl AppState {
                             });
                         }
                     }
+                    // live daemon-side wallet balance (getbalance returns TRI)
+                    if let Ok(v4) = rpc_client::rpc_call(&addr, "getbalance", &[]) {
+                        if let Some(tri) = v4.as_f64() {
+                            info.daemon_balance_sats = Some((tri * 100_000_000.0).round() as i64);
+                        }
+                    }
                 }
                 Err(e) => info.error = Some(e),
             }
@@ -1726,6 +1735,14 @@ impl AppState {
                 if let Some(s) = &di.sync {
                     if s.syncing {
                         return s.label();
+                    }
+                }
+                // daemon caught up and following: show Synced honestly even
+                // when the GUI folder holds no local chain state (wallet-only
+                // folder design — the daemon owns the chain)
+                if self.tip.as_ref().map(|t| t.height).unwrap_or(0) == 0 {
+                    if let Some(b) = di.blocks {
+                        return format!("Synced · daemon {}", b);
                     }
                 }
             }

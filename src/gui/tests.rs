@@ -1593,6 +1593,7 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         connections: Some(1),
         blocks: Some(2_204_751),
         sync: Some(s),
+        daemon_balance_sats: Some(3_036_990_591),
         error: None,
     });
     let lbl = st.status_blocks_label();
@@ -1605,6 +1606,7 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         connections: Some(1),
         blocks: Some(2_204_751),
         sync: None,
+        daemon_balance_sats: None,
         error: None,
     });
     let lbl2 = st.status_blocks_label();

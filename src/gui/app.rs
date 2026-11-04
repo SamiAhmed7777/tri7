@@ -1578,6 +1578,11 @@ impl Tri7App {
                         return (s.fraction(), s.label());
                     }
                 }
+                // daemon following, no local chain state: treat as synced
+                // (wallet-only folder design — the daemon owns the chain)
+                if self.st.tip.as_ref().map(|t| t.height).unwrap_or(0) == 0 {
+                    return (1.0, self.st.status_blocks_label());
+                }
             }
         }
         match (&self.st.tip, &self.st.debug_info) {
@@ -1727,15 +1732,24 @@ impl Tri7App {
 
     /// Balance card — the historical Wallet frame (Spendable/Stake/
     /// Unconfirmed/Immature → divider → Total) with its original tooltips.
+    /// Balance source: the daemon's live getbalance when reachable (Sami's
+    /// PC setup: the daemon tracks the wallet keys and holds the chain);
+    /// the local key+snapshot derivation fills in when no daemon answers.
+    /// Rows render in an egui Grid — no more overlapping text.
     fn overview_balance(&mut self, ui: &mut egui::Ui) {
         let marker_tex = self.tex(ui.ctx(), "brand/mark16");
         let st = &mut self.st;
+        // daemon balance wins when present (live truth from the synced chain)
+        let daemon_sats = st
+            .debug_info
+            .as_ref()
+            .filter(|d| d.reachable)
+            .and_then(|d| d.daemon_balance_sats);
         th::card_titled(ui, "Wallet", |ui| {
             let Some(derived) = st.derived.clone() else {
                 th::empty_state(ui, None, "No wallet loaded", "Open a wallet to see balances");
                 return;
             };
-            let total = derived.balances.total_sats;
             let tip = st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
             let mut immature = 0i64;
             for u in &derived.utxos {
@@ -1743,29 +1757,61 @@ impl Tri7App {
                     immature += u.value_sats;
                 }
             }
-            let (spendable, unconfirmed, stake) = (total - immature, 0i64, 0i64);
-            let row = |ui: &mut egui::Ui, k: &str, tip: &str, v: &str, marker: bool| {
-                ui.horizontal(|ui| {
-                    if marker {
-                        if let Some(tex) = &marker_tex {
-                            ui.add(img(tex, Vec2::splat(14.0)));
-                        }
-                    }
-                    ui.label(egui::RichText::new(k).color(th::TEXT_SECONDARY));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} {}", v, s::TICKER))
-                                .monospace()
-                                .color(th::TEXT_PRIMARY),
-                        )
-                        .on_hover_text(tip);
-                    });
-                });
+            let (spendable, unconfirmed, stake, total) = if let Some(ds) = daemon_sats {
+                // daemon view: the whole balance is spendable (its snapshot
+                // is chain-covered); immature split comes from local UTXOs
+                // only when they agree with the daemon total
+                (ds, 0i64, 0i64, ds)
+            } else {
+                let total = derived.balances.total_sats;
+                (total - immature, 0i64, 0i64, total)
             };
-            row(ui, "Spendable:", "Your current spendable balance", &s::format_tri(spendable), true);
-            row(ui, "Stake:", "Total of coins that was staked, and do not yet count toward the current balance", &s::format_tri(stake), false);
-            row(ui, "Unconfirmed:", "Total of transactions that have yet to be confirmed, and do not yet count toward the current balance", &s::format_tri(unconfirmed), false);
-            row(ui, "Immature:", "Mined balance that has not yet matured", &s::format_tri(immature), false);
+            let source_note = if daemon_sats.is_some() {
+                "live via daemon"
+            } else {
+                "from local snapshot"
+            };
+            egui::Grid::new("balance_grid")
+                .num_columns(2)
+                .spacing([16.0, 7.0])
+                .min_col_width(140.0)
+                .show(ui, |ui| {
+                    let grow = |ui: &mut egui::Ui, v: String, tip: &str, marker: bool, size: f32| {
+                        ui.horizontal(|ui| {
+                            if marker {
+                                if let Some(tex) = &marker_tex {
+                                    ui.add(img(tex, Vec2::splat(14.0)));
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", v, s::TICKER))
+                                    .monospace()
+                                    .size(size)
+                                    .color(th::TEXT_PRIMARY),
+                            )
+                            .on_hover_text(tip);
+                        });
+                    };
+                    ui.label(egui::RichText::new("Spendable:").color(th::TEXT_SECONDARY))
+                        .on_hover_text("Your current spendable balance");
+                    grow(ui, s::format_tri(spendable), "Your current spendable balance", true, 14.0);
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Stake:").color(th::TEXT_SECONDARY))
+                        .on_hover_text("Total of coins that was staked, and do not yet count toward the current balance");
+                    grow(ui, s::format_tri(stake), "Total of coins that was staked, and do not yet count toward the current balance", false, 14.0);
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Unconfirmed:").color(th::TEXT_SECONDARY))
+                        .on_hover_text("Total of transactions that have yet to be confirmed, and do not yet count toward the current balance");
+                    grow(ui, s::format_tri(unconfirmed), "Total of transactions that have yet to be confirmed, and do not yet count toward the current balance", false, 14.0);
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Immature:").color(th::TEXT_SECONDARY))
+                        .on_hover_text("Mined balance that has not yet matured");
+                    grow(ui, s::format_tri(immature), "Mined balance that has not yet matured", false, 14.0);
+                    ui.end_row();
+                });
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Total:").color(th::TEXT_SECONDARY));
@@ -1780,6 +1826,8 @@ impl Tri7App {
                     .on_hover_text("Your current total balance");
                 });
             });
+            ui.add_space(2.0);
+            th::text_meta(ui, source_note);
         });
         // snapshot/coverage/reconciliation sentence → collapsed "Data details"
         let st = &mut self.st;
