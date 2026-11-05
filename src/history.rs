@@ -160,7 +160,12 @@ pub fn scan(
     // tip), so a plain frame counter after genesis mislabels every row that
     // follows a gap. The index knows the real height of each block hash.
     let store = crate::blockindex::BlockStore::new(Some(store_path.to_path_buf()), None);
-    store.spawn_build(None);
+    // Oracle from tipstate: without the window hashes the thread stops at the
+    // first reorg leftover (3,600+ blocks short of the tip), which silently
+    // truncated history and made the dates regress. With the oracle the map
+    // reaches the window base and everything below it is authoritative.
+    let oracle = load_oracle(state_dir);
+    store.spawn_build(oracle.clone());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
     let mut threaded_tip = None;
     while std::time::Instant::now() < deadline {
@@ -349,6 +354,33 @@ fn apply_block(
             });
         }
     }
+}
+
+/// Chain-threading oracle from `<state_dir>/tipstate.json` (window entries).
+fn load_oracle(state_dir: &Path) -> Option<crate::blockindex::BuildOracle> {
+    let raw = std::fs::read_to_string(state_dir.join("tipstate.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let entries = v.get("entries")?.as_array()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let base = entries.first()?.get("height")?.as_u64()?;
+    let tip = v.get("height").and_then(|h| h.as_u64())?;
+    let mut hashes = Vec::with_capacity(entries.len());
+    for e in entries {
+        let hex = e.get("hash")?.as_str()?;
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut raw = [0u8; 32];
+        for i in 0..32 {
+            raw[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        // tipstate stores display hex
+        raw.reverse();
+        hashes.push(raw);
+    }
+    Some(crate::blockindex::BuildOracle { base, hashes, tip })
 }
 
 #[cfg(test)]
