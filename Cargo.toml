@@ -57,6 +57,8 @@ ureq = { version = "2.12", default-features = false, features = [
 # unit-tested in the headless suite too.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 
 [features]
 default = []

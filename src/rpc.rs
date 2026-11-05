@@ -76,6 +76,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getrawtransaction",
     "gettransaction",
     "getinfo",
+    "gettxoutsetinfo",
     "getdifficulty",
     "getconnectioncount",
     "getstakemodifier",
@@ -1292,6 +1293,27 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 })
                 .collect();
             NativeOutcome::Ok(json!({ "rows": out, "count": rows.len(), "source": "history.json" }))
+        }
+
+        // Chain-state summary. Counts come from the wallet replay snapshot when
+        // present (it knows every output); the fields legacy clients read are
+        // height, bestblock and total_amount.
+        "gettxoutsetinfo" => {
+            let t_view = deps.tip.tip();
+            let bal = deps.wallet.balance();
+            let entries = deps.wallet.address_entries();
+            let utxos: u64 = entries.iter().map(|e| e.utxos).sum();
+            NativeOutcome::Ok(json!({
+                "height": t_view.height,
+                "bestblock": t_view.blockhash,
+                "transactions": Value::Null,
+                "txouts": utxos,
+                "bogosize": Value::Null,
+                "hash_serialized_2": Value::Null,
+                "total_amount": bal.as_ref().map(|b| sats_to_tri(b.sats)),
+                "total_utxos": utxos,
+                "note": "transactions/bogosize need a full UTXO-set pass; txouts and total_amount are the node's replay view",
+            }))
         }
 
         // Legacy paginated history. listwallettx is a full dump for the GUI;

@@ -24,6 +24,7 @@ pub mod smsg;
 pub mod sync_progress;
 pub mod smsg_net;
 pub mod spend;
+pub mod walletcrypto;
 pub mod stake;
 pub mod sweep;
 pub mod txpool;
