@@ -100,7 +100,13 @@ impl BlockIndex {
     }
 
     pub fn offset_by_height(&self, h: u64) -> Option<u64> {
-        self.height_off.get(h as usize).copied()
+        // height_off is indexed BY HEIGHT. Gaps are padded with HEIGHT_GAP so
+        // that one skipped frame cannot shift every later height onto the
+        // wrong offset (which made lookups return a neighbour's body).
+        match self.height_off.get(h as usize) {
+            Some(&HEIGHT_GAP) | None => None,
+            Some(o) => Some(*o),
+        }
     }
 
     pub fn height_of_seq(&self, seq: u32) -> Option<u64> {
@@ -113,11 +119,14 @@ impl BlockIndex {
     }
 
     pub fn tip_height(&self) -> Option<u64> {
-        if self.height_off.is_empty() {
-            None
-        } else {
-            Some(self.height_off.len() as u64 - 1)
+        let mut i = self.height_off.len();
+        while i > 0 {
+            i -= 1;
+            if self.height_off[i] != HEIGHT_GAP {
+                return Some(i as u64);
+            }
         }
+        None
     }
 }
 
@@ -176,6 +185,24 @@ pub fn walk_tx_ranges(
 }
 
 /// Hash9 over the 80-byte header at frame body start.
+/// Sentinel for "this height has no frame" inside `height_off`, which must be
+/// indexable by absolute height.
+const HEIGHT_GAP: u64 = u64::MAX;
+
+/// Record `off` at absolute height `h`, padding any skipped heights with the
+/// sentinel so indices stay aligned with real heights.
+fn push_height_off(v: &mut Vec<u64>, h: u64, off: u64) {
+    let want = (h as usize) + 1;
+    if v.len() < want {
+        v.resize(want, HEIGHT_GAP);
+    }
+    if let Some(slot) = v.get_mut(h as usize) {
+        if *slot == HEIGHT_GAP {
+            *slot = off;
+        }
+    }
+}
+
 fn header_hash(body: &[u8]) -> Result<Hash, String> {
     if body.len() < 80 {
         return Err("frame body shorter than header".into());
@@ -323,7 +350,7 @@ pub fn build_index(
             if let Some(hx) = by_oracle {
                 last_accepted = Some(hash);
                 height = hx; // continue threading from this height
-                height_off.push(off);
+                push_height_off(&mut height_off, hx, off);
                 heights_by_seq.push(hx as u32);
                 blocks.push(BlockEntry {
                     key: key8(&hash),
@@ -370,7 +397,7 @@ pub fn build_index(
 
         if accepted_here {
             last_accepted = Some(hash);
-            height_off.push(off);
+            push_height_off(&mut height_off, height, off);
             heights_by_seq.push(height as u32);
         } else {
             skipped += 1;
@@ -486,7 +513,10 @@ const CACHE_MAGIC_TX: u32 = 0x5452_4954; // TRIT
 /// v2: heights_ok semantics changed (a frame missing ABOVE the threaded tip
 /// shortens the map instead of invalidating it) + the append appendix. v1
 /// caches carry the old gate — force one rebuild.
-const CACHE_VERSION: u32 = 2;
+/// v3: height_off became height-indexed (gap-padded). A v2 cache holds the
+/// compact list, where every skipped frame shifted later heights onto the
+/// wrong offsets — serving neighbour bodies and reporting false gaps.
+const CACHE_VERSION: u32 = 3;
 const BLOCKS_HEAD_LEN: usize = 49;
 const TX_HEAD_LEN: usize = 32;
 

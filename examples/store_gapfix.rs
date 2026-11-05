@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use tri7_core::blockindex::BlockStore;
+use tri7_core::blockindex::{BlockStore, BuildOracle};
 
 fn post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
     let mut s = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;
@@ -86,6 +86,26 @@ fn load_expected(state_dir: &std::path::Path) -> Option<Vec<(u64, String)>> {
     Some(out)
 }
 
+/// The tipstate window as a BuildOracle: display hex -> internal byte order.
+fn oracle_from(expected: &[(u64, String)]) -> Option<BuildOracle> {
+    if expected.is_empty() {
+        return None;
+    }
+    let base = expected[0].0;
+    let mut hashes = Vec::with_capacity(expected.len());
+    for (h, hex) in expected {
+        if *h != base + hashes.len() as u64 {
+            return None; // non-contiguous window: not usable as an oracle
+        }
+        hashes.push(tri7_core::p2p::display_to_internal(hex).ok()?);
+    }
+    Some(BuildOracle {
+        base,
+        tip: base + hashes.len() as u64 - 1,
+        hashes,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -114,7 +134,10 @@ fn main() {
         Some(state_dir.join("blk0001.dat")),
         Some(state_dir.join("index")),
     );
-    store.spawn_build(None);
+    // Build WITH the oracle: hash-first acceptance is what lets a frame that
+    // cannot chain (another branch sits before it) still get its height.
+    let oracle = oracle_from(&expected);
+    store.spawn_build(oracle);
     loop {
         match store.status() {
             tri7_core::blockindex::StoreStatus::Ready { frames, .. } => {
