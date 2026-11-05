@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# tri7-verify.sh — read-only, reproducible verification of the claims in
-# TRI7-COORDINATION.md. Run on the host that runs tri7d (atis: DNS2). No writes
-# outside stdout; requires only git, curl, journalctl, python3, GNU stat.
+# tri7-verify.sh — reproducible verification of the claims in TRI7-COORDINATION.md.
+# Run on the host that runs tri7d (atis: DNS2). Filesystem writes: ONLY the mktemp
+# files it creates and removes; requires git, curl, journalctl, python3, GNU stat.
+# Note: wallet/prevout addresses are taken from the node's own scriptPubKey.addresses
+# annotation and matched against the decoded wallet set (RPC-reported verification,
+# not an independent re-decode of raw scripts).
 set -euo pipefail
 cd /root/tri7
 
@@ -161,9 +164,7 @@ import json as _j
 want=_j.load(open("/root/tri7/spend_live.json"))["to_address"]
 assert outs[0]==want, ("1-TRI output does not match spend_live.json to_address",outs[0],want)
 print("ok: vout[0] matches spend_live.json to_address",want)
-open("/tmp/tri7-verify-input-owner.txt","w").write(o1)
 PY
-echo "input owner recorded: $(cat /tmp/tri7-verify-input-owner.txt)"
 curl -sS --connect-timeout 5 --max-time 20 -X POST http://127.0.0.1:19112 \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"listunspent"}' -o "$V"
@@ -175,7 +176,7 @@ assert not spent, ("input still unspent?!",spent)
 print(f"ok: consumed input e09191f7…:1 no longer in listunspent ({len(u)} current UTXOs)")
 PY
 
-echo "== relay-pool state (node's own periodic report, last 24h) =="
+echo "== relay-pool counter (node's own periodic report; scope not documented upstream — treat as indicative; the 300-block scan is the mined-window evidence) =="
 R=$(journalctl -u tri7d --since "-24 hours" --no-pager | grep '"txs_accepted"' | tail -1)
 [ -n "$R" ] || { echo "VERIFY FAIL: no txs_accepted report found in the journal"; exit 1; }
 echo "$R"

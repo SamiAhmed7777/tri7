@@ -1,0 +1,65 @@
+host=vmi3080415  when=2026-11-04T21:38:12-08:00
+repo_head=7c34b6c3556c58398edb089093a6605556ffe868
+repo_head_short=7c34b6c
+
+== implementation commit refs ==
+src/txpool.rs                caeffbe 2026-11-02 Windows installer: NSIS setup for tri7 Wallet v7.0.0
+src/rpc.rs                   7c34b6c 2026-11-04 tor/i2p: node identity RPC + address drawer; fork repair on sami-pc
+src/stake.rs                 427c316 2026-11-03 CI: quote NSIS -DVERSION arg (PowerShell word-split 7.0.0 into two args)
+src/spend.rs                 4e9017d 2026-11-02 [grade=B urn:ump:hefgmrxvcoobrsakkuhagejk6cpgadcj24mzjyhwsjz6agv42miq] tri7 phase 5b: native-first RPC surface (r13 final)
+src/bin/follow_tip.rs        7c34b6c 2026-11-04 tor/i2p: node identity RPC + address drawer; fork repair on sami-pc
+src/bin/tri7_wallet_gui.rs   709204d 2026-11-04 transactions: live coins merged into the list, aligned status glyph, hover tooltip
+
+== sendrawtransaction: advertised + implemented ==
+91:    "sendrawtransaction",
+122:    "sendrawtransaction",
+513:///   sendrawtransaction — consensus-validate + pending-relay set + inv relay
+4350:            "sendrawtransaction" => {
+txpool.rs present: 633 lines
+
+== mint includes pool txs ==
+4224:        .txs_for_block(400_000, 250)
+
+== follower validator: structure-only scan for extra txs ==
+1940:    for tx in block.vtx.iter().skip(1) {
+3826:        for tx in block.vtx.iter().skip(1) {
+4258:    for tx in block.vtx.iter().skip(1) {
+
+== live mint cadence (last 60 min) ==
+STAKE MINTED lines: 33 (varies with stake luck; expect tens per hour)
+Nov 04 21:36:32 vmi3080415 follow_tip[2646935]: [2026-11-05T05:36:32Z] STAKE MINTED → h2205549 14fad565be103f60b4b25560016a31e80d523d3de9ff411f11b603f8509f575a (self-validated: kernel enforced, nbits enforced) — relaying to 4 peer(s)
+Nov 04 21:36:47 vmi3080415 follow_tip[2646935]: [2026-11-05T05:36:47Z] STAKE MINTED → h2205550 22ac8f76d764469617dcbecb71573c4cfddb28aa7c3a68f1033ddfece00fcb5a (self-validated: kernel enforced, nbits enforced) — relaying to 4 peer(s)
+
+== live getinfo ==
+balance 3203.022726 coverage_h 2205550 blocks 2205550 connections 4
+
+== 300-block tx-count scan (exact bounds recorded) ==
+scan_start=2026-11-05T05:38:12Z scan_end=2026-11-05T05:38:12Z
+tip_at_scan=2205550 scanned=300 range=2205251..2205550
+blocks_with_more_than_2_txs=0
+
+== relay pool bounds (code facts) ==
+27:pub const DEFAULT_POOL_CAP: usize = 2000;
+28:pub const DEFAULT_ENTRY_TTL_SECS: i64 = 60 * 60; // 1h relay horizon
+70:        TxPool::new(DEFAULT_POOL_CAP, DEFAULT_ENTRY_TTL_SECS)
+
+== stored signed spend: broadcast:false in the JSON is STALE ==
+mode live-self-spend | json says broadcast False | amount_sats 1000000 | txid d7f7a8db709125888e6a | signed_at_block 2204147
+== verbose chain lookup of that txid (authoritative; missing txid FAILS) ==
+IN CHAIN: txid d7f7a8db709125888e6a2d044b0ae38aa9573c857ab2580a6166a8e2fcdadc26
+  height 2204151 | confirmations 1400 (grow over time)
+  blockhash a4cd2adc7566f5718e1c04f0cf41b83ba8b326f0acb532d883e9d1cef9799aad
+  vin: [('e09191f721a1aa6f6a2537cf2423ed875a69a044ea927fd6d2c45b7227f9ad93', 1)]
+  vout values: [1.0, 19.968354]
+LIVE-SPEND-PROVEN: the stored self-spend (1 TRI out, single input e09191f7…:1) is mined and confirmed
+== wallet ownership DERIVED from the tx scripts (base58-decode, no hardcoding) ==
+ok: input e09191f7…:1 pays to TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL (wallet)
+ok: spend outputs pay to ['TJWJVTStJc3FmCEwvsnMxP6aUo94WPYikG', 'TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL'] (both wallet)
+ok: vout[0] matches spend_live.json to_address TJWJVTStJc3FmCEwvsnMxP6aUo94WPYikG
+ok: consumed input e09191f7…:1 no longer in listunspent (206 current UTXOs)
+== relay-pool counter (node's own periodic report; scope not documented upstream — treat as indicative; the 300-block scan is the mined-window evidence) ==
+Nov 04 20:07:29 vmi3080415 follow_tip[2612230]:     "txs_accepted": 0,
+== tri7 services ==
+active
+active
+VERIFY-SCRIPT-COMPLETE
