@@ -401,3 +401,60 @@ mod glyph_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod live_split_tests {
+    use super::*;
+
+    /// Mirror of the Overview split over (value, height, kind) coins, which is
+    /// exactly the shape the GUI feeds it from listunspent. Regression guard
+    /// for "still 0 under spendable": a wallet whose coins are all 4+ deep must
+    /// produce a non-zero spendable figure.
+    fn split(coins: &[(i64, u64, &str)], tip: u64) -> (i64, i64, i64, i64) {
+        let (mut sp, mut st, mut un, mut im) = (0i64, 0i64, 0i64, 0i64);
+        for (value, height, kind) in coins {
+            let depth = depth_of(*height, tip);
+            let generated = *kind == "coinbase" || *kind == "coinstake";
+            let matures = (COINBASE_MATURITY - depth).max(0);
+            if generated && matures > 0 {
+                if *kind == "coinstake" {
+                    st += *value;
+                } else {
+                    im += *value;
+                }
+            } else if depth >= RECOMMENDED_CONFIRMATIONS {
+                sp += *value;
+            } else {
+                un += *value;
+            }
+        }
+        (sp, st, un, im)
+    }
+
+    #[test]
+    fn deep_coins_are_spendable_never_zero() {
+        let (sp, st, un, im) = split(
+            &[
+                (100_000_000, 2_200_000, "regular"),
+                (50_000_000, 2_205_000, "coinstake"),
+            ],
+            2_205_400,
+        );
+        assert_eq!(sp, 150_000_000, "both coins are far past maturity");
+        assert_eq!((st, un, im), (0, 0, 0));
+    }
+
+    #[test]
+    fn fresh_stakes_are_stake_not_spendable() {
+        let (sp, st, _un, _im) = split(&[(10_000_000, 2_205_399, "coinstake")], 2_205_400);
+        assert_eq!(sp, 0);
+        assert_eq!(st, 10_000_000);
+    }
+
+    #[test]
+    fn one_confirmation_receipt_is_unconfirmed() {
+        let (sp, _st, un, _im) = split(&[(1_000_000, 2_205_400, "regular")], 2_205_400);
+        assert_eq!(sp, 0);
+        assert_eq!(un, 1_000_000);
+    }
+}

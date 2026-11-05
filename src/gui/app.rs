@@ -1956,45 +1956,42 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             // Before this, every minted stake was silently lumped into
             // Spendable and the four rows were decorative.
             let (mut spendable, mut stake, mut unconfirmed, mut immature) = (0i64, 0i64, 0i64, 0i64);
-            // history rows carry the authoritative kind + height; fall back to
-            // the derived set when there is no history yet
-            let hist = st.load_history_file().0;
-            if !hist.is_empty() && tip > 0 {
-                for h in &hist {
-                    if h.direction != "in" || h.spent {
-                        continue;
-                    }
-                    let depth = crate::legacy_rows::depth_of(h.height, tip as u64);
-                    let generated = h.kind == "coinstake" || h.kind == "coinbase";
-                    let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
-                    if generated && matures > 0 {
-                        if h.kind == "coinstake" {
-                            stake += h.value_sats;
-                        } else {
-                            immature += h.value_sats;
-                        }
-                    } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
-                        spendable += h.value_sats;
-                    } else {
-                        unconfirmed += h.value_sats;
-                    }
+            // THE LIVE SET IS THE SOURCE for balances. History is a snapshot
+            // file: coins spent since it was written are still listed as
+            // unspent there and coins created after it are missing, so summing
+            // history showed 0 spendable on a wallet holding 3,202 TRI.
+            // listunspent (the node's live view) is the truth; history is only
+            // for the Transactions list.
+            let live_rows = st
+                .debug_info
+                .as_ref()
+                .and_then(|d| d.daemon_utxos.clone())
+                .unwrap_or_default();
+            // one shape for the split: (value, height, kind)
+            let mut coins: Vec<(i64, u64, String)> = Vec::new();
+            if !live_rows.is_empty() {
+                for u in &live_rows {
+                    coins.push((u.value_sats, u.height as u64, u.prev_kind.clone()));
                 }
             } else {
                 for u in &derived.utxos {
-                    let depth = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
-                    let generated = u.prev_kind == "coinbase" || u.prev_kind == "coinstake";
-                    let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
-                    if generated && matures > 0 {
-                        if u.prev_kind == "coinstake" {
-                            stake += u.value_sats;
-                        } else {
-                            immature += u.value_sats;
-                        }
-                    } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
-                        spendable += u.value_sats;
+                    coins.push((u.value_sats, u.height as u64, u.prev_kind.clone()));
+                }
+            }
+            for (value, height, kind) in coins {
+                let depth = crate::legacy_rows::depth_of(height, tip as u64);
+                let generated = kind == "coinbase" || kind == "coinstake";
+                let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
+                if generated && matures > 0 {
+                    if kind == "coinstake" {
+                        stake += value;
                     } else {
-                        unconfirmed += u.value_sats;
+                        immature += value;
                     }
+                } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
+                    spendable += value;
+                } else {
+                    unconfirmed += value;
                 }
             }
             let total = spendable + stake + unconfirmed + immature;
