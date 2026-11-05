@@ -1634,6 +1634,47 @@ impl AppState {
     }
 
     /// Connection info refresh (status bar + Chain/Debug information page).
+    /// The Overview balance split, computed exactly like the page does:
+    /// (spendable, stake, unconfirmed, immature, total, tip_used).
+    ///
+    /// Tip source matters: the page used the LOCAL tipstate height, which is 0
+    /// when the wallet folder has no tipstate.json, so every coin computed
+    /// depth 0 and the whole balance showed as Unconfirmed. The daemon's
+    /// height is authoritative when it is reachable.
+    pub fn balance_split(&self) -> (i64, i64, i64, i64, i64, u64) {
+        let (mut sp, mut st_, mut un, mut im) = (0i64, 0i64, 0i64, 0i64);
+        let daemon_tip = self
+            .debug_info
+            .as_ref()
+            .filter(|d| d.reachable)
+            .and_then(|d| d.blocks);
+        let tip = daemon_tip
+            .or_else(|| self.tip.as_ref().map(|x| x.height))
+            .unwrap_or(0);
+        let rows = self
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.daemon_utxos.clone())
+            .unwrap_or_else(|| self.derived.as_ref().map(|d| d.utxos.clone()).unwrap_or_default());
+        for u in &rows {
+            let depth = crate::legacy_rows::depth_of(u.height as u64, tip);
+            let generated = u.prev_kind == "coinbase" || u.prev_kind == "coinstake";
+            let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
+            if generated && matures > 0 {
+                if u.prev_kind == "coinstake" {
+                    st_ += u.value_sats;
+                } else {
+                    im += u.value_sats;
+                }
+            } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
+                sp += u.value_sats;
+            } else {
+                un += u.value_sats;
+            }
+        }
+        (sp, st_, un, im, sp + st_ + un + im, tip)
+    }
+
     /// Visible diagnostic: what the Transactions page is actually reading.
     /// Sami has been told "history is loaded" three times while the page kept
     /// showing only today's rows, so the UI now prints the resolved path, the

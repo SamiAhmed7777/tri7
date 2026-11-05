@@ -1945,7 +1945,16 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                 th::empty_state(ui, None, "No wallet loaded", "Open a wallet to see balances");
                 return;
             };
-            let tip = st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
+            // daemon height wins: the local tipstate file is optional in the
+            // one-folder design, and a missing one used to make tip 0, which
+            // made EVERY coin depth 0 -> the whole balance "Unconfirmed"
+            let tip = st
+                .debug_info
+                .as_ref()
+                .filter(|d| d.reachable)
+                .and_then(|d| d.blocks)
+                .or_else(|| st.tip.as_ref().map(|x| x.height))
+                .unwrap_or(0) as u32;
             // Legacy split (wallet.cpp): Spendable / Stake / Unconfirmed /
             // Immature / Total, where
             //   Spendable   = sum of credits at depth >= 4        (IsTrusted)

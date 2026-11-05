@@ -82,6 +82,18 @@ fn main() {
         println!("oldest: {}", tri7_core::gui::app_state::stamp_date(oldest));
         println!("newest: {}", tri7_core::gui::app_state::stamp_date(newest));
         println!("note: {}", note);
+        // the Overview split, same function the page renders
+        st.refresh_debug_info_action();
+        let (sp, sk, un, im, total, tip) = st.balance_split();
+        println!(
+            "split @ tip h{}: spendable {:.6} | stake {:.6} | unconfirmed {:.6} | immature {:.6} | total {:.6}",
+            tip,
+            sp as f64 / 1e6,
+            sk as f64 / 1e6,
+            un as f64 / 1e6,
+            im as f64 / 1e6,
+            total as f64 / 1e6
+        );
         println!("--- what the page would print ---");
         println!("{}", st.history_status_line());
         std::process::exit(if rows.is_empty() { 1 } else { 0 });
