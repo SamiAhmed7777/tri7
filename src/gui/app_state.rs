@@ -1644,14 +1644,20 @@ impl AppState {
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let file = crate::history::cache_path(std::path::Path::new(&folder));
-        let exists = file.exists();
+        let wallet_copy = crate::history::cache_path(std::path::Path::new(&folder));
         let (rows, note) = self.load_history_file();
+        // the note names the file that actually loaded
+        let file = if note.starts_with("history.json") || note.contains("rows, scanned") {
+            note.split(" - ").next().unwrap_or("").to_string()
+        } else {
+            wallet_copy.display().to_string()
+        };
+        let exists = std::path::Path::new(&file).exists();
         let oldest = rows.iter().map(|r| r.time).filter(|t| *t > 0).min();
         let newest = rows.iter().map(|r| r.time).max();
         format!(
             "history: {} | exists={} | rows={} | oldest={} | newest={} | {}",
-            file.display(),
+            file,
             exists,
             rows.len(),
             oldest.map(stamp_date).unwrap_or_else(|| "-".into()),
@@ -1678,22 +1684,34 @@ impl AppState {
         // the wallet folder is the source of truth; the daemon's state dir
         // (where txhistory wrote) is the same folder in the one-folder design,
         // but check both so a legacy layout still resolves
+        // Remember: history.json used to be written into the NODE's state dir
+        // (a sibling of the wallet folder, not inside it), which is why a
+        // wallet folder with the file present still rendered only today's
+        // rows. Check every place it can legitimately live.
         let mut candidates = vec![crate::history::cache_path(&dir)];
         if !self.cfg.state_dir.trim().is_empty() {
             candidates.push(crate::history::cache_path(std::path::Path::new(
                 &self.cfg.state_dir,
             )));
         }
+        // embedded node layouts
+        for sub in ["node", "node\\state", "state"] {
+            let p = std::path::Path::new(&dir).join(sub);
+            candidates.push(crate::history::cache_path(&p));
+        }
         for path in candidates {
             if let Some(cache) = crate::history::load_cache(path.parent().unwrap_or(&dir)) {
                 if !cache.rows.is_empty() {
                     let mut rows = cache.rows;
                     rows.sort_by(|a, b| b.time.cmp(&a.time).then(b.height.cmp(&a.height)));
+                    let n = rows.len();
                     return (
                         rows,
                         format!(
-                            "history.json: {} rows (scanned to h{})",
-                            cache.scanned_height, cache.scanned_height
+                            "{} - {} rows, scanned to h{}",
+                            path.display(),
+                            n,
+                            cache.scanned_height
                         ),
                     );
                 }

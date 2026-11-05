@@ -27,6 +27,7 @@ fn usage() -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let selfcheck = args.iter().any(|a| a == "--selfcheck");
+    let history_probe = args.iter().any(|a| a == "--history-probe");
     let mut cfg = tri7_core::gui::state::UiConfig::default();
     let mut report: Option<String> = None;
     let get = |flag: &str, args: &[String]| -> Option<String> {
@@ -60,6 +61,30 @@ fn main() {
     }
     if let Some(v) = get("--rpc", &args) {
         cfg.rpc_addr = if v == "none" { None } else { Some(v) };
+    }
+    if history_probe {
+        // headless: construct the app state, load the wallet exactly like the
+        // GUI does, then print the history the Transactions page would show
+        let mut st = tri7_core::gui::app_state::AppState::new(cfg.clone());
+        match st.load_wallet_action() {
+            Ok(()) => {}
+            Err(e) => {
+                println!("load failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        let (rows, note) = st.load_history_file();
+        let oldest = rows.iter().map(|r| r.time).min().unwrap_or(0);
+        let newest = rows.iter().map(|r| r.time).max().unwrap_or(0);
+        println!("wallet: {}", cfg.wallet_path);
+        println!("state dir: {}", cfg.state_dir);
+        println!("history rows: {}", rows.len());
+        println!("oldest: {}", tri7_core::gui::app_state::stamp_date(oldest));
+        println!("newest: {}", tri7_core::gui::app_state::stamp_date(newest));
+        println!("note: {}", note);
+        println!("--- what the page would print ---");
+        println!("{}", st.history_status_line());
+        std::process::exit(if rows.is_empty() { 1 } else { 0 });
     }
     if selfcheck {
         report = get("--report", &args);
