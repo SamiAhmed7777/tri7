@@ -4644,6 +4644,91 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 ));
                 Ok(serde_json::json!(rep.txid))
             }
+            // Key export / import. The heavy lifting already lives in
+            // keytool (dump_privkey, dump_wallet, import_wallet, check_wallet)
+            // — these are the legacy RPC names over it.
+            "dumpprivkey" => {
+                let addr = ps(0).ok_or_else(|| (-8, "expected address".to_string()))?;
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                match tri7_core::keytool::dump_privkey(&wp, &addr) {
+                    Ok(wif) => {
+                        log(&format!("dumpprivkey: {} exported", addr));
+                        Ok(serde_json::json!(wif))
+                    }
+                    Err(e) => Err((-5, e)),
+                }
+            }
+            "dumpwallet" => {
+                let dest = ps(0).ok_or_else(|| (-8, "expected filename".to_string()))?;
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                let (rows, n) = tri7_core::keytool::dump_wallet(&wp)
+                    .map_err(|e| (-1, format!("dumpwallet: {e}")))?;
+                let path = PathBuf::from(&dest);
+                let mut f = std::fs::File::create(&path)
+                    .map_err(|e| (-1, format!("dumpwallet: create {}: {e}", path.display())))?;
+                tri7_core::keytool::write_dump(&mut f, &rows, None)
+                    .map_err(|e| (-1, format!("dumpwallet: write: {e}")))?;
+                log(&format!("dumpwallet: {} keys -> {}", n, path.display()));
+                Ok(serde_json::Value::Null)
+            }
+            "importwallet" => {
+                let src = ps(0).ok_or_else(|| (-8, "expected filename".to_string()))?;
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                let rep = tri7_core::keytool::import_wallet(&wp, &PathBuf::from(&src))
+                    .map_err(|e| (-1, format!("importwallet: {e}")))?;
+                log(&format!(
+                    "importwallet: {} imported, {} skipped, {} failed",
+                    rep.imported, rep.skipped, rep.failed
+                ));
+                Ok(serde_json::Value::Null)
+            }
+            "importprivkey" => {
+                let wif = ps(0).ok_or_else(|| (-8, "expected WIF private key".to_string()))?;
+                let label = ps(1).unwrap_or_default();
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                let (secret, compressed) = tri7_core::keytool::wif_decode(&wif)
+                    .map_err(|e| (-5, e))?;
+                if !compressed {
+                    // tri7 stores compressed key rows only; importing an
+                    // uncompressed WIF would bind the secret to a different
+                    // address than the one it was exported for.
+                    return Err((
+                        -5,
+                        "uncompressed WIF not supported (the address would differ from the source wallet)"
+                            .to_string(),
+                    ));
+                }
+                let addr = tri7_core::keytool::secret_to_address(&secret, true)
+                    .map_err(|e| (-5, e))?;
+                let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&wp)
+                    .map_err(|e| (-1, format!("open wallet: {e}")))?;
+                let res = wh.add_key(&secret, &label);
+                wh.close();
+                res.map_err(|e| (-1, format!("importprivkey: {e}")))?;
+                log(&format!("importprivkey: {} imported", addr));
+                Ok(serde_json::Value::Null)
+            }
+            "checkwallet" => {
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                let rep = tri7_core::keytool::check_wallet(&wp)
+                    .map_err(|e| (-1, format!("checkwallet: {e}")))?;
+                Ok(rep.to_json())
+            }
             "getstakinginfo" => {
                 let (tip_height, entry) = self.tip();
                 let wl = self.wl.lock().unwrap();

@@ -29,6 +29,15 @@ out of scope (with reason).
       sendrawtransaction. `dryrun` (non-legacy) builds and signs WITHOUT
       relaying so the path can be proven on a live wallet. Verified on DNS2:
       195-byte tx, fee 100 sats, change 30,454,219 sats, not relayed.
+- [x] **`dumpprivkey` / `dumpwallet` / `importwallet` / `importprivkey` /
+      `checkwallet`** — thin RPC wrappers over the existing keytool functions
+      (the same ones `wallet_keytool` uses). Verified on a wallet COPY:
+      dumpwallet wrote 249 keys, importwallet into an identical copy reported
+      249 skipped / 0 failed (idempotent), checkwallet returned
+      integrity ok, bad_keys 0. Live on DNS2: dumpprivkey returns a WIF,
+      checkwallet reports 248 keys / 63,026 rows / integrity ok.
+      importprivkey refuses an uncompressed WIF because tri7 stores compressed
+      rows only and the address would differ from the source wallet.
 - [x] **`listtransactions [account, count, from]`** and
       **`listsinceblock [blockhash]`** — paginated history in legacy record
       shape (category receive/send, confirmations, blockhash, blocktime).
@@ -59,8 +68,6 @@ out of scope (with reason).
       implemented in `gui::state` for the GUI page but **not exposed on RPC**.
 - [ ] **`backupwallet`** — copy `wallet.dat` to a caller path. Trivial and it is the
       one operation a holder must be able to script before touching anything.
-- [ ] **`dumpprivkey` / `importprivkey` / `dumpwallet` / `importwallet`** — key
-      export/import. Needed for migration and for proving the wallet is not a cage.
 - [ ] **`listtransactions` / `listsinceblock`** — history by account/address/count
       and "everything since block N". tri7 has `listwallettx` (full dump) but no
       windowed, paginated form; every integration expects these two.
