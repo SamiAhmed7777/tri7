@@ -19,7 +19,8 @@ use crate::legacy::Hash;
 /// Work represented by one block with these compact bits, in units of
 /// 2^-29 (the same normalisation the daemon's difficulty_from_bits uses):
 ///
-///     work = 2^256 / (target + 1) = 0xFFFF * 256^(29 - nShift) / mantissa
+/// `work = 2^256 / (target + 1)`, normalised as
+/// `0xFFFF * 256^(29 - nShift) / mantissa`.
 ///
 /// Shrinking the target (smaller mantissa) strictly increases this value, which
 /// is the only property fork choice needs. Computed in f64 with the chain's

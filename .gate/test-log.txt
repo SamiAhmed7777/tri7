@@ -1,0 +1,227 @@
+    Blocking waiting for file lock on build directory
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+   Compiling tri7-core v7.0.1 (/root/tri7)
+warning: unused import: `super::*`
+    --> src/rpc.rs:3213:5
+     |
+3213 | use super::*;
+     |     ^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SMSG_ANON_VERSION`
+   --> src/smsg_net.rs:956:30
+    |
+956 |     use crate::smsg::{Token, SMSG_ANON_VERSION};
+    |                              ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/blockindex.rs:1512:13
+     |
+1512 |         let mut cur = g;
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hashes`
+    --> src/blockindex.rs:1726:22
+     |
+1726 |         let (frames, hashes, _, _) = synthetic_chain();
+     |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hashes`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `peers_arg`
+   --> src/gui/node_supervisor.rs:123:13
+    |
+123 |         let peers_arg = peers.join(" --daemon ");
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_peers_arg`
+
+warning: variable does not need to be mutable
+   --> src/legacy_rows.rs:348:38
+    |
+348 |         let (mut sp, mut st, mut un, mut im) = (0i64, 0i64, 0i64, 0i64);
+    |                                      ----^^
+    |                                      |
+    |                                      help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:442:13
+    |
+442 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:296:13
+    |
+296 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `gen`
+   --> src/stake.rs:824:18
+    |
+824 |             let (gen, m) = if h > 0 && h % 5 == 0 {
+    |                  ^^^ help: if this is intentional, prefix it with an underscore: `_gen`
+
+warning: unused variable: `e`
+    --> src/wallet.rs:1905:13
+     |
+1905 |         let e = WalletHandle::open_readwrite(&missing).unwrap_err();
+     |             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1641:8
+     |
+1641 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1647:8
+     |
+1647 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1657:4
+     |
+1657 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1666:4
+     |
+1666 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: `tri7-core` (lib test) generated 17 warnings (run `cargo fix --lib -p tri7-core --tests` to apply 11 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 22s
+     Running unittests src/lib.rs (target/release/deps/tri7_core-c67df7b664c319ac)
+
+running 71 tests
+test gui::explorer::tests::classify_search_kinds ... ok
+test gui::explorer::tests::rich_list_parses_balances_snapshot_and_sorts ... ok
+test gui::explorer::tests::parse_block_from_live_rpc_shape ... ok
+test gui::explorer::tests::parse_tx_from_live_rpc_shape_and_attribute_addresses ... ok
+test gui::explorer::tests::fee_and_stake_credit_from_prevouts ... ok
+test gui::notify::tests::decrease_never_fires ... ok
+test gui::explorer::tests::endpoint_probe_falls_back_to_second_port ... ok
+test gui::node_supervisor::tests::decision_node_exe_somewhere ... ok
+test gui::notify::tests::first_observation_never_fires ... ok
+test gui::node_supervisor::tests::conf_written_once ... ok
+test gui::notify::tests::increase_while_synced_fires ... ok
+test gui::notify::tests::increase_while_syncing_is_suppressed ... ok
+test gui::rpc_client::tests::rpc_call_unreachable_is_clean_error ... ok
+test gui::notify::tests::subdust_increase_ignored ... ok
+test gui::seed_flow::tests::abandon_scrubs_everything ... ok
+test gui::rpc_client::tests::rpc_call_parses_canned_response_and_enforces_allowlist ... ok
+test gui::node_supervisor::tests::supervisor_starts_disconnected ... ok
+test gui::notify::tests::disabled_suppresses_everything ... ok
+test gui::sweep_flow::tests::abandon_scrubs_everything ... ok
+test gui::sweep_flow::tests::complete_carries_txid_and_scrubs_the_phrase ... ok
+test gui::seed_flow::tests::execute_rejects_bad_targets_and_counts ... ok
+test gui::sweep_flow::tests::lock_to_stored_seed_refuses_a_corrupt_row_and_jumps_to_verified ... ok
+test gui::explorer::tests::backward_scan_pages_and_caches_with_injected_fetcher ... ok
+test gui::sweep_flow::tests::prepare_refuses_an_already_migrated_wallet ... ok
+test gui::seed_flow::tests::restore_refuses_to_overwrite_a_seeded_wallet ... ok
+test gui::sweep_flow::tests::wizard_create_state_machine_full ... ok
+test gui::sweep_flow::tests::wizard_restore_whitespace_and_checksum_gates ... ok
+test gui::seed_flow::tests::restore_flow_whitespace_insensitive_with_passphrase ... ok
+test gui::tests::amount_roundtrip ... ok
+test gui::tests::appstate_starts_with_quiet_updater ... ok
+test gui::tests::base58_decode_roundtrips_the_encoder ... ok
+test gui::tests::base64_known_vectors ... ok
+test gui::tests::coin_control_manual_pool_is_respected ... ok
+test gui::tests::compute_balances_totals_and_sorts ... ok
+test gui::tests::console_line_parsing_matches_legacy_syntax ... ok
+test gui::tests::default_options_carry_the_legacy_default_fee ... ok
+test gui::tests::derivation_falls_back_to_snapshot_without_index ... ok
+test gui::tests::format_tri_matches_legacy_6dp ... ok
+test gui::tests::gui_send_bytes_equal_direct_spend_rs_construction ... ok
+test gui::tests::gui_send_rejects_insufficient_and_immature_coinbase ... ok
+test gui::tests::gui_sync_progress_drives_status_bar_and_fraction ... ok
+test gui::tests::keystore_side_files_persist_new_addresses ... ok
+test gui::tests::legacy_identity_is_carried_over_exactly ... ok
+test gui::tests::load_tipstate_parses_and_reports_tip_fields ... ok
+test gui::sweep_flow::tests::wrong_step_is_refused ... ok
+test gui::tests::message_sign_roundtrip_and_tamper_detection ... ok
+test gui::tests::locked_wallet_falls_back_to_keystore ... ok
+test gui::tests::parse_tri_accepts_legacy_strings_and_rejects_junk ... ok
+test gui::tests::payment_uri_matches_legacy_scheme_and_params ... ok
+test gui::tests::qr_matrix_renders_and_png_bytes_are_wellformed ... ok
+test gui::tests::reconcile_tail_applies_spends_and_wallet_additions ... ok
+test gui::tests::remembered_wallet_roundtrip_and_first_open_logic ... ok
+test gui::tests::rpc_allowlist_refuses_writes_before_any_io ... ok
+test gui::tests::script_to_dest_classifies_the_gui_p2pkh_scripts ... ok
+test gui::tests::new_address_writes_into_wallet_dat_and_survives_restart ... ok
+test gui::tests::seed_migration_entry_guards_refuse_before_any_value_moves ... ok
+test gui::sweep_flow::tests::prepare_refuses_zero_inputs_and_all_on_destinations ... ok
+test gui::tests::stake_status_parses_dryrun_and_counts_mature_weight ... ok
+test gui::tests::tx_date_order_flips_and_reverses ... ok
+test gui::tests::updater_banner_line_pins_the_offered_jump ... ok
+test gui::tests::updater_install_gate_refuses_busy_and_flushes_wallet_rw ... ok
+test gui::tests::updater_options_line_reports_state ... ok
+test gui::tests::updater_skip_persists_across_appstate_rebuild ... ok
+test gui::tests::validate_address_accepts_real_wallet_vector ... ok
+test gui::tests::validate_address_rejects_tamper_and_foreign_versions ... ok
+test gui::sweep_flow::tests::prepare_proves_roundtrip_inserts_keys_and_builds_the_plan ... ok
+test gui::sweep_flow::tests::prepare_retry_path_is_idempotent_on_a_partially_migrated_wallet ... ok
+test gui::tests::wallet_label_edit_writes_name_row_when_writable ... ok
+test gui::tests::seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry ... ok
+test gui::tests::seed_migration_full_path_prepare_broadcast_marker ... ok
+test gui::seed_flow::tests::create_flow_full_state_machine ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 281 filtered out; finished in 1.09s
+

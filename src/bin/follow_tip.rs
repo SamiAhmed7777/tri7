@@ -387,6 +387,63 @@ fn rollback_tip(st: &mut ChainState) -> Result<(u64, Hash), String> {
     Ok((new_tip, new_hash))
 }
 
+/// Fork choice at the acceptance point: a block arrived whose prev is NOT our
+/// tip. If it descends from an ancestor we hold and its branch carries more
+/// work than ours above that ancestor, roll back to the ancestor and adopt it.
+///
+/// This is the piece that was missing: without it two staking nodes each kept
+/// their own block at the same height forever (sami-pc ran an isolated branch
+/// whose balances looked real but which the network never had).
+///
+/// Returns Ok(true) when the branch was adopted (the caller then validates and
+/// appends the block against the rolled-back window).
+fn try_adopt_heavier_branch(
+    st: &mut ChainState,
+    block: &Block,
+    hash: &Hash,
+) -> Result<bool, String> {
+    // 1. where does this block want to attach?
+    let Some(ancestor_idx) = st.index_of_hash(&block.prev_hash) else {
+        return Ok(false); // unknown branch: not ours to judge (yet)
+    };
+    let ancestor_height = st.base + ancestor_idx as u64;
+    if ancestor_height >= st.tip_height {
+        return Ok(false); // extends our tip: the normal path handles it
+    }
+
+    // 2. work above the ancestor: ours vs theirs
+    let our_work: u128 = st.entries[(ancestor_height - st.base + 1) as usize..]
+        .iter()
+        .map(|e| tri7_core::forkchoice::work_of(e.bits))
+        .sum();
+    let their_work = tri7_core::forkchoice::work_of(block.bits);
+
+    let decision = tri7_core::forkchoice::choose(
+        st.tip_height,
+        &st.tip_hash,
+        our_work,
+        ancestor_height + 1,
+        hash,
+        their_work,
+    );
+    match decision {
+        tri7_core::forkchoice::ForkChoice::KeepOurs => Ok(false),
+        tri7_core::forkchoice::ForkChoice::Switch { reason } => {
+            log(&format!(
+                "FORK CHOICE: {} — rolling back to h{}, adopting {} ({} block(s) replaced)",
+                reason,
+                ancestor_height,
+                tri7_core::p2p::internal_to_display(hash),
+                st.tip_height - ancestor_height
+            ));
+            while st.tip_height > ancestor_height {
+                rollback_tip(st)?;
+            }
+            Ok(true)
+        }
+    }
+}
+
 /// Evidence marker for the report: which gap branch fired, when, over which
 /// hash/height, with the peer that served (or the rollback height).
 fn write_gap_marker(cfg: &Config, payload: Value) {
@@ -617,6 +674,11 @@ impl ChainState {
 
     fn entry_by_hash(&self, hash: &Hash) -> Option<&IndexEntry> {
         self.entries.iter().find(|e| &e.hash == hash)
+    }
+
+    /// Window index of a block hash, if we hold it.
+    fn index_of_hash(&self, hash: &Hash) -> Option<usize> {
+        self.entries.iter().position(|e| &e.hash == hash)
     }
 
     /// ReplayIndex view over the window: entries[i] has ABSOLUTE height
@@ -1315,6 +1377,7 @@ struct Stats {
     handshakes: u64,
     // phase 6: primary-node serving/relay
     blocks_relayed: u64,     // inv announcements sent on tip advance
+    reorgs: u64,             // competing branches adopted via fork choice
     getdata_served: u64,     // block payloads served to peers
     getheaders_served: u64,  // headers ranges served to peers
     inbound_accepted: u64,   // inbound peers that completed the handshake
@@ -1367,6 +1430,7 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "parse_failures": s.parse_failures,
         "handshakes": s.handshakes,
         "blocks_relayed": s.blocks_relayed,
+        "reorgs": s.reorgs,
         "getdata_served": s.getdata_served,
         "getheaders_served": s.getheaders_served,
         "inbound_accepted": s.inbound_accepted,
@@ -4799,7 +4863,18 @@ fn handle_message(
                     }
                 }
             }
-            let links_tip = b.prev_hash == st.tip_hash;
+            let mut links_tip = b.prev_hash == st.tip_hash;
+            if !links_tip {
+                // a competing block: adopt it only if its branch is heavier
+                match try_adopt_heavier_branch(st, &b, &hash) {
+                    Ok(true) => {
+                        links_tip = b.prev_hash == st.tip_hash;
+                        stats.reorgs += 1;
+                    }
+                    Ok(false) => {}
+                    Err(e) => log(&format!("fork choice: rollback failed: {}", e)),
+                }
+            }
             let height_abs = if links_tip { st.tip_height + 1 } else { 0 };
             // cache the raw bytes BEFORE validation: a valid block must be
             // servable to peers immediately (relay getdata), and the RPC
@@ -7255,6 +7330,50 @@ mod tests {
         let file = stg.to_file();
         assert_eq!(file.height, 104);
         assert_eq!(file.entries.len(), stg.entries.len());
+    }
+
+    /// Fork choice must refuse a lighter competing block and adopt a heavier
+    /// one, rolling the window back to their common ancestor. This is the
+    /// regression guard for "two stakers kept their own block forever".
+    #[test]
+    fn fork_choice_refuses_lighter_and_adopts_heavier() {
+        let mut stg = synthetic_chain(100, 105);
+        let ancestor_hash = stg.entry_abs(103).unwrap().hash;
+
+        let mk_block = |bits: u32| Block {
+            version: 1,
+            prev_hash: ancestor_hash,
+            merkle_root: [0u8; 32],
+            time: 0,
+            bits,
+            nonce: 0,
+            vtx: vec![],
+            block_sig: vec![],
+        };
+
+        // a block at the same height as our tip but with a LARGER target
+        // (less work) must not displace ours
+        // synthetic_chain blocks carry 0x2000ffff; a block with a larger
+        // target (0x2100ffff = 256x easier) represents strictly less work
+        let easy = mk_block(0x2100_ffff);
+        let easy_hash = easy.hash();
+        assert!(
+            !try_adopt_heavier_branch(&mut stg, &easy, &easy_hash).unwrap(),
+            "lighter branch must be ignored"
+        );
+        assert_eq!(stg.tip_height, 105, "window untouched on refusal");
+
+        // a harder block (smaller target) DOES win: the window rolls back to
+        // the ancestor and the caller re-applies against that state
+        // and one with a smaller target (0x1e00ffff = 256x harder) wins
+        let hard = mk_block(0x1e00_ffff);
+        let hard_hash = hard.hash();
+        assert!(
+            try_adopt_heavier_branch(&mut stg, &hard, &hard_hash).unwrap(),
+            "heavier branch must be adopted"
+        );
+        assert_eq!(stg.tip_height, 103, "rolled back to the common ancestor");
+        assert_eq!(stg.tip_hash, ancestor_hash);
     }
 
     #[test]

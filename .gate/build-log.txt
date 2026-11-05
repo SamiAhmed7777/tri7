@@ -1,0 +1,210 @@
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.5
+   Compiling find-msvc-tools v0.1.15
+   Compiling zerocopy v0.8.63
+   Compiling shlex v2.0.1
+   Compiling libc v0.2.191
+   Compiling serde_core v1.0.229
+   Compiling cc v1.10.0
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling proc-macro2 v1.0.107
+   Compiling ahash v0.8.12
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling winnow v1.0.4
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling getrandom v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling rand_core v0.6.4
+   Compiling pkg-config v0.3.34
+   Compiling vcpkg v0.2.15
+   Compiling crunchy v0.2.4
+   Compiling serde_spanned v1.1.2
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling secp256k1-sys v0.10.1
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling libsqlite3-sys v0.30.1
+   Compiling byteorder v1.5.0
+   Compiling crc32fast v1.5.4
+   Compiling static_assertions v1.1.0
+   Compiling toml v1.2.0+spec-1.1.0
+   Compiling zmij v1.0.23
+   Compiling digest v0.10.7
+   Compiling syn v3.0.9
+   Compiling winresource v0.1.34
+   Compiling serde_json v1.0.154
+   Compiling ppv-lite86 v0.2.21
+   Compiling hashbrown v0.14.5
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.8
+   Compiling rustc-hex v2.1.0
+   Compiling serde v1.0.229
+   Compiling hex v0.4.3
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling uint v0.10.2
+   Compiling hashlink v0.9.1
+   Compiling miniz_oxide v0.9.1
+   Compiling serde_derive v1.0.229
+   Compiling fixed-hash v0.8.0
+   Compiling tri7-core v7.0.1 (/root/tri7)
+   Compiling filetime v0.2.29
+   Compiling bitflags v2.13.2
+   Compiling smallvec v1.16.4
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling itoa v1.0.18
+   Compiling fallible-iterator v0.3.0
+   Compiling memchr v2.8.3
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.10
+   Compiling secp256k1 v0.29.1
+   Compiling primitive-types v0.13.1
+   Compiling ripemd v0.1.3
+   Compiling base58 v0.2.0
+   Compiling qrcodegen v1.8.0
+   Compiling zeroize v1.9.1
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+   Compiling rusqlite v0.32.1
+warning: unused import: `sha256d`
+  --> src/txpool.rs:17:21
+   |
+17 | use crate::legacy::{sha256d, Hash, Tx};
+   |                     ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `peers_arg`
+   --> src/gui/node_supervisor.rs:123:13
+    |
+123 |         let peers_arg = peers.join(" --daemon ");
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_peers_arg`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:442:13
+    |
+442 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:296:13
+    |
+296 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1641:8
+     |
+1641 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1647:8
+     |
+1647 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1657:4
+     |
+1657 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1666:4
+     |
+1666 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: associated function `key_of` is never used
+    --> src/smsg.rs:1100:8
+     |
+1072 | impl MessageStore {
+     | ----------------- associated function in this implementation
+...
+1100 |     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
+     |        ^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: `tri7-core` (lib) generated 12 warnings (run `cargo fix --lib -p tri7-core` to apply 5 suggestions)
+warning: unreachable statement
+   --> src/bin/tri7_wallet_gui.rs:187:5
+    |
+185 |         std::process::exit(2);
+    |         --------------------- any code following this expression is unreachable
+186 |     }
+187 |     let _ = report;
+    |     ^^^^^^^^^^^^^^^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `report` is never read
+   --> src/bin/tri7_wallet_gui.rs:32:38
+    |
+ 32 |     let mut report: Option<String> = None;
+    |                                      ^^^^ this value is reassigned later and never used
+...
+144 |         report = get("--report", &args);
+    |         ------ `report` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 1m 21s

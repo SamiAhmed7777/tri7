@@ -1,60 +1,64 @@
 diff --git a/src/gui/app.rs b/src/gui/app.rs
-index ff22629..10f6d91 100644
+index 10f6d91..ff63105 100644
 --- a/src/gui/app.rs
 +++ b/src/gui/app.rs
-@@ -104,6 +104,7 @@ asset_map! {
-     "icons/refresh" => "icons/refresh.png",
-     "brand/header" => "brand/brand_header_new@2x.png",
-     "brand/mark" => "brand/brand_mark_32.png",
-+    "brand/mark64" => "brand/brand_mark_64.png",
-     "brand/mark16" => "brand/brand_mark_16.png",
- }
- 
-@@ -303,11 +304,23 @@ impl Tri7App {
-             .exact_height(64.0)
-             .frame(egui::Frame::none().fill(th::WINDOW_BG))
-             .show(ctx, |ui| {
--                // banner LEFT-aligned in the header strip — the legacy
--                // mainwindow.ui header placement (brand left, menus right)
--                if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
-+                // brand lockup LEFT-aligned — legacy mainwindow.ui placement
-+                // (brand left, menus right). Crisp: mark at native size + REAL
-+                // text, never a downscaled 1199x252 banner (spec §1: no blurry
-+                // scaled bitmaps — that was the "weird blurry" header bug).
-+                if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
-                     ui.add_space(20.0);
--                    ui.add(img(&tex, Vec2::new(219.0, 46.0))); // 1199x252 aspect-true
-+                    ui.add(img(&tex, Vec2::splat(40.0)));
-+                    ui.add_space(10.0);
-+                    ui.vertical(|ui| {
-+                        ui.add_space(6.0);
-+                        ui.label(
-+                            egui::RichText::new("Cryptographic Triangles")
-+                                .size(20.0)
-+                                .color(th::BRAND_RED)
-+                                .strong(),
-+                        );
-+                    });
-                 }
-                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                     ui.add_space(12.0);
+@@ -308,23 +308,28 @@ impl Tri7App {
+                 // (brand left, menus right). Crisp: mark at native size + REAL
+                 // text, never a downscaled 1199x252 banner (spec §1: no blurry
+                 // scaled bitmaps — that was the "weird blurry" header bug).
+-                if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
+-                    ui.add_space(20.0);
+-                    ui.add(img(&tex, Vec2::splat(40.0)));
+-                    ui.add_space(10.0);
+-                    ui.vertical(|ui| {
+-                        ui.add_space(6.0);
+-                        ui.label(
+-                            egui::RichText::new("Cryptographic Triangles")
+-                                .size(20.0)
+-                                .color(th::BRAND_RED)
+-                                .strong(),
+-                        );
++                // ONE shared horizontal row holds the lockup (left) and the
++                // menu (right) — the panel ui itself is top-down, so without
++                // this the menu would land on a clipped second row.
++                ui.horizontal(|ui| {
++                    if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
++                        ui.add_space(20.0);
++                        ui.add(img(&tex, Vec2::splat(44.0)));
++                        ui.add_space(12.0);
++                        ui.vertical(|ui| {
++                            ui.add_space(8.0);
++                            ui.label(
++                                egui::RichText::new("Cryptographic Triangles")
++                                    .size(20.0)
++                                    .color(th::BRAND_RED)
++                                    .strong(),
++                            );
++                        });
++                    }
++                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                        ui.add_space(12.0);
++                        self.menu_bar(ui);
+                     });
+-                }
+-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+-                    ui.add_space(12.0);
+-                    self.menu_bar(ui);
+                 });
+             });
+         // subtle 1 px BRAND_RED bottom rule at 35% opacity
 diff --git a/src/gui/theme.rs b/src/gui/theme.rs
-index f20f2af..70daf29 100644
+index 70daf29..e1ee869 100644
 --- a/src/gui/theme.rs
 +++ b/src/gui/theme.rs
-@@ -206,7 +206,14 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::In
-         .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-         .rounding(Rounding::same(6.0))
-         .inner_margin(egui::Margin::same(16.0))
--        .show(ui, add_contents)
-+        .show(ui, |ui| {
-+            // Force top-down INSIDE the card: cards are often placed inside
-+            // `ui.horizontal` two-column layouts (e.g. Receive: addresses left,
-+            // QR right), and Frame::show inherits the parent layout — without
-+            // this, every element in the card flows sideways on one line and
-+            // tables collapse into slivers (the broken Receive page bug).
-+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
-+        })
+@@ -212,7 +212,9 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::In
+             // QR right), and Frame::show inherits the parent layout — without
+             // this, every element in the card flows sideways on one line and
+             // tables collapse into slivers (the broken Receive page bug).
+-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
++            // `.inner` unwraps with_layout's own InnerResponse so the card's
++            // declared return type stays InnerResponse<R> for callers.
++            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents).inner
+         })
  }
  
- /// Card with a section title at top.
