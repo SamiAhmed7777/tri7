@@ -3991,6 +3991,10 @@ struct LiveWalletProvider {
 }
 
 impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+    fn state_dir(&self) -> String {
+        self.state_dir.display().to_string()
+    }
+
     fn balance(&self) -> Option<BalanceView> {
         if let Ok(g) = self.wl.lock() {
             if let Some(w) = g.as_ref() {

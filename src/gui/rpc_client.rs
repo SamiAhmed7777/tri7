@@ -29,6 +29,7 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "getbalance",
     "listunspent",
     "listwallettx",
+    "getlocalinfo",
     "listwalletaddresses",
     "getreceivedbyaddress",
     "validateaddress",

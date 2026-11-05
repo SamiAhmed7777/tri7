@@ -81,6 +81,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getbalance",
     "listunspent",
     "listwallettx",
+    "getlocalinfo",
     "listwalletaddresses",
     "getreceivedbyaddress",
     "validateaddress",
@@ -238,6 +239,11 @@ pub trait WalletProvider: Send + Sync {
     /// wallet membership (balances.json wallet address list).
     fn is_mine(&self, addr: &str) -> bool;
     fn utxos(&self) -> Vec<UtxoRow>;
+    /// Directory holding the node's state (where onion_address.txt /
+    /// hidden_service/hostname live). Default: empty = unknown.
+    fn state_dir(&self) -> String {
+        String::new()
+    }
     /// Full wallet history (history.json, built by the txhistory bin).
     /// Empty = no history file yet; the RPC then answers with an empty list
     /// rather than an error so the GUI can render "run a rescan".
@@ -1053,6 +1059,44 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
 
         // full wallet history: every receive/spend ever seen for these keys,
         // dated from the containing block (legacy client parity)
+        // Tor / I2P identity of this node: the addresses a holder can hand
+        // out so peers (and messages) reach them over those transports.
+        // Sources, in order: an explicit state file, then a Tor hidden-service
+        // hostname file, then nothing (honest "not configured").
+        "getlocalinfo" => {
+            let sd_owned = deps.wallet.state_dir();
+            let sd = std::path::Path::new(&sd_owned);
+            let read_first = |names: &[&str]| -> Option<String> {
+                for n in names {
+                    let p = sd.join(n);
+                    if let Ok(s) = std::fs::read_to_string(&p) {
+                        let s = s.trim().to_string();
+                        if !s.is_empty() {
+                            return Some(s);
+                        }
+                    }
+                }
+                None
+            };
+            let onion = read_first(&[
+                "onion_address.txt",
+                "hidden_service/hostname",
+                "tor/hostname",
+            ]);
+            let i2p = read_first(&["i2p_destination.txt", "i2p/hostname"]);
+            NativeOutcome::Ok(json!({
+                "onion": onion,
+                "i2p": i2p,
+                "listen": deps.tip.peers(),
+                "state_dir": sd_owned,
+                "note": if onion.is_none() && i2p.is_none() {
+                    "no Tor/I2P identity configured for this node"
+                } else {
+                    ""
+                },
+            }))
+        }
+
         "listwallettx" => {
             let rows = deps.wallet.history();
             let tip_h = deps.tip.tip().height;

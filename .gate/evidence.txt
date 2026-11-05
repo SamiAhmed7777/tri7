@@ -1,0 +1,40 @@
+## Evidence block (collected 2026-11-04T21:14:03-08:00 on vmi3080415, repo HEAD 102aaa7)
+
+### rpc.rs sendrawtransaction
+91:    "sendrawtransaction",
+122:    "sendrawtransaction",
+513:///   sendrawtransaction — consensus-validate + pending-relay set + inv relay
+3230:            "sendrawtransaction" => Ok(json!({"txid": "abc123", "announced_to": 2})),
+### rpc.rs pending-set store (what is kept after validation)
+513:///   sendrawtransaction — consensus-validate + pending-relay set + inv relay
+### stake.rs template + fees
+26://!   - GetProofOfStakeReward main.cpp:1539-1560 — CBigNum integer division
+27://!     order: (nCoinAge * MAX_TRI_PROOF_OF_STAKE / 365) / COIN + nFees.
+30://!     calculated reward (nFees excludes the coinstake).
+141:    pub fees: i64,
+183:/// GetProofOfStakeReward (main.cpp:1539-1560) — CBigNum division order:
+184:/// ((nCoinAge * MAX_TRI_PROOF_OF_STAKE) / 365) / COIN, then + nFees.
+186:pub fn stake_reward(coin_age: u64, fees: i64) -> i64 {
+188:    (subsidy + fees as i128) as i64
+206:    fees: i64,
+381:        let reward = stake_reward(coin_age, fees);
+442:            fees,
+456:/// `median_time_past` the 11-entry MTP at the tip, `extra_txs` the optional
+### stake.rs SignBlock fn line
+540:pub fn sign_block(block: &mut Block, secret: &[u8; 32]) -> Result<(), String> {
+### follow_tip validator structure loop (vtx[2+] = structure only)
+1940:    for tx in block.vtx.iter().skip(1) {
+3826:        for tx in block.vtx.iter().skip(1) {
+4258:    for tx in block.vtx.iter().skip(1) {
+### spend.rs connect_inputs_check
+905:pub fn connect_inputs_check(
+### mint caller in follow_tip (where SignBlock is invoked)
+4229:    tri7_core::stake::sign_block(&mut block, &plan.signer.secret)?;
+### legacy fee rule (canonical fork)
+sed: can't read /root/tri-orig/src/main.cpp: No such file or directory
+### bounded mint-cadence evidence (last 60 min)
+34
+Nov 04 21:13:16 vmi3080415 follow_tip[2646935]: [2026-11-05T05:13:16Z] STAKE MINTED → h2205535 15f8d09156899534e1bf68eecd8525265bd1faa46a35c3e1cb0e8a25a1266bf1 (self-validated: kernel enforced, nbits enforced) — relaying to 4 peer(s)
+Nov 04 21:13:48 vmi3080415 follow_tip[2646935]: [2026-11-05T05:13:48Z] STAKE MINTED → h2205536 ff425efa9c4b25e1e8f9a7b4dbc0c053a7fb622f07f8d28b221399d8e676bfee (self-validated: kernel enforced, nbits enforced) — relaying to 4 peer(s)
+### live getinfo balance/coverage (POST, bounded)
+balance 3202.967419 coverage_h 2205536 blocks 2205536 conns 4

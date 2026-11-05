@@ -96,6 +96,12 @@ pub struct DebugInfo {
     /// daemon-side unspent set (listunspent) — the Transactions/history truth
     /// when the wallet folder has no local snapshot (fresh installs)
     pub daemon_utxos: Option<Vec<crate::gui::state::UtxoRec>>,
+    /// Tor / I2P identity of the node serving this wallet (getlocalinfo):
+    /// the addresses a holder hands out so others can reach them over those
+    /// transports. None = not configured on this node.
+    pub local_onion: Option<String>,
+    pub local_i2p: Option<String>,
+
     /// full wallet history from the daemon (listwallettx -> history.json).
     /// Every receive/spend ever seen, dated from the containing block, so a
     /// holder from 2014-2021 sees those rows, not just the live window.
@@ -1931,6 +1937,18 @@ impl AppState {
                             }
                         }
                     }
+                    // Tor / I2P identity (address drawer)
+                    if let Ok(vi) = rpc_client::rpc_call(&addr, "getlocalinfo", &[]) {
+                        info.local_onion = vi
+                            .get("onion")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
+                        info.local_i2p = vi
+                            .get("i2p")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
+                    }
+
                     // full wallet history (history.json via the daemon)
                     // 30 s throttle: the payload is every history row ever
                     // seen (multi-MB), not something to pull each tick

@@ -233,6 +233,10 @@ pub struct Tri7App {
     /// oldest first. Clicking the Date header flips it (Sami: "oldest to the
     /// newest and then back again").
     tx_sort_desc: bool,
+    /// Tor/I2P address drawer: Some(t) = open, t is when it was last touched.
+    /// It closes itself after 20 s of no interaction (Sami: "reveal itself and
+    /// then automatically go back away when they don't need to see it").
+    net_drawer_open: Option<std::time::Instant>,
     tx_min_amount: String,
     tx_type_filter: usize,
     tx_status_filter: usize,
@@ -2751,6 +2755,8 @@ impl Tri7App {
             "Receive Coins",
             "Manage receiving addresses and create payment requests",
         );
+        // Tor / I2P identity: a drawer that reveals the addresses on demand
+        self.net_drawer(ui);
         // HD seed status strip: what this wallet's keys derive from (or the
         // honest no-seed note for pre-HD random-key wallets) + the seed
         // migration state and its entry point.
@@ -3185,6 +3191,97 @@ impl Tri7App {
                 }
             });
         });
+    }
+
+    /// Tor / I2P identity drawer: a single row that reveals the node's onion
+    /// and i2p addresses with Copy buttons, then folds itself away again.
+    fn net_drawer(&mut self, ui: &mut egui::Ui) {
+        // auto-close after 20 s
+        if let Some(opened) = self.net_drawer_open {
+            if opened.elapsed().as_secs() > 20 {
+                self.net_drawer_open = None;
+            }
+        }
+        let open = self.net_drawer_open.is_some();
+        let arrow = if open { "▾" } else { "▸" };
+        let onion = self
+            .st
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.local_onion.clone());
+        let i2p = self
+            .st
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.local_i2p.clone());
+
+        let btn = egui::Button::new(
+            egui::RichText::new(format!("{} Tor / I2P addresses", arrow))
+                .size(12.0)
+                .color(th::TEXT_SECONDARY),
+        )
+        .fill(th::PANEL_BG)
+        .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE));
+        if ui.add(btn).clicked() {
+            self.net_drawer_open = if open {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
+        }
+        if self.net_drawer_open.is_some() {
+            ui.add_space(4.0);
+            th::card(ui, |ui| {
+                for (label, value, kind) in [
+                    ("Tor (.onion)", onion, "onion"),
+                    ("I2P", i2p, "i2p"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(12.0)
+                                .color(th::TEXT_SECONDARY),
+                        );
+                        match value {
+                            Some(v) => {
+                                ui.label(
+                                    egui::RichText::new(&v)
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(th::TEXT_PRIMARY),
+                                );
+                                if th::ghost_button(ui, "Copy").clicked() {
+                                    ui.output_mut(|o| o.copied_text = v.clone());
+                                    // touching a control keeps the drawer open
+                                    self.net_drawer_open = Some(std::time::Instant::now());
+                                }
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new(match kind {
+                                        "onion" => "not configured on this node",
+                                        _ => "not configured (needs i2pd)",
+                                    })
+                                    .size(12.0)
+                                    .color(th::TEXT_MUTED),
+                                );
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Peers reach you on these addresses; paste one when someone \
+                         needs to message or connect to your wallet directly.",
+                    )
+                    .size(11.0)
+                    .color(th::TEXT_MUTED),
+                );
+            });
+            ui.add_space(6.0);
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        }
     }
 
     fn ab_edit_dialog(&mut self, ui: &mut egui::Ui) {
@@ -5650,6 +5747,7 @@ pub fn run(cfg: UiConfig) {
             tx_selected: None,
             tx_search: String::new(),
             tx_sort_desc: true,
+            net_drawer_open: None,
             tx_min_amount: String::new(),
             tx_type_filter: 0,
             tx_status_filter: 0,
