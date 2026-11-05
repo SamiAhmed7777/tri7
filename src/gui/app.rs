@@ -3791,15 +3791,24 @@ impl Tri7App {
         });
         ui.add_space(8.0);
         // ---- metric cards ----
-        let young_n = match &st.derived {
-            Some(d) => {
-                let tip_h = st.tip.as_ref().map(|t| t.height).unwrap_or(0);
-                d.utxos
-                    .iter()
-                    .filter(|u| tip_h.saturating_sub(u.height as u64) < 60)
-                    .count()
-            }
-            None => 0,
+        let stake_tip = st
+            .debug_info
+            .as_ref()
+            .filter(|d| d.reachable)
+            .and_then(|d| d.blocks)
+            .or_else(|| st.tip.as_ref().map(|t| t.height))
+            .unwrap_or(0);
+        let young_n = {
+            let coins = st
+                .debug_info
+                .as_ref()
+                .and_then(|d| d.daemon_utxos.clone())
+                .or_else(|| st.derived.as_ref().map(|d| d.utxos.clone()))
+                .unwrap_or_default();
+            coins
+                .iter()
+                .filter(|u| stake_tip.saturating_sub(u.height as u64) < 60)
+                .count()
         };
         ui.horizontal(|ui| {
             let metric = |ui: &mut egui::Ui, k: &str, v: &str| {
@@ -3814,10 +3823,20 @@ impl Tri7App {
                     );
                 });
             };
-            let (spendable, utxo_n) = match &st.derived {
-                Some(d) => (d.utxos.iter().map(|u| u.value_sats).sum::<i64>(), d.utxos.len()),
-                None => (0, 0),
-            };
+            // live coins first: the local snapshot set is empty on a
+            // one-folder wallet, which made this metric read 0 TRI while the
+            // node held 3,202 (Sami: "how can it say zero spendable coins
+            // when I have 3200")
+            let live_coins = st
+                .debug_info
+                .as_ref()
+                .and_then(|d| d.daemon_utxos.clone())
+                .or_else(|| st.derived.as_ref().map(|d| d.utxos.clone()))
+                .unwrap_or_default();
+            let (spendable, utxo_n) = (
+                live_coins.iter().map(|u| u.value_sats).sum::<i64>(),
+                live_coins.len(),
+            );
             metric(ui, "Wallet weight", &live.field("weight"));
             metric(ui, "Network weight", &live.field("netstakeweight"));
             metric(ui, "Expected time", &format!("{}s", live.field("expectedtime")));
@@ -3828,6 +3847,19 @@ impl Tri7App {
                     "{} coins ({} young <1h)",
                     live.field("coins_meeting_min_age"),
                     young_n
+                ),
+            );
+            // honest explanation of the counters: "Mature / eligible" is the
+            // coins that can actually solve a kernel, which is often far fewer
+            // than the coins held (a young coin cannot stake for an hour).
+            metric(ui, "Coins held", &utxo_n.to_string());
+            metric(
+                ui,
+                "Held value",
+                &format!(
+                    "{} {}",
+                    s::format_tri(spendable),
+                    s::TICKER
                 ),
             );
             metric(ui, "Reserve", "—");
@@ -3855,13 +3887,20 @@ impl Tri7App {
                         egui::RichText::new(format!(
                             "{} {} across {} UTXOs",
                             s::format_tri(
-                                st.derived
+                                st.debug_info
                                     .as_ref()
-                                    .map(|d| d.utxos.iter().map(|u| u.value_sats).sum::<i64>())
+                                    .and_then(|d| d.daemon_utxos.clone())
+                                    .or_else(|| st.derived.as_ref().map(|d| d.utxos.clone()))
+                                    .map(|v| v.iter().map(|u| u.value_sats).sum::<i64>())
                                     .unwrap_or(0)
                             ),
                             s::TICKER,
-                            st.derived.as_ref().map(|d| d.utxos.len()).unwrap_or(0)
+                            st.debug_info
+                                .as_ref()
+                                .and_then(|d| d.daemon_utxos.clone())
+                                .or_else(|| st.derived.as_ref().map(|d| d.utxos.clone()))
+                                .map(|v| v.len())
+                                .unwrap_or(0)
                         ))
                         .monospace()
                         .color(th::TEXT_PRIMARY),
