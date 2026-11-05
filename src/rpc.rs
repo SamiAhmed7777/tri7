@@ -74,6 +74,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getblockhash",
     "getblock",
     "getrawtransaction",
+    "gettransaction",
     "getinfo",
     "getdifficulty",
     "getconnectioncount",
@@ -928,6 +929,119 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 }
                 Err(e) => NativeOutcome::Err(-1, e),
             }
+        }
+
+        // Wallet-scoped view of a transaction (legacy rpcwallet gettransaction).
+        // It was in the proxy-fallback list with no native handler, so every
+        // call errored once the legacy daemon was gone. Built from the native
+        // verbose tx plus wallet ownership of the outputs/inputs.
+        "gettransaction" => {
+            let txid = match ptry!(p_str(params, 0, "txid")) {
+                Some(s) => s,
+                None => return NativeOutcome::Err(-8, "expected txid parameter".into()),
+            };
+            if txid.len() != 64 || !txid.chars().all(|c| c.is_ascii_hexdigit()) {
+                return NativeOutcome::Err(-8, "invalid txid — expected 64 hex chars".into());
+            }
+            if !deps.blocks.ready() {
+                return NativeOutcome::Miss("block index warming up".into());
+            }
+            let v = match deps.blocks.tx(&txid, true) {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return NativeOutcome::Err(-5, "Invalid or non-wallet transaction id".into())
+                }
+                Err(e) => return NativeOutcome::Err(-1, e),
+            };
+            let mut amount = 0.0f64;
+            let mut details: Vec<Value> = Vec::new();
+            let mut ours_out = false;
+            if let Some(vout) = v.get("vout").and_then(|x| x.as_array()) {
+                for o in vout {
+                    let addrs = o
+                        .get("scriptPubKey")
+                        .and_then(|s| s.get("addresses"))
+                        .and_then(|a| a.as_array());
+                    let val = o.get("value_sats").and_then(|x| x.as_i64()).unwrap_or(0);
+                    if val == 0 {
+                        continue;
+                    }
+                    if let Some(list) = addrs {
+                        // One output pays ONE script. If several of its
+                        // addresses are ours (multisig/P2SH), the value must be
+                        // counted once, not once per address.
+                        let ours: Vec<&str> = list
+                            .iter()
+                            .filter_map(|a| a.as_str())
+                            .filter(|addr| deps.wallet.is_mine(addr))
+                            .collect();
+                        if let Some(first) = ours.first() {
+                            ours_out = true;
+                            amount += sats_to_tri(val);
+                            details.push(json!({
+                                "account": "",
+                                "address": first,
+                                "category": "receive",
+                                "amount": sats_to_tri(val),
+                            }));
+                        }
+                    }
+                }
+            }
+            // inputs that spend our coins make this a send
+            let mut spent = 0.0f64;
+            // Inputs are capped at 32 lookups per call (each one reads another
+            // transaction). Beyond the cap `amount` would undercount silently,
+            // so the count of skipped inputs is reported instead.
+            const MAX_INPUT_LOOKUPS: usize = 32;
+            let mut skipped_inputs = 0usize;
+            if let Some(vin) = v.get("vin").and_then(|x| x.as_array()) {
+                skipped_inputs = vin.len().saturating_sub(MAX_INPUT_LOOKUPS);
+                for i in vin.iter().take(MAX_INPUT_LOOKUPS) {
+                    let Some(ptx) = i.get("txid").and_then(|x| x.as_str()) else { continue };
+                    let n = i.get("vout").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    let Ok(Some(prev)) = deps.blocks.tx(ptx, true) else { continue };
+                    let Some(po) = prev.get("vout").and_then(|x| x.as_array()).and_then(|a| a.get(n)) else { continue };
+                    let val = po.get("value_sats").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let mine = po
+                        .get("scriptPubKey")
+                        .and_then(|s| s.get("addresses"))
+                        .and_then(|a| a.as_array())
+                        .map(|l| {
+                            l.iter().any(|a| {
+                                a.as_str()
+                                    .map(|ad| deps.wallet.is_mine(ad))
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if mine {
+                        spent += sats_to_tri(val);
+                        details.push(json!({
+                            "account": "",
+                            "category": "send",
+                            "amount": -sats_to_tri(val),
+                        }));
+                    }
+                }
+            }
+            if spent > 0.0 {
+                amount -= spent;
+            }
+            let _ = ours_out;
+            NativeOutcome::Ok(json!({
+                "txid": txid,
+                "amount": (amount * 1_000_000.0).round() / 1_000_000.0,
+                "confirmations": v.get("confirmations").cloned().unwrap_or(json!(0)),
+                "blockhash": v.get("blockhash").cloned().unwrap_or(Value::Null),
+                "blockindex": v.get("height").cloned().unwrap_or(Value::Null),
+                "blocktime": v.get("time").cloned().unwrap_or(Value::Null),
+                "time": v.get("time").cloned().unwrap_or(Value::Null),
+                "timereceived": v.get("time").cloned().unwrap_or(Value::Null),
+                "details": details,
+                "hex": v.get("hex").cloned().unwrap_or(json!("")),
+                "inputs_not_scanned": skipped_inputs,
+            }))
         }
 
         // ---- tri7 tipstate window + difficulty module ----
@@ -2705,18 +2819,89 @@ mod tests {
         assert!(p.calls.lock().unwrap().is_empty());
     }
 
+    /// Blocks stub that answers one synthetic verbose tx, so the wallet-scoped
+    /// gettransaction reshape can be tested without a real chain.
+    struct TxStubBlocks {
+        ready: bool,
+    }
+    impl BlockDataProvider for TxStubBlocks {
+        fn ready(&self) -> bool {
+            self.ready
+        }
+        fn status_json(&self) -> Value {
+            json!({"state": "ready"})
+        }
+        fn block_by_hash(&self, _h: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn block_by_height(&self, _h: u64) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn tx(&self, t: &str, _v: bool) -> Result<Option<Value>, String> {
+            if t == "aa".repeat(32) {
+                // pays our address twice in ONE output (multisig shape: two of
+                // our addresses on the same script) plus a foreign output
+                Ok(Some(json!({
+                    "txid": t,
+                    "confirmations": 7,
+                    "blockhash": "bb".repeat(32),
+                    "height": 100,
+                    "time": 1_700_000_000u64,
+                    "hex": "00",
+                    "vin": [],
+                    "vout": [
+                        {"n": 0, "value_sats": 2_000_000i64,
+                         "scriptPubKey": {"addresses": ["TMINE1", "TMINE2"]}},
+                        {"n": 1, "value_sats": 5_000_000i64,
+                         "scriptPubKey": {"addresses": ["TOURS"]}},
+                        {"n": 2, "value_sats": 0i64,
+                         "scriptPubKey": {"addresses": null}}
+                    ]
+                })))
+            } else {
+                Ok(None)
+            }
+        }
+        fn hash_at(&self, _h: u64) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+    }
+
     #[test]
-    fn proxy_only_method_is_forwarded_and_marked() {
+    fn gettransaction_counts_a_multi_address_output_once() {
+        let t = StubTip;
+        let mut w = StubWallet::default();
+        w.mine = vec!["TMINE1".into(), "TMINE2".into()];
+        let b = TxStubBlocks { ready: true };
+        let d = Deps {
+            tip: &t,
+            wallet: &w,
+            blocks: &b,
+            proxy: None,
+            ops: None,
+        };
+        let v = call(&d, "gettransaction", json!(["aa".repeat(32)]));
+        assert!(v.get("error").is_none() || v["error"].is_null(), "{}", v);
+        // 2.0 TRI counted ONCE even though both addresses are ours
+        assert_eq!(v["result"]["amount"], json!(2.0));
+        assert_eq!(v["result"]["confirmations"], json!(7));
+        assert_eq!(v["result"]["details"].as_array().unwrap().len(), 1);
+        assert_eq!(v["result"]["inputs_not_scanned"], json!(0));
+    }
+
+    #[test]
+    fn native_miss_is_forwarded_and_marked() {
+        // No method is proxy-ONLY any more (all fourteen have native
+        // handlers); the proxy is a fallback for a native miss. getblock while
+        // the block index is still building is that miss.
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: false };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
-        // getrawmempool/getmempoolinfo gained native handlers, so the
-        // representative proxy-only verb here is getwalletinfo.
-        let v = call(&d, "gettransaction", json!(["ab".repeat(32)]));
+        let v = call(&d, "getblock", json!(["ab".repeat(32)]));
         assert_eq!(v["source"], "legacy-proxy");
-        assert_eq!(v["result"]["echo"], "gettransaction");
+        assert_eq!(v["result"]["echo"], "getblock");
         assert_eq!(p.calls.lock().unwrap().len(), 1);
     }
 
@@ -2759,7 +2944,9 @@ mod tests {
         let mut p = StubProxy::default();
         p.fail = true;
         let d = deps(&t, &w, &b, Some(&p));
-        let v = call(&d, "gettransaction", json!(["ab".repeat(32)]));
+        let b2 = StubBlocks { ready: false };
+        let d = deps(&t, &w, &b2, Some(&p));
+        let v = call(&d, "getblock", json!(["ab".repeat(32)]));
         assert_eq!(v["error"]["code"], -32001);
         assert!(v["error"]["message"]
             .as_str()
@@ -3460,8 +3647,10 @@ fn help_lists_every_native_and_proxy_method() {
     // membership: native vs proxy vs unknown
     let v = call(&d, "help", json!(["getblockcount"]));
     assert!(v["result"].as_str().unwrap().contains("tri7 native"));
+    // every method that used to be proxy-only now has a native handler, so
+    // the representative check is that it reports native
     let v = call(&d, "help", json!(["gettransaction"]));
-    assert!(v["result"].as_str().unwrap().contains("legacy proxy fallback"));
+    assert!(v["result"].as_str().unwrap().contains("tri7 native"));
     let v = call(&d, "help", json!(["nosuchcommand"]));
     assert_eq!(v["error"]["code"], -1);
 }
