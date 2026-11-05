@@ -4444,6 +4444,24 @@ struct OpsAdapter {
     conf_path: PathBuf,
     /// wallet this node stakes for; getnewaddress/backupwallet act on it
     wallet_path: Option<PathBuf>,
+    /// state dir — locates the opt-in address index (addressindex.db)
+    state_dir: PathBuf,
+}
+
+/// Legacy address-index verbs take either `[["addr1","addr2"]]` or
+/// `[{"addresses":["addr1"]}]`.
+fn addr_list<'a>(p: &dyn Fn(usize) -> Option<&'a serde_json::Value>, i: usize) -> Vec<String> {
+    let Some(v) = p(i) else { return Vec::new() };
+    let arr = if v.is_array() {
+        v.as_array().cloned().unwrap_or_default()
+    } else if let Some(a) = v.get("addresses").and_then(|x| x.as_array()) {
+        a.clone()
+    } else {
+        vec![v.clone()]
+    };
+    arr.iter()
+        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+        .collect()
 }
 
 impl OpsAdapter {
@@ -4643,6 +4661,74 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     amount_sats, to, rep.txid, peers_n
                 ));
                 Ok(serde_json::json!(rep.txid))
+            }
+            // Chain-wide address index (legacy -addressindex=1 parity). Absent
+            // index -> the exact legacy failure text, never a wallet-scoped
+            // shortcut that would answer differently.
+            "getaddressbalance" => {
+                let addrs = addr_list(&p, 0);
+                if addrs.is_empty() {
+                    return Err((-8, "expected addresses array".to_string()));
+                }
+                let path = tri7_core::addrindex::db_path(&self.state_dir);
+                if !path.exists() {
+                    return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
+                }
+                let c = tri7_core::addrindex::open(&path).map_err(|e| (-1, e))?;
+                let (bal, recv) = tri7_core::addrindex::balance(&c, &addrs).map_err(|e| (-1, e))?;
+                let idx_h = tri7_core::addrindex::index_height(&c);
+                let tip_h = self.tip().0;
+                // A part-built index answers with what it has; say so instead
+                // of letting a caller mistake a partial sum for the whole chain.
+                Ok(serde_json::json!({
+                    "balance": bal,
+                    "received": recv,
+                    "index_height": idx_h,
+                    "index_complete": tri7_core::addrindex::is_complete(&c),
+                    "chain_tip": tip_h,
+                }))
+            }
+            "getaddressutxos" => {
+                let addrs = addr_list(&p, 0);
+                if addrs.is_empty() {
+                    return Err((-8, "expected addresses array".to_string()));
+                }
+                let path = tri7_core::addrindex::db_path(&self.state_dir);
+                if !path.exists() {
+                    return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
+                }
+                let c = tri7_core::addrindex::open(&path).map_err(|e| (-1, e))?;
+                let rows = tri7_core::addrindex::utxos(&c, &addrs).map_err(|e| (-1, e))?;
+                let out: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "address": u.address,
+                            "txid": tri7_core::addrindex::txid_hex(&u.txid),
+                            "outputIndex": u.n,
+                            "script": u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                            "satoshis": u.value,
+                            "height": u.height,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!(out))
+            }
+            "getaddresstxids" => {
+                let addrs = addr_list(&p, 0);
+                if addrs.is_empty() {
+                    return Err((-8, "expected addresses array".to_string()));
+                }
+                let path = tri7_core::addrindex::db_path(&self.state_dir);
+                if !path.exists() {
+                    return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
+                }
+                let c = tri7_core::addrindex::open(&path).map_err(|e| (-1, e))?;
+                let ids = tri7_core::addrindex::txids(&c, &addrs).map_err(|e| (-1, e))?;
+                Ok(serde_json::json!(ids
+                    .iter()
+                    .map(tri7_core::addrindex::txid_hex)
+                    .collect::<Vec<_>>()))
             }
             // Key export / import. The heavy lifting already lives in
             // keytool (dump_privkey, dump_wallet, import_wallet, check_wallet)
@@ -6447,6 +6533,7 @@ fn main() {
                 smsg: smsg_engine.clone(),
                 conf_path: cfg.conf_path.clone(),
                 wallet_path: cfg.wallet_path.clone(),
+                state_dir: cfg.state_dir.clone(),
             })),
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,
