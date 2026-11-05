@@ -81,6 +81,8 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getstakemodifier",
     "getbalance",
     "listunspent",
+    "listtransactions",
+    "listsinceblock",
     "listwallettx",
     "getlocalinfo",
     "listwalletaddresses",
@@ -98,6 +100,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getnetworkhashps",
     "getnewaddress",
     "backupwallet",
+    "sendtoaddress",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -134,6 +137,7 @@ pub const OPS_METHODS: &[&str] = &[
     "getnetworkhashps",
     "getnewaddress",
     "backupwallet",
+    "sendtoaddress",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -1278,6 +1282,103 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 })
                 .collect();
             NativeOutcome::Ok(json!({ "rows": out, "count": rows.len(), "source": "history.json" }))
+        }
+
+        // Legacy paginated history. listwallettx is a full dump for the GUI;
+        // these two are the verbs every integration actually calls.
+        "listtransactions" => {
+            // params: [account, count=10, from=0]
+            let count = ptry!(p_u64(params, 1, "count")).unwrap_or(10) as usize;
+            let from = ptry!(p_u64(params, 2, "from")).unwrap_or(0) as usize;
+            let tip_h = deps.tip.tip().height;
+            let mut rows = deps.wallet.history();
+            // newest first for windowing, then flip to legacy ascending order
+            rows.sort_by(|a, b| b.height.cmp(&a.height).then(b.txid.cmp(&a.txid)));
+            let mut window: Vec<_> = rows.into_iter().skip(from).take(count).collect();
+            window.reverse();
+            let out: Vec<Value> = window
+                .iter()
+                .map(|r| {
+                    let depth = crate::legacy_rows::depth_of(r.height, tip_h);
+                    json!({
+                        "account": "",
+                        "address": r.address,
+                        "category": if r.direction == "out" { "send" } else { "receive" },
+                        "amount": sats_to_tri(r.value_sats),
+                        "confirmations": depth,
+                        "blockhash": deps.blocks.hash_at(r.height).ok().flatten(),
+                        "blockindex": r.height,
+                        "blocktime": r.time,
+                        "txid": r.txid,
+                        "time": r.time,
+                        "timereceived": r.time,
+                    })
+                })
+                .collect();
+            NativeOutcome::Ok(json!(out))
+        }
+
+        "listsinceblock" => {
+            // params: [blockhash, target_confirmations]
+            let tip_h = deps.tip.tip().height;
+            let want_hash: Option<String> = ptry!(p_str(params, 0, "blockhash"));
+            let since_h: Option<u64> = match want_hash.as_deref() {
+                None | Some("") => None,
+                Some(h) => {
+                    // resolve over the tipstate window (the only heights this
+                    // node can hash); older hashes are refused rather than
+                    // silently returning a partial list
+                    let (base, entries) = deps.tip.window();
+                    let mut found = None;
+                    for height in base..=tip_h {
+                        if deps.blocks.hash_at(height).ok().flatten().as_deref() == Some(h) {
+                            found = Some(height);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(x) => Some(x),
+                        None => {
+                            return NativeOutcome::Err(
+                                -8,
+                                format!(
+                                    "blockhash {h} is not in this node's window (h{base}..h{tip_h}); pass a recent block or omit the parameter"
+                                ),
+                            )
+                        }
+                    }
+                }
+            };
+            let mut rows: Vec<_> = deps
+                .wallet
+                .history()
+                .into_iter()
+                .filter(|r| since_h.map(|s| r.height > s).unwrap_or(true))
+                .collect();
+            rows.sort_by(|a, b| a.height.cmp(&b.height).then(a.txid.cmp(&b.txid)));
+            let out: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let depth = crate::legacy_rows::depth_of(r.height, tip_h);
+                    json!({
+                        "account": "",
+                        "address": r.address,
+                        "category": if r.direction == "out" { "send" } else { "receive" },
+                        "amount": sats_to_tri(r.value_sats),
+                        "confirmations": depth,
+                        "blockhash": deps.blocks.hash_at(r.height).ok().flatten(),
+                        "blockindex": r.height,
+                        "blocktime": r.time,
+                        "txid": r.txid,
+                        "time": r.time,
+                        "timereceived": r.time,
+                    })
+                })
+                .collect();
+            NativeOutcome::Ok(json!({
+                "transactions": out,
+                "lastblock": deps.tip.tip().blockhash,
+            }))
         }
 
         // ---- composite ----
@@ -2817,7 +2918,9 @@ mod tests {
         let b = StubBlocks { ready: true };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
-        let v = call(&d, "sendtoaddress", json!(["addr", 1.0]));
+        // sendtoaddress is a native verb now; dumpprivkey is still a
+        // wallet-write method with no handler, which is what this guards.
+        let v = call(&d, "dumpprivkey", json!(["addr"]));
         assert_eq!(v["error"]["code"], -32601);
         // SECURITY: wallet-write methods must never hit the proxy
         assert!(p.calls.lock().unwrap().is_empty());
@@ -2891,6 +2994,75 @@ mod tests {
         assert_eq!(v["result"]["confirmations"], json!(7));
         assert_eq!(v["result"]["details"].as_array().unwrap().len(), 1);
         assert_eq!(v["result"]["inputs_not_scanned"], json!(0));
+    }
+
+    /// Wallet stub with a fixed history, for the paginated verbs.
+    struct HistWallet {
+        rows: Vec<crate::history::HistoryRec>,
+    }
+    impl WalletProvider for HistWallet {
+        fn balance(&self) -> Option<BalanceView> {
+            None
+        }
+        fn coverage(&self) -> Option<(u64, String)> {
+            None
+        }
+        fn address_entries(&self) -> Vec<AddressEntry> {
+            Vec::new()
+        }
+        fn received_regular(&self, _a: &str) -> Option<i64> {
+            None
+        }
+        fn is_mine(&self, _a: &str) -> bool {
+            false
+        }
+        fn utxos(&self) -> Vec<UtxoRow> {
+            Vec::new()
+        }
+        fn history(&self) -> Vec<crate::history::HistoryRec> {
+            self.rows.clone()
+        }
+    }
+
+    fn hist_row(height: u64, tx: &str, sats: i64, dir: &str) -> crate::history::HistoryRec {
+        crate::history::HistoryRec {
+            txid: tx.into(),
+            height,
+            time: 1_700_000_000 + height as u32,
+            value_sats: sats,
+            address: "TADDR".into(),
+            direction: dir.into(),
+            kind: "regular".into(),
+            spent: false,
+            idx: 0,
+            legacy_kind: String::new(),
+            coinstake: false,
+            stake_principal: 0,
+        }
+    }
+
+    #[test]
+    fn listtransactions_windows_newest_first_then_returns_ascending() {
+        let t = StubTip;
+        let w = HistWallet {
+            rows: vec![
+                hist_row(10, "aa", 1_000_000, "in"),
+                hist_row(11, "bb", -500_000, "out"),
+                hist_row(12, "cc", 2_000_000, "in"),
+                hist_row(13, "dd", 3_000_000, "in"),
+            ],
+        };
+        let b = StubBlocks { ready: true };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        // count=2, from=1 -> skip the newest (dd), take cc and bb, ascending
+        let v = call(&d, "listtransactions", json!(["", 2, 1]));
+        let arr = v["result"].as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["txid"], json!("bb"));
+        assert_eq!(arr[1]["txid"], json!("cc"));
+        assert_eq!(arr[0]["category"], json!("send"));
+        assert_eq!(arr[0]["amount"], json!(-0.5));
+        assert_eq!(arr[1]["category"], json!("receive"));
     }
 
     #[test]

@@ -4500,6 +4500,150 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "announced_to": peers_n,
                 }))
             }
+            // Programmatic spend (legacy rpcwallet sendtoaddress). Builds and
+            // signs with the same builder the GUI uses, then relays through
+            // the same accept+announce path as sendrawtransaction.
+            "sendtoaddress" => {
+                let to = ps(0).ok_or_else(|| (-8, "expected address parameter".to_string()))?;
+                let amount_tri = p(1)
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| (-8, "expected amount parameter".to_string()))?;
+                if !(amount_tri > 0.0) {
+                    return Err((-3, "Amount out of range".to_string()));
+                }
+                let amount_sats = (amount_tri * 1_000_000.0).round() as i64;
+                let dest_payload = tri7_core::address::address_to_payload(&to)
+                    .map_err(|e| (-5, format!("Invalid address: {e}")))?;
+                let (tip_h, _) = self.tip();
+                let now = now_secs() as u32;
+                let mut wl = self.wl.lock().unwrap();
+                let w = wl
+                    .as_ref()
+                    .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+
+                let mut keys: std::collections::HashMap<String, (Vec<u8>, [u8; 32])> =
+                    std::collections::HashMap::new();
+                for k in &w.wallet.keys {
+                    keys.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
+                }
+                let kb = w.key_by_payload();
+                let mut utxos: Vec<tri7_core::gui::state::UtxoRec> = Vec::new();
+                for ((txid, n), o) in w.live.iter() {
+                    let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
+                        continue;
+                    };
+                    if !kb.contains_key(&dest.payload()) {
+                        continue;
+                    }
+                    utxos.push(tri7_core::gui::state::UtxoRec {
+                        txid: *txid,
+                        n: *n,
+                        value_sats: o.value,
+                        script: o.script.clone(),
+                        address: tri7_core::address::payload_to_address(&dest.payload()),
+                        height: o.height as u32,
+                        tx_time: o.created_epoch,
+                        prev_kind: if o.coinstake {
+                            "coinstake"
+                        } else if o.coinbase {
+                            "coinbase"
+                        } else {
+                            "regular"
+                        }
+                        .into(),
+                        legacy_kind: String::new(),
+                    });
+                }
+                // candidate source addresses, richest first
+                let mut by_addr: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                for u in &utxos {
+                    *by_addr.entry(u.address.clone()).or_insert(0) += u.value_sats;
+                }
+                let mut cands: Vec<(String, i64)> = by_addr.into_iter().collect();
+                cands.sort_by(|a, b| b.1.cmp(&a.1));
+                if cands.is_empty() {
+                    return Err((-6, "Insufficient funds".to_string()));
+                }
+                let derived = tri7_core::gui::state::DerivedWallet {
+                    utxos: utxos.clone(),
+                    balances: tri7_core::gui::state::compute_balances(&utxos, &|_| None),
+                    snapshot_height: tip_h as u32,
+                    coverage_height: tip_h,
+                    reconcile: tri7_core::gui::state::ReconcileReport {
+                        enabled: false,
+                        blocks_applied: 0,
+                        additions_found: 0,
+                        additions_kept: 0,
+                        spends_applied: 0,
+                        heights: (tip_h as u32, tip_h),
+                        source: "live".into(),
+                        note: String::new(),
+                    },
+                };
+                let fee_sats = tri7_core::rpc::MIN_TX_FEE_SATS;
+                let mut last_err = String::from("Insufficient funds!");
+                let mut built: Option<(String, tri7_core::gui::state::SendBuild)> = None;
+                for (from, _bal) in cands {
+                    let req = tri7_core::gui::state::SendRequest {
+                        from: from.clone(),
+                        dest_payload,
+                        amount_sats,
+                        fee_sats,
+                        // change returns to the source address, like legacy
+                        change_payload: tri7_core::address::address_to_payload(&from)
+                            .unwrap_or(dest_payload),
+                    };
+                    match tri7_core::gui::state::build_signed_send(
+                        &req,
+                        &derived,
+                        &keys,
+                        None,
+                        now,
+                        tip_h as u32,
+                    ) {
+                        Ok(b) => {
+                            built = Some((from, b));
+                            break;
+                        }
+                        Err(e) => last_err = e,
+                    }
+                }
+                let Some((_from, build)) = built else {
+                    return Err((-6, last_err));
+                };
+                // Optional third parameter "dryrun": build, sign and
+                // self-verify the transaction but do NOT relay it. Not a
+                // legacy verb, added so the path can be proven on a live
+                // wallet without moving coins.
+                if ps(2).as_deref() == Some("dryrun") {
+                    return Ok(serde_json::json!({
+                        "txid": build.txid_display,
+                        "fee_sats": build.fee_sats,
+                        "change_sats": build.change_sats,
+                        "bytes": build.n_bytes,
+                        "hex": build.tx_hex,
+                        "relayed": false,
+                    }));
+                }
+                // relay exactly like sendrawtransaction
+                let raw = tri7_core::p2p::hex_decode(&build.tx_hex)
+                    .map_err(|e| (-1, format!("built tx hex: {e}")))?;
+                let mut pool = self.pool.lock().unwrap();
+                let rep = pool
+                    .accept(&raw, &LiveUtxoView(&w.live), now as i64)
+                    .map_err(|e| (-25, e))?;
+                let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
+                self.announce
+                    .lock()
+                    .unwrap()
+                    .push_back(tri7_core::p2p::display_to_internal(&rep.txid).map_err(|e| (-8, e))?);
+                log(&format!(
+                    "sendtoaddress: {} sats to {} — tx {} relayed to {} peer(s)",
+                    amount_sats, to, rep.txid, peers_n
+                ));
+                Ok(serde_json::json!(rep.txid))
+            }
             "getstakinginfo" => {
                 let (tip_height, entry) = self.tip();
                 let wl = self.wl.lock().unwrap();

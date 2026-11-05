@@ -19,6 +19,22 @@ out of scope (with reason).
 
 ## Shipped this session (for the record)
 
+- [x] **`getnewaddress [label]`** — HD wallets derive m/44'/2222'/0'/0/N (seed
+      still restores the address); non-HD wallets get a random key via add_key.
+      Proven on a wallet copy: 248 -> 249 keys, key present after reopen.
+- [x] **`backupwallet <dest>`** — copies the wallet, refuses an existing
+      destination (legacy rule).
+- [x] **`sendtoaddress <addr> <amount> [dryrun]`** — builds and signs with the
+      GUI's builder, then relays through the same accept+announce path as
+      sendrawtransaction. `dryrun` (non-legacy) builds and signs WITHOUT
+      relaying so the path can be proven on a live wallet. Verified on DNS2:
+      195-byte tx, fee 100 sats, change 30,454,219 sats, not relayed.
+- [x] **`listtransactions [account, count, from]`** and
+      **`listsinceblock [blockhash]`** — paginated history in legacy record
+      shape (category receive/send, confirmations, blockhash, blocktime).
+      listtransactions windows newest-first then returns ascending, matching
+      legacy order; unit-tested with a fixed 4-row history.
+
 - [x] **`gettransaction`** — was in the proxy-fallback list with no handler, so it
       errored on any node without a legacy daemon. Now native and wallet-scoped:
       rebuilds `details` from output/input ownership against the wallet, so a
@@ -49,8 +65,13 @@ out of scope (with reason).
       and "everything since block N". tri7 has `listwallettx` (full dump) but no
       windowed, paginated form; every integration expects these two.
 - [ ] **`getaddressbalance` / `getaddressutxos` / `getaddresstxids`** — the
-      address-index family. A block explorer or payment processor cannot work
-      without them.
+      address-index family. IMPORTANT: legacy only serves these when started
+      with `-addressindex=1`, and otherwise throws
+      "Address index not enabled. Start with -addressindex=1"
+      (`rpcblockchain.cpp:464`). So parity means an opt-in chain-wide address
+      index, not a wallet-scoped shortcut: it must cover foreign addresses too.
+      A wallet-scoped implementation would answer differently from legacy and
+      is therefore not acceptable.
 - [ ] **`gettxoutsetinfo`** — chain state summary; cheap to compute from the index.
 
 ## P1 — parity that users will notice
