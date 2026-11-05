@@ -212,7 +212,9 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::In
             // QR right), and Frame::show inherits the parent layout — without
             // this, every element in the card flows sideways on one line and
             // tables collapse into slivers (the broken Receive page bug).
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
+            // `.inner` unwraps with_layout's own InnerResponse so the card's
+            // declared return type stays InnerResponse<R> for callers.
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents).inner
         })
 }
 

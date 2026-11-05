@@ -308,23 +308,28 @@ impl Tri7App {
                 // (brand left, menus right). Crisp: mark at native size + REAL
                 // text, never a downscaled 1199x252 banner (spec §1: no blurry
                 // scaled bitmaps — that was the "weird blurry" header bug).
-                if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
-                    ui.add_space(20.0);
-                    ui.add(img(&tex, Vec2::splat(40.0)));
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new("Cryptographic Triangles")
-                                .size(20.0)
-                                .color(th::BRAND_RED)
-                                .strong(),
-                        );
+                // ONE shared horizontal row holds the lockup (left) and the
+                // menu (right) — the panel ui itself is top-down, so without
+                // this the menu would land on a clipped second row.
+                ui.horizontal(|ui| {
+                    if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
+                        ui.add_space(20.0);
+                        ui.add(img(&tex, Vec2::splat(44.0)));
+                        ui.add_space(12.0);
+                        ui.vertical(|ui| {
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Cryptographic Triangles")
+                                    .size(20.0)
+                                    .color(th::BRAND_RED)
+                                    .strong(),
+                            );
+                        });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        self.menu_bar(ui);
                     });
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(12.0);
-                    self.menu_bar(ui);
                 });
             });
         // subtle 1 px BRAND_RED bottom rule at 35% opacity
