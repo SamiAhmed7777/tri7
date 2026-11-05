@@ -1,0 +1,10 @@
+[Unit]
+Description=tri7 address index resume (keeps addressindex.db at the chain tip)
+After=tri7d.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/root/tri7/target/release/addrindex_build /var/lib/tri7/blk0001.dat /var/lib/tri7
+Nice=10
+IOSchedulingClass=idle

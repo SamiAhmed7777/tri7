@@ -1,0 +1,10 @@
+[Unit]
+Description=Resume the tri7 address index every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=tri7-addrindex.service
+
+[Install]
+WantedBy=timers.target
