@@ -59,11 +59,29 @@ pub fn load_cache(state_dir: &Path) -> Option<HistoryCache> {
     serde_json::from_str(&raw).ok()
 }
 
+pub fn dedupe(rows: &mut Vec<HistoryRec>) {
+    // Durations are checked from these rows; a duplicated receive inflates the
+    // balance forever. Key on (txid, value, height, direction, address).
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| {
+        seen.insert((
+            r.txid.clone(),
+            r.value_sats,
+            r.height,
+            r.direction.clone(),
+            r.address.clone(),
+        ))
+    });
+    rows.sort_by(|a, b| a.height.cmp(&b.height).then(a.txid.cmp(&b.txid)));
+}
+
 pub fn save_cache(state_dir: &Path, cache: &HistoryCache) -> Result<(), String> {
+    let mut cache = cache.clone();
+    dedupe(&mut cache.rows);
     std::fs::create_dir_all(state_dir)
         .map_err(|e| format!("mkdir {}: {}", state_dir.display(), e))?;
     let tmp = state_dir.join("history.json.tmp");
-    let raw = serde_json::to_string(cache).map_err(|e| e.to_string())?;
+    let raw = serde_json::to_string(&cache).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, raw).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
     std::fs::rename(&tmp, cache_path(state_dir))
         .map_err(|e| format!("rename history cache: {}", e))
@@ -137,6 +155,28 @@ pub fn scan(
         }
     }
 
+    // Height map from the store's own index. The frame order in the .dat file
+    // is NOT chain order (reorg leftovers are appended above the threaded
+    // tip), so a plain frame counter after genesis mislabels every row that
+    // follows a gap. The index knows the real height of each block hash.
+    let store = crate::blockindex::BlockStore::new(Some(store_path.to_path_buf()), None);
+    store.spawn_build(None);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut threaded_tip = None;
+    while std::time::Instant::now() < deadline {
+        if let crate::blockindex::StoreStatus::Ready {
+            threaded_tip: t, ..
+        } = store.status()
+        {
+            threaded_tip = t;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    if let Some(tip) = threaded_tip {
+        eprintln!("history: store index ready, threaded tip h{}", tip);
+    }
+
     let mut f = std::fs::File::open(store_path)
         .map_err(|e| format!("open {}: {}", store_path.display(), e))?;
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -168,9 +208,26 @@ pub fn scan(
         let mut r = Reader::new(&body);
         let block =
             Block::read(&mut r).map_err(|e| format!("block at height {}: {}", height, e))?;
+        // true height: store index by hash; frames above the threaded tip are
+        // stale and skipped entirely
+        let hash = block.hash();
+        let real_height = match store.block_by_hash(&hash).ok().flatten().and_then(|h| h.height) {
+            Some(h) => h,
+            None => {
+                // not in the chain (reorg leftover / above tip): skip
+                pos += 8 + blen as u64;
+                continue;
+            }
+        };
+        if let Some(tip) = threaded_tip {
+            if real_height > tip {
+                pos += 8 + blen as u64;
+                continue;
+            }
+        }
         apply_block(
             &block,
-            height,
+            real_height,
             &by_payload,
             &by_pubkey,
             &mut cache.rows,
@@ -179,8 +236,10 @@ pub fn scan(
         pos += 8 + blen as u64;
         height += 1;
         scanned += 1;
-        cache.scanned_height = height - 1;
-        cache.scanned_offset = pos;
+        if real_height > cache.scanned_height {
+            cache.scanned_height = real_height;
+            cache.scanned_offset = pos;
+        }
         if scanned % 50_000 == 0 {
             let bps = scanned as f64 / started.elapsed().as_secs_f64().max(0.001);
             eprintln!(

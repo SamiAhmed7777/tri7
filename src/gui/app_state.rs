@@ -1634,6 +1634,32 @@ impl AppState {
     }
 
     /// Connection info refresh (status bar + Chain/Debug information page).
+    /// Visible diagnostic: what the Transactions page is actually reading.
+    /// Sami has been told "history is loaded" three times while the page kept
+    /// showing only today's rows, so the UI now prints the resolved path, the
+    /// row count and the oldest date. No more guessing.
+    pub fn history_status_line(&self) -> String {
+        let wp = self.cfg.wallet_path.trim().to_string();
+        let folder = std::path::Path::new(&wp)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let file = crate::history::cache_path(std::path::Path::new(&folder));
+        let exists = file.exists();
+        let (rows, note) = self.load_history_file();
+        let oldest = rows.iter().map(|r| r.time).filter(|t| *t > 0).min();
+        let newest = rows.iter().map(|r| r.time).max();
+        format!(
+            "history: {} | exists={} | rows={} | oldest={} | newest={} | {}",
+            file.display(),
+            exists,
+            rows.len(),
+            oldest.map(stamp_date).unwrap_or_else(|| "-".into()),
+            newest.map(stamp_date).unwrap_or_else(|| "-".into()),
+            note
+        )
+    }
+
     /// Full wallet history straight from `<wallet folder>/history.json`.
     ///
     /// The daemon route (listwallettx) is an optimisation, not the source of
@@ -2459,4 +2485,23 @@ fn chrono_iso_now() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, mi, s)
+}
+
+/// UTC YYYY-MM-DD for a unix stamp (no chrono dependency).
+pub fn stamp_date(secs: u32) -> String {
+    if secs == 0 {
+        return "-".into();
+    }
+    let days = (secs as i64).div_euclid(86400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
 }

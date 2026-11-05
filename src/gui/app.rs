@@ -3276,7 +3276,7 @@ impl Tri7App {
             ui.add_space(4.0);
             th::text_meta(
                 ui,
-                "every receive and spend recorded for these keys — click the Date header to reverse the order",
+                &self.st.history_status_line(),
             );
             ui.add_space(6.0);
             // NO local derived wallet is required to show history: the rows
