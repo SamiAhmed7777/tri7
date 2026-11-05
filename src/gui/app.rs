@@ -3382,7 +3382,7 @@ impl Tri7App {
                 }
             });
             let w = ui.available_width();
-            let addr_w = (w - 24.0 - 160.0 - 120.0 - 110.0 - 60.0).max(140.0);
+            let addr_w = (w - 24.0 - 160.0 - 120.0 - 110.0).max(140.0);
             // legacy table: Status | Date | Type | Address | Amount
             let cols = [
                 th::TableCol::new("", 24.0, false),
@@ -3390,8 +3390,6 @@ impl Tri7App {
                 th::TableCol::new("Type", 120.0, false),
                 th::TableCol::new("Label/Address", addr_w, false),
                 th::TableCol::new("Amount", 110.0, true),
-                // the glyph IS the status; the sentence lives in its tooltip
-                th::TableCol::new("", 60.0, true),
             ];
             // Date header is a real click target: flips newest<->oldest and
             // shows an arrow for the current direction.
@@ -3504,48 +3502,11 @@ impl Tri7App {
                 let selected = sel_idx == Some(*orig_idx);
                 let ir = th::table_row(ui, i, selected, w, |rui| {
                     let resp = th::row_click(rui, 38.0);
+                    // the ONE status glyph: leading column, vertically centred,
+                    // with the legacy status sentence as its hover text
                     if let Some(t) = tex {
-                        egui::Image::from_texture(egui::load::SizedTexture::new(
-                            t.id(),
-                            Vec2::splat(16.0),
-                        ))
-                        .paint_at(
-                            rui,
-                            egui::Rect::from_min_size(
-                                egui::pos2(rui.max_rect().left() + 4.0, rui.max_rect().top() + 11.0),
-                                Vec2::splat(16.0),
-                            ),
-                        );
-                    }
-                    th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
-                    th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
-                    th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
-                    th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
-                    // status cell: the glyph alone, with the legacy status
-                    // sentence as its hover text (Sami: "the number of
-                    // confirmation should be a tooltip over whatever the
-                    // graphic is next to the transaction").
-                    //
-                    // Positioned from the ROW rect rather than by allocating,
-                    // so every row's glyph lands in the same column and the
-                    // layout below it is untouched. The hover response is a
-                    // real interact() on that rect - that is what makes egui
-                    // show a tooltip.
-                    let zone = egui::Rect::from_min_max(
-                        egui::pos2(
-                            rui.max_rect().left() + 284.0 + addr_w + 110.0,
-                            rui.max_rect().top(),
-                        ),
-                        egui::pos2(rui.max_rect().right(), rui.max_rect().bottom()),
-                    );
-                    let hover = rui.interact(
-                        zone,
-                        egui::Id::new(("tx_status", *orig_idx)),
-                        egui::Sense::hover(),
-                    );
-                    if let Some(t) = tex {
-                        let icon_rect = egui::Rect::from_center_size(
-                            egui::pos2(zone.center().x, zone.center().y - 6.0),
+                        let icon_rect = egui::Rect::from_min_size(
+                            egui::pos2(rui.max_rect().left() + 4.0, rui.max_rect().top() + 11.0),
                             Vec2::splat(16.0),
                         );
                         egui::Image::from_texture(egui::load::SizedTexture::new(
@@ -3553,8 +3514,17 @@ impl Tri7App {
                             Vec2::splat(16.0),
                         ))
                         .paint_at(rui, icon_rect);
+                        let hover = rui.interact(
+                            icon_rect.expand(6.0),
+                            egui::Id::new(("tx_status", *orig_idx)),
+                            egui::Sense::hover(),
+                        );
+                        hover.on_hover_text(conf_label.clone());
                     }
-                    hover.on_hover_text(conf_label.clone());
+                    th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
+                    th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
+                    th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
+                    th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
                     resp.clicked()
                 });
                 if ir.inner {
