@@ -94,6 +94,7 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getpeerinfo",
     "getrawmempool",
     "getmempoolinfo",
+    "getnetworkhashps",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -127,6 +128,7 @@ pub const OPS_METHODS: &[&str] = &[
     "getpeerinfo",
     "getrawmempool",
     "getmempoolinfo",
+    "getnetworkhashps",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -2712,9 +2714,9 @@ mod tests {
         let d = deps(&t, &w, &b, Some(&p));
         // getrawmempool/getmempoolinfo gained native handlers, so the
         // representative proxy-only verb here is getwalletinfo.
-        let v = call(&d, "getnetworkhashps", json!([]));
+        let v = call(&d, "gettransaction", json!(["ab".repeat(32)]));
         assert_eq!(v["source"], "legacy-proxy");
-        assert_eq!(v["result"]["echo"], "getnetworkhashps");
+        assert_eq!(v["result"]["echo"], "gettransaction");
         assert_eq!(p.calls.lock().unwrap().len(), 1);
     }
 
@@ -2757,7 +2759,7 @@ mod tests {
         let mut p = StubProxy::default();
         p.fail = true;
         let d = deps(&t, &w, &b, Some(&p));
-        let v = call(&d, "getnetworkhashps", json!([]));
+        let v = call(&d, "gettransaction", json!(["ab".repeat(32)]));
         assert_eq!(v["error"]["code"], -32001);
         assert!(v["error"]["message"]
             .as_str()

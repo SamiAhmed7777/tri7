@@ -4622,6 +4622,34 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     Ok(pool.json())
                 }
             }
+            // Mining/stats clients poll this; it used to be "daemon-only" and
+            // errored on any node without a legacy proxy. Work it out from the
+            // window: mean difficulty over the last N entries and the mean
+            // spacing between their timestamps.
+            "getnetworkhashps" => {
+                let n = ps(0).and_then(|v| v.parse::<usize>().ok()).unwrap_or(120).clamp(2, 1000);
+                let g = self.st.lock().unwrap();
+                let len = g.entries.len();
+                if len < 3 {
+                    return Ok(serde_json::json!(0.0));
+                }
+                let take = n.min(len - 1);
+                let slice = &g.entries[len - take..];
+                let mut diff_sum = 0.0f64;
+                for e in slice {
+                    diff_sum += rpc::difficulty_from_bits(e.bits);
+                }
+                let mean_diff = diff_sum / slice.len() as f64;
+                let span = slice
+                    .last()
+                    .map(|e| e.time)
+                    .unwrap_or(0)
+                    .saturating_sub(slice.first().map(|e| e.time).unwrap_or(0))
+                    .max(1) as f64;
+                let spacing = span / (slice.len() as f64 - 1.0).max(1.0);
+                let hps = mean_diff * 4_294_967_296.0 / spacing;
+                Ok(serde_json::json!(hps.round()))
+            }
             "getmempoolinfo" => {
                 let pool = self.pool.lock().unwrap();
                 Ok(serde_json::json!({
