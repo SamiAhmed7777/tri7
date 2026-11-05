@@ -206,7 +206,14 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::In
         .stroke(Stroke::new(1.0, BORDER_SUBTLE))
         .rounding(Rounding::same(6.0))
         .inner_margin(egui::Margin::same(16.0))
-        .show(ui, add_contents)
+        .show(ui, |ui| {
+            // Force top-down INSIDE the card: cards are often placed inside
+            // `ui.horizontal` two-column layouts (e.g. Receive: addresses left,
+            // QR right), and Frame::show inherits the parent layout — without
+            // this, every element in the card flows sideways on one line and
+            // tables collapse into slivers (the broken Receive page bug).
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
+        })
 }
 
 /// Card with a section title at top.

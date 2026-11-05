@@ -104,6 +104,7 @@ asset_map! {
     "icons/refresh" => "icons/refresh.png",
     "brand/header" => "brand/brand_header_new@2x.png",
     "brand/mark" => "brand/brand_mark_32.png",
+    "brand/mark64" => "brand/brand_mark_64.png",
     "brand/mark16" => "brand/brand_mark_16.png",
 }
 
@@ -303,11 +304,23 @@ impl Tri7App {
             .exact_height(64.0)
             .frame(egui::Frame::none().fill(th::WINDOW_BG))
             .show(ctx, |ui| {
-                // banner LEFT-aligned in the header strip — the legacy
-                // mainwindow.ui header placement (brand left, menus right)
-                if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
+                // brand lockup LEFT-aligned — legacy mainwindow.ui placement
+                // (brand left, menus right). Crisp: mark at native size + REAL
+                // text, never a downscaled 1199x252 banner (spec §1: no blurry
+                // scaled bitmaps — that was the "weird blurry" header bug).
+                if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
                     ui.add_space(20.0);
-                    ui.add(img(&tex, Vec2::new(219.0, 46.0))); // 1199x252 aspect-true
+                    ui.add(img(&tex, Vec2::splat(40.0)));
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Cryptographic Triangles")
+                                .size(20.0)
+                                .color(th::BRAND_RED)
+                                .strong(),
+                        );
+                    });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);

@@ -1264,8 +1264,25 @@ fn write_state_atomic(cfg: &Config, st: &TipStateFile) -> Result<(), String> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod {}: {}", tmp.display(), e))?;
     }
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename state: {}", e))?;
-    Ok(())
+    // Windows: MoveFileEx fails with ERROR_ACCESS_DENIED (os error 5) when a
+    // reader has the destination open or an AV filter holds it briefly. Retry
+    // with backoff instead of failing the write.
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..12 {
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(
+                    50 * (attempt + 1) as u64,
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "rename state: {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4818,7 +4835,13 @@ fn handle_message(
                     ));
                 }
                 let file = st.to_file();
-                write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
+                // The block is already applied in memory and in the store; a
+                // failed checkpoint write only means the on-disk resume point
+                // lags. Log it and keep following (this used to exit the node
+                // with FAIL(3) and left the wallet 5+ blocks behind).
+                if let Err(e) = write_state_atomic(cfg, &file) {
+                    log(&format!("state write deferred (tip advance continues): {}", e));
+                }
                 log(&format!(
                     "TIP ADVANCE → h{} {} (kernel {}) via {}",
                     st.tip_height,
