@@ -4442,6 +4442,8 @@ struct OpsAdapter {
     peers_table: SharedPeers,
     smsg: Option<Arc<tri7_core::smsg_net::SmsgEngine>>,
     conf_path: PathBuf,
+    /// wallet this node stakes for; getnewaddress/backupwallet act on it
+    wallet_path: Option<PathBuf>,
 }
 
 impl OpsAdapter {
@@ -4610,6 +4612,64 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 }
             }
             "getpeerinfo" => Ok(peer_table_json(&self.peers_table)),
+            // Legacy wallet verbs. Both act on the wallet this node was
+            // started with; the writer is the same WalletHandle the GUI uses
+            // (HD-aware: a seed wallet derives m/44'/2222'/... rather than
+            // injecting a random key that the phrase would not restore).
+            "getnewaddress" => {
+                let label = ps(0).unwrap_or_default();
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&path)
+                    .map_err(|e| (-1, format!("open wallet: {e}")))?;
+                let hd = wh.hd_mnemonic.is_some();
+                let res: Result<String, (i64, String)> = if hd {
+                    wh.generate_hd_key(&label)
+                        .map(|k| k.address)
+                        .map_err(|e| (-1, format!("generate_hd_key: {e}")))
+                } else {
+                    let mut secret = [0u8; 32];
+                    getrandom::getrandom(&mut secret)
+                        .map_err(|e| (-1, format!("keygen entropy: {e}")))?;
+                    wh.add_key(&secret, &label)
+                        .map(|k| k.address)
+                        .map_err(|e| (-1, format!("add_key: {e}")))
+                };
+                wh.close();
+                let address = res?;
+                log(&format!(
+                    "getnewaddress: {} ({})",
+                    address,
+                    if hd { "derived from the wallet seed" } else { "fresh random key" }
+                ));
+                Ok(serde_json::json!(address))
+            }
+            // Copy the wallet file. The legacy daemon refuses a destination
+            // that already exists; keeping that rule means a mistyped path
+            // cannot silently overwrite an older backup.
+            "backupwallet" => {
+                let dest = ps(0)
+                    .ok_or_else(|| (-8, "expected destination path".to_string()))?;
+                let src = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                let dest = PathBuf::from(dest);
+                if dest.exists() {
+                    return Err((
+                        -4,
+                        format!("backupwallet: {} already exists", dest.display()),
+                    ));
+                }
+                std::fs::copy(&src, &dest)
+                    .map_err(|e| (-1, format!("backupwallet: copy to {}: {e}", dest.display())))?;
+                log(&format!(
+                    "backupwallet: {} -> {}",
+                    src.display(),
+                    dest.display()
+                ));
+                Ok(serde_json::Value::Null)
+            }
             // Mempool verbs used to fall through to the legacy proxy, which
             // points at a port that does not exist on a workstation. The node
             // owns a TxPool - answer from it.
@@ -6157,6 +6217,7 @@ fn main() {
                 peers_table: Arc::clone(&peers_table),
                 smsg: smsg_engine.clone(),
                 conf_path: cfg.conf_path.clone(),
+                wallet_path: cfg.wallet_path.clone(),
             })),
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,
