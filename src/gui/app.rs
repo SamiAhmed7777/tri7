@@ -3364,100 +3364,9 @@ impl Tri7App {
                 .unwrap_or(0);
             let search = self.tx_search.to_lowercase();
             // newest first (existing order), then view filters
-            // History source, in priority order:
-            //  1. daemon listwallettx (history.json: EVERY receive/spend since
-            //    2014, dated from the containing block — legacy parity)
-            //  2. local derived snapshot
-            //  3. daemon listunspent (live unspent only)
-            // A holder from 2021 must see those rows, not just today's.
-            // The FILE wins: it is in the wallet's own folder and cannot be
-            // gated by an RPC allow-list, a timeout or a throttle. The daemon
-            // copy is only a fallback when the file is absent.
-            let (hist, hist_note) = self.st.load_history_file();
-            let hist: Vec<crate::history::HistoryRec> = if hist.is_empty() {
-                self.st
-                    .debug_info
-                    .as_ref()
-                    .and_then(|d| d.wallet_history.clone())
-                    .unwrap_or_default()
-            } else {
-                hist
-            };
-            let utxos: Vec<UtxoRec> = if !derived.utxos.is_empty() {
-                derived.utxos.clone()
-            } else {
-                self.st
-                    .debug_info
-                    .as_ref()
-                    .and_then(|d| d.daemon_utxos.clone())
-                    .unwrap_or_default()
-            };
-            let base_rows: Vec<UtxoRec> = if !hist.is_empty() {
-                hist.into_iter()
-                    .filter(|h| {
-                        if min_amount_sats > 0 && h.value_sats.abs() < min_amount_sats {
-                            return false;
-                        }
-                        if self.tx_type_filter != 0
-                            && Self::tx_type_index(&h.kind) != self.tx_type_filter
-                        {
-                            return false;
-                        }
-                        let depth = tip.saturating_sub(h.height as u32);
-                        if self.tx_status_filter == 1 && depth < 6 {
-                            return false;
-                        }
-                        if self.tx_status_filter == 2 && depth >= 6 {
-                            return false;
-                        }
-                        if !search.is_empty() {
-                            let label_hit = self
-                                .st
-                                .label_of(&h.address)
-                                .map(|l| l.to_lowercase().contains(&search))
-                                .unwrap_or(false);
-                            if !label_hit
-                                && !h.address.to_lowercase().contains(&search)
-                                && !h.txid.to_lowercase().contains(&search)
-                            {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .map(|h| {
-                        let mut r = UtxoRec {
-                            txid: [0u8; 32],
-                            n: 0,
-                            value_sats: h.value_sats,
-                            script: Vec::new(),
-                            address: h.address,
-                            height: h.height as u32,
-                            tx_time: h.time,
-                            prev_kind: h.kind,
-                            legacy_kind: h.legacy_kind,
-                        };
-                        // display-order hex is what the UI prints; UtxoRec keeps
-                        // internal order, so decode+reverse once here
-                        if h.txid.len() == 64 {
-                            let bytes: Vec<u8> = (0..32)
-                                .filter_map(|i| {
-                                    u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok()
-                                })
-                                .collect();
-                            if bytes.len() == 32 {
-                                let mut raw = [0u8; 32];
-                                raw.copy_from_slice(&bytes);
-                                raw.reverse();
-                                r.txid = raw;
-                            }
-                        }
-                        r
-                    })
-                    .collect()
-            } else {
-                utxos.iter().cloned().collect()
-            };
+            // Rows come from one shared helper (history file + live coins the
+            // file has not reached) so the page and the headless probe agree.
+            let base_rows: Vec<UtxoRec> = self.st.merged_transaction_rows();
             let mut rows: Vec<(usize, UtxoRec)> =
                 base_rows.into_iter().enumerate().collect();
             // date order: oldest<->newest. Keyed on the created epoch (the
@@ -3615,19 +3524,28 @@ impl Tri7App {
                     // status cell: the glyph alone, with the legacy status
                     // sentence as its hover text (Sami: "the number of
                     // confirmation should be a tooltip over whatever the
-                    // graphic is next to the transaction")
-                    let cell_x = 284.0 + addr_w + 110.0;
-                    let cell_w = cols[5].width.max(40.0);
-                    let (cell_rect, cell_resp) = rui.allocate_exact_size(
-                        Vec2::new(cell_w, 38.0),
+                    // graphic is next to the transaction").
+                    //
+                    // Positioned from the ROW rect rather than by allocating,
+                    // so every row's glyph lands in the same column and the
+                    // layout below it is untouched. The hover response is a
+                    // real interact() on that rect - that is what makes egui
+                    // show a tooltip.
+                    let zone = egui::Rect::from_min_max(
+                        egui::pos2(
+                            rui.max_rect().left() + 284.0 + addr_w + 110.0,
+                            rui.max_rect().top(),
+                        ),
+                        egui::pos2(rui.max_rect().right(), rui.max_rect().bottom()),
+                    );
+                    let hover = rui.interact(
+                        zone,
+                        egui::Id::new(("tx_status", *orig_idx)),
                         egui::Sense::hover(),
                     );
                     if let Some(t) = tex {
                         let icon_rect = egui::Rect::from_center_size(
-                            egui::pos2(
-                                cell_rect.right() - 22.0,
-                                cell_rect.center().y,
-                            ),
+                            egui::pos2(zone.center().x, zone.center().y - 6.0),
                             Vec2::splat(16.0),
                         );
                         egui::Image::from_texture(egui::load::SizedTexture::new(
@@ -3635,11 +3553,8 @@ impl Tri7App {
                             Vec2::splat(16.0),
                         ))
                         .paint_at(rui, icon_rect);
-                        // hover anywhere on the status cell explains it
-                        cell_resp.clone().on_hover_text(conf_label.clone());
-                    } else {
-                        let _ = cell_x;
                     }
+                    hover.on_hover_text(conf_label.clone());
                     resp.clicked()
                 });
                 if ir.inner {

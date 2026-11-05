@@ -73,7 +73,17 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        st.refresh_debug_info_action();
         let (rows, note) = st.load_history_file();
+        // what the Transactions table actually lists (history + live coins)
+        let merged = st.merged_transaction_rows();
+        let newest = merged.first().map(|r| (r.height, r.tx_time)).unwrap_or((0, 0));
+        println!(
+            "merged rows: {} | newest row h{} ({})",
+            merged.len(),
+            newest.0,
+            tri7_core::gui::app_state::stamp_date(newest.1)
+        );
         let oldest = rows.iter().map(|r| r.time).min().unwrap_or(0);
         let newest = rows.iter().map(|r| r.time).max().unwrap_or(0);
         println!("wallet: {}", cfg.wallet_path);
@@ -83,7 +93,6 @@ fn main() {
         println!("newest: {}", tri7_core::gui::app_state::stamp_date(newest));
         println!("note: {}", note);
         // the Overview split, same function the page renders
-        st.refresh_debug_info_action();
         let (sp, sk, un, im, total, tip) = st.balance_split();
         println!(
             "split @ tip h{}: spendable {:.6} | stake {:.6} | unconfirmed {:.6} | immature {:.6} | total {:.6}",

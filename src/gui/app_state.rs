@@ -1634,6 +1634,60 @@ impl AppState {
     }
 
     /// Connection info refresh (status bar + Chain/Debug information page).
+    /// Transaction rows for the Transactions page: the history file PLUS every
+    /// live coin the file has not reached, newest first.
+    ///
+    /// The file is a snapshot; without the merge the newest stakes never
+    /// appeared even though the balance kept climbing.
+    pub fn merged_transaction_rows(&self) -> Vec<crate::gui::state::UtxoRec> {
+        let (hist, _) = self.load_history_file();
+        let mut rows: Vec<crate::gui::state::UtxoRec> = hist
+            .into_iter()
+            .map(|h| {
+                let mut txid = [0u8; 32];
+                if h.txid.len() == 64 {
+                    let bytes: Vec<u8> = (0..32)
+                        .filter_map(|i| u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok())
+                        .collect();
+                    if bytes.len() == 32 {
+                        txid.copy_from_slice(&bytes);
+                        txid.reverse();
+                    }
+                }
+                crate::gui::state::UtxoRec {
+                    txid,
+                    n: 0,
+                    value_sats: h.value_sats,
+                    script: Vec::new(),
+                    address: h.address,
+                    height: h.height as u32,
+                    tx_time: h.time,
+                    prev_kind: h.kind,
+                    legacy_kind: h.legacy_kind,
+                }
+            })
+            .collect();
+        let mut seen: std::collections::HashSet<(String, i64)> = rows
+            .iter()
+            .map(|r| (r.txid_display(), r.value_sats))
+            .collect();
+        let live = self
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.daemon_utxos.clone())
+            .unwrap_or_default();
+        for u in live {
+            if u.value_sats <= 0 {
+                continue;
+            }
+            if seen.insert((u.txid_display(), u.value_sats)) {
+                rows.push(u);
+            }
+        }
+        rows.sort_by(|a, b| b.tx_time.cmp(&a.tx_time).then(b.height.cmp(&a.height)));
+        rows
+    }
+
     /// The Overview balance split, computed exactly like the page does:
     /// (spendable, stake, unconfirmed, immature, total, tip_used).
     ///
