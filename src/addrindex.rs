@@ -273,6 +273,75 @@ pub fn txids(c: &Connection, addrs: &[String]) -> Result<Vec<[u8; 32]>, String> 
     Ok(out)
 }
 
+/// Keeps the index in step with block acceptance instead of rebuilding it.
+///
+/// Opt-in stays opt-in: it only opens when `addressindex.db` already exists.
+/// If the DB is behind (a gap), apply() refuses rather than writing a block out
+/// of order, because a missing output row would make a later spend unmarkable
+/// and the balance would drift. The 5-minute builder closes any such gap.
+pub struct LiveIndex {
+    conn: Connection,
+    next_height: u64,
+}
+
+impl LiveIndex {
+    pub fn open_if_built(state_dir: &Path) -> Option<LiveIndex> {
+        if !exists(state_dir) {
+            return None;
+        }
+        let conn = open(&db_path(state_dir)).ok()?;
+        let next = index_height(&conn) + 1;
+        Some(LiveIndex {
+            conn,
+            next_height: next,
+        })
+    }
+
+    pub fn apply(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {
+        if height != self.next_height {
+            return Err(format!(
+                "index is at h{}, block is h{} (builder will catch up)",
+                self.next_height.saturating_sub(1),
+                height
+            ));
+        }
+        let mut txs: Vec<(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)> = Vec::new();
+        for tx in &block.vtx {
+            let txid = tx.hash().to_vec();
+            let outs: Vec<(u32, i64, Vec<u8>)> = tx
+                .vout
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
+                .collect();
+            let ins: Vec<(Vec<u8>, u32)> = tx
+                .vin
+                .iter()
+                .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
+                .map(|v| (v.prev_hash.to_vec(), v.prev_n))
+                .collect();
+            txs.push((txid, outs, ins));
+        }
+        self.conn
+            .execute_batch("BEGIN")
+            .map_err(|e| format!("begin: {e}"))?;
+        match insert_block(&self.conn, height, &txs) {
+            Ok(_) => {
+                finish(&self.conn, height)?;
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| format!("commit: {e}"))?;
+                self.next_height = height + 1;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Legacy failure text when the index is absent.
 pub const NOT_ENABLED: &str = "Address index not enabled. Start with -addressindex=1";
 

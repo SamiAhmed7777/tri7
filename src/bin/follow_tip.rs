@@ -4373,6 +4373,7 @@ fn stake_tick(
     }
     recent.insert(block.hash(), height_abs, &raw);
     wl.apply_block(&block, height_abs);
+    addrindex_apply(&block, height_abs);
     let mut spent: Vec<(Hash, u32)> = Vec::new();
     for tx in block.vtx.iter().skip(1) {
         for vin in &tx.vin {
@@ -4462,6 +4463,33 @@ fn addr_list<'a>(p: &dyn Fn(usize) -> Option<&'a serde_json::Value>, i: usize) -
     arr.iter()
         .filter_map(|x| x.as_str().map(|s| s.to_string()))
         .collect()
+}
+
+/// Live address index (opt-in: only when addressindex.db exists). Kept in a
+/// process-wide slot because the accept sites are deep in the follow loops.
+static LIVE_ADDRINDEX: std::sync::OnceLock<
+    std::sync::Mutex<Option<tri7_core::addrindex::LiveIndex>>,
+> = std::sync::OnceLock::new();
+
+fn init_addrindex(state_dir: &std::path::Path) {
+    let cell = LIVE_ADDRINDEX.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        *g = tri7_core::addrindex::LiveIndex::open_if_built(state_dir);
+        if g.is_some() {
+            log("addrindex: live updates enabled (addressindex.db present)");
+        }
+    }
+}
+
+/// Best-effort: an index failure must never stop block acceptance.
+fn addrindex_apply(block: &tri7_core::legacy::Block, height: u64) {
+    let Some(cell) = LIVE_ADDRINDEX.get() else { return };
+    let Ok(mut g) = cell.lock() else { return };
+    let Some(ix) = g.as_mut() else { return };
+    match ix.apply(block, height) {
+        Ok(()) => {}
+        Err(e) => log(&format!("addrindex: h{height} skipped: {e}")),
+    }
 }
 
 /// A built-and-verified spend, before it is relayed.
@@ -5483,6 +5511,7 @@ fn handle_message(
                         height_abs, e
                     ));
                 }
+                addrindex_apply(&b, height_abs);
                 let file = st.to_file();
                 // The block is already applied in memory and in the store; a
                 // failed checkpoint write only means the on-disk resume point
@@ -6203,6 +6232,7 @@ fn main() {
             cfg.wallet_path = Some(nw);
         }
     }
+    init_addrindex(&cfg.state_dir);
     let (user, pass) = read_rpc_creds(&cfg);
     let rpc = tri7_rpc(&cfg, &user, &pass);
     // 1. multi-target outbound attach (HEADLESS TOLERANT): with a usable
