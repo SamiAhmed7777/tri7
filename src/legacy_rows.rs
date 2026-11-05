@@ -185,17 +185,31 @@ pub fn stake_reward(credit_total: i64, principal: i64) -> i64 {
     (credit_total - principal).max(0)
 }
 
+/// Is the row's block in the main chain, as far as this client can tell?
+///
+/// The legacy check is a mapBlockIndex lookup, which is authoritative. Our
+/// equivalent is the store index, and the store's threaded map can lag the tip
+/// by design (a body lands after its header). Treating "index hasn't caught up
+/// yet" as "not in the chain" is exactly how a whole wallet turned into
+/// "Generated but not accepted" when the tip advanced past the index.
+///
+/// Rule: a mined row is in the chain unless the tip proves otherwise — height 0
+/// or a height beyond the daemon's tip. Anything below the tip is in the chain.
+fn in_main_chain(height: u64, tip_height: u64) -> bool {
+    height > 0 && height <= tip_height
+}
+
 pub fn status_for(kind: LegacyKind, depth: i64, tip_height: u64, height: u64) -> (LegacyStatus, i64) {
     let generated = matches!(kind, LegacyKind::Generated);
     if generated {
         // GetBlocksToMaturity(): max(0, nCoinbaseMaturity - depth)
         let matures_in = (COINBASE_MATURITY - depth).max(0);
-        if matures_in > 0 {
-            // IsInMainChain() ? Immature : NotAccepted
-            if height > 0 && height <= tip_height {
-                return (LegacyStatus::Immature, matures_in);
-            }
+        if !in_main_chain(height, tip_height) {
+            // genuinely unknown/absent from the chain at this height
             return (LegacyStatus::NotAccepted, 0);
+        }
+        if matures_in > 0 {
+            return (LegacyStatus::Immature, matures_in);
         }
         return (LegacyStatus::Confirmed, 0);
     }
@@ -507,5 +521,53 @@ mod stake_row_tests {
     fn unmined_stake_counts_because_depth_is_positive() {
         assert_eq!(stake_row_value(0, &[1_000_000]), 0);
         assert_eq!(stake_row_value(6, &[1_000_000]), 1_000_000);
+    }
+}
+
+#[cfg(test)]
+mod chain_membership_tests {
+    use super::*;
+
+    /// Regression: a wallet where every stake rendered "Generated but not
+    /// accepted" because the store index lagged the tip and the legacy
+    /// IsInMainChain() equivalent said "unknown" instead of "in the chain".
+    #[test]
+    fn rows_below_the_tip_are_in_the_chain() {
+        // a stake 3 blocks deep is maturing; 207 deep is mature
+        let (st, matures) = status_for(LegacyKind::Generated, 3, 2_205_516, 2_205_514);
+        assert_eq!(st, LegacyStatus::Immature);
+        assert_eq!(matures, 4);
+        let (st_old, _) = status_for(LegacyKind::Generated, 207, 2_205_516, 2_205_310);
+        assert_eq!(st_old, LegacyStatus::Confirmed);
+        // and a very fresh one is Immature too, never NotAccepted
+        let (st2, _) = status_for(LegacyKind::Generated, 1, 2_205_516, 2_205_516);
+        assert_eq!(st2, LegacyStatus::Immature);
+    }
+
+    #[test]
+    fn not_accepted_requires_being_outside_the_chain() {
+        // height beyond the tip = genuinely not in this chain
+        assert_eq!(
+            status_for(LegacyKind::Generated, 3, 2_205_000, 2_206_000).0,
+            LegacyStatus::NotAccepted
+        );
+        // height 0 = never mined
+        assert_eq!(
+            status_for(LegacyKind::Generated, 0, 2_205_000, 0).0,
+            LegacyStatus::NotAccepted
+        );
+    }
+
+    #[test]
+    fn no_generated_row_at_or_below_tip_can_be_not_accepted() {
+        for h in [1u64, 100, 2_200_000, 2_205_000] {
+            let (st, _) = status_for(LegacyKind::Generated, 5, 2_205_516, h);
+            assert_ne!(
+                st,
+                LegacyStatus::NotAccepted,
+                "h{} at tip 2205516 must be in the chain",
+                h
+            );
+        }
     }
 }
