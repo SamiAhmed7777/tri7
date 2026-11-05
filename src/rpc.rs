@@ -1055,6 +1055,7 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         // dated from the containing block (legacy client parity)
         "listwallettx" => {
             let rows = deps.wallet.history();
+            let tip_h = deps.tip.tip().height;
             let out: Vec<Value> = rows
                 .iter()
                 .map(|r| {
@@ -1069,6 +1070,15 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                         "category": r.direction,
                         "kind": r.kind,
                         "spent": r.spent,
+                        // legacy state machine (transactionrecord.cpp updateStatus)
+                        "depth": crate::legacy_rows::depth_of(r.height, tip_h),
+                        "matures_in": if r.kind == "coinbase" || r.kind == "coinstake" {
+                            (crate::legacy_rows::COINBASE_MATURITY
+                                - crate::legacy_rows::depth_of(r.height, tip_h))
+                            .max(0)
+                        } else {
+                            0i64
+                        },
                     })
                 })
                 .collect();

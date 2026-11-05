@@ -115,6 +115,7 @@ fn compute_balances_totals_and_sorts() {
         address: addr.to_string(),
         height: 100,
         tx_time: 1_700_000_000,
+        legacy_kind: String::new(),
         prev_kind: "regular".into(),
     };
     let utxos = vec![mk(&addr_a, 500), mk(&addr_b, 9_000), mk(&addr_a, 1_500)];
@@ -167,6 +168,7 @@ fn funded_utxo(label: &str, value: i64, kind: &str, height: u32) -> (UtxoRec, [u
         address: addr,
         height,
         tx_time: 1_700_000_000,
+        legacy_kind: String::new(),
         prev_kind: kind.into(),
     };
     (utxo, secret, pubkey)
@@ -400,6 +402,7 @@ fn reconcile_tail_applies_spends_and_wallet_additions() {
         address: payload_to_address(payload),
         height: snapshot_height,
         tx_time: 1_700_000_000,
+        legacy_kind: String::new(),
         prev_kind: "regular".into(),
     };
     let mut tx_a = Tx {
@@ -605,6 +608,7 @@ fn stake_status_parses_dryrun_and_counts_mature_weight() {
         address: payload_to_address(&payload),
         height: 2_203_769,
         tx_time: 1_700_000_000 - 4000, // mature vs STAKE_MIN_AGE=3600 at tip_time
+        legacy_kind: String::new(),
         prev_kind: "coinstake".into(),
     };
     let st = load_stake_status(&dry, &tip, &[utxo]);
@@ -1330,6 +1334,7 @@ fn sweep_fixture_derived(funded_addr: &str, script: Vec<u8>) -> gs::DerivedWalle
         address: funded_addr.to_string(),
         height: 100,
         tx_time: 1_400_000_000,
+        legacy_kind: String::new(),
         prev_kind: "regular".into(),
     };
     gs::DerivedWallet {

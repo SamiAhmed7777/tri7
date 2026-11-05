@@ -559,6 +559,9 @@ pub struct UtxoRec {
     /// legacy client dates its history from, so dates match across clients
     pub tx_time: u32,
     pub prev_kind: String, // "regular" | "coinbase" | "coinstake"
+    /// legacy row kind from history.json ("mined" | "recv_with" | "send" | ...)
+    /// — empty for rows derived from the live/snapshot set
+    pub legacy_kind: String,
 }
 
 impl UtxoRec {
@@ -652,6 +655,7 @@ impl UtxoDump {
                     address: u.address,
                     height: u.height,
                     tx_time: u.tx_time,
+                    legacy_kind: String::new(),
                     prev_kind: u.prev_kind,
                 })
             })
@@ -818,6 +822,7 @@ fn apply_tail_bookkeeping(
                 address: crate::address::payload_to_address(&payload),
                 height: height_abs,
                 tx_time,
+                legacy_kind: String::new(),
                 prev_kind: kind.into(),
             });
         }

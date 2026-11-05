@@ -5774,7 +5774,12 @@ fn main() {
                 // actually holds a body for.
                 let mut seed_tip = tip;
                 let mut back = 0u64;
-                while back < 64 && seed_tip > base {
+                // walk back until a body is actually present: the store's last
+                // body can be far below the tip when recent blocks exist only
+                // in the live tip/body cache (mined here, appended in memory).
+                // A 64-block window was not enough and made the wallet show a
+                // zero balance forever ("all my transactions rejected").
+                while back < 5_000 && seed_tip > base {
                     if store2
                         .block_by_height(seed_tip)
                         .ok()
@@ -5787,7 +5792,19 @@ fn main() {
                     back += 1;
                 }
                 if seed_tip <= base {
-                    continue; // store not ready for seeding yet
+                    log(&format!(
+                        "wallet-seed: no stored bodies in h{}..h{} - store behind the tip, \
+                         retrying (this is why the balance would read 0)",
+                        base, tip
+                    ));
+                    continue;
+                }
+                if seed_tip < tip {
+                    log(&format!(
+                        "wallet-seed: store's newest body is h{} (tip h{}) - seeding up to \
+                         there; newer coins arrive as bodies land",
+                        seed_tip, tip
+                    ));
                 }
                 match tri7_core::wallet::read_wallet(wp) {
                     Ok(keys) => match WalletLive::seed(&store2, keys, base, seed_tip) {

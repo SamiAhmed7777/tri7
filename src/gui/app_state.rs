@@ -1778,6 +1778,7 @@ impl AppState {
                                     height: r.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
                                     tx_time: r.get("tx_time").and_then(|x| x.as_i64()).unwrap_or(0) as u32,
                                     prev_kind: r.get("prev_kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
+                                    legacy_kind: String::new(),
                                 });
                             }
                             if !out.is_empty() {
@@ -1811,6 +1812,8 @@ impl AppState {
                                 direction: r.get("direction").and_then(|x| x.as_str()).unwrap_or("in").to_string(),
                                 kind: r.get("kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
                                 spent: r.get("spent").and_then(|x| x.as_bool()).unwrap_or(false),
+                                idx: 0,
+                                legacy_kind: String::new(),
                             };
                             out.push(rec);
                         }

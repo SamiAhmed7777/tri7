@@ -14,6 +14,7 @@ pub mod gui;
 pub mod kernel;
 pub mod keytool;
 pub mod legacy;
+pub mod legacy_rows;
 pub mod p2p;
 pub mod replay;
 pub mod rpc;

@@ -96,6 +96,11 @@ asset_map! {
     "icons/clock3" => "icons/clock3.png",
     "icons/clock4" => "icons/clock4.png",
     "icons/clock5" => "icons/clock5.png",
+    // legacy status glyphs: transaction_0 = not yet in a block,
+    // transaction_conflicted = conflicted, transaction_1..5 = clock1..clock5
+    // (the circle fills as confirmations arrive)
+    "icons/tx_zero" => "icons/tx_zero.png",
+    "icons/tx_conflicted" => "icons/tx_conflicted.png",
     "icons/refresh" => "icons/refresh.png",
     "brand/header" => "brand/brand_header_new@2x.png",
     "brand/mark" => "brand/brand_mark_32.png",
@@ -1941,26 +1946,73 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                 return;
             };
             let tip = st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
-            let mut immature = 0i64;
-            for u in &derived.utxos {
-                if !u.spendable_at(tip + 1) {
-                    immature += u.value_sats;
+            // Legacy split (wallet.cpp): Spendable / Stake / Unconfirmed /
+            // Immature / Total, where
+            //   Spendable   = sum of credits at depth >= 4        (IsTrusted)
+            //   Stake       = stake outputs still maturing        (GetStake)
+            //   Unconfirmed = depth < 4 credits                   (untrusted)
+            //   Immature    = PoW coinbase still maturing
+            //   Total       = all four added
+            // Before this, every minted stake was silently lumped into
+            // Spendable and the four rows were decorative.
+            let (mut spendable, mut stake, mut unconfirmed, mut immature) = (0i64, 0i64, 0i64, 0i64);
+            // history rows carry the authoritative kind + height; fall back to
+            // the derived set when there is no history yet
+            let hist = st.load_history_file().0;
+            if !hist.is_empty() && tip > 0 {
+                for h in &hist {
+                    if h.direction != "in" || h.spent {
+                        continue;
+                    }
+                    let depth = crate::legacy_rows::depth_of(h.height, tip as u64);
+                    let generated = h.kind == "coinstake" || h.kind == "coinbase";
+                    let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
+                    if generated && matures > 0 {
+                        if h.kind == "coinstake" {
+                            stake += h.value_sats;
+                        } else {
+                            immature += h.value_sats;
+                        }
+                    } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
+                        spendable += h.value_sats;
+                    } else {
+                        unconfirmed += h.value_sats;
+                    }
+                }
+            } else {
+                for u in &derived.utxos {
+                    let depth = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
+                    let generated = u.prev_kind == "coinbase" || u.prev_kind == "coinstake";
+                    let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
+                    if generated && matures > 0 {
+                        if u.prev_kind == "coinstake" {
+                            stake += u.value_sats;
+                        } else {
+                            immature += u.value_sats;
+                        }
+                    } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
+                        spendable += u.value_sats;
+                    } else {
+                        unconfirmed += u.value_sats;
+                    }
                 }
             }
-            let (spendable, unconfirmed, stake, total) = if let Some(ds) = daemon_sats {
-                // daemon view: the whole balance is spendable (its snapshot
-                // is chain-covered); immature split comes from local UTXOs
-                // only when they agree with the daemon total
-                (ds, 0i64, 0i64, ds)
-            } else {
-                let total = derived.balances.total_sats;
-                (total - immature, 0i64, 0i64, total)
+            let total = spendable + stake + unconfirmed + immature;
+            // daemon agreement check: the live getbalance must equal the sum we
+            // just derived, otherwise one side is wrong and the user deserves
+            // to know which number is which
+            let daemon_note = match daemon_sats {
+                Some(ds) if (ds - total).abs() > 2_000 => format!(
+                    " · node reports {} TRI",
+                    s::format_tri(ds)
+                ),
+                _ => String::new(),
             };
-            let source_note = if daemon_sats.is_some() {
-                "live via daemon"
-            } else {
-                "from local snapshot"
-            };
+            let _ = daemon_sats;
+            let source_note = format!(
+                "legacy split: spendable (4+ conf), stake maturing, unconfirmed, immature{}",
+                daemon_note
+            );
             egui::Grid::new("balance_grid")
                 .num_columns(2)
                 .spacing([16.0, 7.0])
@@ -2017,7 +2069,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                 });
             });
             ui.add_space(2.0);
-            th::text_meta(ui, source_note);
+            th::text_meta(ui, &source_note);
         });
         // snapshot/coverage/reconciliation sentence → collapsed "Data details"
         let st = &mut self.st;
@@ -3242,8 +3294,27 @@ impl Tri7App {
 
     fn page_transactions(&mut self, ui: &mut egui::Ui) {
         th::page_header(ui, "Transactions", "History for this wallet");
-        let confirmed_tex = self.tex(ui.ctx(), "icons/tx_confirmed");
-        let pending_tex = self.tex(ui.ctx(), "icons/clock1");
+        // legacy glyph set (transactiontablemodel.cpp txStatusDecoration):
+        // unconfirmed circle, clock1..clock5 filling up, green check, conflict
+        let glyph_tex: Vec<(&'static str, Option<egui::TextureHandle>)> = [
+            "icons/tx_zero",
+            "icons/clock1",
+            "icons/clock2",
+            "icons/clock3",
+            "icons/clock4",
+            "icons/clock5",
+            "icons/tx_confirmed",
+            "icons/tx_conflicted",
+        ]
+        .into_iter()
+        .map(|k| (k, self.tex(ui.ctx(), k)))
+        .collect();
+        let glyph_for = |key: &str| -> Option<egui::TextureHandle> {
+            glyph_tex
+                .iter()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, t)| t.clone())
+        };
         th::card(ui, |ui| {
             // filter toolbar (historical page model: type/status/amount/search)
             ui.horizontal(|ui| {
@@ -3386,6 +3457,7 @@ impl Tri7App {
                             height: h.height as u32,
                             tx_time: h.time,
                             prev_kind: h.kind,
+                            legacy_kind: h.legacy_kind,
                         };
                         // display-order hex is what the UI prints; UtxoRec keeps
                         // internal order, so decode+reverse once here
@@ -3423,14 +3495,15 @@ impl Tri7App {
                 }
             });
             let w = ui.available_width();
-            let addr_w = (w - 24.0 - 170.0 - 110.0 - 110.0 - 100.0).max(140.0);
+            let addr_w = (w - 24.0 - 160.0 - 120.0 - 110.0 - 210.0).max(140.0);
+            // legacy table: Status | Date | Type | Address | Amount
             let cols = [
                 th::TableCol::new("", 24.0, false),
-                th::TableCol::new("Date", 170.0, false),
-                th::TableCol::new("Type", 110.0, false),
+                th::TableCol::new("Date", 160.0, false),
+                th::TableCol::new("Type", 120.0, false),
                 th::TableCol::new("Label/Address", addr_w, false),
                 th::TableCol::new("Amount", 110.0, true),
-                th::TableCol::new("Confs", 100.0, true),
+                th::TableCol::new("Status", 210.0, true),
             ];
             // Date header is a real click target: flips newest<->oldest and
             // shows an arrow for the current direction.
@@ -3474,24 +3547,71 @@ impl Tri7App {
             for (i, (orig_idx, u)) in rows.iter().enumerate() {
                 let depth = tip.saturating_sub(u.height);
                 let confirmed = depth >= 6;
-                let tex = if confirmed {
-                    confirmed_tex.as_ref()
+                // legacy status machine (src/legacy_rows.rs) — "Confirmed (12
+                // confirmations)", "Immature (3 confirmations, will be
+                // available after 7)", "Confirming (2 of 4 confirmations)"
+                let lk = if !u.legacy_kind.is_empty() {
+                    match u.legacy_kind.as_str() {
+                        "mined" => crate::legacy_rows::LegacyKind::Generated,
+                        "send" => crate::legacy_rows::LegacyKind::SendToAddress,
+                        "self" => crate::legacy_rows::LegacyKind::SendToSelf,
+                        "recv_from" => crate::legacy_rows::LegacyKind::RecvFromOther,
+                        _ => crate::legacy_rows::LegacyKind::RecvWithAddress,
+                    }
+                } else if u.prev_kind == "coinbase" || u.prev_kind == "coinstake" {
+                    crate::legacy_rows::LegacyKind::Generated
+                } else if u.value_sats < 0 {
+                    crate::legacy_rows::LegacyKind::SendToAddress
                 } else {
-                    pending_tex.as_ref()
+                    crate::legacy_rows::LegacyKind::RecvWithAddress
                 };
-                let color = if confirmed {
-                    th::TX_IN_GREEN_BRIGHT
+                let depth_legacy = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
+                let (lstatus, matures_in) =
+                    crate::legacy_rows::status_for(lk, depth_legacy, tip as u64, u.height as u64);
+                let lrow = crate::legacy_rows::LegacyRow {
+                    txid: u.txid_display(),
+                    idx: 0,
+                    time: u.tx_time,
+                    height: u.height as u64,
+                    kind: lk,
+                    address: u.address.clone(),
+                    debit: if u.value_sats < 0 { u.value_sats } else { 0 },
+                    credit: if u.value_sats > 0 { u.value_sats } else { 0 },
+                    status: lstatus,
+                    depth: depth_legacy,
+                    matures_in,
+                };
+                let status_text = lrow.status_text();
+                let glyph_key = crate::legacy_rows::status_glyph(
+                    &lstatus,
+                    depth_legacy,
+                    !matches!(lstatus, crate::legacy_rows::LegacyStatus::Immature),
+                    matures_in,
+                )
+                .unwrap_or("icons/tx_zero");
+                let glyph = glyph_for(glyph_key);
+                let tex = glyph.as_ref();
+                // colour follows the glyph, exactly like the legacy column:
+                // grey unconfirmed, amber while confirming, green when confirmed
+                let color = match lstatus {
+                    crate::legacy_rows::LegacyStatus::Confirmed => th::TX_IN_GREEN_BRIGHT,
+                    crate::legacy_rows::LegacyStatus::Confirming
+                    | crate::legacy_rows::LegacyStatus::Immature => th::TEXT_PRIMARY,
+                    crate::legacy_rows::LegacyStatus::Conflicted => th::ERROR,
+                    _ => th::TEXT_SECONDARY,
+                };
+                let type_label: String = if lk.label().is_empty() {
+                    Self::tx_type_name(&u.prev_kind).to_string()
                 } else {
-                    th::TX_IN_GREEN
+                    lk.label().to_string()
                 };
-                let type_label = Self::tx_type_name(&u.prev_kind);
                 let label = self
                     .st
                     .label_of(&u.address)
                     .map(|l| l.to_string())
                     .unwrap_or_else(|| u.address.clone());
                 let amt = format!("+{} {}", s::format_tri(u.value_sats), s::TICKER);
-                let conf_label = format!("{}", depth);
+                let conf_label = status_text.clone();
                 let date = fmt_unix(u.tx_time);
                 let selected = sel_idx == Some(*orig_idx);
                 let ir = th::table_row(ui, i, selected, w, |rui| {
@@ -3510,7 +3630,7 @@ impl Tri7App {
                         );
                     }
                     th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
-                    th::table_cell_text(rui, 174.0, cols[2].width, type_label, false, th::TEXT_PRIMARY, false);
+                    th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
                     th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
                     th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
                     th::table_cell_text(

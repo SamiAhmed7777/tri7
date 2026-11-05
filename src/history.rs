@@ -41,6 +41,12 @@ pub struct HistoryRec {
     pub kind: String,
     /// true when the received output has been spent since
     pub spent: bool,
+    /// legacy sub-row index within its transaction (transactionrecord.h idx)
+    #[serde(default)]
+    pub idx: u32,
+    /// legacy kind label key: "recv_with" | "recv_from" | "send" | "self" | "mined"
+    #[serde(default)]
+    pub legacy_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -334,6 +340,13 @@ fn apply_block(
                     direction: "in".into(),
                     kind: kind.into(),
                     spent: false,
+                    // one row per output to us, indexed like the Qt model
+                    idx: n as u32,
+                    legacy_kind: if is_coinbase || is_coinstake {
+                        "mined".into()
+                    } else {
+                        "recv_with".into()
+                    },
                 });
                 owned.insert((txid_internal, n as u32), rows.len() - 1);
             }
@@ -351,6 +364,8 @@ fn apply_block(
                 direction: "out".into(),
                 kind: "regular".into(),
                 spent: true,
+                idx: 0,
+                legacy_kind: "send".into(),
             });
         }
     }
@@ -443,6 +458,8 @@ mod tests {
                 direction: "in".into(),
                 kind: "regular".into(),
                 spent: false,
+                idx: 0,
+                legacy_kind: "recv_with".into(),
             }],
         };
         save_cache(&dir, &c).unwrap();
