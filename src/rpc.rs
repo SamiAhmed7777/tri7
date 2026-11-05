@@ -863,13 +863,40 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                     Err(e) => NativeOutcome::Err(-1, e),
                 };
             }
-            let res = if is_hex_hash {
-                deps.blocks
-                    .block_by_hash(raw.as_deref().expect("hex hash present"))
-            } else {
-                deps.blocks.block_by_height(height.expect("height present"))
-            };
-            match res {
+            if !is_hex_hash {
+                let h = height.expect("height present");
+                // A height lookup must never hand back a body that is not the
+                // chain's block at that height. The offset table stops where
+                // height-threading stopped, so above it a lookup can miss;
+                // verify the answer instead of trusting the offset.
+                return match deps.blocks.block_by_height(h) {
+                    Ok(Some(mut v)) => {
+                        let want = deps.blocks.hash_at(h).ok().flatten();
+                        let got = v
+                            .get("hash")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
+                        match (want, got) {
+                            (Some(w), Some(g)) if w != g => NativeOutcome::Err(
+                                -5,
+                                format!(
+                                    "height {h} resolves to a body that hashes to {g}, not the chain block {w} (height map gap — ask by hash, or repair the store)"
+                                ),
+                            ),
+                            _ => {
+                                v["height"] = json!(h);
+                                NativeOutcome::Ok(v)
+                            }
+                        }
+                    }
+                    Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
+                    Err(e) => NativeOutcome::Err(-1, e),
+                };
+            }
+            match deps
+                .blocks
+                .block_by_hash(raw.as_deref().expect("hex hash present"))
+            {
                 Ok(Some(v)) => NativeOutcome::Ok(v),
                 Ok(None) => NativeOutcome::Err(-5, "Block not found".into()),
                 Err(e) => NativeOutcome::Err(-1, e),

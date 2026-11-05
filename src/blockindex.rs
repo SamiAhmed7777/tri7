@@ -247,6 +247,10 @@ pub fn build_index(
     let mut last_accepted: Option<Hash> = None;
     let mut skipped = 0usize;
     let mut tx_count = 0usize;
+    // hash -> height for the authoritative window, built ONCE. Scanning the
+    // window per frame is O(frames x window) on a cold 2.2M-frame build.
+    let oracle_map: Option<std::collections::HashMap<Hash, u64>> =
+        oracle.map(|o| o.hashes.iter().enumerate().map(|(i, h)| (*h, o.base + i as u64)).collect());
 
     loop {
         match read_exact_or_eof(&mut r, &mut hdr) {
@@ -295,12 +299,7 @@ pub fn build_index(
                     accepted_here = true; // frame 0 anchors height 0
                     height = 0;
                 }
-                Err(_) => match oracle.and_then(|o| {
-                    o.hashes
-                        .iter()
-                        .position(|h| *h == hash)
-                        .map(|i| o.base + i as u64)
-                }) {
+                Err(_) => match oracle_map.as_ref().and_then(|m| m.get(&hash).copied()) {
                     Some(h0) => {
                         accepted_here = true;
                         height = h0;
@@ -309,6 +308,45 @@ pub fn build_index(
                 },
             }
         } else {
+            // HASH-FIRST AUTHORITY. A store can legitimately hold more than
+            // one branch: a reorg leaves the abandoned frames behind, and a
+            // node that forked and later adopted the heavier chain has its own
+            // blocks in the middle of the file. Positional chaining then
+            // refuses the canonical bodies ("does not follow the previous
+            // frame") and those heights go missing from the height map even
+            // though the tipstate oracle knows them.
+            //
+            // So before chaining, ask the authoritative window: if this frame
+            // IS the block at some height, that is its height — hash equality
+            // with the tipstate is stronger evidence than file order.
+            let by_oracle = oracle_map.as_ref().and_then(|m| m.get(&hash).copied());
+            if let Some(hx) = by_oracle {
+                last_accepted = Some(hash);
+                height = hx; // continue threading from this height
+                height_off.push(off);
+                heights_by_seq.push(hx as u32);
+                blocks.push(BlockEntry {
+                    key: key8(&hash),
+                    off,
+                    seq,
+                });
+                walk_tx_ranges(&body, &mut |start, end| {
+                    let txid = sha256d(&body[start..end]);
+                    txs.push(TxEntry {
+                        key: key8(&txid),
+                        off,
+                    });
+                    tx_count += 1;
+                    Ok(())
+                })?;
+                seq += 1;
+                off += (8 + len) as u64;
+                if seq % 100_000 == 0 {
+                    progress(seq as usize);
+                }
+                continue;
+            }
+
             let cand = height + 1;
             let in_window = oracle
                 .map(|o| cand >= o.base && cand <= o.tip)
@@ -946,6 +984,53 @@ impl BlockStore {
     /// Locate a block by its full internal hash: candidate frames via the
     /// truncated key, full Hash9 verification on the bytes. Post-build
     /// appended frames (gap recovery) are consulted after the main index.
+    /// The EXACT bytes of the frame that hashes to `hash`.
+    ///
+    /// `block_by_hash` decodes into a `Block` and callers that re-serialize it
+    /// get a body that is not byte-identical to the chain (extra header bytes,
+    /// tx re-encoding), so its hash no longer matches the block it claims to
+    /// be. Anything that serves a block to another node or client must use
+    /// this and hand back the stored bytes untouched.
+    pub fn raw_body_by_hash(&self, hash: &Hash) -> Result<Option<Vec<u8>>, String> {
+        let inner = match self.inner() {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        for e in inner.blocks.candidates_by_key(key8(hash)) {
+            let body = Self::read_frame(&inner, e.off)?;
+            if &header_hash(&body)? == hash {
+                return Ok(Some(body));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Raw bytes for a height, verified against the height map so a gap can
+    /// never hand back a neighbouring frame.
+    pub fn raw_body_by_height(&self, h: u64) -> Result<Option<Vec<u8>>, String> {
+        let inner = match self.inner() {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        let want = self.hash_at_height(h)?;
+        let off = match inner.blocks.offset_by_height(h) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        let body = Self::read_frame(&inner, off)?;
+        let w = match want {
+            // No expected hash means we cannot prove what this frame is.
+            // Serving it anyway would hand out an unverified body.
+            Some(w) => w,
+            None => return Ok(None),
+        };
+        let got = crate::p2p::internal_to_display(&header_hash(&body)?);
+        if got != w {
+            return Ok(None);
+        }
+        Ok(Some(body))
+    }
+
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
         for e in inner.blocks.candidates_by_key(key8(hash)) {

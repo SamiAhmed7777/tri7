@@ -5278,16 +5278,23 @@ impl BlockDataProvider for StoreAdapter {
         hash_display: Option<&str>,
         height: Option<u64>,
     ) -> Result<Option<String>, String> {
-        let hit = match (hash_display, height) {
+        // Serve the STORED bytes, not a re-serialization of the decoded
+        // Block: re-encoding is not guaranteed byte-identical (header extras,
+        // tx encoding), and a block served to a peer must hash to its own
+        // block hash.
+        match (hash_display, height) {
             (Some(hs), _) => {
                 let hash = tri7_core::p2p::display_to_internal(hs)?;
-                self.store.block_by_hash(&hash)?
+                if let Some(body) = self.store.raw_body_by_hash(&hash)? {
+                    return Ok(Some(rpc::hex_encode(&body)));
+                }
             }
-            (_, Some(h)) => self.store.block_by_height(h)?,
-            _ => None,
-        };
-        if let Some(hit) = hit {
-            return Ok(Some(rpc::hex_encode(&hit.block.serialize())));
+            (_, Some(h)) => {
+                if let Some(body) = self.store.raw_body_by_height(h)? {
+                    return Ok(Some(rpc::hex_encode(&body)));
+                }
+            }
+            _ => {}
         }
         // recent cache (blocks above the file tip): payload IS the wire body
         let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
