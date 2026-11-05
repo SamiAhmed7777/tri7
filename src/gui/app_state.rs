@@ -248,6 +248,11 @@ pub struct AppState {
     pub console: Vec<ConsoleEntry>,
     pub console_input: String,
     pub debug_info: Option<DebugInfo>,
+    /// Auto-refresh stamp: the wallet re-read the node every few seconds so
+    /// new stakes appear by themselves (Sami: "no noticeable updates" - the
+    /// only refresh trigger was the manual button).
+    pub last_auto_refresh: Option<std::time::Instant>,
+
     /// last time the full wallet history was pulled (multi-MB payload —
     /// fetched at most every 30 s, not on every status tick)
     pub last_history_fetch: Option<std::time::Instant>,
@@ -331,6 +336,7 @@ impl AppState {
             console_input: String::new(),
             debug_info: None,
             last_history_fetch: None,
+            last_auto_refresh: None,
             dialogs: Dialogs::default(),
             status_log: Vec::new(),
             explorer,
@@ -1843,6 +1849,23 @@ impl AppState {
             Vec::new(),
             format!("no history.json in {}", dir.display()),
         )
+    }
+
+    /// Called every frame; refreshes the node data at most every 5 s while a
+    /// wallet is open. Cheap calls only (blockcount/listunspent/getbalance);
+    /// the multi-MB history fetch keeps its own 30 s throttle.
+    pub fn maybe_auto_refresh(&mut self) {
+        if !self.loaded() {
+            return;
+        }
+        let due = self
+            .last_auto_refresh
+            .map(|t| t.elapsed().as_secs_f32() >= 5.0)
+            .unwrap_or(true);
+        if due {
+            self.last_auto_refresh = Some(std::time::Instant::now());
+            self.refresh_debug_info_action();
+        }
     }
 
     pub fn refresh_debug_info_action(&mut self) {

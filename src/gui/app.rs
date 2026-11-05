@@ -1626,6 +1626,10 @@ impl eframe::App for Tri7App {
         if self.poll_ticker % 10 == 5 {
             self.st.refresh_debug_info_action();
         }
+        // time-based refresh: the frame ticker above depends on repaints, which
+        // an idle window does not do; this keeps the Transactions list and the
+        // balances current while the wallet sits open
+        self.st.maybe_auto_refresh();
         // ---- embedded node: the wallet works INDIVIDUALLY (Sami) ----
         // once a wallet is loaded, ensure its own node is running for it
         // (spawned next to the GUI exe; state lives in the wallet folder).
@@ -3514,17 +3518,16 @@ impl Tri7App {
                             Vec2::splat(16.0),
                         ))
                         .paint_at(rui, icon_rect);
-                        let hover = rui.interact(
-                            icon_rect.expand(6.0),
-                            egui::Id::new(("tx_status", *orig_idx)),
-                            egui::Sense::hover(),
-                        );
-                        hover.on_hover_text(conf_label.clone());
+                        // tooltip is attached to the row response below (see
+                        // resp.on_hover_text) - a separate interact() inside
+                        // the row loses the hit test to the row itself
+                        let _ = icon_rect;
                     }
                     th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
                     th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
                     th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
                     th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
+                    resp.clone().on_hover_text(conf_label.clone());
                     resp.clicked()
                 });
                 if ir.inner {
