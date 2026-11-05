@@ -4133,7 +4133,45 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn address_entries(&self) -> Vec<AddressEntry> {
-        self.snap.address_entries()
+        // A balances snapshot is optional (a fresh wallet folder has none, and
+        // a node started without --balances never writes one). Serve the live
+        // wallet view instead of failing the whole call: the UI needs the
+        // address list, and the live view already knows every owned output.
+        let from_snap = self.snap.address_entries();
+        if !from_snap.is_empty() {
+            return from_snap;
+        }
+        let mut agg: std::collections::HashMap<String, AddressEntry> =
+            std::collections::HashMap::new();
+        if let Ok(g) = self.wl.lock() {
+            if let Some(w) = g.as_ref() {
+                let kb = w.key_by_payload();
+                for (_, o) in w.live.iter() {
+                    let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
+                        continue;
+                    };
+                    if !kb.contains_key(&dest.payload()) {
+                        continue; // not ours
+                    }
+                    let addr = tri7_core::address::payload_to_address(&dest.payload());
+                    let e = agg.entry(addr.clone()).or_insert(AddressEntry {
+                        address: addr,
+                        balance_sats: 0,
+                        utxos: 0,
+                        received_regular_sats: 0,
+                        received_all_sats: 0,
+                    });
+                    e.balance_sats += o.value;
+                    e.utxos += 1;
+                    // a live unspent output is by definition money received
+                    e.received_regular_sats += o.value;
+                    e.received_all_sats += o.value;
+                }
+            }
+        }
+        let mut out: Vec<AddressEntry> = agg.into_values().collect();
+        out.sort_by(|a, b| b.balance_sats.cmp(&a.balance_sats));
+        out
     }
 
     fn received_regular(&self, addr: &str) -> Option<i64> {

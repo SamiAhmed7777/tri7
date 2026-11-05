@@ -175,6 +175,47 @@ fn main() {
         missing.len()
     );
 
+    // --from-file <bundle.jsonl>: {height,hash,hex} lines produced by a node
+    // that could reach the authoritative chain. Used when the peer's RPC is
+    // not reachable from this machine (loopback-only binding).
+    if let Some(i) = args.iter().position(|a| a == "--from-file") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut fixed = 0usize;
+        let mut refused = 0usize;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let h = v.get("height").and_then(|x| x.as_u64()).unwrap_or(u64::MAX);
+            let want = v.get("hash").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let hexs = v.get("hex").and_then(|x| x.as_str()).unwrap_or("");
+            let bytes = match decode_hex(hexs) {
+                Ok(b) if b.len() >= 80 => b,
+                _ => {
+                    refused += 1;
+                    continue;
+                }
+            };
+            let got = tri7_core::p2p::internal_to_display(&tri7_core::legacy::hash9(&bytes[..80]));
+            if got != want {
+                eprintln!("h{h}: bundle hash mismatch (got {got} want {want}) — REFUSED");
+                refused += 1;
+                continue;
+            }
+            match store.append_block(&bytes, Some(h)) {
+                Ok(_) => fixed += 1,
+                Err(e) => {
+                    eprintln!("h{h}: append failed: {e}");
+                    refused += 1;
+                }
+            }
+        }
+        println!("bundle: appended {fixed}, refused {refused}");
+        return;
+    }
+
     let (host, port) = match peer.split_once(':') {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(19112)),
         None => (peer.clone(), 19112),
