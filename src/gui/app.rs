@@ -1624,6 +1624,24 @@ impl Tri7App {
 
 impl eframe::App for Tri7App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Close button behaviour (Options -> Display):
+        //   minimize / tray -> keep the process (and the node) running
+        //   quit            -> let the window close for real
+        // CancelClose is what actually stops the window from being destroyed.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let o = &self.st.options;
+            if o.tray_on_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                self.st.status_log.push(
+                    "Triangles is still running (node + staking). Reopen from the taskbar."
+                        .into(),
+                );
+            } else if o.minimize_on_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
         Self::apply_theme(ctx);
         self.header(ctx);
         self.sidebar(ctx);
@@ -4785,6 +4803,51 @@ impl Tri7App {
                     ui.label(egui::RichText::new("Amount unit:").color(th::TEXT_SECONDARY));
                     th::disabled_input(ui, 160.0, s::TICKER, "Not supported by this desktop shell");
                 });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("When I close the window")
+                        .strong()
+                        .color(th::TEXT_PRIMARY),
+                );
+                // legacy optionsdialog.ui Window tab, in Sami's words: choose
+                // between closing to the tray, the taskbar, or quitting.
+                // Radio semantics: exactly one behaviour.
+                let mut quit = !self.st.options.minimize_on_close
+                    && !self.st.options.tray_on_close;
+                let mut minimize = self.st.options.minimize_on_close
+                    && !self.st.options.tray_on_close;
+                let mut tray = self.st.options.tray_on_close;
+                if ui
+                    .radio(minimize, "Minimize to the taskbar (keep running)")
+                    .clicked()
+                {
+                    minimize = true;
+                    quit = false;
+                    tray = false;
+                }
+                if ui
+                    .radio(tray, "Close to the system tray (keep running)")
+                    .on_hover_text(
+                        "Hides the window; the node keeps staking and receiving. \
+                         A tray icon needs the tray helper - until then this \
+                         behaves like minimizing.",
+                    )
+                    .clicked()
+                {
+                    tray = true;
+                    minimize = false;
+                    quit = false;
+                }
+                if ui.radio(quit, "Quit Triangles").clicked() {
+                    quit = true;
+                    minimize = false;
+                    tray = false;
+                }
+                self.st.options.tray_on_close = tray;
+                self.st.options.minimize_on_close = minimize || tray;
+                let _ = quit;
+
                 let mut off = false;
                 ui.add_enabled(
                     false,

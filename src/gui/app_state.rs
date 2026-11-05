@@ -57,6 +57,18 @@ pub struct OptionsState {
     /// the tray like the old wallet, with a user preference to disable)
     #[serde(default = "default_true")]
     pub notifications: bool,
+    /// Close button behaviour, exactly the legacy Window tab's choices:
+    ///   --minimize-on-close  -> minimize, keep running
+    ///   --tray-on-close      -> hide to the system tray, keep running
+    ///   neither              -> quit
+    /// (optionsdialog.ui: "Minimize on close", "Minimize to the tray instead
+    /// of the taskbar", "Show only a tray icon after minimizing the window")
+    #[serde(default)]
+    pub minimize_on_close: bool,
+    #[serde(default)]
+    pub tray_on_close: bool,
+    #[serde(default)]
+    pub tray_icon_only: bool,
 }
 
 fn default_true() -> bool {
@@ -71,6 +83,9 @@ impl Default for OptionsState {
             display_addresses: true,
             coin_control: true,
             notifications: true,
+            minimize_on_close: true,
+            tray_on_close: false,
+            tray_icon_only: false,
         }
     }
 }
