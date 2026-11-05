@@ -94,6 +94,19 @@ pub fn save_cache(state_dir: &Path, cache: &HistoryCache) -> Result<(), String> 
     dedupe(&mut cache.rows);
     std::fs::create_dir_all(state_dir)
         .map_err(|e| format!("mkdir {}: {}", state_dir.display(), e))?;
+    // A scan that starts at genesis checkpoints an EMPTY cache immediately.
+    // If that run is killed, the empty file used to replace real history and
+    // the wallet silently showed zero transactions forever (seen on sami-pc:
+    // 29k rows replaced by {"scanned_height":0,"rows":[]}).
+    if cache.rows.is_empty() && cache.scanned_height == 0 {
+        if let Ok(old_raw) = std::fs::read_to_string(cache_path(state_dir)) {
+            if let Ok(old) = serde_json::from_str::<HistoryCache>(&old_raw) {
+                if !old.rows.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
     let tmp = state_dir.join("history.json.tmp");
     let raw = serde_json::to_string(&cache).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, raw).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
