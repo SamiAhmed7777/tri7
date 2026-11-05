@@ -49,8 +49,13 @@ fn create_schema(c: &Connection) -> Result<(), String> {
              PRIMARY KEY(addr, txid, n)
          );
          CREATE INDEX IF NOT EXISTS out_addr_val ON out(addr, spent_height, value);
+         -- spend marking and spend-side tx_addr rows look up by (txid,n); the
+         -- primary key starts with addr, so without this every input scanned
+         -- the whole table (measured: the build crawled at ~17 blocks/s)
+         CREATE INDEX IF NOT EXISTS out_tx ON out(txid, n);
          CREATE TABLE IF NOT EXISTS tx_addr(txid BLOB NOT NULL, addr TEXT NOT NULL,
              height INTEGER NOT NULL, PRIMARY KEY(txid, addr));
+         CREATE INDEX IF NOT EXISTS tx_addr_addr ON tx_addr(addr, height);
          CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);",
     )
     .map_err(|e| format!("schema: {e}"))?;

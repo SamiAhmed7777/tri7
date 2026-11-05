@@ -67,6 +67,30 @@ fn main() {
     };
     println!("store threaded to h{tip}");
 
+    // Heights above the store's threaded tip exist only in the tipstate
+    // window; without this map those blocks were skipped as "not in the
+    // chain", leaving the last few thousand blocks out of the index.
+    let oracle: std::collections::HashMap<String, u64> = {
+        let mut m = std::collections::HashMap::new();
+        if let Ok(raw) = std::fs::read_to_string(state_dir.join("tipstate.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
+                    for e in entries {
+                        if let (Some(h), Some(hash)) = (
+                            e.get("height").and_then(|x| x.as_u64()),
+                            e.get("hash").and_then(|x| x.as_str()),
+                        ) {
+                            m.insert(hash.to_string(), h);
+                        }
+                    }
+                }
+            }
+        }
+        m
+    };
+    println!("tipstate oracle: {} hashes", oracle.len());
+    let chain_tip = oracle.values().copied().max().unwrap_or(tip);
+
     let (conn, _) = match addrindex::begin(&state_dir) {
         Ok(v) => v,
         Err(e) => {
@@ -139,7 +163,10 @@ fn main() {
             }
         };
         let hash = block.hash();
-        let real_height = match store.block_by_hash(&hash) {
+        let display = tri7_core::p2p::internal_to_display(&hash);
+        let real_height = match oracle.get(&display).copied() {
+            Some(h) => h, // authoritative: tipstate knows this block's height
+            None => match store.block_by_hash(&hash) {
             Ok(Some(hit)) => match hit.height {
                 Some(h) if h <= tip => h,
                 _ => {
@@ -151,6 +178,7 @@ fn main() {
                 pos += (8 + blen) as u64;
                 continue; // reorg leftover / not in the chain
             }
+            },
         };
 
         let mut txs: Vec<(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)> = Vec::new();
@@ -217,14 +245,14 @@ fn main() {
     // `pos` here would make every future resume halt on the same frame.
     addrindex::set_offset(&conn, last_slice_off).ok();
     if reached_eof {
-        addrindex::finish(&conn, tip).ok();
+        addrindex::finish(&conn, chain_tip.max(last_height)).ok();
         addrindex::set_complete(&conn, true).ok();
     } else {
         // partial: keep the covered height and say so explicitly
         addrindex::finish(&conn, last_height).ok();
         addrindex::set_complete(&conn, false).ok();
         eprintln!(
-            "addrindex: INCOMPLETE — stopped before the end of the store; index covers h{last_height} of h{tip}"
+            "addrindex: INCOMPLETE — stopped before the end of the store; index covers h{last_height} of h{chain_tip}"
         );
     }
     println!(
