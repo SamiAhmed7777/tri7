@@ -778,6 +778,31 @@ pub fn build_spend(
     dest_script: Vec<u8>,
     dest_value: i64,
     change_script: Option<Vec<u8>>,
+    fee: i64,
+    n_time: u32,
+    spend_height: u32,
+) -> Result<SpendPlan, String> {
+    build_spend_outputs(
+        inputs,
+        vec![Vout {
+            value: dest_value,
+            script_pubkey: dest_script,
+        }],
+        change_script,
+        fee,
+        n_time,
+        spend_height,
+    )
+}
+
+/// Multi-destination spend (legacy `sendmany`). Same construction, signing,
+/// fee and size rules as `build_spend`; only the payment outputs differ, so the
+/// single-destination function is a thin wrapper over this one rather than a
+/// second copy of the logic.
+pub fn build_spend_outputs(
+    inputs: &[SpendInput],
+    dest_outputs: Vec<Vout>,
+    change_script: Option<Vec<u8>>,
     mut fee: i64,
     n_time: u32,
     spend_height: u32,
@@ -785,11 +810,20 @@ pub fn build_spend(
     if inputs.is_empty() {
         return Err("CreateTransaction: no inputs".into());
     }
-    if solver_type(&dest_script).is_none() {
-        return Err("CreateTransaction: destination script is non-standard".into());
+    if dest_outputs.is_empty() {
+        return Err("CreateTransaction: no destinations".into());
     }
-    if !money_range(dest_value) || dest_value <= 0 {
-        return Err("CreateTransaction: send value out of range".into());
+    let mut dest_total = 0i64;
+    for d in &dest_outputs {
+        if solver_type(&d.script_pubkey).is_none() {
+            return Err("CreateTransaction: destination script is non-standard".into());
+        }
+        if !money_range(d.value) || d.value <= 0 {
+            return Err("CreateTransaction: send value out of range".into());
+        }
+        dest_total = dest_total
+            .checked_add(d.value)
+            .ok_or_else(|| "CreateTransaction: destination sum overflow".to_string())?;
     }
     let mut inputs_value = 0i64;
     for i in inputs {
@@ -808,15 +842,12 @@ pub fn build_spend(
 
     loop {
         // nValue + nFeeRet <= nValueIn is enforced below (value in < out)
-        let mut vout = vec![Vout {
-            value: dest_value,
-            script_pubkey: dest_script.clone(),
-        }];
-        let change = inputs_value - dest_value - fee;
+        let mut vout = dest_outputs.clone();
+        let change = inputs_value - dest_total - fee;
         if change < 0 {
             return Err(format!(
                 "CreateTransaction: inputs ({}) < dest ({}) + fee ({})",
-                inputs_value, dest_value, fee
+                inputs_value, dest_total, fee
             ));
         }
         if change > 0 {

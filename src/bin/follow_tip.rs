@@ -4464,7 +4464,184 @@ fn addr_list<'a>(p: &dyn Fn(usize) -> Option<&'a serde_json::Value>, i: usize) -
         .collect()
 }
 
+/// A built-and-verified spend, before it is relayed.
+struct SpendBuilt {
+    txid: String,
+    hex: String,
+    fee_sats: i64,
+    change_sats: i64,
+    bytes: usize,
+}
+
+fn dryrun_json(b: &SpendBuilt) -> serde_json::Value {
+    serde_json::json!({
+        "txid": b.txid,
+        "fee_sats": b.fee_sats,
+        "change_sats": b.change_sats,
+        "bytes": b.bytes,
+        "hex": b.hex,
+        "relayed": false,
+    })
+}
+
+/// P2PKH script from an address payload (OP_DUP OP_HASH160 20 <h160>
+/// OP_EQUALVERIFY OP_CHECKSIG) — same script legacy builds for a payment.
+fn p2pkh_script_for_payload(payload: &[u8; 21]) -> Vec<u8> {
+    let mut s = Vec::with_capacity(25);
+    s.push(tri7_core::spend::OP_DUP);
+    s.push(tri7_core::spend::OP_HASH160);
+    s.push(20);
+    s.extend_from_slice(&payload[1..]);
+    s.push(tri7_core::spend::OP_EQUALVERIFY);
+    s.push(tri7_core::spend::OP_CHECKSIG);
+    s
+}
+
 impl OpsAdapter {
+    /// Build and sign a spend from this node's wallet: pick a source address by
+    /// balance, select coins, build, sign, then self-verify (signature per
+    /// input + connect check). Shared by sendtoaddress and sendmany so neither
+    /// can drift from the other.
+    fn build_wallet_tx(
+        &self,
+        outs: Vec<tri7_core::legacy::Vout>,
+    ) -> Result<SpendBuilt, (i64, String)> {
+        let (tip_h, _) = self.tip();
+        let now = now_secs() as u32;
+        let wl = self.wl.lock().unwrap();
+        let w = wl
+            .as_ref()
+            .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+
+        let mut keys: std::collections::HashMap<String, (Vec<u8>, [u8; 32])> =
+            std::collections::HashMap::new();
+        for k in &w.wallet.keys {
+            keys.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
+        }
+        let kb = w.key_by_payload();
+        let mut inputs: Vec<tri7_core::spend::SpendInput> = Vec::new();
+        let mut by_addr: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for ((txid, n), o) in w.live.iter() {
+            let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
+                continue;
+            };
+            if !kb.contains_key(&dest.payload()) {
+                continue;
+            }
+            let Some((pubkey, secret)) = keys
+                .get(&tri7_core::address::payload_to_address(&dest.payload()))
+                .cloned()
+            else {
+                continue;
+            };
+            let addr = tri7_core::address::payload_to_address(&dest.payload());
+            *by_addr.entry(addr).or_insert(0) += o.value;
+            inputs.push(tri7_core::spend::SpendInput {
+                txid: *txid,
+                n: *n,
+                value: o.value,
+                script_pubkey: o.script.clone(),
+                height: o.height as u32,
+                tx_time: o.created_epoch,
+                is_coinbase: o.coinbase,
+                is_coinstake: o.coinstake,
+                secret,
+                pubkey,
+            });
+        }
+        let mut cands: Vec<(String, i64)> = by_addr.into_iter().collect();
+        cands.sort_by(|a, b| b.1.cmp(&a.1));
+        if cands.is_empty() {
+            return Err((-6, "Insufficient funds".to_string()));
+        }
+        let mut last_err = "Insufficient funds!".to_string();
+        for (from, _bal) in cands {
+            let change_payload = match tri7_core::address::address_to_payload(&from) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let pool: Vec<tri7_core::spend::SpendInput> = inputs
+                .iter()
+                .filter(|i| {
+                    tri7_core::address::script_to_dest(&i.script_pubkey)
+                        .map(|d| tri7_core::address::payload_to_address(&d.payload()) == from)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            if pool.is_empty() {
+                continue;
+            }
+            let target: i64 = outs.iter().map(|o| o.value).sum::<i64>()
+                + tri7_core::rpc::MIN_TX_FEE_SATS;
+            let selected = match tri7_core::spend::select_utxos_covering(&pool, target) {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            let plan = match tri7_core::spend::build_spend_outputs(
+                &selected,
+                outs.clone(),
+                Some(p2pkh_script_for_payload(&change_payload)),
+                tri7_core::rpc::MIN_TX_FEE_SATS,
+                now,
+                tip_h as u32,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            for (i, input) in selected.iter().enumerate() {
+                if let Err(e) = tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey) {
+                    return Err((-1, format!("self-verify failed: {e}")));
+                }
+            }
+            if let Err(e) =
+                tri7_core::spend::connect_inputs_check(&plan.tx, &selected, tip_h as u32)
+            {
+                return Err((-1, format!("connect check failed: {e}")));
+            }
+            let raw = plan.tx.serialize();
+            return Ok(SpendBuilt {
+                txid: tri7_core::p2p::internal_to_display(&plan.tx.hash()),
+                hex: raw.iter().map(|b| format!("{:02x}", b)).collect(),
+                fee_sats: plan.fee,
+                change_sats: plan.change,
+                bytes: raw.len(),
+            });
+        }
+        Err((-6, last_err))
+    }
+
+    /// Accept into the pool and announce — the same path as
+    /// sendrawtransaction, so a built spend cannot bypass pool validation.
+    fn relay_built(&self, build: &SpendBuilt) -> Result<serde_json::Value, (i64, String)> {
+        let raw = tri7_core::p2p::hex_decode(&build.hex)
+            .map_err(|e| (-1, format!("built tx hex: {e}")))?;
+        let mut pool = self.pool.lock().unwrap();
+        let wl = self.wl.lock().unwrap();
+        let w = wl
+            .as_ref()
+            .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+        let rep = pool
+            .accept(&raw, &LiveUtxoView(&w.live), now_secs() as i64)
+            .map_err(|e| (-25, e))?;
+        let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
+        self.announce
+            .lock()
+            .unwrap()
+            .push_back(tri7_core::p2p::display_to_internal(&rep.txid).map_err(|e| (-8, e))?);
+        log(&format!(
+            "BROADCAST: {} ({} bytes, fee {} sats) — inv to {} peer(s)",
+            rep.txid, rep.n_bytes, rep.fee_sats, peers_n
+        ));
+        Ok(serde_json::json!(rep.txid))
+    }
+
     fn tip(&self) -> (u64, Option<IndexEntry>) {
         if let Ok(g) = self.st.try_lock() {
             let h = g.tip_height;
@@ -4532,135 +4709,68 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let amount_sats = (amount_tri * 1_000_000.0).round() as i64;
                 let dest_payload = tri7_core::address::address_to_payload(&to)
                     .map_err(|e| (-5, format!("Invalid address: {e}")))?;
-                let (tip_h, _) = self.tip();
-                let now = now_secs() as u32;
-                let mut wl = self.wl.lock().unwrap();
+                let out = tri7_core::legacy::Vout {
+                    value: amount_sats,
+                    script_pubkey: p2pkh_script_for_payload(&dest_payload),
+                };
+                let build = self.build_wallet_tx(vec![out])?;
+                if ps(2).as_deref() == Some("dryrun") {
+                    return Ok(dryrun_json(&build));
+                }
+                self.relay_built(&build)
+            }
+            // Legacy sendmany: `sendmany "" {"addr":amount,...}`. One
+            // transaction, several payment outputs, same builder and relay path
+            // as sendtoaddress.
+            "sendmany" => {
+                let Some(serde_json::Value::Object(map)) = p(1) else {
+                    return Err((
+                        -8,
+                        "expected {\"address\":amount,...} as the second parameter".to_string(),
+                    ));
+                };
+                let mut outs: Vec<tri7_core::legacy::Vout> = Vec::new();
+                for (addr, amt) in map.iter() {
+                    let amount = amt.as_f64().ok_or_else(|| {
+                        (-8, format!("sendmany: amount for {addr} is not a number"))
+                    })?;
+                    if !(amount > 0.0) {
+                        return Err((-3, format!("sendmany: amount for {addr} out of range")));
+                    }
+                    let payload = tri7_core::address::address_to_payload(addr)
+                        .map_err(|e| (-5, format!("Invalid address {addr}: {e}")))?;
+                    outs.push(tri7_core::legacy::Vout {
+                        value: (amount * 1_000_000.0).round() as i64,
+                        script_pubkey: p2pkh_script_for_payload(&payload),
+                    });
+                }
+                if outs.is_empty() {
+                    return Err((-8, "sendmany: no recipients".to_string()));
+                }
+                let build = self.build_wallet_tx(outs)?;
+                if ps(2).as_deref() == Some("dryrun") {
+                    return Ok(dryrun_json(&build));
+                }
+                self.relay_built(&build)
+            }
+            // Legacy signmessage <address> <message>: the same implementation
+            // the GUI Sign page uses.
+            "signmessage" => {
+                let addr = ps(0).ok_or_else(|| (-8, "expected address".to_string()))?;
+                let msg = ps(1).ok_or_else(|| (-8, "expected message".to_string()))?;
+                let wl = self.wl.lock().unwrap();
                 let w = wl
                     .as_ref()
                     .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
-
-                let mut keys: std::collections::HashMap<String, (Vec<u8>, [u8; 32])> =
-                    std::collections::HashMap::new();
-                for k in &w.wallet.keys {
-                    keys.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
-                }
-                let kb = w.key_by_payload();
-                let mut utxos: Vec<tri7_core::gui::state::UtxoRec> = Vec::new();
-                for ((txid, n), o) in w.live.iter() {
-                    let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
-                        continue;
-                    };
-                    if !kb.contains_key(&dest.payload()) {
-                        continue;
-                    }
-                    utxos.push(tri7_core::gui::state::UtxoRec {
-                        txid: *txid,
-                        n: *n,
-                        value_sats: o.value,
-                        script: o.script.clone(),
-                        address: tri7_core::address::payload_to_address(&dest.payload()),
-                        height: o.height as u32,
-                        tx_time: o.created_epoch,
-                        prev_kind: if o.coinstake {
-                            "coinstake"
-                        } else if o.coinbase {
-                            "coinbase"
-                        } else {
-                            "regular"
-                        }
-                        .into(),
-                        legacy_kind: String::new(),
-                    });
-                }
-                // candidate source addresses, richest first
-                let mut by_addr: std::collections::HashMap<String, i64> =
-                    std::collections::HashMap::new();
-                for u in &utxos {
-                    *by_addr.entry(u.address.clone()).or_insert(0) += u.value_sats;
-                }
-                let mut cands: Vec<(String, i64)> = by_addr.into_iter().collect();
-                cands.sort_by(|a, b| b.1.cmp(&a.1));
-                if cands.is_empty() {
-                    return Err((-6, "Insufficient funds".to_string()));
-                }
-                let derived = tri7_core::gui::state::DerivedWallet {
-                    utxos: utxos.clone(),
-                    balances: tri7_core::gui::state::compute_balances(&utxos, &|_| None),
-                    snapshot_height: tip_h as u32,
-                    coverage_height: tip_h,
-                    reconcile: tri7_core::gui::state::ReconcileReport {
-                        enabled: false,
-                        blocks_applied: 0,
-                        additions_found: 0,
-                        additions_kept: 0,
-                        spends_applied: 0,
-                        heights: (tip_h as u32, tip_h),
-                        source: "live".into(),
-                        note: String::new(),
-                    },
-                };
-                let fee_sats = tri7_core::rpc::MIN_TX_FEE_SATS;
-                let mut last_err = String::from("Insufficient funds!");
-                let mut built: Option<(String, tri7_core::gui::state::SendBuild)> = None;
-                for (from, _bal) in cands {
-                    let req = tri7_core::gui::state::SendRequest {
-                        from: from.clone(),
-                        dest_payload,
-                        amount_sats,
-                        fee_sats,
-                        // change returns to the source address, like legacy
-                        change_payload: tri7_core::address::address_to_payload(&from)
-                            .unwrap_or(dest_payload),
-                    };
-                    match tri7_core::gui::state::build_signed_send(
-                        &req,
-                        &derived,
-                        &keys,
-                        None,
-                        now,
-                        tip_h as u32,
-                    ) {
-                        Ok(b) => {
-                            built = Some((from, b));
-                            break;
-                        }
-                        Err(e) => last_err = e,
-                    }
-                }
-                let Some((_from, build)) = built else {
-                    return Err((-6, last_err));
-                };
-                // Optional third parameter "dryrun": build, sign and
-                // self-verify the transaction but do NOT relay it. Not a
-                // legacy verb, added so the path can be proven on a live
-                // wallet without moving coins.
-                if ps(2).as_deref() == Some("dryrun") {
-                    return Ok(serde_json::json!({
-                        "txid": build.txid_display,
-                        "fee_sats": build.fee_sats,
-                        "change_sats": build.change_sats,
-                        "bytes": build.n_bytes,
-                        "hex": build.tx_hex,
-                        "relayed": false,
-                    }));
-                }
-                // relay exactly like sendrawtransaction
-                let raw = tri7_core::p2p::hex_decode(&build.tx_hex)
-                    .map_err(|e| (-1, format!("built tx hex: {e}")))?;
-                let mut pool = self.pool.lock().unwrap();
-                let rep = pool
-                    .accept(&raw, &LiveUtxoView(&w.live), now as i64)
-                    .map_err(|e| (-25, e))?;
-                let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
-                self.announce
-                    .lock()
-                    .unwrap()
-                    .push_back(tri7_core::p2p::display_to_internal(&rep.txid).map_err(|e| (-8, e))?);
-                log(&format!(
-                    "sendtoaddress: {} sats to {} — tx {} relayed to {} peer(s)",
-                    amount_sats, to, rep.txid, peers_n
-                ));
-                Ok(serde_json::json!(rep.txid))
+                let key = w
+                    .wallet
+                    .keys
+                    .iter()
+                    .find(|k| k.address == addr)
+                    .ok_or_else(|| (-5, "address not found in wallet".to_string()))?;
+                let sig = tri7_core::gui::state::sign_message(&key.secret, &msg)
+                    .map_err(|e| (-1, e))?;
+                Ok(serde_json::json!(sig))
             }
             // Chain-wide address index (legacy -addressindex=1 parity). Absent
             // index -> the exact legacy failure text, never a wallet-scoped
