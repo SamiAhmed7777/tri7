@@ -57,29 +57,37 @@ out of scope (with reason).
 
 ## P0 — wallet cannot be used as a wallet without these
 
-- [ ] **`getnewaddress`** — legacy `rpcwallet.cpp`. tri7 GUI creates keys locally,
-      the RPC does not exist. Any external tool (or a second wallet UI) cannot mint
-      an address.
-- [ ] **`sendtoaddress` / `sendmany` / `sendfrom` / `move`** — the whole
-      programmatic spend path. GUI sends fine (its own tx builder), RPC cannot.
-      `move`/`sendfrom` are legacy account-model verbs: port `sendtoaddress` +
-      `sendmany`, mark `move`/`sendfrom` `[–]`.
-- [ ] **`signmessage` / `verifymessage`** — `verifymessage` is native; signing is
-      implemented in `gui::state` for the GUI page but **not exposed on RPC**.
-- [ ] **`backupwallet`** — copy `wallet.dat` to a caller path. Trivial and it is the
-      one operation a holder must be able to script before touching anything.
-- [ ] **`listtransactions` / `listsinceblock`** — history by account/address/count
-      and "everything since block N". tri7 has `listwallettx` (full dump) but no
-      windowed, paginated form; every integration expects these two.
-- [ ] **`getaddressbalance` / `getaddressutxos` / `getaddresstxids`** — the
-      address-index family. IMPORTANT: legacy only serves these when started
+- [x] **`getnewaddress`** — HD wallets derive m/44'/2222'/0'/0/N (seed still
+      restores the address); non-HD wallets get a random key via add_key.
+- [x] **`sendtoaddress`** — builds and signs with the GUI's builder, relays via
+      the sendrawtransaction path; a non-legacy `dryrun` third parameter builds
+      without relaying.
+- [ ] **`sendmany`** — multiple recipients in one transaction (same builder,
+      more outputs). Still missing.
+- [–] **`sendfrom` / `move`** — legacy account-model verbs; not ported.
+- [ ] **`signmessage`** — signing exists in `gui::state` for the GUI page but is
+      **not exposed on RPC**. (`verifymessage` is native.)
+- [x] **`backupwallet`** — copies the wallet, refuses an existing destination.
+- [x] **`listtransactions` / `listsinceblock`** — paginated window in legacy
+      record shape (newest-first window, ascending result); listsinceblock
+      refuses a hash outside the node's window instead of returning a partial
+      list.
+- [x] **`getaddressbalance` / `getaddressutxos` / `getaddresstxids`** — shipped
+      as a real opt-in chain-wide index (`src/addrindex.rs`, SQLite at
+      `<state_dir>/addressindex.db`, built by `addrindex_build`). Legacy detail: IMPORTANT: legacy only serves these when started
       with `-addressindex=1`, and otherwise throws
       "Address index not enabled. Start with -addressindex=1"
       (`rpcblockchain.cpp:464`). So parity means an opt-in chain-wide address
       index, not a wallet-scoped shortcut: it must cover foreign addresses too.
       A wallet-scoped implementation would answer differently from legacy and
       is therefore not acceptable.
-- [ ] **`gettxoutsetinfo`** — chain state summary; cheap to compute from the index.
+      STATUS: index + three RPCs shipped and unit-tested; the full chain build
+      runs at ~240 blocks/s (~2.5 h on DNS2, resumable, commits every 500
+      blocks). Known limit: it is a separate pass, not incremental during block
+      acceptance, so it goes stale as the tip advances until re-run.
+- [x] **`gettxoutsetinfo`** — height, bestblock, txouts and total_amount from
+      the wallet replay view; transactions/bogosize/hash_serialized_2 are null
+      with a note because no full UTXO-set pass exists.
 
 ## P1 — parity that users will notice
 
@@ -135,6 +143,14 @@ Legacy names → tri7 equivalents (renames, not gaps — verify each):
 - [ ] **Wallet encryption UI** (`askpassphrasedialog`, `walletpassphrase`,
       `encryptwallet`). GUI has 21 mentions of "Encrypt" but the node only reports
       "Unencrypted"; there is no passphrase path.
+      STATUS: the crypto foundation is DONE and OpenSSL-verified
+      (`src/walletcrypto.rs`: EVP_BytesToKey/SHA-512 KDF, AES-256-CBC, secret
+      checksums; both KDF and AES vectors cross-checked against Python). What is
+      NOT done: the encrypted-wallet read/write path. Blocker: ckey rows carry
+      only ciphertext+IV keyed by hash160 (no pubkey, no compressed flag), so the
+      row layout must be validated against a REAL legacy-encrypted wallet, and
+      writing mkey/ckey over a live wallet is the one operation that can brick a
+      holder's funds.
 - [ ] **Start Triangles on login** — Options row currently disabled.
 - [ ] **Detach databases** — Options row currently disabled.
 - [ ] **Staking reserve field** — disabled in Options; pairs with `reservebalance`.
