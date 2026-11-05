@@ -685,6 +685,26 @@ impl Tri7App {
                     .on_hover_text(
                         "Peer transports: C = clearnet, T = Tor, I = I2P",
                     );
+                    ui.separator();
+                    // 5b. Tor/I2P handle: there is ONE drawer implementation
+                    // (net_drawer on the Receive page). This jumps there and
+                    // opens it, instead of growing a second copy that would
+                    // drift out of sync.
+                    let net_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
+                        )
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
+                        .small(),
+                    );
+                    if net_btn.clicked() {
+                        self.st.screen = crate::gui::state::Screen::Receive;
+                        self.net_drawer_open = Some(std::time::Instant::now());
+                    }
+                    net_btn.on_hover_text(
+                        "Your Tor and I2P addresses, with copy — opens on Receive Coins",
+                    );
                     // 6. refresh — 28 px icon-only ghost button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
