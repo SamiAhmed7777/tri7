@@ -3344,7 +3344,17 @@ impl Tri7App {
                     },
                 }
             });
-            let tip = self.st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
+            // daemon height first: the local tipstate file is optional and a
+            // missing one used to make tip 0, which marked every mined row as
+            // "Generated but not accepted"
+            let tip = self
+                .st
+                .debug_info
+                .as_ref()
+                .filter(|d| d.reachable)
+                .and_then(|d| d.blocks)
+                .or_else(|| self.st.tip.as_ref().map(|x| x.height))
+                .unwrap_or(0) as u32;
             let min_amount_sats: i64 = self
                 .tx_min_amount
                 .trim()

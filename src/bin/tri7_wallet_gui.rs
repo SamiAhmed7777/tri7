@@ -94,6 +94,39 @@ fn main() {
             im as f64 / 1e6,
             total as f64 / 1e6
         );
+        // sample row statuses exactly as the Transactions table renders them
+        let (_, _, _, _, _, tip_h) = st.balance_split();
+        for r in rows.iter().take(5) {
+            let lk = if r.kind == "coinbase" || r.kind == "coinstake" {
+                tri7_core::legacy_rows::LegacyKind::Generated
+            } else if r.value_sats < 0 {
+                tri7_core::legacy_rows::LegacyKind::SendToAddress
+            } else {
+                tri7_core::legacy_rows::LegacyKind::RecvWithAddress
+            };
+            let depth = tri7_core::legacy_rows::depth_of(r.height, tip_h);
+            let (status, matures) =
+                tri7_core::legacy_rows::status_for(lk, depth, tip_h, r.height);
+            let row = tri7_core::legacy_rows::LegacyRow {
+                txid: r.txid.clone(),
+                idx: 0,
+                time: r.time,
+                height: r.height,
+                kind: lk,
+                address: r.address.clone(),
+                debit: 0,
+                credit: r.value_sats,
+                status,
+                depth,
+                matures_in: matures,
+            };
+            println!(
+                "row h{} depth {} -> {}",
+                r.height,
+                depth,
+                row.status_text()
+            );
+        }
         println!("--- what the page would print ---");
         println!("{}", st.history_status_line());
         std::process::exit(if rows.is_empty() { 1 } else { 0 });
