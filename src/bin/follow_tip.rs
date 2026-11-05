@@ -3737,6 +3737,11 @@ struct LiveOut {
     /// block time capped by the containing block's own time (tx.nTime is 0 on
     /// staker blocks, so the block time is the only usable stamp).
     created_epoch: u32,
+    /// block was mined by proof of stake (IsCoinStake) — the wallet needs this
+    /// to show a stake as a stake instead of a plain transfer
+    coinstake: bool,
+    /// block was a proof-of-work block (IsCoinBase)
+    coinbase: bool,
 }
 
 /// The wallet's live UTXO view: seeded by scanning the disk store from the
@@ -3765,6 +3770,20 @@ impl tri7_core::txpool::UtxoView for LiveUtxoView<'_> {
     }
 }
 
+
+/// A block is a PoW block when its first transaction is a coinbase (no real
+/// prevout and a zero-value first output).
+fn tx_is_coinbase(block: &Block) -> bool {
+    block
+        .vtx
+        .first()
+        .map(|tx| {
+            tx.vin.iter().any(|v| v.prev_n == u32::MAX)
+                && tx.vout.first().map(|o| o.value == 0).unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 impl WalletLive {
     /// Scan the disk store from `base` to `tip` and build the exact live
     /// set. Requires the store index ready (heights_ok).
@@ -3786,6 +3805,24 @@ impl WalletLive {
     /// Apply one accepted block: remove spent prevouts (all non-coinbase
     /// txs), add non-empty outputs.
     fn apply_block(&mut self, block: &Block, height: u64) {
+        // classify the block once: a stake block's first tx is the coinstake
+        // (vin carries a real prevout), a PoW block's first tx is a coinbase
+        // (vin.prev_n == u32::MAX). Wallet rows and their maturity rules both
+        // depend on this distinction.
+        let cb = block.vtx.first().map(|tx| {
+            tx.vin.iter().any(|v| v.prev_n == u32::MAX) && tx.vout.first().map(|o| o.value == 0).unwrap_or(false)
+        }).unwrap_or(false);
+        let is_coinstake = block.vtx.len() > 1
+            && block.vtx[1]
+                .vin
+                .iter()
+                .any(|v| v.prev_n != u32::MAX)
+            && block
+                .vtx
+                .first()
+                .map(|tx| tx.vout.first().map(|o| o.value == 0).unwrap_or(false))
+                .unwrap_or(false);
+        let _ = cb;
         for tx in block.vtx.iter().skip(1) {
             for vin in &tx.vin {
                 if vin.prev_n != u32::MAX {
@@ -3809,6 +3846,8 @@ impl WalletLive {
                         } else {
                             tx.time
                         },
+                        coinstake: is_coinstake,
+                        coinbase: !is_coinstake && tx_is_coinbase(block),
                     });
                 }
             }
@@ -4051,7 +4090,21 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                         // leave the tx field at 0 and the legacy client dates
                         // rows from the block, so this matches it exactly
                         tx_time: o.created_epoch as i64,
-                        prev_kind: if o.tx_time == 0 { "stake" } else { "regular" }.into(),
+                        // prev_kind must say what the coin IS. It used to be
+                        // inferred from tx_time == 0, which only means "the
+                        // staker left nTime blank" - so every live stake was
+                        // reported as a plain transfer and the Overview Stake
+                        // row could never fill.
+                        prev_kind: if o.coinstake {
+                            "coinstake"
+                        } else if o.coinbase {
+                            "coinbase"
+                        } else if o.tx_time == 0 {
+                            "stake" // legacy label kept for older consumers
+                        } else {
+                            "regular"
+                        }
+                        .into(),
                     });
                 }
                 rows.sort_by(|a, b| b.height.cmp(&a.height));

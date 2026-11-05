@@ -1964,45 +1964,11 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             //   Total       = all four added
             // Before this, every minted stake was silently lumped into
             // Spendable and the four rows were decorative.
-            let (mut spendable, mut stake, mut unconfirmed, mut immature) = (0i64, 0i64, 0i64, 0i64);
-            // THE LIVE SET IS THE SOURCE for balances. History is a snapshot
-            // file: coins spent since it was written are still listed as
-            // unspent there and coins created after it are missing, so summing
-            // history showed 0 spendable on a wallet holding 3,202 TRI.
-            // listunspent (the node's live view) is the truth; history is only
-            // for the Transactions list.
-            let live_rows = st
-                .debug_info
-                .as_ref()
-                .and_then(|d| d.daemon_utxos.clone())
-                .unwrap_or_default();
-            // one shape for the split: (value, height, kind)
-            let mut coins: Vec<(i64, u64, String)> = Vec::new();
-            if !live_rows.is_empty() {
-                for u in &live_rows {
-                    coins.push((u.value_sats, u.height as u64, u.prev_kind.clone()));
-                }
-            } else {
-                for u in &derived.utxos {
-                    coins.push((u.value_sats, u.height as u64, u.prev_kind.clone()));
-                }
-            }
-            for (value, height, kind) in coins {
-                let depth = crate::legacy_rows::depth_of(height, tip as u64);
-                let generated = kind == "coinbase" || kind == "coinstake";
-                let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
-                if generated && matures > 0 {
-                    if kind == "coinstake" {
-                        stake += value;
-                    } else {
-                        immature += value;
-                    }
-                } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
-                    spendable += value;
-                } else {
-                    unconfirmed += value;
-                }
-            }
+            // legacy split comes from ONE place (AppState::balance_split) so the
+            // page and the headless probe can never disagree again
+            let (spendable, stake, unconfirmed, immature, total, tip_used) =
+                st.balance_split();
+            let _ = tip_used;
             let total = spendable + stake + unconfirmed + immature;
             // daemon agreement check: the live getbalance must equal the sum we
             // just derived, otherwise one side is wrong and the user deserves
@@ -2061,21 +2027,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     ui.end_row();
                 });
             ui.separator();
+            // Total sits directly beside its label (Sami: "move the total more
+            // close to where it shows total"), and the explanatory line under
+            // it is gone - the rows already carry their own tooltips.
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Total:").color(th::TEXT_SECONDARY));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{} {}", s::format_tri(total), s::TICKER))
-                            .size(22.0)
-                            .strong()
-                            .monospace()
-                            .color(th::TEXT_PRIMARY),
-                    )
-                    .on_hover_text("Your current total balance");
-                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("{} {}", s::format_tri(total), s::TICKER))
+                        .size(22.0)
+                        .strong()
+                        .monospace()
+                        .color(th::TEXT_PRIMARY),
+                )
+                .on_hover_text("Your current total balance");
             });
-            ui.add_space(2.0);
-            th::text_meta(ui, &source_note);
+            let _ = &source_note;
         });
         // snapshot/coverage/reconciliation sentence → collapsed "Data details"
         let st = &mut self.st;
@@ -3299,7 +3266,7 @@ impl Tri7App {
     }
 
     fn page_transactions(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Transactions", "History for this wallet");
+        th::page_header(ui, "Transactions", "");
         // legacy glyph set (transactiontablemodel.cpp txStatusDecoration):
         // unconfirmed circle, clock1..clock5 filling up, green check, conflict
         let glyph_tex: Vec<(&'static str, Option<egui::TextureHandle>)> = [
@@ -3350,11 +3317,6 @@ impl Tri7App {
                     Some("label / address / txid"),
                 );
             });
-            ui.add_space(4.0);
-            th::text_meta(
-                ui,
-                &self.st.history_status_line(),
-            );
             ui.add_space(6.0);
             // NO local derived wallet is required to show history: the rows
             // come from <wallet folder>/history.json (or the daemon). Requiring

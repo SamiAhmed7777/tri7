@@ -160,6 +160,31 @@ pub fn status_glyph(status: &LegacyStatus, depth: i64, _mature: bool, matures_in
 /// transactionrecord.cpp updateStatus() — the status machine, reduced to the
 /// cases a chain-backed row can be in (no offline/open-until-date states: we
 /// only render rows that are in a block or in the mempool).
+/// wallet.cpp GetStake(): the "Stake" row is every coinstake output that is
+/// mined AND still maturing (`IsCoinStake() && GetBlocksToMaturity() > 0 &&
+/// GetDepthInMainChain() > 0`), summed with GetCredit — i.e. the whole stake
+/// transaction's value, NOT only the reward output (the reward is the net
+/// difference; the principal is returned in the second output).
+///
+/// `tx_values` is every output value of that coinstake transaction that the
+/// wallet owns; `depth` is the coinstake block's depth.
+pub fn stake_row_value(depth: i64, tx_values: &[i64]) -> i64 {
+    if depth <= 0 {
+        return 0;
+    }
+    if (COINBASE_MATURITY - depth).max(0) == 0 {
+        return 0; // matured: the coins are plain balance now
+    }
+    tx_values.iter().sum()
+}
+
+/// A stake's *reward* — the part a holder thinks of as "what I just earned".
+/// Legacy shows it as the Mined row: nNet when positive, else value-out minus
+/// the stake principal (transactionrecord.cpp decomposeTransaction).
+pub fn stake_reward(credit_total: i64, principal: i64) -> i64 {
+    (credit_total - principal).max(0)
+}
+
 pub fn status_for(kind: LegacyKind, depth: i64, tip_height: u64, height: u64) -> (LegacyStatus, i64) {
     let generated = matches!(kind, LegacyKind::Generated);
     if generated {
@@ -456,5 +481,31 @@ mod live_split_tests {
         let (sp, _st, un, _im) = split(&[(1_000_000, 2_205_400, "regular")], 2_205_400);
         assert_eq!(sp, 0);
         assert_eq!(un, 1_000_000);
+    }
+}
+
+#[cfg(test)]
+mod stake_row_tests {
+    use super::*;
+
+    #[test]
+    fn maturing_stake_row_is_the_whole_transaction_value() {
+        // principal 143.7 TRI returned + 0.0084 reward, depth 1 -> maturing
+        let values = vec![14_377_923i64, 8_448];
+        assert_eq!(stake_row_value(1, &values), 14_386_371);
+        assert_eq!(stake_reward(14_386_371, 14_377_923), 8_448);
+    }
+
+    #[test]
+    fn matured_stake_leaves_the_stake_row() {
+        // at 7 confirmations legacy stops calling it Stake; it is balance now
+        assert_eq!(stake_row_value(7, &[1_000_000]), 0);
+        assert_eq!(stake_row_value(20, &[1_000_000]), 0);
+    }
+
+    #[test]
+    fn unmined_stake_counts_because_depth_is_positive() {
+        assert_eq!(stake_row_value(0, &[1_000_000]), 0);
+        assert_eq!(stake_row_value(6, &[1_000_000]), 1_000_000);
     }
 }

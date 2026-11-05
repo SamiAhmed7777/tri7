@@ -1642,7 +1642,6 @@ impl AppState {
     /// depth 0 and the whole balance showed as Unconfirmed. The daemon's
     /// height is authoritative when it is reachable.
     pub fn balance_split(&self) -> (i64, i64, i64, i64, i64, u64) {
-        let (mut sp, mut st_, mut un, mut im) = (0i64, 0i64, 0i64, 0i64);
         let daemon_tip = self
             .debug_info
             .as_ref()
@@ -1651,6 +1650,34 @@ impl AppState {
         let tip = daemon_tip
             .or_else(|| self.tip.as_ref().map(|x| x.height))
             .unwrap_or(0);
+
+        // ---- Stake row: legacy CWallet::GetStake --------------------------
+        // `IsCoinStake() && GetBlocksToMaturity() > 0 && depth > 0` — the stake
+        // outputs this wallet mined that have NOT matured yet (maturity 7).
+        // The value of such an output is principal + reward in one coin,
+        // because this chain pays the returned stake and the reward in the
+        // same output.
+        //
+        // Note what this row is NOT: it is not "coins currently eligible to
+        // stake". Those are ordinary spendable coins (they stay in Spendable
+        // and also count toward the staking weight on the Staking page).
+        // Legacy only ever put *pending* stake outputs here.
+        let mut stake = 0i64;
+        let live = self
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.daemon_utxos.clone())
+            .unwrap_or_else(|| self.derived.as_ref().map(|d| d.utxos.clone()).unwrap_or_default());
+        for u in &live {
+            if u.prev_kind != "coinstake" {
+                continue;
+            }
+            let depth = crate::legacy_rows::depth_of(u.height as u64, tip);
+            stake += crate::legacy_rows::stake_row_value(depth, &[u.value_sats]);
+        }
+
+        // ---- the other three rows come from the live set ------------------
+        let (mut sp, mut un, mut im) = (0i64, 0i64, 0i64);
         let rows = self
             .debug_info
             .as_ref()
@@ -1661,9 +1688,9 @@ impl AppState {
             let generated = u.prev_kind == "coinbase" || u.prev_kind == "coinstake";
             let matures = (crate::legacy_rows::COINBASE_MATURITY - depth).max(0);
             if generated && matures > 0 {
-                if u.prev_kind == "coinstake" {
-                    st_ += u.value_sats;
-                } else {
+                // maturing coinstake is the Stake row above; only a PoW
+                // coinbase belongs in Immature
+                if u.prev_kind == "coinbase" {
                     im += u.value_sats;
                 }
             } else if depth >= crate::legacy_rows::RECOMMENDED_CONFIRMATIONS {
@@ -1672,7 +1699,7 @@ impl AppState {
                 un += u.value_sats;
             }
         }
-        (sp, st_, un, im, sp + st_ + un + im, tip)
+        (sp, stake, un, im, sp + stake + un + im, tip)
     }
 
     /// Visible diagnostic: what the Transactions page is actually reading.
@@ -1855,6 +1882,8 @@ impl AppState {
                                 spent: r.get("spent").and_then(|x| x.as_bool()).unwrap_or(false),
                                 idx: 0,
                                 legacy_kind: String::new(),
+                                coinstake: r.get("kind").and_then(|x| x.as_str()) == Some("coinstake"),
+                                stake_principal: 0,
                             };
                             out.push(rec);
                         }

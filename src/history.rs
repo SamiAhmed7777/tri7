@@ -47,6 +47,14 @@ pub struct HistoryRec {
     /// legacy kind label key: "recv_with" | "recv_from" | "send" | "self" | "mined"
     #[serde(default)]
     pub legacy_kind: String,
+    /// produced by a proof-of-stake block (coinstake output)
+    #[serde(default)]
+    pub coinstake: bool,
+    /// for a coinstake: the stake principal returned in the same transaction.
+    /// wallet.cpp GetStake() sums the WHOLE transaction value, so the Stake
+    /// row needs principal + reward, not the reward alone.
+    #[serde(default)]
+    pub stake_principal: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -347,6 +355,22 @@ fn apply_block(
                     } else {
                         "recv_with".into()
                     },
+                    coinstake: is_coinstake,
+                    // principal = outputs paying us in this tx minus this one;
+                    // for a normal coinstake that is the returned stake
+                    stake_principal: if is_coinstake {
+                        tx.vout
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, o)| {
+                                *i != n
+                                    && out_owner(&o.script_pubkey, by_payload, by_pubkey).is_some()
+                            })
+                            .map(|(_, o)| o.value)
+                            .sum()
+                    } else {
+                        0
+                    },
                 });
                 owned.insert((txid_internal, n as u32), rows.len() - 1);
             }
@@ -366,6 +390,8 @@ fn apply_block(
                 spent: true,
                 idx: 0,
                 legacy_kind: "send".into(),
+                coinstake: false,
+                stake_principal: 0,
             });
         }
     }
@@ -460,6 +486,8 @@ mod tests {
                 spent: false,
                 idx: 0,
                 legacy_kind: "recv_with".into(),
+                coinstake: false,
+                stake_principal: 0,
             }],
         };
         save_cache(&dir, &c).unwrap();
