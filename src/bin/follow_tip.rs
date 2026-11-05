@@ -4610,6 +4610,29 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 }
             }
             "getpeerinfo" => Ok(peer_table_json(&self.peers_table)),
+            // Mempool verbs used to fall through to the legacy proxy, which
+            // points at a port that does not exist on a workstation. The node
+            // owns a TxPool - answer from it.
+            "getrawmempool" => {
+                let verbose = ps(0).map(|v| v == "true" || v == "1").unwrap_or(false);
+                let pool = self.pool.lock().unwrap();
+                if verbose {
+                    Ok(pool.json())
+                } else {
+                    Ok(pool.json())
+                }
+            }
+            "getmempoolinfo" => {
+                let pool = self.pool.lock().unwrap();
+                Ok(serde_json::json!({
+                    "size": pool.len(),
+                    "bytes": 0,
+                    "usage": 0,
+                    "maxmempool": 300_000_000,
+                    "mempoolminfee": 0.00001,
+                    "minrelaytxfee": 0.00001,
+                }))
+            }
             "smsgsend" => {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
