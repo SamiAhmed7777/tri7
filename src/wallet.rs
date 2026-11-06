@@ -72,6 +72,43 @@ fn decode_compact_size(buf: &[u8], pos: &mut usize) -> Result<u64, String> {
 }
 
 /// key blob = CompactSize(type-len) + type-string + optional suffix.
+/// Strip the address from a `name` record suffix, accepting BOTH layouts:
+///   legacy:  CS(34) T…           (std::string serialization)
+///   legacy-written-by-tri7: CS(34) CS(34) T…  (double prefix, pre-2026-11-06)
+fn strip_name_suffix(suffix: &[u8]) -> Vec<u8> {
+    // Every layout the chain has ever written prefixes the address with one
+    // length byte, and 34 == 0x22 == ASCII '"' makes the first byte ambiguous.
+    // Instead of pattern-matching shapes, try each plausible split and keep the
+    // candidate that actually IS an address (chain version byte + length).
+    fn is_addr(b: &[u8]) -> bool {
+        (b.len() == 34 || b.len() == 35) && matches!(b.first(), Some(b'T') | Some(b'C'))
+    }
+    let mut candidates: Vec<&[u8]> = Vec::new();
+    if is_addr(suffix) {
+        candidates.push(suffix);
+    }
+    if suffix.len() > 1 {
+        let n = suffix[0] as usize;
+        if n < 0xfd && suffix.len() >= 1 + n {
+            candidates.push(&suffix[1..1 + n]);
+        }
+        candidates.push(&suffix[1..]);
+        if suffix.len() > 2 && suffix[1] as usize + 2 <= suffix.len() {
+            let m = suffix[1] as usize;
+            candidates.push(&suffix[2..2 + m]);
+        }
+    }
+    for c in candidates {
+        if is_addr(c) {
+            return c.to_vec();
+        }
+    }
+    // nothing looked like an address: strip one length prefix, best effort
+    if suffix.len() > 1 && suffix[0] < 0xfd && suffix.len() >= 1 + suffix[0] as usize {
+        return suffix[1..1 + suffix[0] as usize].to_vec();
+    }
+    suffix.to_vec()
+}
 fn parse_key_blob(blob: &[u8]) -> Result<(String, Vec<u8>), String> {
     let mut pos = 0usize;
     let tlen = decode_compact_size(blob, &mut pos)? as usize;
@@ -208,14 +245,10 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
                 }
             }
             "name" => {
-                // suffix = CompactSize(addr len) + address string
+                // suffix = address string (legacy single prefix, OR the double
+                //          prefix earlier tri7 builds wrote — both accepted)
                 // value  = CompactSize(label len) + label string
-                let mut apos = 0usize;
-                let alen = decode_compact_size(&suffix, &mut apos)? as usize;
-                if suffix.len() < apos + alen {
-                    return Err("name record: address overruns suffix".into());
-                }
-                let addr = String::from_utf8_lossy(&suffix[apos..apos + alen]).to_string();
+                let addr = String::from_utf8_lossy(&strip_name_suffix(&suffix)).to_string();
                 let mut vpos = 0usize;
                 let vlen = decode_compact_size(&value, &mut vpos)? as usize;
                 if value.len() < vpos + vlen {
@@ -470,11 +503,34 @@ pub fn encode_keymeta_value(create_time: i64) -> Vec<u8> {
 }
 
 /// `name` row key blob: 04 "name" + CS(len) + base58 address string.
+///
+/// NOTE (2026-11-06): this is the shape the wallet READER accepts, but the
+/// LEGACY client writes these rows as `std::string` values, i.e. a bare
+/// CompactSize-prefixed string with NO inner CompactSize:
+/// `04 "name" 22 "T…"` (one length byte). Rows written by this helper appear
+/// with a visible leading quote in a hex dump (`04 6e616d65 22 22 54…`) because
+/// 0x22 is both the CS(34) byte and the ASCII '"'. Addresses are 34 chars, so
+/// that byte doubles as the opening quote and the reader still parses them —
+/// but a legacy QT reading a wallet we wrote would see a corrupt name. Use
+/// `encode_legacy_name_keyblob` for any row that must be byte-identical to the
+/// original client's.
 pub fn encode_name_keyblob(address: &str) -> Vec<u8> {
     let mut s = Vec::new();
     push_compact_size(&mut s, address.len() as u64);
     s.extend_from_slice(address.as_bytes());
     encode_key_blob("name", &s)
+}
+
+/// `name` row key blob in the ORIGINAL client's byte layout: the address is a
+/// serialized `std::string`, so the record key is `CS(4) "name" CS(34) T…` with
+/// exactly ONE length prefix. Byte-identical to what the Qt wallet writes.
+pub fn encode_legacy_name_keyblob(address: &str) -> Vec<u8> {
+    let mut k = Vec::new();
+    push_compact_size(&mut k, 4);
+    k.extend_from_slice(b"name");
+    push_compact_size(&mut k, address.len() as u64);
+    k.extend_from_slice(address.as_bytes());
+    k
 }
 
 /// `name` row value: std::string label (empty label = single 0x00 byte).
@@ -923,7 +979,7 @@ impl WalletHandle {
         let now = now_unix();
         let meta_row = (encode_keymeta_keyblob(&pubkey33), encode_keymeta_value(now));
         let address = pubkey_to_address(&pubkey33);
-        let name_row = (encode_name_keyblob(&address), encode_name_value(label));
+        let name_row = (encode_legacy_name_keyblob(&address), encode_name_value(label));
 
         // Legacy WriteKey passes fOverwrite=false for the key row — an
         // existing key is an error, never a silent overwrite. (The rows all
@@ -1017,7 +1073,9 @@ impl WalletHandle {
     /// these into its address book / receive page.
     pub fn set_label(&mut self, address: &str, label: &str) -> Result<(), String> {
         decode_address_payload(address)?;
-        let row = (encode_name_keyblob(address), encode_name_value(label));
+        // LEGACY layout: a new label must be readable by the original client,
+        // so write the single-CompactSize form (see encode_legacy_name_keyblob)
+        let row = (encode_legacy_name_keyblob(address), encode_name_value(label));
         self.ensure_backup()?;
         self.write_rows(&[row], "set_label")?;
         // Reader verification on the label surface (names vector).
@@ -1272,7 +1330,7 @@ impl WalletHandle {
         let now = now_unix();
         let meta_row = (encode_keymeta_keyblob(&pubkey33), encode_keymeta_value(now));
         let address = pubkey_to_address(&pubkey33);
-        let name_row = (encode_name_keyblob(&address), encode_name_value(label));
+        let name_row = (encode_legacy_name_keyblob(&address), encode_name_value(label));
         let next = index + 1;
         let chain_row = (encode_key_blob("hdchain", &[]), encode_hdchain_value(next));
 
@@ -1773,6 +1831,47 @@ mod tests {
         // the reader path still errors on nothing; wallet intact
         assert!(read_wallet(&path).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The label row is written in the ORIGINAL client's byte layout and the
+    /// reader accepts BOTH that layout and the double-prefixed one earlier
+    /// tri7 builds produced (a wallet holding both must not lose labels).
+    #[test]
+    fn name_rows_use_legacy_bytes_and_reader_accepts_both_layouts() {
+        let addr = "T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY";
+        let legacy = encode_legacy_name_keyblob(addr);
+        // record key prefix is CS(4)+"name"
+        assert_eq!(&legacy[..5], &[0x04, b'n', b'a', b'm', b'e']);
+        // then EXACTLY one length byte (34), then the address itself
+        let body = &legacy[5..];
+        assert_eq!(body[0] as usize, addr.len());
+        assert_eq!(&body[1..1 + addr.len()], addr.as_bytes());
+        assert_eq!(body.len(), 1 + addr.len(), "one prefix, not two");
+
+        // By 2026-11 the two helpers emit the SAME bytes; the reader keeps
+        // accepting an extra prefix as well, so wallets written by either
+        // generation still yield their labels.
+        let old_double = encode_name_keyblob(addr);
+        assert_eq!(old_double, legacy);
+        // on-disk doubled shape: 0x22 then a serialized std::string ('"T…')
+        let mut doubled = vec![0x04u8, b'n', b'a', b'm', b'e', addr.len() as u8];
+        doubled.push(addr.len() as u8);
+        doubled.extend_from_slice(addr.as_bytes());
+        let (t2, suffix2) = parse_key_blob(&doubled).unwrap();
+        assert_eq!(t2, "name");
+        assert_eq!(
+            String::from_utf8_lossy(&strip_name_suffix(&suffix2)),
+            addr,
+            "doubled={:?} suffix={:?}",
+            doubled,
+            suffix2
+        );
+
+        for k in [legacy, old_double] {
+            let (t, suffix) = parse_key_blob(&k).unwrap();
+            assert_eq!(t, "name");
+            assert_eq!(String::from_utf8_lossy(&strip_name_suffix(&suffix)), addr);
+        }
     }
 
     #[test]

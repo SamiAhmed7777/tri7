@@ -697,6 +697,109 @@ pub fn import_bdb_paths(src: &PathBuf, dest: &PathBuf) -> Result<ImportReport, S
     import_bdb(src, dest)
 }
 
+/// Carry the NON-KEY legacy metadata into an ALREADY-migrated SQLite wallet.
+///
+/// The first conversion of a live wallet copied key rows only (the older
+/// `bdb_migrate`). This fills in everything that conversion skipped, without
+/// touching key/keymeta/ckey rows at all: labels, settings (including the
+/// Tor v3 identity), keypool, defaultkey, bestblock, version, minversion.
+/// Every write is INSERT OR REPLACE, so running it twice is a no-op.
+pub fn anchor_metadata_into(src: &Path, dest: &Path) -> Result<ImportReport, String> {
+    if !is_bdb_wallet(src) {
+        return Err(format!("{} is not a Berkeley-DB file", src.display()));
+    }
+    if !dest.exists() {
+        return Err(format!("{} does not exist", dest.display()));
+    }
+    let (tool, stdout) = dump_bdb(src)?;
+    let pairs = parse_dump(&stdout);
+    let mut r = ImportReport {
+        source: src.display().to_string(),
+        dest: dest.display().to_string(),
+        records_dumped: pairs.len(),
+        ..Default::default()
+    };
+    if pairs.is_empty() {
+        return Err(format!("{tool}: no records dumped from {}", src.display()));
+    }
+    let mut by_section: HashMap<String, Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    for (k, v) in pairs {
+        if let Some((section, suffix)) = split_key(&k) {
+            by_section.entry(section).or_default().push((suffix, v));
+        } else {
+            r.skipped += 1;
+        }
+    }
+
+    // duplicate the destination first — this writes into a wallet holding coins
+    let bak = {
+        let mut p = dest.as_os_str().to_os_string();
+        p.push(".preanchor");
+        std::path::PathBuf::from(p)
+    };
+    if !bak.exists() {
+        std::fs::copy(dest, &bak).map_err(|e| format!("backup {}: {e}", bak.display()))?;
+    }
+
+    let conn = Connection::open_with_flags(dest, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("open {}: {e}", dest.display()))?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let put = |kb: Vec<u8>, val: Vec<u8>| -> Result<(), String> {
+        tx.execute(
+            "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+            params![kb, val],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    };
+
+    // labels
+    for (suffix, value) in by_section.get("name").cloned().unwrap_or_default() {
+        let addr = String::from_utf8_lossy(&strip_cs(&suffix)).to_string();
+        if crate::address::address_to_payload(&addr).is_err() {
+            r.skipped += 1;
+            continue;
+        }
+        let label = String::from_utf8_lossy(&strip_cs(&value)).to_string();
+        put(
+            crate::wallet::encode_legacy_name_keyblob(&addr),
+            crate::wallet::encode_name_value(&label),
+        )?;
+        r.names += 1;
+    }
+    // settings (Tor v3 identity lives here)
+    for (suffix, value) in by_section.get("setting").cloned().unwrap_or_default() {
+        let name = String::from_utf8_lossy(&strip_cs(&suffix)).to_string();
+        if name.is_empty() {
+            r.skipped += 1;
+            continue;
+        }
+        put(crate::wallet::encode_setting_keyblob(&name), value)?;
+        r.settings += 1;
+    }
+    // keypool rows (suffix already carries the index)
+    for (suffix, value) in by_section.get("pool").cloned().unwrap_or_default() {
+        put(key_blob("pool", &suffix), value)?;
+        r.pool += 1;
+    }
+    // opaque singletons: value only
+    for s in ["defaultkey", "bestblock", "version", "minversion"] {
+        if let Some((_, value)) = by_section.get(s).and_then(|v| v.first()).cloned() {
+            put(key_blob(s, &[]), value)?;
+            r.singletons.push(s.to_string());
+        }
+    }
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+
+    // prove the destination still opens as a wallet before reporting success
+    let back = crate::wallet::read_wallet(dest)
+        .map_err(|e| format!("destination failed to re-open after anchoring: {e}"))?;
+    if back.keys.is_empty() {
+        return Err("destination has no key rows after anchoring".into());
+    }
+    Ok(r)
+}
+
 /// Why an automatic first-open migration touched (or refused to touch) a file.
 #[derive(Debug, Clone)]
 pub enum AutoConvert {
