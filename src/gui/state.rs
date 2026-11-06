@@ -502,6 +502,9 @@ pub struct WalletData {
     pub default_key: Option<Vec<u8>>,
     pub version: Option<i32>,
     pub best_block: Option<Hash>,
+    /// Redeem scripts stored in the wallet (legacy `script` rows) as
+    /// (scriptID, redeem) — the multisig P2SH watch list.
+    pub scripts: Vec<([u8; 20], Vec<u8>)>,
     /// Seed wallet (legacy `hdmnemonic` row): the stored phrase. None = the
     /// wallet is a pre-HD random-key wallet (which can NEVER gain a seed).
     pub hd_mnemonic: Option<String>,
@@ -523,6 +526,7 @@ pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
         default_key: w.default_key,
         version: w.version,
         best_block: w.best_block,
+        scripts: w.scripts,
         hd_mnemonic: w.hd_mnemonic,
         hd_passphrase: w.hd_passphrase,
         hd_chain_index: w.hd_chain_index.unwrap_or(0),
@@ -938,16 +942,47 @@ pub struct DerivedWallet {
 /// balances. Falls back to snapshot-only with an explanatory note when the
 /// blockindex caches are absent/stale. `label_of` resolves address labels
 /// (wallet names + GUI address book).
+///
+/// `scripts` are the wallet's stored redeem scripts (`WalletData.scripts`):
+/// each contributes a P2SH watch script `a9 14 hash160(redeem) 87` — the
+/// 'C' address (SCRIPT_ADDRESS = 28) — so UTXOs paying the multisig
+/// addresses enter `derived.utxos` exactly like key-owned coins. P2SH
+/// outputs whose redeem is NOT stored are dropped (not wallet-owned).
 pub fn derive_wallet(
     dump: UtxoDump,
     wallet_payloads: HashSet<[u8; 21]>,
+    scripts: &[([u8; 20], Vec<u8>)],
     cfg: &UiConfig,
     tip: &TipInfo,
     label_of: &dyn Fn(&str) -> Option<String>,
 ) -> Result<DerivedWallet, String> {
     let snapshot_height = dump.height;
     let snapshot_tip = dump.covered_tip_hash.clone();
-    let snapshot = dump.into_recs()?;
+    let mut snapshot = dump.into_recs()?;
+    // The P2SH watch list: base58check payload (version 28 ‖ hash160) per
+    // stored redeem — the same payload a P2SH output solves to.
+    let watch: HashSet<[u8; 21]> = scripts
+        .iter()
+        .map(|(_, redeem)| crate::address::script_hash_payload(redeem))
+        .collect();
+    // Keep only P2SH snapshot rows the wallet holds the redeem for, and
+    // attribute the address from the script itself (a P2SH row's address is
+    // derivable without the redeem: base58check(28 ‖ scriptPubKey hash)).
+    snapshot.retain(|u| match crate::address::script_to_dest(&u.script) {
+        Some(dest @ crate::address::ScriptDest::ScriptHash(_)) => watch.contains(&dest.payload()),
+        _ => true,
+    });
+    for u in snapshot.iter_mut() {
+        if let Some(dest @ crate::address::ScriptDest::ScriptHash(_)) =
+            crate::address::script_to_dest(&u.script)
+        {
+            u.address = crate::address::payload_to_address(&dest.payload());
+        }
+    }
+    // the live tail watches the same P2SH scripts (apply_tail_bookkeeping
+    // matches additions by payload and derives the address from it)
+    let mut watched_payloads = wallet_payloads;
+    watched_payloads.extend(watch.iter().cloned());
     let (utxos, reconcile) = match tail_offsets(
         &cfg.index_dir(),
         &cfg.archive_path(),
@@ -959,7 +994,7 @@ pub fn derive_wallet(
             snapshot,
             snapshot_height,
             Some(snapshot_tip.as_str()),
-            &wallet_payloads,
+            &watched_payloads,
             &cfg.archive_path(),
             &offsets,
             tip.height,
@@ -1235,11 +1270,38 @@ pub struct InputRef {
 /// Build + sign a spend from the GUI state via spend::build_spend — the SAME
 /// bytes the spend.rs CLI path produces for identical inputs (asserted by
 /// tests and by --selfcheck). Signing is offline; nothing is broadcast.
+///
+/// Book-less form: single-key spends exactly as before; P2SH inputs are not
+/// adoptable (an empty script book cannot spend them).
 pub fn build_signed_send(
     req: &SendRequest,
     derived: &DerivedWallet,
     keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
     manual_pool: Option<&[UtxoRec]>,
+    now: u32,
+    tip_height: u32,
+) -> Result<SendBuild, String> {
+    build_signed_send_with_book(
+        req,
+        derived,
+        keys,
+        manual_pool,
+        &crate::multisig::ScriptBook::empty(),
+        now,
+        tip_height,
+    )
+}
+
+/// The multisig-capable variant: a script book admits P2SH coins the wallet
+/// can spend (redeem present + m keys) and the builder/selector use the
+/// `_with_book` spend path; P2SH coins the book cannot spend are skipped
+/// with a log line instead of wedging the send.
+pub fn build_signed_send_with_book(
+    req: &SendRequest,
+    derived: &DerivedWallet,
+    keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
+    manual_pool: Option<&[UtxoRec]>,
+    book: &crate::multisig::ScriptBook,
     now: u32,
     tip_height: u32,
 ) -> Result<SendBuild, String> {
@@ -1276,26 +1338,65 @@ pub fn build_signed_send(
     if pool.is_empty() {
         return Err("No spendable inputs for the selected address".into());
     }
-    let inputs: Vec<spend::SpendInput> = pool
-        .iter()
-        .map(|u| {
-            let (pubkey, secret) = keys
-                .get(&u.address)
-                .ok_or_else(|| format!("no key for {}", u.address))?;
-            Ok(spend::SpendInput {
-                txid: u.txid,
-                n: u.n,
-                value: u.value_sats,
-                script_pubkey: u.script.clone(),
-                height: u.height,
-                tx_time: u.tx_time,
-                is_coinbase: u.prev_kind == "coinbase",
-                is_coinstake: u.prev_kind == "coinstake",
-                secret: *secret,
-                pubkey: pubkey.clone(),
-            })
-        })
-        .collect::<Result<_, String>>()?;
+    let mut inputs: Vec<spend::SpendInput> = Vec::with_capacity(pool.len());
+    for u in &pool {
+        if matches!(
+            spend::solver_type(&u.script),
+            Some(spend::SpendType::ScriptHash(_))
+        ) {
+            // multisig coin: adopt only when the book can spend it; skip
+            // unrelated/unsignable P2SH with a log line (never wedge)
+            match book.can_spend(&u.script) {
+                Ok(()) => {
+                    let redeem = book.redeem_for(&u.script).expect("can_spend passed").clone();
+                    let held = book.held_keys(&redeem);
+                    let Some((secret, pubkey)) = held.first().cloned() else {
+                        continue;
+                    };
+                    // representative key pair — the multisig signing path reads
+                    // the book, not these fields
+                    inputs.push(spend::SpendInput {
+                        txid: u.txid,
+                        n: u.n,
+                        value: u.value_sats,
+                        script_pubkey: u.script.clone(),
+                        height: u.height,
+                        tx_time: u.tx_time,
+                        is_coinbase: u.prev_kind == "coinbase",
+                        is_coinstake: u.prev_kind == "coinstake",
+                        secret,
+                        pubkey,
+                    });
+                }
+                Err(e) => {
+                    eprintln!(
+                        "tri7-gui: skipping input {}:{} ({} sats): {}",
+                        hash_to_display(&u.txid),
+                        u.n,
+                        u.value_sats,
+                        e
+                    );
+                    continue;
+                }
+            }
+            continue;
+        }
+        let (pubkey, secret) = keys
+            .get(&u.address)
+            .ok_or_else(|| format!("no key for {}", u.address))?;
+        inputs.push(spend::SpendInput {
+            txid: u.txid,
+            n: u.n,
+            value: u.value_sats,
+            script_pubkey: u.script.clone(),
+            height: u.height,
+            tx_time: u.tx_time,
+            is_coinbase: u.prev_kind == "coinbase",
+            is_coinstake: u.prev_kind == "coinstake",
+            secret: *secret,
+            pubkey: pubkey.clone(),
+        });
+    }
 
     // Legacy dialog wording (sendcoinsdialog.ui) — checked before selection so
     // the operator sees the exact legacy error, not the raw selector text.
@@ -1312,11 +1413,15 @@ pub fn build_signed_send(
     let floor = req.fee_sats.max(spend::MIN_FEE_SATS);
     // reserve the floor: converge with the rate, but never select less than
     // amount + the fee the operator agreed to
-    let mut shape = spend::select_with_fee(&inputs, &[req.amount_sats], rate)?;
+    let mut shape = spend::select_with_fee_with_book(&inputs, &[req.amount_sats], rate, book)?;
     if shape.fee < floor {
         let sum: i64 = shape.selected.iter().map(|c| c.value).sum();
         if sum < req.amount_sats + floor {
-            shape.selected = spend::select_utxos_covering(&inputs, req.amount_sats + floor)?;
+            shape.selected = spend::select_utxos_covering_with_book(
+                &inputs,
+                req.amount_sats + floor,
+                book,
+            )?;
             shape.fee = floor;
             shape.n_inputs = shape.selected.len();
         }
@@ -1326,7 +1431,7 @@ pub fn build_signed_send(
     let change_script = p2pkh_script_for(&req.change_payload);
     let n_time = now.max(selected.iter().map(|i| i.tx_time).max().unwrap_or(0));
     let spend_height = tip_height + 1;
-    let plan = spend::build_spend_outputs_floor(
+    let plan = spend::build_spend_outputs_floor_with_book(
         &selected,
         vec![crate::legacy::Vout {
             value: req.amount_sats,
@@ -1335,6 +1440,7 @@ pub fn build_signed_send(
         Some(change_script),
         rate,   // size schedule
         floor,  // the total the operator agreed to, honoured verbatim
+        book,
         n_time,
         spend_height,
     )?;

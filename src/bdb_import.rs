@@ -17,6 +17,7 @@
 //! | `version`        | wallet format version                        | `version`     |
 //! | `minversion`     | minimum client version                       | `minversion`  |
 //! | `pool`           | keypool reserve (keys live on; indexes do not)| `pool`       |
+//! | `script`         | redeem scripts (multisig P2SH watch list)    | `script`      |
 //! | `tx`             | 28k legacy transaction records               | NOT COPIED    |
 //! | `orderposnext`   | UI ordering counter                          | NOT COPIED    |
 //!
@@ -53,6 +54,8 @@ pub struct ImportReport {
     pub names: usize,
     pub settings: usize,
     pub pool: usize,
+    /// redeem scripts carried from the legacy `script` section (multisig)
+    pub scripts: usize,
     pub skipped: usize,
     pub encrypted: bool,
     pub errors: Vec<String>,
@@ -74,6 +77,7 @@ impl ImportReport {
             "names": self.names,
             "settings": self.settings,
             "pool": self.pool,
+            "scripts": self.scripts,
             "skipped": self.skipped,
             "encrypted": self.encrypted,
             "errors": self.errors,
@@ -581,6 +585,34 @@ pub fn import_bdb(src: &Path, dest: &Path) -> Result<ImportReport, String> {
             r.settings += 1;
         }
     }
+    // redeem scripts (multisig P2SH watch list): the legacy record key is
+    // 06 "script" + the RAW 20-byte scriptID (a uint160 carries no inner
+    // CompactSize) and the value is CS(len)+script. Carried through the
+    // wallet module's encoders so a file we write compares equal to one the
+    // wallet writer writes; INSERT OR REPLACE makes re-runs no-ops.
+    for (suffix, value) in by_section.get("script").cloned().unwrap_or_default() {
+        if suffix.len() != 20 {
+            r.skipped += 1;
+            r.errors.push(format!(
+                "script: record-key suffix is {} bytes, expected the 20-byte scriptID",
+                suffix.len()
+            ));
+            continue;
+        }
+        let mut id = [0u8; 20];
+        id.copy_from_slice(&suffix);
+        let kb = crate::wallet::encode_script_keyblob(&id);
+        let val = crate::wallet::encode_script_value(strip_cs(&value));
+        if tx
+            .execute(
+                "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+                params![kb, val],
+            )
+            .is_ok()
+        {
+            r.scripts += 1;
+        }
+    }
     // keypool: suffix = CS(8)+LE index, value = CS(version)+CS(time)+CS(34)+pubkey
     for (suffix, value) in pool_rows.iter() {
         let kb = key_blob("pool", suffix);
@@ -776,6 +808,21 @@ pub fn anchor_metadata_into(src: &Path, dest: &Path) -> Result<ImportReport, Str
         }
         put(crate::wallet::encode_setting_keyblob(&name), value)?;
         r.settings += 1;
+    }
+    // redeem scripts (multisig P2SH watch list) — same rows import_bdb
+    // writes; INSERT OR REPLACE keeps re-anchoring a no-op (idempotent).
+    for (suffix, value) in by_section.get("script").cloned().unwrap_or_default() {
+        if suffix.len() != 20 {
+            r.skipped += 1;
+            continue;
+        }
+        let mut id = [0u8; 20];
+        id.copy_from_slice(&suffix);
+        put(
+            crate::wallet::encode_script_keyblob(&id),
+            crate::wallet::encode_script_value(strip_cs(&value)),
+        )?;
+        r.scripts += 1;
     }
     // keypool rows (suffix already carries the index)
     for (suffix, value) in by_section.get("pool").cloned().unwrap_or_default() {
@@ -1136,6 +1183,96 @@ mod tests {
         let bdb = dir.join("b.dat");
         std::fs::write(&bdb, &meta).unwrap();
         assert!(is_bdb_wallet(&bdb));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The legacy `script` section (redeem scripts) rides the import: a BDB
+    /// wallet carrying script rows produces a SQLite wallet whose
+    /// WalletHandle lists them back — and re-anchoring is idempotent.
+    /// SKIPS (never passes silently) when db5.3_load is unavailable.
+    #[test]
+    fn bdb_script_section_carries_redeem_scripts_into_the_new_wallet() {
+        let have_load = std::process::Command::new("db5.3_load")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || std::process::Command::new("db_load")
+                .arg("-V")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        if !have_load {
+            eprintln!("SKIP: db5.3_load unavailable — script-section fixture cannot be built here");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-bdbscript-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // one plaintext key + one legacy `script` row (raw-20 scriptID key,
+        // CS+script value — the exact CWalletDB::WriteCScript shape)
+        let secret = {
+            let mut s = [0u8; 32];
+            s[0] = 0x42;
+            s[31] = 7;
+            s
+        };
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec();
+        let der = crate::wallet::encode_der_privkey(&secret, &pk).unwrap();
+        let mut key_suffix = cs(pk.len());
+        key_suffix.extend_from_slice(&pk);
+        let mut key_value = cs(der.len());
+        key_value.extend_from_slice(&der);
+
+        let redeem = crate::multisig::redeem_script(1, &[pk.clone()]).unwrap();
+        let script_id = crate::address::hash160(&redeem);
+        let mut script_value = cs(redeem.len());
+        script_value.extend_from_slice(&redeem);
+
+        let bdb = dir.join("legacy.dat");
+        write_bdb(
+            vec![
+                (key_blob("key", &key_suffix), key_value),
+                (
+                    key_blob("script", &script_id.to_vec()),
+                    script_value,
+                ),
+            ],
+            &bdb,
+        )
+        .expect("build bdb fixture");
+        assert!(is_bdb_wallet(&bdb), "fixture must be a real BDB file");
+
+        // production import: the script row lands in the new wallet
+        let dest = dir.join("dest.sqlite");
+        let report = import_bdb(&bdb, &dest).expect("production import");
+        assert_eq!(report.scripts, 1, "one script row carried: {report:?}");
+        assert_eq!(report.errors, Vec::<String>::new());
+        let mut wh = WalletHandle::open_readwrite(&dest).unwrap();
+        assert_eq!(
+            wh.get_redeem_script(&script_id).unwrap().as_deref(),
+            Some(&redeem[..])
+        );
+        assert_eq!(wh.list_redeem_scripts().unwrap().len(), 1);
+        wh.close();
+
+        // idempotent like the metadata anchoring: re-running changes nothing
+        let again = anchor_metadata_into(&bdb, &dest).unwrap();
+        assert_eq!(again.scripts, 1);
+        let mut wh = WalletHandle::open_readwrite(&dest).unwrap();
+        assert_eq!(wh.list_redeem_scripts().unwrap().len(), 1);
+        wh.close();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

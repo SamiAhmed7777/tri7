@@ -55,6 +55,9 @@ pub const OP_DUP: u8 = 0x76;
 pub const OP_HASH160: u8 = 0xa9;
 pub const OP_EQUAL: u8 = 0x87;
 pub const OP_RETURN: u8 = 0x6a;
+/// OP_CHECKMULTISIG (script.h opcode enum) — evaluation lives below; the
+/// raw-tx decoder table (rawtx.rs) prints the same 0xae byte.
+pub const OP_CHECKMULTISIG: u8 = 0xae;
 
 pub fn money_range(v: i64) -> bool {
     // MoneyRange (main.h:65)
@@ -521,12 +524,14 @@ pub fn check_sig(
 }
 
 /// Solver classification of a scriptPubKey into the spendable forms we sign
-/// (script.cpp:1336-1470): PubKey (bare), PubKeyHash. P2SH inputs are out of
-/// scope for phase 3 spends (no redemption scripts in the wallet flow).
+/// (script.cpp:1336-1470): PubKey (bare), PubKeyHash, ScriptHash (P2SH —
+/// the IsPayToScriptHash shortcut at script.cpp:1333, which Solver checks
+/// before the template scan).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpendType {
     PubKey(Vec<u8>),
     PubkeyHash([u8; 20]),
+    ScriptHash([u8; 20]),
 }
 
 pub fn solver_type(script_pubkey: &[u8]) -> Option<SpendType> {
@@ -535,22 +540,35 @@ pub fn solver_type(script_pubkey: &[u8]) -> Option<SpendType> {
     }
     match crate::address::script_to_dest(script_pubkey) {
         Some(crate::address::ScriptDest::PubkeyHash(h)) => Some(SpendType::PubkeyHash(h)),
+        // a9 14 <20> 87 — exactly the IsPayToScriptHash shape; the spend is
+        // verified against the redeem script the scriptSig carries.
+        Some(crate::address::ScriptDest::ScriptHash(h)) => Some(SpendType::ScriptHash(h)),
         _ => None,
     }
 }
 
-/// ScriptSigArgsExpected (script.cpp:1515-1533): PubKey → 1, PubKeyHash → 2.
+/// ScriptSigArgsExpected (script.cpp:1515-1533): PubKey → 1, PubKeyHash → 2,
+/// ScriptHash → 1 (legacy "2..20" — the real count is m+2: OP_0 dummy, m
+/// sigs, redeem script; the P2SH verification path below evaluates the
+/// redeem script instead of enforcing this count).
 pub fn script_sig_args_expected(t: &SpendType) -> usize {
     match t {
         SpendType::PubKey(_) => 1,
         SpendType::PubkeyHash(_) => 2,
+        SpendType::ScriptHash(_) => 1,
     }
 }
 
-/// VerifyScript-lite for the two standard templates (main.cpp ConnectInputs →
-/// VerifyScript → EvalScript flow): parse the scriptSig pushes, require the
-/// Solver-expected element count, enforce the P2PKH pubkey-hash equality
+/// VerifyScript-lite (main.cpp ConnectInputs → VerifyScript → EvalScript
+/// flow): parse the scriptSig pushes, require the Solver-expected element
+/// count for the bare templates, enforce the P2PKH pubkey-hash equality
 /// (OP_EQUALVERIFY), then CheckSig.
+///
+/// P2SH prevouts take the VerifyScript pay-to-script-hash branch
+/// (script.cpp:1721-1734): the scriptSig must be push-only (parse_pushes
+/// enforces exactly that), its LAST push is the redeem script, and the
+/// redeem script is then evaluated as the effective scriptPubKey against
+/// the remaining pushes.
 pub fn verify_input(
     tx_to: &Tx,
     n_in: usize,
@@ -567,29 +585,126 @@ pub fn verify_input(
         .ok_or_else(|| "VerifyScript: non-standard script".to_string())?;
     let pushes = parse_pushes(&tx_to.vin[n_in].script_sig)
         .map_err(|e| format!("VerifyScript: bad scriptSig: {}", e))?;
-    if pushes.len() != script_sig_args_expected(&spend_type) {
-        return Err(format!(
-            "VerifyScript: scriptSig has {} pushes, Solver expects {}",
-            pushes.len(),
-            script_sig_args_expected(&spend_type)
-        ));
-    }
-    let (sig, pubkey): (&[u8], &[u8]) = match &spend_type {
+    match &spend_type {
         SpendType::PubKey(pk) => {
             // scriptPubKey carries the key itself
-            (&pushes[0], pk.as_slice())
+            if pushes.len() != script_sig_args_expected(&spend_type) {
+                return Err(format!(
+                    "VerifyScript: scriptSig has {} pushes, Solver expects {}",
+                    pushes.len(),
+                    script_sig_args_expected(&spend_type)
+                ));
+            }
+            check_sig(tx_to, n_in, prev_script_pubkey, &pushes[0], pk)
         }
         SpendType::PubkeyHash(h) => {
+            if pushes.len() != script_sig_args_expected(&spend_type) {
+                return Err(format!(
+                    "VerifyScript: scriptSig has {} pushes, Solver expects {}",
+                    pushes.len(),
+                    script_sig_args_expected(&spend_type)
+                ));
+            }
             // OP_DUP OP_HASH160 <h> OP_EQUALVERIFY: hash160(scriptSig pubkey)
             // must equal the embedded hash before CHECKSIG can run
             let pk = &pushes[1];
             if &crate::address::hash160(pk) != h {
                 return Err("VerifyScript: pubkey hash mismatch (OP_EQUALVERIFY)".into());
             }
-            (&pushes[0], pk.as_slice())
+            check_sig(tx_to, n_in, prev_script_pubkey, &pushes[0], pk.as_slice())
         }
-    };
-    check_sig(tx_to, n_in, prev_script_pubkey, sig, pubkey)
+        SpendType::ScriptHash(h) => verify_p2sh_input(tx_to, n_in, h, &pushes),
+    }
+}
+
+/// VerifyScript's pay-to-script-hash branch (script.cpp:1721-1734): the
+/// last scriptSig push is the redeem script — hash160(redeem) must equal
+/// the scriptPubKey's hash (the OP_HASH160 … OP_EQUAL the P2SH scriptPubKey
+/// evaluates) — and the redeem script is then evaluated as the effective
+/// scriptPubKey against the remaining pushes (the legacy interpreter's
+/// stackCopy path).
+fn verify_p2sh_input(
+    tx_to: &Tx,
+    n_in: usize,
+    h: &[u8; 20],
+    pushes: &[Vec<u8>],
+) -> Result<VerifiedSig, String> {
+    if pushes.len() < 2 {
+        return Err(
+            "VerifyScript(P2SH): scriptSig must be OP_0 <sig…> <redeemScript>".to_string(),
+        );
+    }
+    let redeem = &pushes[pushes.len() - 1];
+    if &crate::address::hash160(redeem) != h {
+        return Err(
+            "VerifyScript(P2SH): redeem script hash mismatch (scriptSig hash160 != scriptPubKey hash)"
+                .to_string(),
+        );
+    }
+    eval_multisig_redeem(tx_to, n_in, redeem, &pushes[..pushes.len() - 1])
+}
+
+/// OP_CHECKMULTISIG evaluation (script.cpp:1043-1135) for the standard
+/// m-of-n multisig redeem script, with `stack` = the scriptSig pushes minus
+/// the redeem script: [OP_0 dummy] [sig m] … [sig 1].
+///
+/// Consensus rules mirrored 1:1:
+///   - pop n (top), then n pubkeys, then m, then m signatures, then ONE
+///     EXTRA element that is popped and ignored — the historical off-by-one
+///     bug the protocol keeps: the scriptSig's leading OP_0. The legacy
+///     underflow checks (`stack.size() < i`) make a scriptSig WITHOUT the
+///     leading dummy fail for every m >= 1.
+///   - each signature must match a pubkey at or after the last matched
+///     index (script.cpp:1074-1095: isig/ikey advance together, ikey only
+///     forward); running out of keys while signatures remain fails.
+///   - every CheckSig runs over scriptCode = the REDEEM script (with
+///     OP_CODESEPARATOR stripped inside signature_hash) and the hashtype
+///     the signature carries. The legacy scriptCode.FindAndDelete(each sig)
+///     is a no-op for this template — no instruction boundary of
+///     OP_m <pks> OP_n OP_CHECKMULTISIG can start with a DER push.
+fn eval_multisig_redeem(
+    tx_to: &Tx,
+    n_in: usize,
+    redeem: &[u8],
+    stack: &[Vec<u8>],
+) -> Result<VerifiedSig, String> {
+    let (m, pubkeys) = crate::multisig::parse_multisig(redeem)
+        .map_err(|e| format!("VerifyScript(P2SH): redeem script is not a standard multisig: {}", e))?;
+    let m = m as usize;
+    let n = pubkeys.len();
+    // n (count) + n pubkeys + m (count) + m sigs + 1 dummy pops.
+    if stack.len() < m + 1 {
+        return Err(format!(
+            "VerifyScript(P2SH): CHECKMULTISIG stack underflow — need {} sigs plus the \
+             leading OP_0 dummy ({} stack elements given)",
+            m,
+            stack.len()
+        ));
+    }
+    let sigs = &stack[stack.len() - m..];
+    let _dummy = &stack[stack.len() - m - 1]; // popped and ignored (script.cpp:1101)
+    let mut ki = 0usize;
+    let mut last: Option<VerifiedSig> = None;
+    for (si, sig) in sigs.iter().enumerate() {
+        let mut matched = false;
+        while ki < n {
+            let pk = &pubkeys[ki];
+            ki += 1;
+            if let Ok(v) = check_sig(tx_to, n_in, redeem, sig, pk) {
+                last = Some(v);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(format!(
+                "VerifyScript(P2SH): CHECKMULTISIG signature #{} matches no remaining pubkey",
+                si + 1
+            ));
+        }
+    }
+    // m >= 1 (parse_multisig rejects OP_0 m), so at least one sig matched.
+    Ok(last.expect("m >= 1 guarantees a matched signature"))
 }
 
 /// Sign one input of `tx` in place, building the scriptSig per the Solver
@@ -610,6 +725,13 @@ pub fn sign_input(
     let script_sig = match &spend_type {
         SpendType::PubKey(_) => script_sig_p2pk(&der),
         SpendType::PubkeyHash(_) => script_sig_p2pkh(&der, pubkey),
+        SpendType::ScriptHash(_) => {
+            return Err(
+                "SignSignature: P2SH multisig inputs need per-key partial signing \
+                 (multisig::sign_multisig_partial + assemble_multisig_scriptsig)"
+                    .into(),
+            )
+        }
     };
     tx_to.vin[n_in].script_sig = script_sig;
     Ok(())
@@ -641,7 +763,44 @@ impl SpendInput {
     /// The key this input's prevout actually pays to — enforced before
     /// signing so a key/prevout mismatch fails loudly instead of producing a
     /// tx the network would reject (Solver key lookup in C++ Sign1/SignN).
+    /// P2SH prevouts are REFUSED here: single-key ownership cannot prove
+    /// them spendable — use `assert_owns_prevout_with` (a script book can
+    /// answer "redeem present + enough keys").
     pub fn assert_owns_prevout(&self) -> Result<(), String> {
+        match solver_type(&self.script_pubkey) {
+            Some(SpendType::ScriptHash(_)) => Err(format!(
+                "input {}:{} P2SH prevout needs a script book \
+                 (assert_owns_prevout_with / the _with_book builders)",
+                crate::legacy::hash_to_display(&self.txid),
+                self.n
+            )),
+            _ => self.check_single_key_ownership(),
+        }
+    }
+
+    /// Ownership check with a multisig script book: identical to
+    /// `assert_owns_prevout` for PubKey/PubKeyHash; for ScriptHash the book
+    /// must hold the redeem script (hash-matching) and at least m of its
+    /// keys. Code paths with no book keep refusing P2SH (safe default).
+    pub fn assert_owns_prevout_with(
+        &self,
+        book: &crate::multisig::ScriptBook,
+    ) -> Result<(), String> {
+        match solver_type(&self.script_pubkey) {
+            Some(SpendType::ScriptHash(_)) => book.can_spend(&self.script_pubkey).map_err(|e| {
+                format!(
+                    "input {}:{} P2SH: {}",
+                    crate::legacy::hash_to_display(&self.txid),
+                    self.n,
+                    e
+                )
+            }),
+            _ => self.check_single_key_ownership(),
+        }
+    }
+
+    /// The single-key ownership arms shared by both entry points.
+    fn check_single_key_ownership(&self) -> Result<(), String> {
         match solver_type(&self.script_pubkey) {
             Some(SpendType::PubKey(pk)) => {
                 if pk != self.pubkey {
@@ -663,6 +822,9 @@ impl SpendInput {
                 }
                 Ok(())
             }
+            Some(SpendType::ScriptHash(_)) => {
+                unreachable!("check_single_key_ownership is only reached for non-P2SH prevouts")
+            }
             None => Err(format!(
                 "input {}:{} prevout is non-standard",
                 crate::legacy::hash_to_display(&self.txid),
@@ -681,9 +843,24 @@ pub fn select_utxos_covering(
     inputs: &[SpendInput],
     target: i64,
 ) -> Result<Vec<SpendInput>, String> {
+    select_utxos_covering_with_book(inputs, target, &crate::multisig::ScriptBook::empty())
+}
+
+/// Coin selection with a multisig script book. Candidates the book cannot
+/// spend — every P2SH prevout when the book is empty, unrelated P2SH
+/// prevouts otherwise — are SKIPPED with a log line (never adopted), so an
+/// unrelated P2SH UTXO cannot wedge a spend. Single-key ownership
+/// mismatches remain hard errors (a key/prevout mismatch is a caller bug,
+/// not a skippable coin).
+pub fn select_utxos_covering_with_book(
+    inputs: &[SpendInput],
+    target: i64,
+    book: &crate::multisig::ScriptBook,
+) -> Result<Vec<SpendInput>, String> {
     if target <= 0 {
         return Err("select: target must be positive".into());
     }
+    let mut usable: Vec<&SpendInput> = Vec::with_capacity(inputs.len());
     for i in inputs {
         if !money_range(i.value) {
             return Err(format!(
@@ -692,9 +869,22 @@ pub fn select_utxos_covering(
                 i.n
             ));
         }
-        i.assert_owns_prevout()?;
+        if let Err(e) = i.assert_owns_prevout_with(book) {
+            if matches!(solver_type(&i.script_pubkey), Some(SpendType::ScriptHash(_))) {
+                eprintln!(
+                    "tri7-select: skipping input {}:{} ({} sats): {}",
+                    crate::legacy::hash_to_display(&i.txid),
+                    i.n,
+                    i.value,
+                    e
+                );
+                continue;
+            }
+            return Err(e);
+        }
+        usable.push(i);
     }
-    let mut sorted: Vec<&SpendInput> = inputs.iter().collect();
+    let mut sorted = usable;
     sorted.sort_by(|a, b| {
         b.value
             .cmp(&a.value)
@@ -761,6 +951,90 @@ pub fn estimate_signed_size(n_in: usize, n_out: usize) -> usize {
     // P2PKH output: 8 value + 1 script len + 25 script
     let out_size = 8 + 1 + 25;
     base + n_in * in_size + n_out * out_size
+}
+
+/// Per-input signed-size estimate: the same wire schedule as
+/// [`estimate_signed_size`], but each input sized by its SOLVER TYPE so a
+/// mixed / multisig pool stops being quoted as if every input were P2PKH.
+///
+///   - PubkeyHash: 32+4+1+(1+72)+(1+33)+4 = 148   (today's value, unchanged)
+///   - PubKey:     32+4+1+(1+72)+4        = 114   (bare key, no hash push)
+///   - ScriptHash: 32+4+1 + m*(1+72+1) + push_len(redeem_len) + 4
+///     (m from the redeem script via the `book`; the sigs + the OP_0 dummy +
+///     the redeemScript push dominate — a 2-of-3 with a 105-byte redeem is
+///     ~296 bytes, not 148)
+///
+/// Base (4+4+1+1+4) and per-output (8+1+25) match `estimate_signed_size`.
+/// A P2SH input the book cannot name a redeem for (or a non-standard script —
+/// which selection refuses anyway) falls back to the conservative 148.
+pub fn estimate_signed_size_for(
+    inputs: &[SpendInput],
+    n_out: usize,
+    book: &crate::multisig::ScriptBook,
+) -> usize {
+    /// Length of `data` when pushed onto a script: a bare length byte up to 75,
+    /// OP_PUSHDATA1 (0x4c) up to 255, OP_PUSHDATA2 (0x4d) up to 65535, else
+    /// OP_PUSHDATA4 (0x4e). The redeem script of a 2-of-3 is 105 bytes, so it
+    /// costs OP_PUSHDATA1 — not a single length byte.
+    fn push_len(data_len: usize) -> usize {
+        if data_len <= 75 {
+            1 + data_len
+        } else if data_len <= 0xff {
+            2 + data_len
+        } else if data_len <= 0xffff {
+            3 + data_len
+        } else {
+            5 + data_len
+        }
+    }
+
+    /// The transaction writes every length with a CompactSize varint, including
+    /// each input's scriptSig. A 2-of-3 scriptSig is 254 bytes worst case, which
+    /// crosses the 252 boundary and costs THREE bytes, not one.
+    fn compact_size_len(n: usize) -> usize {
+        if n < 0xfd {
+            1
+        } else if n <= 0xffff {
+            3
+        } else if n <= 0xffff_ffff {
+            5
+        } else {
+            9
+        }
+    }
+
+    /// Version, nTime, the two CompactSize counts, and nLockTime.
+    let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+    let out_size = 8 + 1 + 25; // value + 1-byte script length + P2PKH script
+    let mut total = base + n_out * out_size;
+    for i in inputs {
+        total += match solver_type(&i.script_pubkey) {
+            Some(SpendType::PubkeyHash(_)) => {
+                let script = 1 + 72 + 1 + 33; // push sig + push pubkey
+                32 + 4 + compact_size_len(script) + script + 4
+            }
+            Some(SpendType::PubKey(_)) => {
+                let script = 1 + 72; // push sig
+                32 + 4 + compact_size_len(script) + script + 4
+            }
+            Some(SpendType::ScriptHash(_)) => book
+                .redeem_for(&i.script_pubkey)
+                .and_then(|r| {
+                    crate::multisig::parse_multisig(r)
+                        .ok()
+                        .map(|(m, _)| (m as usize, r.len()))
+                })
+                .map(|(m, redeem_len)| {
+                    // OP_0 dummy + m pushed signatures + the redeem push — then
+                    // that whole scriptSig gets its own CompactSize prefix.
+                    let script = 1 + m * (1 + 72) + push_len(redeem_len);
+                    32 + 4 + compact_size_len(script) + script + 4
+                })
+                .unwrap_or(148),
+            None => 148,
+        };
+    }
+    total
 }
 
 /// GetMinFee (main.cpp:1000-1027). `n_block_size` is the caller's block-size
@@ -833,6 +1107,35 @@ pub fn build_spend(
     )
 }
 
+/// The multisig-capable single-destination variant: identical construction
+/// to `build_spend`, but P2SH inputs the `book` can spend (redeem present +
+/// m keys) are signed via the multisig path; P2SH inputs it cannot spend
+/// are skipped, and if nothing spendable remains the error names why.
+pub fn build_spend_with_book(
+    inputs: &[SpendInput],
+    dest_script: Vec<u8>,
+    dest_value: i64,
+    change_script: Option<Vec<u8>>,
+    fee_rate_sats: i64,
+    book: &crate::multisig::ScriptBook,
+    n_time: u32,
+    spend_height: u32,
+) -> Result<SpendPlan, String> {
+    build_spend_outputs_floor_with_book(
+        inputs,
+        vec![Vout {
+            value: dest_value,
+            script_pubkey: dest_script,
+        }],
+        change_script,
+        fee_rate_sats,
+        0,
+        book,
+        n_time,
+        spend_height,
+    )
+}
+
 /// Multi-destination spend (legacy `sendmany`). Same construction, signing,
 /// fee and size rules as `build_spend`; only the payment outputs differ, so the
 /// single-destination function is a thin wrapper over this one rather than a
@@ -865,18 +1168,50 @@ pub fn build_spend_outputs(
 /// to a specific fee in sats (a typed fee in the Send dialog). The transaction
 /// must pay at least that, while the rate supplies the size schedule. This is
 /// the only way to honour a typed total without mistaking it for a rate.
+///
+/// Book-less form: P2SH inputs are refused (an empty script book cannot spend
+/// them) — single-key wallet behavior, unchanged.
 pub fn build_spend_outputs_floor(
+    inputs: &[SpendInput],
+    dest_outputs: Vec<Vout>,
+    change_script: Option<Vec<u8>>,
+    fee_rate_sats: i64, // per-size-step rate (nTransactionFee)
+    fee_floor_sats: i64, // absolute minimum total the operator agreed to
+    n_time: u32,
+    spend_height: u32,
+) -> Result<SpendPlan, String> {
+    build_spend_outputs_floor_with_book(
+        inputs,
+        dest_outputs,
+        change_script,
+        fee_rate_sats,
+        fee_floor_sats,
+        &crate::multisig::ScriptBook::empty(),
+        n_time,
+        spend_height,
+    )
+}
+
+/// The multisig-capable builder. Everything matches
+/// `build_spend_outputs_floor`, plus:
+///   - P2SH candidates the `book` cannot spend are SKIPPED with a log line
+///     (never adopted), so an unrelated P2SH UTXO cannot wedge a spend; if
+///     nothing spendable remains, the error names the skipped input and why;
+///   - the signing loop branches on the solver type: PubKey/PubKeyHash sign
+///     through `sign_input` as before; ScriptHash signs through
+///     `sign_multisig_partial` + `assemble_multisig_scriptsig` (m derived
+///     from the redeem script), failing loudly with the input coordinates
+///     and the signature shortfall if the book comes up short.
+pub fn build_spend_outputs_floor_with_book(
     inputs: &[SpendInput],
     dest_outputs: Vec<Vout>,
     change_script: Option<Vec<u8>>,
     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee)
     fee_floor_sats: i64,    // absolute minimum total the operator agreed to
+    book: &crate::multisig::ScriptBook,
     n_time: u32,
     spend_height: u32,
 ) -> Result<SpendPlan, String> {
-    if inputs.is_empty() {
-        return Err("CreateTransaction: no inputs".into());
-    }
     if dest_outputs.is_empty() {
         return Err("CreateTransaction: no destinations".into());
     }
@@ -892,12 +1227,39 @@ pub fn build_spend_outputs_floor(
             .checked_add(d.value)
             .ok_or_else(|| "CreateTransaction: destination sum overflow".to_string())?;
     }
+    // Adopt only inputs the book can actually spend (single-key inputs are
+    // always candidates; P2SH inputs must pass the book's can_spend).
+    let mut kept: Vec<SpendInput> = Vec::with_capacity(inputs.len());
+    let mut skipped_p2sh: Vec<(String, u32, String)> = Vec::new();
+    for i in inputs {
+        if let Some(SpendType::ScriptHash(_)) = solver_type(&i.script_pubkey) {
+            if let Err(e) = book.can_spend(&i.script_pubkey) {
+                eprintln!(
+                    "tri7-spend: skipping input {}:{} ({} sats): {}",
+                    crate::legacy::hash_to_display(&i.txid),
+                    i.n,
+                    i.value,
+                    e
+                );
+                skipped_p2sh.push((crate::legacy::hash_to_display(&i.txid), i.n, e));
+                continue;
+            }
+        }
+        kept.push(i.clone());
+    }
+    if kept.is_empty() {
+        if let Some((id, n, why)) = skipped_p2sh.first() {
+            return Err(format!("input {}:{}: {}", id, n, why));
+        }
+        return Err("CreateTransaction: no inputs".into());
+    }
+    let inputs = &kept[..];
     let mut inputs_value = 0i64;
     for i in inputs {
         if !money_range(i.value) {
             return Err("CreateTransaction: input value out of range".into());
         }
-        i.assert_owns_prevout()?;
+        i.assert_owns_prevout_with(book)?;
         inputs_value += i.value;
         if !money_range(inputs_value) {
             return Err("CreateTransaction: input sum out of range".into());
@@ -915,6 +1277,26 @@ pub fn build_spend_outputs_floor(
     // time and the built fee would exceed what was shown. Callers pass
     // `paytxfee_sats` and read the final number from `SpendPlan.fee`.
     let est_fee = fee_rate_sats.max(MIN_FEE_SATS);
+
+    // Multisig shapes: seed the fee reservation with the PER-INPUT estimate
+    // (a 2-of-3 input is ~295 bytes, so its schedule can exceed the raw
+    // rate below the first 1000-byte step of the count-based formula).
+    // Reserving the estimate up front makes the first change computation
+    // honest; the loop below still converges on the REAL signed size, and
+    // the reservation never exceeds what that fixed point would charge.
+    // Single-key shapes skip this branch and stay byte-identical.
+    if ordered
+        .iter()
+        .any(|i| matches!(solver_type(&i.script_pubkey), Some(SpendType::ScriptHash(_))))
+    {
+        let est_bytes = estimate_signed_size_for(&ordered, dest_outputs.len() + 1, book);
+        let est_schedule = estimate_fee(
+            est_bytes,
+            est_fee,
+            &dest_outputs.iter().map(|o| o.value).collect::<Vec<_>>(),
+        );
+        fee_rate_sats = fee_rate_sats.max(est_schedule);
+    }
 
     loop {
         // nValue + nFeeRet <= nValueIn is enforced below (value in < out)
@@ -955,16 +1337,38 @@ pub fn build_spend_outputs_floor(
             locktime: 0,
         };
 
-        // Sign (SignSignature per input, wallet.cpp:2084-2088)
+        // Sign (SignSignature per input, wallet.cpp:2084-2088). PubKey /
+        // PubKeyHash go through the single-key Sign1 path; ScriptHash goes
+        // through the multisig SignN path with the book's held keys.
         for (i, input) in ordered.iter().enumerate() {
-            sign_input(
-                &mut tx,
-                i,
-                &input.script_pubkey,
-                &input.secret,
-                &input.pubkey,
-                SIGHASH_ALL,
-            )?;
+            if let Some(SpendType::ScriptHash(_)) = solver_type(&input.script_pubkey) {
+                let id = crate::legacy::hash_to_display(&input.txid);
+                let redeem = book.redeem_for(&input.script_pubkey).ok_or_else(|| {
+                    format!("input {}:{}: no redeem script in the script book", id, input.n)
+                })?;
+                let (m, _) = crate::multisig::parse_multisig(redeem)
+                    .map_err(|e| format!("input {}:{}: {}", id, input.n, e))?;
+                let held = book.held_keys(redeem);
+                let sigs = crate::multisig::sign_multisig_partial(&tx, i, redeem, &held)?;
+                let filled = sigs.iter().flatten().count();
+                if filled < m as usize {
+                    return Err(format!(
+                        "input {}:{}: only {} of {} required signatures could be produced",
+                        id, input.n, filled, m
+                    ));
+                }
+                tx.vin[i].script_sig =
+                    crate::multisig::assemble_multisig_scriptsig(&sigs, redeem)?;
+            } else {
+                sign_input(
+                    &mut tx,
+                    i,
+                    &input.script_pubkey,
+                    &input.secret,
+                    &input.pubkey,
+                    SIGHASH_ALL,
+                )?;
+            }
         }
 
         // Size limit (wallet.cpp:2090-2093): nBytes >= MAX_BLOCK_SIZE_GEN/5
@@ -1034,18 +1438,42 @@ pub fn select_with_fee(
     out_values: &[i64],
     paytxfee_sats: i64,
 ) -> Result<FeeShape, String> {
+    select_with_fee_with_book(inputs, out_values, paytxfee_sats, &crate::multisig::ScriptBook::empty())
+}
+
+/// `select_with_fee` with a multisig script book: P2SH candidates the book
+/// cannot spend are skipped inside the covering selection (see
+/// `select_utxos_covering_with_book`).
+pub fn select_with_fee_with_book(
+    inputs: &[SpendInput],
+    out_values: &[i64],
+    paytxfee_sats: i64,
+    book: &crate::multisig::ScriptBook,
+) -> Result<FeeShape, String> {
     let pay = paytxfee_sats.max(MIN_FEE_SATS);
     let amount: i64 = out_values.iter().sum();
     if amount <= 0 {
         return Err("select: amount must be positive".into());
     }
+    // Seed with the count-based 1-input estimate, then converge on the
+    // PER-INPUT size of the selection we actually got (a 2-of-3 input is
+    // ~295 bytes, not 148 — the quoted fee must schedule what will be
+    // signed, or the builder's exact-equality guard refuses). Uniform
+    // single-key pools reproduce the old sequence exactly: the per-input
+    // function returns the same 148 the count formula used.
     let mut n_in = 1usize;
+    let mut fee = estimate_fee(estimate_signed_size(n_in, out_values.len() + 1), pay, out_values);
     for _ in 0..8 {
-        // the shape we are about to build: n_in inputs, payments + change
-        let fee = estimate_fee(estimate_signed_size(n_in, out_values.len() + 1), pay, out_values);
-        let selected = select_utxos_covering(inputs, amount + fee)?;
+        let selected = select_utxos_covering_with_book(inputs, amount + fee, book)?;
         let got = selected.len();
-        if got == n_in {
+        let real_fee = estimate_fee(
+            estimate_signed_size_for(&selected, out_values.len() + 1, book),
+            pay,
+            out_values,
+        );
+        // settled: the same input count AND a fee that schedules exactly
+        // this selection's per-input shape
+        if got == n_in && real_fee == fee {
             return Ok(FeeShape {
                 selected,
                 fee,
@@ -1054,6 +1482,7 @@ pub fn select_with_fee(
             });
         }
         n_in = got;
+        fee = real_fee;
     }
     // nine iterations without settling means the pool cannot cover it
     Err("Insufficient funds!".into())
@@ -2017,5 +2446,894 @@ mod tests {
             get_min_fee(&[1000], 1000, big, FeeMode::Block),
             200 * (MAX_BLOCK_SIZE_GEN / (MAX_BLOCK_SIZE_GEN - (big + 1000))) as i64
         );
+    }
+
+    // ---- P2SH multisig (phase 3b) ----
+
+    fn ms_keys(labels: &[&str]) -> Vec<([u8; 32], Vec<u8>)> {
+        labels.iter().map(|l| synthetic_key(l)).collect()
+    }
+
+    fn ms_pubkeys(keys: &[([u8; 32], Vec<u8>)]) -> Vec<Vec<u8>> {
+        keys.iter().map(|k| k.1.clone()).collect()
+    }
+
+    /// Known-answer vector shared with an INDEPENDENT implementation.
+    ///
+    /// The constants below were computed by a separate Python program
+    /// (secp256k1 point math from integers, hash160 = RIPEMD160(SHA256(x)),
+    /// base58check with version byte 28) written from the spec — NOT by this
+    /// crate. This test is the cross-implementation check that the redeem
+    /// script layout and the P2SH address encoding are correct, rather than
+    /// merely self-consistent. The same program also reproduces the canonical
+    /// privkey=1 hash160 vector (751e76e8…), so its hashing path is anchored.
+    #[test]
+    fn oracle_vector_two_of_three_matches_the_independent_implementation() {
+        let hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{:02x}", x)).collect() };
+        let secp = secp_ctx();
+        let mut pubkeys = Vec::new();
+        for n in 1u8..=3 {
+            let mut sk_bytes = [0u8; 32];
+            sk_bytes[31] = n;
+            let sk = secp256k1::SecretKey::from_slice(&sk_bytes).expect("scalar");
+            let pk = secp256k1::PublicKey::from_secret_key(secp, &sk);
+            pubkeys.push(pk.serialize().to_vec());
+        }
+        let redeem = crate::multisig::redeem_script(2, &pubkeys).expect("redeem");
+        assert_eq!(redeem.len(), 105, "2-of-3 redeem script length");
+        assert_eq!(
+            hex(&redeem),
+            "52210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+             2102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\
+             2102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\
+             53ae",
+            "redeem script bytes must match the independent implementation"
+        );
+        assert_eq!(
+            crate::multisig::p2sh_address(&redeem),
+            "CJU8gKtn4aNBBovbywqPqZo6mjA1B1pLD1",
+            "P2SH address must match the independent implementation"
+        );
+    }
+
+    /// The P2SH scriptPubKey paying to `redeem`: a9 14 hash160(redeem) 87.
+    fn p2sh_spk(redeem: &[u8]) -> Vec<u8> {
+        let mut spk = vec![OP_HASH160, 0x14];
+        spk.extend_from_slice(&crate::address::hash160(redeem));
+        spk.push(OP_EQUAL);
+        spk
+    }
+
+    fn ms_tx(prev_hash: [u8; 32]) -> Tx {
+        Tx {
+            version: 1,
+            time: 1_400_003_600,
+            vin: vec![Vin {
+                prev_hash,
+                prev_n: 0,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout {
+                value: 10_000,
+                script_pubkey: script_pubkey_p2pk(&synthetic_key("ms/dest").1).unwrap(),
+            }],
+            locktime: 0,
+        }
+    }
+
+    /// T3: solver_type recognizes the exact P2SH shape and yields the
+    /// scriptPubKey hash — equal to hash160 of the redeem script.
+    #[test]
+    fn t3_solver_type_recognizes_p2sh_scripthash() {
+        let keys = ms_keys(&["t3/a", "t3/b", "t3/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let h = crate::address::hash160(&redeem);
+        assert_eq!(
+            solver_type(&spk),
+            Some(SpendType::ScriptHash(h)),
+            "P2SH scriptPubKey must solve to ScriptHash(h)"
+        );
+        assert_eq!(h, crate::address::hash160(&redeem));
+        assert_eq!(script_sig_args_expected(&SpendType::ScriptHash(h)), 1);
+        // ownership WITHOUT a book refuses P2SH (round 2: the safe default);
+        // with a book holding the redeem + m keys it passes — see T-C.
+        let mut prev = make_prevout("t3/prev", spk, 100_000);
+        prev.pubkey = synthetic_key("t3/unrelated").1;
+        let err = prev.assert_owns_prevout().err().unwrap();
+        assert!(
+            err.contains("script book"),
+            "book-less ownership must refuse P2SH, got: {}",
+            err
+        );
+    }
+
+    /// T4: a full 2-of-3 P2SH spend — two keys sign, verify_input passes,
+    /// the assembled scriptSig starts with OP_0, and the whole tx clears
+    /// the ConnectInputs gate the network applies.
+    #[test]
+    fn t4_two_of_three_p2sh_spend_signs_and_verifies() {
+        let keys = ms_keys(&["t4/a", "t4/b", "t4/c"]);
+        let pks = ms_pubkeys(&keys);
+        let redeem = crate::multisig::redeem_script(2, &pks).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let mut tx = ms_tx([0x77u8; 32]);
+        let partial =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys[..2]).unwrap();
+        assert_eq!(partial.len(), 3, "one slot per pubkey");
+        assert_eq!(partial.iter().flatten().count(), 2);
+        assert!(partial[2].is_none(), "wallet holds keys a and b only");
+        let script_sig =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &redeem).unwrap();
+        assert_eq!(script_sig[0], 0x00, "scriptSig must start with OP_0 (dummy)");
+        tx.vin[0].script_sig = script_sig;
+
+        let v = verify_input(&tx, 0, &spk).expect("2-of-3 spend must verify");
+        assert_eq!(v.hash_type, SIGHASH_ALL);
+        assert_eq!(v.der_mode, "strict");
+        assert!(pks.contains(&v.pubkey), "verified against a redeem pubkey");
+
+        let pushes = parse_pushes(&tx.vin[0].script_sig).unwrap();
+        assert_eq!(pushes.len(), 4, "OP_0 dummy + 2 sigs + redeem script");
+        assert!(pushes[0].is_empty(), "OP_0 pushes the empty vector");
+        assert_eq!(pushes[3], redeem, "last push is the redeem script");
+        let sig_lens: Vec<usize> = pushes[1..3].iter().map(|s| s.len()).collect();
+        println!("T4 signature byte lengths: {:?}", sig_lens);
+        for s in &pushes[1..3] {
+            assert!(
+                (70..=72).contains(&s.len()),
+                "DER signature + hashtype byte, got {}",
+                s.len()
+            );
+            assert_eq!(*s.last().unwrap(), SIGHASH_ALL as u8);
+        }
+        // the network gate: ConnectInputs over the real P2SH prevout passes
+        let prev = SpendInput {
+            txid: [0x77u8; 32],
+            n: 0,
+            value: 100_000,
+            script_pubkey: spk,
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: [0u8; 32], // unused: P2SH ownership is proven by the sigs
+            pubkey: Vec::new(),
+        };
+        connect_inputs_check(&tx, &[prev], 200).expect("ConnectInputs must accept the spend");
+    }
+
+    /// T5: the CHECKMULTISIG dummy is mandatory — stripping the leading
+    /// OP_0 leaves a stack the opcode's extra pop underflows on.
+    #[test]
+    fn t5_scriptsig_without_the_op0_dummy_fails() {
+        let keys = ms_keys(&["t5/a", "t5/b", "t5/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let mut tx = ms_tx([0x78u8; 32]);
+        let partial =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys[..2]).unwrap();
+        let script_sig =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &redeem).unwrap();
+        tx.vin[0].script_sig = script_sig.clone();
+        verify_input(&tx, 0, &spk).expect("sanity: assembled spend verifies");
+        // REMOVE the leading OP_0 (a single 0x00 byte) and re-verify
+        let stripped: Vec<u8> = script_sig[1..].to_vec();
+        assert_ne!(stripped[0], 0x00);
+        tx.vin[0].script_sig = stripped;
+        let err = verify_input(&tx, 0, &spk).err().unwrap();
+        assert!(
+            err.contains("OP_0 dummy") || err.contains("underflow"),
+            "missing dummy must fail loudly, got: {}",
+            err
+        );
+    }
+
+    /// T6: a scriptSig carrying a DIFFERENT redeem script fails at the
+    /// hash160 gate (script.cpp:1721's IsPayToScriptHash branch), before
+    /// any signature is checked.
+    #[test]
+    fn t6_wrong_redeem_script_fails_hash_mismatch() {
+        let keys = ms_keys(&["t6/a", "t6/b", "t6/c"]);
+        let other = ms_keys(&["t6/x", "t6/y", "t6/z"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let other_redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&other)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let mut tx = ms_tx([0x79u8; 32]);
+        let partial =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys[..2]).unwrap();
+        // assemble with the WRONG redeem script (right shape, wrong hash)
+        let script_sig =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &other_redeem).unwrap();
+        tx.vin[0].script_sig = script_sig;
+        let err = verify_input(&tx, 0, &spk).err().unwrap();
+        assert!(
+            err.contains("hash mismatch"),
+            "must fail with a hash-mismatch error, got: {}",
+            err
+        );
+    }
+
+    /// T7: CHECKMULTISIG matches in pubkey order — sig(c) before sig(b)
+    /// exhausts the key list and fails, the assembled pubkey order passes.
+    #[test]
+    fn t7_signatures_out_of_pubkey_order_fail() {
+        let keys = ms_keys(&["t7/a", "t7/b", "t7/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let mut tx = ms_tx([0x7au8; 32]);
+        // wallet holds keys b and c (pubkey slots 1 and 2)
+        let partial =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys[1..3]).unwrap();
+        assert!(partial[0].is_none() && partial[1].is_some() && partial[2].is_some());
+        let script_sig =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &redeem).unwrap();
+        tx.vin[0].script_sig = script_sig.clone();
+        verify_input(&tx, 0, &spk).expect("pubkey-order sigs verify");
+        // swap the two signature pushes (dummy, sigB, sigC, redeem) →
+        // (dummy, sigC, sigB, redeem): sigC matches pk3, then sigB has no
+        // pubkey at or after that index left.
+        let pushes = parse_pushes(&script_sig).unwrap();
+        let mut swapped = vec![0x00u8];
+        push_data(&mut swapped, &pushes[2]);
+        push_data(&mut swapped, &pushes[1]);
+        push_data(&mut swapped, &pushes[3]);
+        tx.vin[0].script_sig = swapped;
+        let err = verify_input(&tx, 0, &spk).err().unwrap();
+        assert!(
+            err.contains("CHECKMULTISIG"),
+            "out-of-order sigs must fail, got: {}",
+            err
+        );
+    }
+
+    /// T8: partial signing with a single key fills one slot, and assembly
+    /// refuses to build a 2-of-3 scriptSig from it.
+    #[test]
+    fn t8_partial_signing_with_one_key_cannot_assemble() {
+        let keys = ms_keys(&["t8/a", "t8/b", "t8/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let tx = ms_tx([0x7bu8; 32]);
+        let partial =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys[..1]).unwrap();
+        assert_eq!(partial.iter().flatten().count(), 1, "one filled slot");
+        assert!(partial[0].is_some() && partial[1].is_none() && partial[2].is_none());
+        let err =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &redeem).err().unwrap();
+        assert!(
+            err.contains("missing signatures"),
+            "assembly must demand m=2 sigs, got: {}",
+            err
+        );
+    }
+
+    /// T10: the boundary case — a 1-of-1 P2SH spend verifies end to end.
+    #[test]
+    fn t10_one_of_one_p2sh_spend_verifies() {
+        let keys = ms_keys(&["t10/a"]);
+        let redeem = crate::multisig::redeem_script(1, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let mut tx = ms_tx([0x7cu8; 32]);
+        let partial = crate::multisig::sign_multisig_partial(&tx, 0, &redeem, &keys).unwrap();
+        assert_eq!(partial.iter().flatten().count(), 1);
+        let script_sig =
+            crate::multisig::assemble_multisig_scriptsig(&partial, &redeem).unwrap();
+        assert_eq!(script_sig[0], 0x00);
+        tx.vin[0].script_sig = script_sig;
+        let v = verify_input(&tx, 0, &spk).expect("1-of-1 must verify");
+        assert_eq!(v.hash_type, SIGHASH_ALL);
+        assert_eq!(v.pubkey, keys[0].1);
+    }
+
+    // ---- round 2: the wallet can actually SPEND multisig coins ----
+
+    /// Build the book the way the wallet flow does: store the redeem script
+    /// in a (temp) wallet file, read it back through `read_wallet`, and
+    /// build the ScriptBook from the reader output + the held keys.
+    fn book_via_wallet_file(
+        tag: &str,
+        redeem: &[u8],
+        keys: &[([u8; 32], Vec<u8>)],
+    ) -> crate::multisig::ScriptBook {
+        let dir = std::env::temp_dir().join(format!("tri7spend_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wallet.dat");
+        crate::wallet::create_wallet_file(&path).unwrap();
+        let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+        wh.put_redeem_script(redeem).unwrap();
+        wh.close();
+        let w = crate::wallet::read_wallet(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::multisig::ScriptBook::from_wallet(&w, keys)
+    }
+
+    /// T-A end to end: 2-of-3 created, redeem stored in the wallet, UTXO
+    /// pays the P2SH address, the book-aware builder produces a plan whose
+    /// input verifies via verify_input AND connect_inputs_check, with the
+    /// scriptSig starting in OP_0 and ending in the redeem script.
+    #[test]
+    fn ta_book_builder_spends_multisig_end_to_end() {
+        let keys = ms_keys(&["ta/a", "ta/b", "ta/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let book = book_via_wallet_file("ta", &redeem, &keys[..2]);
+        let coin = SpendInput {
+            txid: [0x91u8; 32],
+            n: 1,
+            value: 500_000,
+            script_pubkey: spk.clone(),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        coin.assert_owns_prevout_with(&book)
+            .expect("the book owns the multisig coin");
+        let dest = script_pubkey_p2pk(&synthetic_key("ta/dest").1).unwrap();
+        let change = script_pubkey_p2pkh(&synthetic_key("ta/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[coin.clone()],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("multisig spend must build and sign");
+        let ss = &plan.tx.vin[0].script_sig;
+        assert_eq!(ss[0], 0x00, "scriptSig must start with OP_0");
+        assert!(
+            ss.ends_with(&redeem),
+            "scriptSig must end with the redeem script push"
+        );
+        verify_input(&plan.tx, 0, &spk).expect("verify_input must accept the spend");
+        connect_inputs_check(&plan.tx, &[coin], 200)
+            .expect("connect_inputs_check must accept the spend");
+    }
+
+    /// T-B: a book holding only ONE of the 2 required keys must make the
+    /// builder fail with the shortfall named — no partial plan.
+    #[test]
+    fn tb_book_with_one_key_cannot_build_multisig_spend() {
+        let keys = ms_keys(&["tb/a", "tb/b", "tb/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let book = book_via_wallet_file("tb", &redeem, &keys[..1]);
+        let coin = SpendInput {
+            txid: [0x92u8; 32],
+            n: 0,
+            value: 500_000,
+            script_pubkey: spk,
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        let dest = script_pubkey_p2pk(&synthetic_key("tb/dest").1).unwrap();
+        let err = build_spend_outputs_floor_with_book(
+            &[coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            None,
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            err.contains("only 1 of 2 required keys held"),
+            "the error must name the shortfall, got: {}",
+            err
+        );
+    }
+
+    /// T-C: book-less ownership REFUSES a P2SH prevout; the _with form
+    /// accepts it when the book holds the redeem + m keys, and refuses with
+    /// the shortfall when a key is missing.
+    #[test]
+    fn tc_ownership_bookless_refuses_with_book_accepts() {
+        let keys = ms_keys(&["tc/a", "tc/b", "tc/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk = p2sh_spk(&redeem);
+        let coin = SpendInput {
+            txid: [0x93u8; 32],
+            n: 0,
+            value: 100_000,
+            script_pubkey: spk,
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        let err = coin.assert_owns_prevout().err().unwrap();
+        assert!(
+            err.contains("script book"),
+            "book-less ownership must refuse P2SH, got: {}",
+            err
+        );
+        assert!(
+            coin.assert_owns_prevout_with(&crate::multisig::ScriptBook::empty())
+                .is_err(),
+            "an empty book cannot spend P2SH either"
+        );
+        let scripts = [(crate::address::hash160(&redeem), redeem.clone())];
+        let good = crate::multisig::ScriptBook::from_scripts(&scripts, &keys[..2]);
+        coin.assert_owns_prevout_with(&good)
+            .expect("book with redeem + m keys accepts");
+        let poor = crate::multisig::ScriptBook::from_scripts(&scripts, &keys[..1]);
+        let err = coin.assert_owns_prevout_with(&poor).err().unwrap();
+        assert!(
+            err.contains("only 1 of 2 required keys held"),
+            "shortfall must be named, got: {}",
+            err
+        );
+    }
+
+    /// T-D: can_spend is false for an unrelated P2SH (no redeem stored) and
+    /// true for ours; non-P2SH scripts pass vacuously.
+    #[test]
+    fn td_can_spend_distinguishes_our_and_unrelated_p2sh() {
+        let keys = ms_keys(&["td/a", "td/b", "td/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let spk_ours = p2sh_spk(&redeem);
+        let strangers = ms_keys(&["td/x", "td/y", "td/z"]);
+        let other_redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&strangers)).unwrap();
+        let spk_other = p2sh_spk(&other_redeem);
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        assert!(book.can_spend(&spk_ours).is_ok(), "our P2SH is spendable");
+        let err = book.can_spend(&spk_other).err().unwrap();
+        assert!(
+            err.contains("no redeem script"),
+            "unrelated P2SH must fail can_spend, got: {}",
+            err
+        );
+        assert!(
+            book.can_spend(&script_pubkey_p2pkh(&keys[0].1)).is_ok(),
+            "non-P2SH needs no book"
+        );
+    }
+
+    /// T-E: assembly derives m from the redeem script (a 3-of-3 with two
+    /// sigs fails even though 2-of-3 would pass with the same slots) and
+    /// rejects a slot count that does not match the pubkey count.
+    #[test]
+    fn te_assemble_derives_m_and_validates_slot_count() {
+        let keys = ms_keys(&["te/a", "te/b", "te/c"]);
+        let pks = ms_pubkeys(&keys);
+        let redeem3 = crate::multisig::redeem_script(3, &pks).unwrap();
+        let tx = ms_tx([0x94u8; 32]);
+        let partial3 =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem3, &keys[..2]).unwrap();
+        assert_eq!(partial3.iter().flatten().count(), 2);
+        let err = crate::multisig::assemble_multisig_scriptsig(&partial3, &redeem3)
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("missing signatures: have 2 but need at least 3"),
+            "m must come from the script, got: {}",
+            err
+        );
+        // slot count must equal the redeem script's pubkey count
+        let redeem2 = crate::multisig::redeem_script(2, &pks).unwrap();
+        let partial2 =
+            crate::multisig::sign_multisig_partial(&tx, 0, &redeem2, &keys[..2]).unwrap();
+        let two_slots: Vec<Option<Vec<u8>>> = partial2[..2].to_vec();
+        let err = crate::multisig::assemble_multisig_scriptsig(&two_slots, &redeem2)
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("slot count 2 does not match the redeem script's 3 pubkeys"),
+            "slot/pubkey mismatch must be rejected, got: {}",
+            err
+        );
+        crate::multisig::assemble_multisig_scriptsig(&partial2, &redeem2)
+            .expect("exact slots assemble");
+    }
+
+    /// T-F: a pool holding an unrelated (bigger) P2SH UTXO skips it and
+    /// still builds a valid single-key spend.
+    #[test]
+    fn tf_pool_with_unrelated_p2sh_skips_and_builds_p2pkh() {
+        let p2pkh_coin = coin(7, 1_000_000);
+        let strangers = ms_keys(&["tf/x", "tf/y", "tf/z"]);
+        let other_redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&strangers)).unwrap();
+        // the unrelated P2SH coin is WORTH MORE, so adoption would change
+        // the selection — it must be skipped instead
+        let p2sh_coin = SpendInput {
+            txid: [0x95u8; 32],
+            n: 0,
+            value: 2_000_000,
+            script_pubkey: p2sh_spk(&other_redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: [0u8; 32],
+            pubkey: Vec::new(),
+        };
+        let book = crate::multisig::ScriptBook::empty();
+        let dest = script_pubkey_p2pk(&synthetic_key("tf/dest").1).unwrap();
+        let change = script_pubkey_p2pkh(&synthetic_key("tf/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[p2sh_coin, p2pkh_coin.clone()],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("the pool must build without the unrelated P2SH coin");
+        assert_eq!(plan.tx.vin.len(), 1, "only the P2PKH coin is adopted");
+        assert_eq!(plan.inputs_value, 1_000_000, "the P2SH value is not counted");
+        verify_input(&plan.tx, 0, &p2pkh_coin.script_pubkey)
+            .expect("the single-key input verifies");
+        connect_inputs_check(&plan.tx, &[p2pkh_coin], 200)
+            .expect("connect_inputs_check passes");
+    }
+
+    // ---- round 3, blocker B: per-input fee/size estimation ----
+
+    /// 1-in/2-out P2PKH estimate is UNCHANGED: 148 + (4+4+1+1+4) + 2*(8+1+25)
+    /// = 230 — the exact number the count-based formula always produced, and
+    /// the per-input function reproduces it for a P2PKH coin (148) and a
+    /// bare-P2PK coin (114).
+    #[test]
+    fn p2pkh_estimate_unchanged_and_per_input_matches() {
+        assert_eq!(
+            estimate_signed_size(1, 2),
+            148 + (4 + 4 + 1 + 1 + 4) + 2 * (8 + 1 + 25),
+            "1-in/2-out P2PKH estimate must stay 230 bytes"
+        );
+        let empty = crate::multisig::ScriptBook::empty();
+        // P2PKH coin: 148 per input — identical to the old estimate
+        let p2pkh = coin(3, 1_000_000);
+        assert_eq!(
+            estimate_signed_size_for(&[p2pkh], 2, &empty),
+            14 + 148 + 2 * 34,
+            "per-input P2PKH estimate must be 230"
+        );
+        // bare-P2PK coin: 32+4+1+(1+72)+4 = 114
+        let pk = synthetic_key("est/p2pk").1;
+        let p2pk = SpendInput {
+            txid: [0x21u8; 32],
+            n: 0,
+            value: 1_000_000,
+            script_pubkey: script_pubkey_p2pk(&pk).unwrap(),
+            height: 1,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: [1u8; 32],
+            pubkey: pk,
+        };
+        p2pk.assert_owns_prevout().expect("owns the bare-p2pk coin");
+        assert_eq!(
+            estimate_signed_size_for(&[p2pk], 2, &empty),
+            14 + 114 + 2 * 34,
+            "per-input bare-P2PK estimate must be 196"
+        );
+    }
+
+    /// The 2-of-3 P2SH estimate lands within 5 bytes of the REAL serialized
+    /// size of the signed transaction (both numbers asserted). Estimate for
+    /// the 105-byte 2-of-3 redeem: 14 + (32+4+1 + 2*74 + 1 + 105 + 4) + 2*34
+    /// = 377; the real scriptSig's DER sigs are 71-72 bytes, so reality is
+    /// within a couple of bytes.
+    #[test]
+    fn two_of_three_estimate_matches_real_signed_size_within_5_bytes() {
+        let keys = ms_keys(&["est2/a", "est2/b", "est2/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        assert_eq!(redeem.len(), 105, "2-of-3 redeem length");
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        let p2sh_coin = SpendInput {
+            txid: [0x96u8; 32],
+            n: 0,
+            value: 500_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        p2sh_coin
+            .assert_owns_prevout_with(&book)
+            .expect("the book owns the coin");
+
+        let est = estimate_signed_size_for(&[p2sh_coin.clone()], 2, &book);
+        assert_eq!(
+            est,
+            14 + (32 + 4 + 3 + (1 + 2 * (1 + 72) + 2 + 105) + 4) + 2 * 34,
+            "estimate formula: base + 2-of-3 input (254-byte scriptSig, 3-byte CompactSize prefix) + 2 P2PKH outputs = 379"
+        );
+
+        // BOTH outputs P2PKH — the estimator's per-output shape (8+1+25)
+        let dest = script_pubkey_p2pkh(&synthetic_key("est2/dest").1);
+        let change = script_pubkey_p2pkh(&synthetic_key("est2/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[p2sh_coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("2-of-3 spend must build");
+        let real = plan.tx.serialize().len();
+        // Safety property: the quote must never be SMALLER than the signed size
+        // (that would underpay). It may exceed it by a few bytes because DER
+        // signature lengths vary 71-73 with the sighash byte while the estimator
+        // assumes the worst case of 72.
+        assert!(
+            est >= real,
+            "estimate {} must not undercount the real signed size {}",
+            est,
+            real
+        );
+        assert!(
+            est - real <= 5,
+            "estimate {} overcounts the real signed size {} by more than 5 bytes",
+            est,
+            real
+        );
+        println!(
+            "round3: 2-of-3 P2SH estimate = {} bytes, real signed size = {} bytes (diff {})",
+            est,
+            real,
+            est.abs_diff(real)
+        );
+    }
+
+    /// Boundary case for the CompactSize accounting: a 2-of-10 redeem script is
+    /// 343 bytes, so the scriptSig is 493 bytes — far above the 252 boundary —
+    /// and the transaction must charge THREE prefix bytes, not one.
+    #[test]
+    fn estimate_charges_a_three_byte_prefix_once_the_scriptsig_crosses_252() {
+        let names: Vec<String> = (0..10).map(|i| format!("wide/{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let keys = ms_keys(&refs);
+        let pubkeys = ms_pubkeys(&keys);
+        let redeem = crate::multisig::redeem_script(2, &pubkeys).unwrap();
+        assert_eq!(redeem.len(), 343, "2-of-10 redeem length");
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        let coin = SpendInput {
+            txid: [0x98u8; 32],
+            n: 0,
+            value: 900_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+
+        // 1 (OP_0) + 2 pushes of (1+72) + OP_PUSHDATA2 (3) + 343
+        let script_sig = 1 + 2 * (1 + 72) + 3 + 343;
+        assert!(script_sig > 252, "scriptSig {script_sig} must cross the boundary");
+        let expected = 14 + (32 + 4 + 3 + script_sig + 4) + 2 * 34;
+        assert_eq!(
+            estimate_signed_size_for(&[coin.clone()], 2, &book),
+            expected,
+            "a 493-byte scriptSig costs a 3-byte CompactSize prefix"
+        );
+
+        let dest = script_pubkey_p2pkh(&synthetic_key("wide/dest").1);
+        let change = script_pubkey_p2pkh(&synthetic_key("wide/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("a 2-of-10 spend must build");
+        let real = plan.tx.serialize().len();
+        assert!(
+            expected >= real,
+            "estimate {} must not undercount the real signed size {} above the boundary",
+            expected,
+            real
+        );
+    }
+
+    /// A wallet can hold MORE than m of a redeem's keys. Assembly must still
+    /// emit exactly m signatures in pubkey order: CHECKMULTISIG consumes only m,
+    /// so any extra push is unconsumed stack garbage — and it would make the
+    /// signed transaction larger than the fee quote budgeted.
+    #[test]
+    fn two_of_three_holding_all_three_keys_emits_exactly_m_and_never_undercounts() {
+        let keys = ms_keys(&["all3/a", "all3/b", "all3/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        assert_eq!(redeem.len(), 105, "2-of-3 redeem length");
+        // ALL THREE keys, not keys[..2] — this is the case the estimate missed.
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..],
+        );
+        let p2sh_coin = SpendInput {
+            txid: [0x97u8; 32],
+            n: 0,
+            value: 500_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        p2sh_coin
+            .assert_owns_prevout_with(&book)
+            .expect("the book owns the coin");
+
+        let est = estimate_signed_size_for(&[p2sh_coin.clone()], 2, &book);
+        let dest = script_pubkey_p2pkh(&synthetic_key("all3/dest").1);
+        let change = script_pubkey_p2pkh(&synthetic_key("all3/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[p2sh_coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("a 2-of-3 spend with all three keys must build");
+
+        // Walk the scriptSig: OP_0, then data pushes, then the redeem last.
+        let sig_script = &plan.tx.vin[0].script_sig;
+        assert_eq!(sig_script[0], 0x00, "OP_0 dummy");
+        let (mut i, mut sig_pushes) = (1usize, 0usize);
+        while i < sig_script.len() {
+            let op = sig_script[i];
+            let (len, hdr) = if op <= 75 {
+                (op as usize, 1usize)
+            } else if op == 0x4c {
+                (sig_script[i + 1] as usize, 2)
+            } else {
+                panic!("unexpected push opcode 0x{op:02x} at {i}");
+            };
+            if i + hdr + len == sig_script.len() && len == redeem.len() {
+                break; // the trailing redeem push
+            }
+            sig_pushes += 1;
+            i += hdr + len;
+        }
+        assert_eq!(
+            sig_pushes, 2,
+            "a 2-of-3 must carry exactly m=2 signatures even though the book holds 3 keys"
+        );
+
+        let real = plan.tx.serialize().len();
+        assert!(
+            est >= real,
+            "estimate {} must not undercount the real signed size {} when the book holds all n keys",
+            est,
+            real
+        );
+        assert!(
+            est - real <= 5,
+            "estimate {} overcounts the real signed size {} by more than 5 bytes",
+            est,
+            real
+        );
+    }
+
+    /// A mixed pool (1 P2PKH + 1 2-of-3 P2SH) converges through the
+    /// per-input fee schedule and builds a transaction whose fee is exactly
+    /// the converged quote — every input verifies.
+    #[test]
+    fn mixed_p2pkh_p2sh_pool_converges_and_builds() {
+        let keys = ms_keys(&["est3/a", "est3/b", "est3/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        let p2pkh_coin = coin(9, 1_000_000);
+        let p2sh_coin = SpendInput {
+            txid: [0x97u8; 32],
+            n: 0,
+            value: 1_000_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        let amount = 1_500_000i64;
+        let shape = select_with_fee_with_book(
+            &[p2pkh_coin.clone(), p2sh_coin.clone()],
+            &[amount],
+            MIN_FEE_SATS,
+            &book,
+        )
+        .expect("the mixed pool must converge");
+        assert_eq!(shape.n_inputs, 2, "both coins adopted");
+        // the quote schedules the per-input sizes: 14 + (148 + 297) + 2*34
+        assert_eq!(
+            estimate_signed_size_for(&shape.selected, shape.n_outputs, &book),
+            14 + 148 + (32 + 4 + 3 + (1 + 2 * (1 + 72) + 2 + 105) + 4) + 2 * 34,
+        );
+
+        let dest = script_pubkey_p2pk(&synthetic_key("est3/dest").1).unwrap();
+        let change = script_pubkey_p2pkh(&synthetic_key("est3/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &shape.selected,
+            vec![Vout {
+                value: amount,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            MIN_FEE_SATS,
+            shape.fee,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("the mixed spend must build and sign");
+        // the exact-equality the GUI guard applies: built fee == quoted fee
+        assert_eq!(
+            plan.fee, shape.fee,
+            "the signed transaction pays exactly the converged quote"
+        );
+        for (i, input) in shape.selected.iter().enumerate() {
+            verify_input(&plan.tx, i, &input.script_pubkey)
+                .unwrap_or_else(|e| panic!("input {} must verify: {}", i, e));
+        }
+        connect_inputs_check(&plan.tx, &shape.selected, 200)
+            .expect("connect_inputs_check passes");
     }
 }

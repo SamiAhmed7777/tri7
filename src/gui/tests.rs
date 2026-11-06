@@ -1077,7 +1077,7 @@ fn derivation_falls_back_to_snapshot_without_index() {
     let tip = load_tipstate(&cfg.tipstate_path()).unwrap();
     let dump = load_utxo_dump(&cfg.utxo_dump_path()).unwrap();
     let payloads: HashSet<[u8; 21]> = [payload].into_iter().collect();
-    let derived = derive_wallet(dump, payloads, &cfg, &tip, &|_| None).unwrap();
+    let derived = derive_wallet(dump, payloads, &[], &cfg, &tip, &|_| None).unwrap();
     // no index caches / no archive → honest fallback, snapshot shown as-is
     assert!(!derived.reconcile.enabled);
     assert!(
@@ -1312,6 +1312,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
         default_key: wread.default_key,
         version: wread.version,
         best_block: wread.best_block,
+            scripts: Vec::new(),
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: 0,
@@ -1645,6 +1646,7 @@ fn seed_migration_entry_guards_refuse_before_any_value_moves() {
         default_key: wread.default_key,
         version: wread.version,
         best_block: wread.best_block,
+            scripts: Vec::new(),
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: 0,
@@ -1708,6 +1710,7 @@ fn seed_migration_full_path_prepare_broadcast_marker() {
         default_key: wread.default_key,
         version: wread.version,
         best_block: wread.best_block,
+            scripts: Vec::new(),
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: 0,
@@ -1811,6 +1814,7 @@ fn seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry() {
         default_key: wread.default_key,
         version: wread.version,
         best_block: wread.best_block,
+            scripts: Vec::new(),
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: 0,
@@ -2078,4 +2082,177 @@ mod passphrase_dialog {
         let st = state();
         assert!(st.passphrase_request().is_err());
     }
+}
+
+// ---------------------------------------------------------------------------
+// round 3, blocker A: the GUI SEES multisig coins (P2SH watch scripts)
+// ---------------------------------------------------------------------------
+
+/// The P2SH scriptPubKey paying to `redeem`: a9 14 hash160(redeem) 87.
+fn p2sh_script(redeem: &[u8]) -> Vec<u8> {
+    let mut s = vec![0xa9u8, 0x14];
+    s.extend_from_slice(&hash160(redeem));
+    s.push(0x87);
+    s
+}
+
+/// GUI-level acceptance: a wallet holding a 2-of-3 redeem script + a UTXO
+/// snapshot carrying one coin at that P2SH address (and one at an unrelated
+/// P2SH we hold no script for). `derived.utxos` must contain OUR coin with
+/// address == p2sh_address(redeem), must NOT contain the stranger's, and a
+/// send built from our coin must succeed through `build_signed_send_with_book`
+/// — the exact-equality fee guard included (no "fee mismatch").
+#[test]
+fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
+    let dir = std::env::temp_dir().join(format!("tri7gui_p2sh_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+
+    // the wallet: created on disk with the redeem script stored (the way the
+    // GUI loads it — WalletData.scripts)
+    let ms_keys: Vec<([u8; 32], Vec<u8>)> = ["gui-ms/a", "gui-ms/b", "gui-ms/c"]
+        .iter()
+        .map(|l| spend::synthetic_key(l))
+        .collect();
+    let ms_pks: Vec<Vec<u8>> = ms_keys.iter().map(|k| k.1.clone()).collect();
+    let redeem = crate::multisig::redeem_script(2, &ms_pks).unwrap();
+    let wallet_path = dir.join("wallet.dat");
+    crate::wallet::create_wallet_file(&wallet_path).unwrap();
+    let mut wh = crate::wallet::WalletHandle::open_readwrite(&wallet_path).unwrap();
+    wh.put_redeem_script(&redeem).unwrap();
+    wh.close();
+    let wallet = load_wallet(&wallet_path).expect("wallet loads");
+    assert_eq!(wallet.scripts.len(), 1, "the redeem script is stored");
+
+    let p2sh_addr = crate::multisig::p2sh_address(&redeem);
+    assert!(p2sh_addr.starts_with('C'), "P2SH address class: {}", p2sh_addr);
+    // a stranger's multisig we hold NO redeem script for
+    let stranger_keys: Vec<([u8; 32], Vec<u8>)> = ["gui-ms/x", "gui-ms/y", "gui-ms/z"]
+        .iter()
+        .map(|l| spend::synthetic_key(l))
+        .collect();
+    let stranger_redeem =
+        crate::multisig::redeem_script(2, &stranger_keys.iter().map(|k| k.1.clone()).collect::<Vec<_>>())
+            .unwrap();
+    let stranger_addr = crate::multisig::p2sh_address(&stranger_redeem);
+
+    let to_hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{:02x}", x)).collect() };
+    let dump = format!(
+        r#"{{"height": 2201090, "covered_tip_hash": "{}", "count": 2, "total_value_sats": 600000,
+           "utxos": [
+             {{"txid": "{}", "n": 0, "value_sats": 500000, "script_hex": "{}",
+               "address": "", "height": 2201090, "tx_time": 1700000000, "prev_kind": "regular"}},
+             {{"txid": "{}", "n": 1, "value_sats": 100000, "script_hex": "{}",
+               "address": "{}", "height": 2201090, "tx_time": 1700000000, "prev_kind": "regular"}}]}}"#,
+        crate::legacy::hash_to_display(&[0x11u8; 32]),
+        crate::legacy::hash_to_display(&[0x22u8; 32]),
+        to_hex(&p2sh_script(&redeem)),
+        crate::legacy::hash_to_display(&[0x33u8; 32]),
+        to_hex(&p2sh_script(&stranger_redeem)),
+        stranger_addr,
+    );
+    std::fs::write(dir.join("state").join("wallet_utxos.json"), &dump).unwrap();
+    std::fs::write(
+        dir.join("state").join("tipstate.json"),
+        format!(
+            r#"{{"height": 2204064, "blockhash": "{}", "window_base": 2199465, "entries": []}}"#,
+            crate::legacy::hash_to_display(&[0xabu8; 32])
+        ),
+    )
+    .unwrap();
+    let cfg = UiConfig {
+        wallet_path: wallet_path.display().to_string(),
+        state_dir: dir.join("state").display().to_string(),
+        state_dir_explicit: true,
+        stake_dryrun_path: "/nonexistent".into(),
+        rpc_addr: None,
+        profile_dir: dir.join("profile").display().to_string(),
+        balances_path: "/nonexistent".into(),
+        explorer_endpoints: vec![],
+    };
+    let tip = load_tipstate(&cfg.tipstate_path()).unwrap();
+    let dump = load_utxo_dump(&cfg.utxo_dump_path()).unwrap();
+    let key_payloads: HashSet<[u8; 21]> = wallet
+        .keys
+        .iter()
+        .map(|k| crate::address::pubkey_payload(&k.pubkey))
+        .collect();
+    let derived = derive_wallet(dump, key_payloads, &wallet.scripts, &cfg, &tip, &|_|
+        None).unwrap();
+
+    // OUR P2SH coin is visible with the CORRECT address; the stranger's is not
+    assert_eq!(
+        derived.utxos.len(),
+        1,
+        "only the redeem-backed P2SH coin is derived (stranger's dropped)"
+    );
+    let utxo = &derived.utxos[0];
+    assert_eq!(utxo.address, p2sh_addr, "address must match p2sh_address(redeem)");
+    assert_eq!(utxo.value_sats, 500_000);
+    assert_eq!(
+        utxo.script,
+        p2sh_script(&redeem),
+        "the row carries the P2SH scriptPubKey the send path needs"
+    );
+    assert_eq!(
+        derived.balances.total_sats, 500_000,
+        "the stranger's 100k never enters the balance"
+    );
+
+    // a send built from the derived UTXO through the book-aware GUI builder
+    let book = crate::multisig::ScriptBook::from_scripts(
+        &[(hash160(&redeem), redeem.clone())],
+        &ms_keys[..2],
+    );
+    // the inputs the builder will see, built the same way it builds them
+    let inputs: Vec<spend::SpendInput> = derived
+        .utxos
+        .iter()
+        .filter_map(|u| {
+            book.can_spend(&u.script).ok()?;
+            let redeem = book.redeem_for(&u.script)?.clone();
+            let (secret, pubkey) = book.held_keys(&redeem).first().cloned()?;
+            Some(spend::SpendInput {
+                txid: u.txid,
+                n: u.n,
+                value: u.value_sats,
+                script_pubkey: u.script.clone(),
+                height: u.height,
+                tx_time: u.tx_time,
+                is_coinbase: u.prev_kind == "coinbase",
+                is_coinstake: u.prev_kind == "coinstake",
+                secret,
+                pubkey,
+            })
+        })
+        .collect();
+    assert_eq!(inputs.len(), 1, "the P2SH coin is a spendable candidate");
+
+    let dest = spend::synthetic_key("gui-ms/dest").1;
+    let amount = 400_000i64;
+    let pay = spend::MIN_FEE_SATS;
+    let shape =
+        spend::select_with_fee_with_book(&inputs, &[amount], pay, &book).expect("fee converges");
+    let req = SendRequest {
+        from: p2sh_addr.clone(),
+        dest_payload: crate::address::pubkey_payload(&dest),
+        amount_sats: amount,
+        fee_sats: shape.fee,
+        fee_rate_sats: pay,
+        change_payload: crate::address::pubkey_payload(&ms_keys[0].1),
+    };
+    let build = build_signed_send_with_book(&req, &derived, &Default::default(), None, &book, 1_400_500_000, 2_204_090)
+        .expect("the multisig send must build through the book-aware builder");
+    assert_eq!(build.fee_sats, shape.fee, "built fee == converged quote");
+    let est = spend::estimate_signed_size_for(&inputs, 2, &book);
+    assert!(
+        est.abs_diff(build.n_bytes) <= 5,
+        "estimate {} vs real signed size {} (must be within 5 bytes)",
+        est,
+        build.n_bytes
+    );
+    println!(
+        "round3: GUI P2SH send estimate = {} bytes, real = {} bytes, fee = {} sats",
+        est, build.n_bytes, build.fee_sats
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

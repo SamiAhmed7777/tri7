@@ -4859,6 +4859,18 @@ impl OpsAdapter {
         for k in &w.wallet.keys {
             keys.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
         }
+        // Multisig context: redeem scripts from the wallet file + every key
+        // we can sign with. P2SH coins are only adopted when this book can
+        // spend them (redeem present + m keys).
+        let book = {
+            let key_vec: Vec<([u8; 32], Vec<u8>)> = w
+                .wallet
+                .keys
+                .iter()
+                .map(|k| (k.secret, k.pubkey.clone()))
+                .collect();
+            tri7_core::multisig::ScriptBook::from_wallet(&w.wallet, &key_vec)
+        };
         let kb = w.key_by_payload();
         let mut inputs: Vec<tri7_core::spend::SpendInput> = Vec::new();
         let mut by_addr: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -4866,16 +4878,32 @@ impl OpsAdapter {
             let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
                 continue;
             };
-            if !kb.contains_key(&dest.payload()) {
-                continue;
-            }
-            let Some((pubkey, secret)) = keys
-                .get(&tri7_core::address::payload_to_address(&dest.payload()))
-                .cloned()
-            else {
+            let addr = tri7_core::address::payload_to_address(&dest.payload());
+            // single-key coin (today's behavior) or a multisig coin the
+            // script book can spend; anything else is not ours to adopt.
+            let (pubkey, secret) = if kb.contains_key(&dest.payload()) {
+                let Some((pk, s)) = keys.get(&addr).cloned() else {
+                    continue;
+                };
+                (pk, s)
+            } else if matches!(
+                dest,
+                tri7_core::address::ScriptDest::ScriptHash(_)
+            ) {
+                if book.can_spend(&o.script).is_err() {
+                    continue; // unrelated/unsignable P2SH — never adopted
+                }
+                let redeem = book.redeem_for(&o.script).expect("can_spend passed").clone();
+                let held = book.held_keys(&redeem);
+                let Some((s, pk)) = held.first().cloned() else {
+                    continue;
+                };
+                // representative key pair: the multisig signing path reads the
+                // book, not these fields
+                (pk, s)
+            } else {
                 continue;
             };
-            let addr = tri7_core::address::payload_to_address(&dest.payload());
             *by_addr.entry(addr).or_insert(0) += o.value;
             inputs.push(tri7_core::spend::SpendInput {
                 txid: *txid,
@@ -4901,6 +4929,17 @@ impl OpsAdapter {
                 Ok(p) => p,
                 Err(_) => continue,
             };
+            // change returns to the sending address: P2PKH for key addresses,
+            // the P2SH scriptPubKey itself for multisig 'C' addresses (the
+            // book keeps it spendable).
+            let change_script = if change_payload[0] == tri7_core::address::SCRIPT_ADDRESS {
+                let mut s = vec![0xa9u8, 0x14];
+                s.extend_from_slice(&change_payload[1..]);
+                s.push(0x87);
+                s
+            } else {
+                p2pkh_script_for_payload(&change_payload)
+            };
             let pool: Vec<tri7_core::spend::SpendInput> = inputs
                 .iter()
                 .filter(|i| {
@@ -4924,7 +4963,12 @@ impl OpsAdapter {
                 .unwrap_or(tri7_core::spend::MIN_FEE_SATS)
                 .max(tri7_core::spend::MIN_FEE_SATS);
             let out_values: Vec<i64> = outs.iter().map(|o| o.value).collect();
-            let shape = match tri7_core::spend::select_with_fee(&pool, &out_values, paytxfee) {
+            let shape = match tri7_core::spend::select_with_fee_with_book(
+                &pool,
+                &out_values,
+                paytxfee,
+                &book,
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     last_err = e;
@@ -4932,16 +4976,17 @@ impl OpsAdapter {
                 }
             };
             let selected = shape.selected.clone();
-            let plan = match tri7_core::spend::build_spend_outputs_floor(
+            let plan = match tri7_core::spend::build_spend_outputs_floor_with_book(
                 &selected,
                 outs.clone(),
-                Some(p2pkh_script_for_payload(&change_payload)),
+                Some(change_script),
                 // the builder applies the (1 + bytes/1000) multiplier itself,
                 // so it gets the RATE, not the converged total in shape.fee
                 paytxfee,
                 // and the converged total as an absolute floor, so the fee the
                 // caller was quoted is what the transaction pays
                 shape.fee,
+                &book,
                 now,
                 tip_h as u32,
             ) {
@@ -7253,14 +7298,68 @@ fn main() {
                         );
                     }
                     Err(e) => {
-                        finish(
-                            &cfg,
-                            &st,
-                            &stats,
-                            &rpc,
-                            EXIT_VALIDATE,
-                            &format!("from-zero sync: {}", e),
-                        );
+                        // A transient peer disconnect must not abandon an
+                        // hours-long sync. The Pi died at h756000 with
+                        // "peer closed connection" after an hour of work; the
+                        // tip was persisted, so resume from it instead of
+                        // reporting a validation failure.
+                        let mut attempts = 0u32;
+                        let mut last_err = e;
+                        loop {
+                            if attempts >= 20 {
+                                finish(
+                                    &cfg,
+                                    &st,
+                                    &stats,
+                                    &rpc,
+                                    EXIT_VALIDATE,
+                                    &format!(
+                                        "from-zero sync: {} (gave up after {} reconnects)",
+                                        last_err, attempts
+                                    ),
+                                );
+                            }
+                            attempts += 1;
+                            log(&format!(
+                                "from-zero sync: {} — reconnecting (attempt {}/20) from h{}",
+                                last_err, attempts, st.tip_height
+                            ));
+                            std::thread::sleep(std::time::Duration::from_secs(
+                                (attempts.min(6) * 5) as u64,
+                            ));
+                            let start = st.tip_height.min(usize::MAX as u64) as usize;
+                            match connect_and_handshake(&cfg, &mut stats, st.tip_height, start) {
+                                Ok((mut peer, _idx)) => {
+                                    let peer_tip = peer.start_height.max(0) as u64;
+                                    match sync_from_zero(
+                                        &cfg,
+                                        &mut peer.sess,
+                                        &mut st,
+                                        &rpc,
+                                        &mut stats,
+                                        &store,
+                                        peer_tip,
+                                    ) {
+                                        Ok(()) => {
+                                            cfg.backfill_headers = 0;
+                                            break;
+                                        }
+                                        Err(e2) if e2 == "__SIGINT__" => {
+                                            finish(
+                                                &cfg,
+                                                &st,
+                                                &stats,
+                                                &rpc,
+                                                130,
+                                                "from-zero sync interrupted (SIGINT/SIGTERM) — tipstate persisted, resumable",
+                                            );
+                                        }
+                                        Err(e2) => last_err = e2,
+                                    }
+                                }
+                                Err(e2) => last_err = format!("reconnect failed: {}", e2),
+                            }
+                        }
                     }
                 }
             }
@@ -7343,6 +7442,9 @@ fn main() {
                                 best_block: None,
                                 version: None,
                                 names: Vec::new(),
+                                // locked: redeem script rows are unreadable,
+                                // so no P2SH coins are watchable yet
+                                scripts: Vec::new(),
                                 encrypted: true,
                                 hd_mnemonic: None,
                                 hd_passphrase: None,
@@ -8667,6 +8769,7 @@ mod tests {
                 best_block: None,
                 version: None,
                 names: Vec::new(),
+                scripts: Vec::new(),
                 encrypted: false,
                 hd_mnemonic: None,
                 hd_passphrase: None,
@@ -9348,6 +9451,7 @@ addnode=nonsense-no-port
                 best_block: None,
                 version: None,
                 names: Vec::new(),
+                scripts: Vec::new(),
                 encrypted: false,
                 hd_mnemonic: None,
                 hd_passphrase: None,
