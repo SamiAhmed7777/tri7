@@ -1431,12 +1431,20 @@ fn updater_banner_line_pins_the_offered_jump() {
     assert!(st.updater_download_action().is_err());
     assert_eq!(st.updater.phase, UpdatePhase::Available);
     st.broadcast.busy = false;
-    // headless host: the action validates + transitions but aborts the worker
-    // (no thread spawn without the gui feature) → back to Idle. The full
-    // Downloading flow is pinned by src/updater.rs tests with the runtime
-    // flavor override driving handle_event directly.
-    st.updater_download_action().unwrap();
-    assert_eq!(st.updater.phase, crate::updater::UpdatePhase::Idle);
+    // The state machine's transition is pinned WITHOUT spawning a worker: a gui
+    // build's download action starts a thread whose timing would make this
+    // assertion racy, so the pure transition is exercised directly here. The
+    // worker's own flow is covered by src/updater.rs tests.
+    st.updater.request_download(false).unwrap();
+    assert_eq!(
+        st.updater.phase,
+        crate::updater::UpdatePhase::Downloading {
+            received: 0,
+            total: 12_345_678, // the asset size the banner offered
+        }
+    );
+    // and the banner stops offering the jump once the download has started
+    assert!(st.updater_banner_line().is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1444,8 +1452,14 @@ fn updater_banner_line_pins_the_offered_jump() {
 fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
     use crate::updater::{DownloadedUpdate, UpdateFlavor, Version};
     let dir = gui_test_dir("upd_install");
+    // a REAL synthetic wallet.dat so the session lifecycle is observable
+    let wallet = synth_wallet_file(&dir, "wallet.dat");
     let mut st = crate::gui::app_state::AppState::new(upd_test_cfg(&dir));
-    // a verified payload ready to install
+    st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&wallet).unwrap());
+    assert!(st.wallet_writable(), "fixture starts with an open RW session");
+
+    // a verified payload ready to install (content is irrelevant: the plan does
+    // not execute it here)
     let payload = dir.join("CryptographicTriangles-7.0.2-win64-setup.exe");
     std::fs::write(&payload, b"p").unwrap();
     st.updater.downloaded = Some(DownloadedUpdate {
@@ -1456,16 +1470,52 @@ fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
         pinned_digest: None,
     });
     st.updater.phase = crate::updater::UpdatePhase::ReadyToInstall;
-    // THE GUARD: broadcast in flight → refused, nothing executes
+
+    // THE GUARD: broadcast in flight → refused, and the refusal must NOT touch
+    // the wallet session (it is only flushed once an install is accepted)
     st.broadcast.busy = true;
     assert!(st.updater_install_action().is_err());
     assert_eq!(st.updater.phase, crate::updater::UpdatePhase::ReadyToInstall);
-    // free → transition to InstallPending (plan built; headless host does not
-    // execute — the plan's describe pins the flow)
+    assert!(
+        st.wallet_writable(),
+        "a refused install must leave the RW wallet session open"
+    );
+
+    // the plan pins the Windows flow on ANY host (describe is host-independent)
     st.broadcast.busy = false;
-    let desc = st.updater_install_action().unwrap();
-    assert!(desc.contains("/S"));
-    assert_eq!(st.updater.phase, crate::updater::UpdatePhase::InstallPending);
+    let plan = st.updater.request_install(false).unwrap();
+    assert!(plan.describe.contains("/S"), "{}", plan.describe);
+    st.updater.phase = crate::updater::UpdatePhase::ReadyToInstall;
+
+    // THE ACTION, per target:
+    //   gui build on non-Windows -> a Windows payload is refused with a clear
+    //   error; the wallet was closed for the install, so it must be REOPENED.
+    //   (The Windows accept-path is not asserted here: it would execute the
+    //   payload, and a dummy .exe must never be run by a test.)
+    #[cfg(all(feature = "gui", not(target_os = "windows")))]
+    {
+        let err = st
+            .updater_install_action()
+            .expect_err("windows payload on a non-windows host must refuse");
+        assert!(err.contains("non-windows"), "got: {err}");
+        assert!(matches!(
+            st.updater.phase,
+            crate::updater::UpdatePhase::Failed(_)
+        ));
+        assert!(
+            st.wallet_writable(),
+            "a FAILED install must reopen the RW wallet session, otherwise every \
+             later spend silently falls back to the keystore"
+        );
+    }
+    //   headless build (no `gui` feature) -> nothing is ever executed, so the
+    //   plan is returned and the phase stays InstallPending.
+    #[cfg(not(feature = "gui"))]
+    {
+        let desc = st.updater_install_action().expect("install accepted");
+        assert!(desc.contains("/S"));
+        assert_eq!(st.updater.phase, crate::updater::UpdatePhase::InstallPending);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

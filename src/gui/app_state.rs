@@ -1108,6 +1108,10 @@ impl AppState {
         #[cfg(feature = "gui")]
         if let Err(e) = crate::updater::runtime::execute_install(&plan) {
             self.updater.phase = crate::updater::UpdatePhase::Failed(e.clone());
+            // The install did NOT run: nothing replaced the binary, so reopen
+            // the wallet session. Leaving it closed would silently make every
+            // later spend fall back to the keystore for the rest of the session.
+            self.ensure_wallet_rw();
             return Err(e);
         }
         #[cfg(not(feature = "gui"))]
