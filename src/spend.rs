@@ -959,10 +959,10 @@ pub fn estimate_signed_size(n_in: usize, n_out: usize) -> usize {
 ///
 ///   - PubkeyHash: 32+4+1+(1+72)+(1+33)+4 = 148   (today's value, unchanged)
 ///   - PubKey:     32+4+1+(1+72)+4        = 114   (bare key, no hash push)
-///   - ScriptHash: 32+4+1 + m*(1+72+1) + 1 + redeem_len + 4
+///   - ScriptHash: 32+4+1 + m*(1+72+1) + push_len(redeem_len) + 4
 ///     (m from the redeem script via the `book`; the sigs + the OP_0 dummy +
 ///     the redeemScript push dominate — a 2-of-3 with a 105-byte redeem is
-///     ~295 bytes, not 148)
+///     ~296 bytes, not 148)
 ///
 /// Base (4+4+1+1+4) and per-output (8+1+25) match `estimate_signed_size`.
 /// A P2SH input the book cannot name a redeem for (or a non-standard script —
@@ -972,6 +972,21 @@ pub fn estimate_signed_size_for(
     n_out: usize,
     book: &crate::multisig::ScriptBook,
 ) -> usize {
+    /// Length of `data` when pushed onto a script: a bare length byte up to 75,
+    /// OP_PUSHDATA1 (0x4c) up to 255, OP_PUSHDATA2 (0x4d) up to 65535, else
+    /// OP_PUSHDATA4 (0x4e). The redeem script of a 2-of-3 is 105 bytes, so it
+    /// costs OP_PUSHDATA1 — not a single length byte.
+    fn push_len(data_len: usize) -> usize {
+        if data_len <= 75 {
+            1 + data_len
+        } else if data_len <= 0xff {
+            2 + data_len
+        } else if data_len <= 0xffff {
+            3 + data_len
+        } else {
+            5 + data_len
+        }
+    }
     let base = 4 + 4 + 1 + 1 + 4;
     let out_size = 8 + 1 + 25;
     let mut total = base + n_out * out_size;
@@ -987,7 +1002,11 @@ pub fn estimate_signed_size_for(
                         .map(|(m, _)| (m as usize, r.len()))
                 })
                 .map(|(m, redeem_len)| {
-                    32 + 4 + 1 + m * (1 + 72 + 1) + 1 + redeem_len + 4
+                    // The redeem script goes into the scriptSig as a data push:
+                    // <=75 bytes costs 1 length byte, <=255 costs OP_PUSHDATA1
+                    // (0x4c + len), and a 2-of-3 redeem script is 105 bytes — so
+                    // a bare `1 + redeem_len` undercounts by one.
+                    32 + 4 + 1 + m * (1 + 72 + 1) + push_len(redeem_len) + 4
                 })
                 .unwrap_or(148),
             None => 148,
@@ -3032,8 +3051,8 @@ mod tests {
         let est = estimate_signed_size_for(&[p2sh_coin.clone()], 2, &book);
         assert_eq!(
             est,
-            14 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 1 + 105 + 4) + 2 * 34,
-            "estimate formula: base + 2-of-3 input + 2 P2PKH outputs = 377"
+            14 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 2 + 105 + 4) + 2 * 34,
+            "estimate formula: base + 2-of-3 input (107-byte OP_PUSHDATA1 redeem push) + 2 P2PKH outputs = 378"
         );
 
         // BOTH outputs P2PKH — the estimator's per-output shape (8+1+25)
@@ -3054,9 +3073,19 @@ mod tests {
         )
         .expect("2-of-3 spend must build");
         let real = plan.tx.serialize().len();
+        // Safety property: the quote must never be SMALLER than the signed size
+        // (that would underpay). It may exceed it by a few bytes because DER
+        // signature lengths vary 71-73 with the sighash byte while the estimator
+        // assumes the worst case of 72.
         assert!(
-            est.abs_diff(real) <= 5,
-            "estimate {} must be within 5 bytes of the real signed size {}",
+            est >= real,
+            "estimate {} must not undercount the real signed size {}",
+            est,
+            real
+        );
+        assert!(
+            est - real <= 5,
+            "estimate {} overcounts the real signed size {} by more than 5 bytes",
             est,
             real
         );
@@ -3101,10 +3130,10 @@ mod tests {
         )
         .expect("the mixed pool must converge");
         assert_eq!(shape.n_inputs, 2, "both coins adopted");
-        // the quote schedules the per-input sizes: 14 + (148 + 295) + 2*34
+        // the quote schedules the per-input sizes: 14 + (148 + 296) + 2*34
         assert_eq!(
             estimate_signed_size_for(&shape.selected, shape.n_outputs, &book),
-            14 + (148 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 1 + 105 + 4)) + 2 * 34,
+            14 + (148 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 2 + 105 + 4)) + 2 * 34,
         );
 
         let dest = script_pubkey_p2pk(&synthetic_key("est3/dest").1).unwrap();
