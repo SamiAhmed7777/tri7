@@ -1449,6 +1449,7 @@ impl AppState {
                     default_key: w.default_key,
                     version: w.version,
                     best_block: w.best_block,
+                    scripts: w.scripts,
                     hd_mnemonic: w.hd_mnemonic,
                     hd_passphrase: w.hd_passphrase,
                     hd_chain_index: w.hd_chain_index.unwrap_or(0),
@@ -1559,7 +1560,27 @@ impl AppState {
                         .collect();
                     Some(pool)
                 };
-                build_signed_send(&req, &derived, &keys, manual.as_deref(), now, tip_height)
+                // multisig context: the wallet's redeem scripts + every key we
+                // can sign with (wallet keys + keystore entries)
+                let book = {
+                    let scripts: Vec<([u8; 20], Vec<u8>)> = self
+                        .wallet
+                        .as_ref()
+                        .map(|w| w.scripts.clone())
+                        .unwrap_or_default();
+                    let key_vec: Vec<([u8; 32], Vec<u8>)> =
+                        keys.values().map(|(pk, s)| (*s, pk.clone())).collect();
+                    crate::multisig::ScriptBook::from_scripts(&scripts, &key_vec)
+                };
+                build_signed_send_with_book(
+                    &req,
+                    &derived,
+                    &keys,
+                    manual.as_deref(),
+                    &book,
+                    now,
+                    tip_height,
+                )
             }
             Err(e) => Err(e),
         });

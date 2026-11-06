@@ -4699,6 +4699,18 @@ impl OpsAdapter {
         for k in &w.wallet.keys {
             keys.insert(k.address.clone(), (k.pubkey.clone(), k.secret));
         }
+        // Multisig context: redeem scripts from the wallet file + every key
+        // we can sign with. P2SH coins are only adopted when this book can
+        // spend them (redeem present + m keys).
+        let book = {
+            let key_vec: Vec<([u8; 32], Vec<u8>)> = w
+                .wallet
+                .keys
+                .iter()
+                .map(|k| (k.secret, k.pubkey.clone()))
+                .collect();
+            tri7_core::multisig::ScriptBook::from_wallet(&w.wallet, &key_vec)
+        };
         let kb = w.key_by_payload();
         let mut inputs: Vec<tri7_core::spend::SpendInput> = Vec::new();
         let mut by_addr: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -4706,16 +4718,32 @@ impl OpsAdapter {
             let Some(dest) = tri7_core::address::script_to_dest(&o.script) else {
                 continue;
             };
-            if !kb.contains_key(&dest.payload()) {
-                continue;
-            }
-            let Some((pubkey, secret)) = keys
-                .get(&tri7_core::address::payload_to_address(&dest.payload()))
-                .cloned()
-            else {
+            let addr = tri7_core::address::payload_to_address(&dest.payload());
+            // single-key coin (today's behavior) or a multisig coin the
+            // script book can spend; anything else is not ours to adopt.
+            let (pubkey, secret) = if kb.contains_key(&dest.payload()) {
+                let Some((pk, s)) = keys.get(&addr).cloned() else {
+                    continue;
+                };
+                (pk, s)
+            } else if matches!(
+                dest,
+                tri7_core::address::ScriptDest::ScriptHash(_)
+            ) {
+                if book.can_spend(&o.script).is_err() {
+                    continue; // unrelated/unsignable P2SH — never adopted
+                }
+                let redeem = book.redeem_for(&o.script).expect("can_spend passed").clone();
+                let held = book.held_keys(&redeem);
+                let Some((s, pk)) = held.first().cloned() else {
+                    continue;
+                };
+                // representative key pair: the multisig signing path reads the
+                // book, not these fields
+                (pk, s)
+            } else {
                 continue;
             };
-            let addr = tri7_core::address::payload_to_address(&dest.payload());
             *by_addr.entry(addr).or_insert(0) += o.value;
             inputs.push(tri7_core::spend::SpendInput {
                 txid: *txid,
@@ -4741,6 +4769,17 @@ impl OpsAdapter {
                 Ok(p) => p,
                 Err(_) => continue,
             };
+            // change returns to the sending address: P2PKH for key addresses,
+            // the P2SH scriptPubKey itself for multisig 'C' addresses (the
+            // book keeps it spendable).
+            let change_script = if change_payload[0] == tri7_core::address::SCRIPT_ADDRESS {
+                let mut s = vec![0xa9u8, 0x14];
+                s.extend_from_slice(&change_payload[1..]);
+                s.push(0x87);
+                s
+            } else {
+                p2pkh_script_for_payload(&change_payload)
+            };
             let pool: Vec<tri7_core::spend::SpendInput> = inputs
                 .iter()
                 .filter(|i| {
@@ -4764,7 +4803,12 @@ impl OpsAdapter {
                 .unwrap_or(tri7_core::spend::MIN_FEE_SATS)
                 .max(tri7_core::spend::MIN_FEE_SATS);
             let out_values: Vec<i64> = outs.iter().map(|o| o.value).collect();
-            let shape = match tri7_core::spend::select_with_fee(&pool, &out_values, paytxfee) {
+            let shape = match tri7_core::spend::select_with_fee_with_book(
+                &pool,
+                &out_values,
+                paytxfee,
+                &book,
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     last_err = e;
@@ -4772,16 +4816,17 @@ impl OpsAdapter {
                 }
             };
             let selected = shape.selected.clone();
-            let plan = match tri7_core::spend::build_spend_outputs_floor(
+            let plan = match tri7_core::spend::build_spend_outputs_floor_with_book(
                 &selected,
                 outs.clone(),
-                Some(p2pkh_script_for_payload(&change_payload)),
+                Some(change_script),
                 // the builder applies the (1 + bytes/1000) multiplier itself,
                 // so it gets the RATE, not the converged total in shape.fee
                 paytxfee,
                 // and the converged total as an absolute floor, so the fee the
                 // caller was quoted is what the transaction pays
                 shape.fee,
+                &book,
                 now,
                 tip_h as u32,
             ) {
@@ -8416,6 +8461,7 @@ mod tests {
                 best_block: None,
                 version: None,
                 names: Vec::new(),
+                scripts: Vec::new(),
                 encrypted: false,
                 hd_mnemonic: None,
                 hd_passphrase: None,
@@ -9028,6 +9074,7 @@ mod tests {
                 best_block: None,
                 version: None,
                 names: Vec::new(),
+                scripts: Vec::new(),
                 encrypted: false,
                 hd_mnemonic: None,
                 hd_passphrase: None,

@@ -300,6 +300,10 @@ pub fn create_coinstake(
                     continue; // failed to get key for kernel type
                 }
             }
+            // unreachable: the solver guard above skips ScriptHash kernels
+            // (only PubKey / PubkeyHash kernels are stakeable, exactly as
+            // before P2SH became recognizable)
+            SpendType::ScriptHash(_) => continue,
         }
         // scriptPubKeyOut: P2PK kernels reuse the kernel script verbatim;
         // P2PKH kernels pay to a bare P2PK of the wallet key
@@ -309,6 +313,7 @@ pub fn create_coinstake(
             SpendType::PubkeyHash(_) => {
                 crate::spend::script_pubkey_p2pk(&coin.pubkey).map_err(|e| e.to_string())?
             }
+            SpendType::ScriptHash(_) => continue, // same unreachable guard
         };
 
         // wallet.cpp:2347-2354 — lock in the solving time, first input, marker,

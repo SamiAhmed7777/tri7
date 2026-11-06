@@ -16,6 +16,7 @@ pub mod kernel;
 pub mod keytool;
 pub mod legacy;
 pub mod legacy_rows;
+pub mod multisig;
 pub mod p2p;
 pub mod rawtx;
 pub mod replay;

@@ -148,6 +148,8 @@ pub const NATIVE_METHODS: &[&str] = &[
     "settxfee",
     "listreceivedbyaddress",
     "getnewpubkey",
+    "addmultisigaddress",
+    "addredeemscript",
     "signrawtransaction",
     "stop",
 ];
@@ -205,6 +207,8 @@ pub const OPS_METHODS: &[&str] = &[
     "signrawtransaction",
     "createrawtransaction",
     "getnewpubkey",
+    "addmultisigaddress",
+    "addredeemscript",
     "stop",
 ];
 
@@ -539,6 +543,16 @@ fn fee_setting_dir() -> Option<std::path::PathBuf> {
     std::env::var("TRI7_STATE_DIR")
         .ok()
         .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The wallet file this node was started with (the same env var the
+/// encryptwallet passive fallback and getnewpubkey read). None when the
+/// node runs without --wallet.
+fn wallet_file_path() -> Option<std::path::PathBuf> {
+    std::env::var("TRI7_WALLET_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
         .map(std::path::PathBuf::from)
 }
 
@@ -2156,6 +2170,157 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                     }
                 }
             }
+        }
+
+        // ---- phase 3b: P2SH multisig (rpcwallet.cpp:836, :905) --------------
+        // Both verbs write the wallet FILE directly (like the encryptwallet
+        // passive fallback), so they work before the ops engine is warm and
+        // independent of the fee path. The optional [account] is accepted
+        // for legacy call-shape compatibility and ignored: tri7's label
+        // writer (set_label) only writes P2PKH 'T' address rows.
+        "addmultisigaddress" => {
+            // legacy rpcwallet.cpp:836: build an m-of-n P2SH multisig address
+            // from Triangles addresses / hex pubkeys, store the redeem script
+            // (AddCScript) and return the bare address string.
+            let n_required = match ptry!(p_u64(params, 0, "nrequired")) {
+                Some(n) => n,
+                None => return NativeOutcome::Err(-8, "expected nrequired parameter".into()),
+            };
+            let keys_param = match param_get(params, 1, "keys") {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return NativeOutcome::Err(-8, "expected an array of keys".into()),
+            };
+            let _account = ptry!(p_str(params, 2, "account"));
+            if n_required < 1 || n_required > 16 {
+                return NativeOutcome::Err(
+                    -8,
+                    "a multisignature address must require between 1 and 16 keys".into(),
+                );
+            }
+            if (keys_param.len() as u64) < n_required {
+                return NativeOutcome::Err(
+                    -8,
+                    format!(
+                        "not enough keys supplied (got {} keys, but need at least {} to redeem)",
+                        keys_param.len(),
+                        n_required
+                    ),
+                );
+            }
+            let path = match wallet_file_path() {
+                Some(p) => p,
+                None => {
+                    return NativeOutcome::Err(
+                        -1,
+                        "wallet file path unknown to this node — start tri7d with --wallet"
+                            .into(),
+                    )
+                }
+            };
+            // Gather public keys (legacy case 1: Triangles address we hold
+            // the full pubkey for; case 2: hex-encoded public key).
+            let wallet_keys = match crate::wallet::read_wallet(&path) {
+                Ok(w) => w.keys,
+                Err(e) => {
+                    return NativeOutcome::Err(
+                        -1,
+                        format!("addmultisigaddress: cannot read wallet: {e}"),
+                    )
+                }
+            };
+            let mut pubkeys: Vec<Vec<u8>> = Vec::with_capacity(keys_param.len());
+            for k in &keys_param {
+                let Some(ks) = k.as_str() else {
+                    return NativeOutcome::Err(-5, "Invalid public key".into());
+                };
+                if let Ok(payload) = crate::address::address_to_payload(ks) {
+                    // a valid address: must be a P2PKH 'T' address referring
+                    // to a key the wallet holds the full pubkey for
+                    if payload[0] != crate::address::PUBKEY_ADDRESS {
+                        return NativeOutcome::Err(
+                            -5,
+                            format!("{ks} does not refer to a key"),
+                        );
+                    }
+                    match wallet_keys.iter().find(|wk| wk.address == ks) {
+                        Some(wk) => pubkeys.push(wk.pubkey.clone()),
+                        None => {
+                            return NativeOutcome::Err(
+                                -4,
+                                format!("no full public key for address {ks}"),
+                            )
+                        }
+                    }
+                } else if let Ok(pk) = crate::p2p::hex_decode(ks) {
+                    if secp256k1::PublicKey::from_slice(&pk).is_err() {
+                        return NativeOutcome::Err(
+                            -5,
+                            format!("Invalid public key: {ks}"),
+                        );
+                    }
+                    pubkeys.push(pk);
+                } else {
+                    return NativeOutcome::Err(-5, format!("Invalid public key: {ks}"));
+                }
+            }
+            let redeem = match crate::multisig::redeem_script(n_required as u8, &pubkeys) {
+                Ok(r) => r,
+                Err(e) => return NativeOutcome::Err(-8, format!("addmultisigaddress: {e}")),
+            };
+            let address = crate::multisig::p2sh_address(&redeem);
+            let mut wh = match crate::wallet::WalletHandle::open_readwrite(&path) {
+                Ok(w) => w,
+                Err(e) => {
+                    return NativeOutcome::Err(
+                        -1,
+                        format!("addmultisigaddress: cannot open wallet: {e}"),
+                    )
+                }
+            };
+            if let Err(e) = wh.put_redeem_script(&redeem) {
+                wh.close();
+                return NativeOutcome::Err(-1, format!("addmultisigaddress: {e}"));
+            }
+            wh.close();
+            NativeOutcome::Ok(json!(address))
+        }
+
+        "addredeemscript" => {
+            // legacy rpcwallet.cpp:905: store a hex redeem script in the
+            // wallet (AddCScript) so its P2SH address becomes spendable.
+            let Some(hex) = ptry!(p_str(params, 0, "redeemScript")) else {
+                return NativeOutcome::Err(-8, "expected redeemScript parameter".into());
+            };
+            let _account = ptry!(p_str(params, 1, "account"));
+            let script = match crate::p2p::hex_decode(&hex) {
+                Ok(s) => s,
+                Err(_) => return NativeOutcome::Err(-5, "Invalid redeemScript".into()),
+            };
+            let path = match wallet_file_path() {
+                Some(p) => p,
+                None => {
+                    return NativeOutcome::Err(
+                        -1,
+                        "wallet file path unknown to this node — start tri7d with --wallet"
+                            .into(),
+                    )
+                }
+            };
+            let mut wh = match crate::wallet::WalletHandle::open_readwrite(&path) {
+                Ok(w) => w,
+                Err(e) => {
+                    return NativeOutcome::Err(
+                        -1,
+                        format!("addredeemscript: cannot open wallet: {e}"),
+                    )
+                }
+            };
+            if let Err(e) = wh.put_redeem_script(&script) {
+                wh.close();
+                return NativeOutcome::Err(-1, format!("addredeemscript: {e}"));
+            }
+            wh.close();
+            NativeOutcome::Ok(json!(true))
         }
 
         // Ops verbs that may run before the live wallet view is ready (a pure
@@ -4756,5 +4921,116 @@ fn new_parity_verbs_are_in_native_and_routed() {
     for m in ["signrawtransaction", "createrawtransaction", "getnewpubkey"] {
         assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
     }
+    for m in ["addmultisigaddress", "addredeemscript"] {
+        assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+        assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+    }
+}
+
+/// addmultisigaddress / addredeemscript end to end against a REAL wallet
+/// file: bare-address reply, redeem script stored under its scriptID,
+/// legacy error codes (-8 bad params, -5 bad address/key, -4 key not found).
+#[test]
+fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _env = ENV_LOCK.lock().unwrap();
+
+    // a wallet file with two keys (synthetic secrets — never wallet material)
+    let dir = std::env::temp_dir().join(format!("tri7rpc_ms_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("wallet.dat");
+    crate::wallet::create_wallet_file(&path).unwrap();
+    let synth = |label: &str| -> ([u8; 32], Vec<u8>) {
+        let secret = crate::legacy::sha256d(format!("tri7-rpc-ms/{label}").as_bytes());
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let secp = secp256k1::Secp256k1::signing_only();
+        (
+            secret,
+            secp256k1::PublicKey::from_secret_key(&secp, &sk)
+                .serialize()
+                .to_vec(),
+        )
+    };
+    let (s1, p1) = synth("a");
+    let (s2, p2) = synth("b");
+    let (_, p3) = synth("c");
+    let _ = (s1, s2);
+    let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+    let a1 = wh.add_key(&s1, "").unwrap().address;
+    let a2 = wh.add_key(&s2, "").unwrap().address;
+    wh.close();
+
+    std::env::set_var("TRI7_WALLET_PATH", &path);
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+
+    // 2-of-2 from one hex pubkey + one wallet address → bare C address reply
+    let v = call(
+        &d,
+        "addmultisigaddress",
+        json!([2, [hex_encode(&p2), a1]]),
+    );
+    assert_eq!(v["error"], Value::Null, "unexpected error: {v}");
+    let addr = v["result"].as_str().unwrap().to_string();
+    assert!(addr.starts_with('C'), "P2SH reply must be a C address: {addr}");
+    let redeem = crate::multisig::redeem_script(2, &[p2.clone(), p1.clone()]).unwrap();
+    assert_eq!(addr, crate::multisig::p2sh_address(&redeem));
+
+    // repeat call is a no-op that returns the same address
+    let v = call(&d, "addmultisigaddress", json!([2, [hex_encode(&p2), a1]]));
+    assert_eq!(v["result"], json!(addr));
+
+    // the redeem script really is stored under its scriptID
+    let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+    let id = crate::address::hash160(&redeem);
+    assert_eq!(
+        wh.get_redeem_script(&id).unwrap().as_deref(),
+        Some(&redeem[..])
+    );
+    wh.close();
+
+    // addredeemscript stores arbitrary hex and replies true
+    let other = crate::multisig::redeem_script(1, &[p3.clone()]).unwrap();
+    let v = call(&d, "addredeemscript", json!([hex_encode(&other)]));
+    assert_eq!(v["result"], json!(true));
+    let v = call(&d, "addredeemscript", json!([hex_encode(&other), "savings"]));
+    assert_eq!(v["result"], json!(true), "[account] accepted for shape compat");
+
+    // legacy error codes
+    let v = call(&d, "addmultisigaddress", json!([2]));
+    assert_eq!(v["error"]["code"], -8, "missing keys array");
+    let v = call(&d, "addmultisigaddress", json!([0, [hex_encode(&p1), hex_encode(&p2)]]));
+    assert_eq!(v["error"]["code"], -8, "nrequired < 1");
+    let v = call(&d, "addmultisigaddress", json!([3, [hex_encode(&p1), hex_encode(&p2)]]));
+    assert_eq!(v["error"]["code"], -8, "not enough keys");
+    let v = call(&d, "addmultisigaddress", json!([1, ["not-a-key-or-address"]]));
+    assert_eq!(v["error"]["code"], -5, "invalid key");
+    let v = call(&d, "addmultisigaddress", json!([1, [hex_encode(&[0x02, 0x55])]]));
+    assert_eq!(v["error"]["code"], -5, "hex but not a valid pubkey");
+    let not_ours = crate::wallet::pubkey_to_address(&p3);
+    let v = call(&d, "addmultisigaddress", json!([1, [not_ours]]));
+    assert_eq!(v["error"]["code"], -4, "valid address, key not in wallet");
+    let v = call(&d, "addmultisigaddress", json!([1, [addr]]));
+    assert_eq!(v["error"]["code"], -5, "a C address does not refer to a key");
+    let v = call(&d, "addredeemscript", json!(["zzzz"]));
+    assert_eq!(v["error"]["code"], -5, "invalid hex redeemScript");
+    let v = call(&d, "addredeemscript", json!([]));
+    assert_eq!(v["error"]["code"], -8, "missing redeemScript");
+
+    // both stored scripts list back (a2 stayed an ordinary address)
+    let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+    let listed = wh.list_redeem_scripts().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|(i, s)| *i == id && s == &redeem));
+    assert!(listed
+        .iter()
+        .any(|(i, s)| *i == crate::address::hash160(&other) && s == &other));
+    wh.close();
+    let _ = (a2,);
+
+    std::env::remove_var("TRI7_WALLET_PATH");
 }
 }
