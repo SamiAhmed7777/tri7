@@ -21,6 +21,7 @@
 //! fields carry NO nTime (protocol.h:104-106).
 
 use crate::legacy::{sha256d, Block, Hash, Reader};
+use sha3::{Digest, Sha3_256};
 
 // ---------------------------------------------------------------------------
 // Constants (protocol.h / net.h / version.h / serialize.h)
@@ -206,17 +207,70 @@ impl Default for MessageDecoder {
 // ---------------------------------------------------------------------------
 // CAddress / version handshake
 // ---------------------------------------------------------------------------
-/// One serialized CService on the v6 wire (netbase.h:205-216): ip[16] (FLATDATA)
-/// + tor_v3_pubkey[32] (FLATDATA) + m_is_tor_v3 (bool→1 byte) + m_is_i2p
-/// (bool→1 byte) + port u16 BIG-endian. CAddress adds nServices u64 before it
-/// (protocol.h:96-109); the version-message form omits nTime because the
-/// version message stream version is INIT_PROTO_VERSION (209) < CADDR_TIME_VERSION.
+/// OnionCat prefix (netbase.cpp pchOnionCat): ip[0..6] of a v3 onion CNetAddr.
+pub const ONIONCAT: [u8; 6] = [0xFD, 0x87, 0xD8, 0x7E, 0xEB, 0x43];
+/// GarliCat prefix (netbase.cpp pchGarliCat): i2p is IMPLIED by this ip
+/// prefix — there is NO i2p flag byte on the legacy wire.
+pub const GARLICAT: [u8; 6] = [0xFD, 0x60, 0xDB, 0x4D, 0xDD, 0xB5];
+
+// ---------------------------------------------------------------------------
+// Tor v3 onion label encoding (rend-spec-v3 §F): the address TEXT is
+// base32(pubkey(32) || checksum(2) || version(1)=0x03) where
+// checksum = sha3_256(".onion checksum" || pubkey || 0x03)[..2].
+// This is a TEXT ENCODING of the 32-byte ed25519 pubkey tor generated —
+// no curve arithmetic, no key generation, no derivation of secrets happens
+// here. Given a pubkey, the hostname is fully determined; that is what lets
+// wire-learned gossip be reconstructed into a dialable `.onion` hostname.
+// ---------------------------------------------------------------------------
+
+/// v3 label checksum: first 2 bytes of
+/// `sha3_256(".onion checksum" || pubkey || 0x03)`.
+pub fn onion_v3_checksum(pubkey: &[u8; 32]) -> [u8; 2] {
+    let mut h = Sha3_256::new();
+    h.update(b".onion checksum");
+    h.update(pubkey);
+    h.update([0x03u8]);
+    let d = h.finalize();
+    [d[0], d[1]]
+}
+
+/// The 56-char lowercase base32 label (without the `.onion` suffix) for a
+/// v3 service pubkey — the inverse of `WireAddr::from_onion_label`'s decode.
+pub fn onion_v3_label(pubkey: &[u8; 32]) -> String {
+    let mut raw = [0u8; 35];
+    raw[..32].copy_from_slice(pubkey);
+    let cs = onion_v3_checksum(pubkey);
+    raw[32] = cs[0];
+    raw[33] = cs[1];
+    raw[34] = 0x03;
+    WireAddr::base32_encode_rfc4648(&raw)
+}
+
+/// Legacy wire layout (verified against /opt/triangles-v5/src, netbase.h:88-93,
+/// netbase.cpp SetSpecial/ToStringIP, protocol.h:84-109):
+///
+///   CNetAddr  = ip[16] | tor_v3_pubkey[32] | m_is_tor_v3 (1 byte)  = 49
+///   CService  = CNetAddr + port (big-endian u16)                   = 51
+///   CAddress  = nTime(u32 LE) | nServices(u64 LE) | CService       = 63
+///
+/// v3 onion: ip[0..6] = FD 87 D8 7E EB 43 (OnionCat), rest zero;
+/// tor_v3_pubkey = the 32 bytes from the onion label; m_is_tor_v3 = true.
+/// i2p is implied by ip[0..6] == FD 60 DB 4D DD B5 (GarliCat).
+///
+/// The pre-parity tri7 shape (ip + key + flag + i2p-flag + port, 60 bytes
+/// without time) is still PARSED leniently so a mixed fleet survives the
+/// change; ENCODING is always the legacy layout.
+///
+/// The version-message form omits nTime because the version stream version
+/// is INIT_PROTO_VERSION (209) < CADDR_TIME_VERSION.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireAddr {
     pub services: u64,
     pub ip: [u8; 16],
     pub tor_key: [u8; 32],
     pub is_tor_v3: bool,
+    /// Parsed only from the old tri7 shape or the GarliCat ip prefix; never
+    /// serialized (the legacy wire has no i2p byte).
     pub is_i2p: bool,
     pub port: u16,
 }
@@ -242,38 +296,265 @@ impl WireAddr {
         }
     }
 
-    pub fn encode_no_time(&self, w: &mut Vec<u8>) {
-        w.extend_from_slice(&self.services.to_le_bytes());
+    /// v3 onion wire form (SetSpecial parity): OnionCat ip prefix, rest zero,
+    /// the label's 32 key bytes, m_is_tor_v3 = true.
+    pub fn onion_v3(key: [u8; 32], port: u16, services: u64) -> Self {
+        let mut ip = [0u8; 16];
+        ip[..6].copy_from_slice(&ONIONCAT);
+        WireAddr {
+            services,
+            ip,
+            tor_key: key,
+            is_tor_v3: true,
+            is_i2p: false,
+            port,
+        }
+    }
+
+    /// Wire form of a published v3 onion hostname. The address already exists
+    /// (Tor's `<HiddenServiceDir>/hostname` file or an ADD_ONION reply);
+    /// this only PARSES it into the wire's tor_v3_pubkey bytes — netbase.cpp
+    /// SetSpecial (615-632) parity. Round-2 gate: unlike the lenient legacy
+    /// SetSpecial, a text label's 2 checksum bytes ARE verified
+    /// (`sha3_256(".onion checksum" || pubkey || 0x03)[..2]`) and the version
+    /// byte must be 0x03 — a label that fails either is not an address tor
+    /// could ever have served, so it is rejected instead of stored.
+    pub fn from_onion_label(label: &str, port: u16, services: u64) -> Result<WireAddr, String> {
+        let label = label.strip_suffix(".onion").unwrap_or(label);
+        if label.len() != 56 {
+            return Err(format!(
+                "onion label must be 56 chars, got {}",
+                label.len()
+            ));
+        }
+        let raw = Self::base32_decode_rfc4648(label)
+            .ok_or_else(|| format!("onion label has non-base32 chars"))?;
+        if raw.len() != 35 {
+            return Err(format!(
+                "onion label decodes to {} bytes, want 35",
+                raw.len()
+            ));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&raw[..32]);
+        if raw[32..34] != onion_v3_checksum(&key) {
+            return Err("onion label checksum mismatch — rejecting (not a real v3 address)".into());
+        }
+        if raw[34] != 0x03 {
+            return Err(format!(
+                "onion label version byte is {:02x}, want 03",
+                raw[34]
+            ));
+        }
+        Ok(WireAddr::onion_v3(key, port, services))
+    }
+
+    /// Reconstructed v3 onion HOSTNAME for this address:
+    /// `base32(pubkey(32) || checksum(2) || 0x03) + ".onion"` where
+    /// `checksum = sha3_256(".onion checksum" || pubkey || 0x03)[..2]`.
+    /// The checksum is a pure text-encoding function OF the 32-byte pubkey
+    /// tor generated (no curve arithmetic here), so this reconstructs —
+    /// never fabricates — the address tor serves for that key. This is what
+    /// makes wire-learned gossip dialable: the store keeps the hostname and
+    /// the dial loop dispatches on `.onion`. None for non-v3 addresses.
+    pub fn onion_hostname(&self) -> Option<String> {
+        if !self.is_tor_v3 {
+            return None;
+        }
+        Some(format!("{}.onion", onion_v3_label(&self.tor_key)))
+    }
+
+    /// RFC 4648 base32 DECODE (unpadded, A-Z2-7). Tor v3 labels are base32
+    /// text of 35 bytes; Tor's control port hands us the label already
+    /// encoded, and the legacy SetSpecial only ever DECODES labels — so
+    /// decoding a published address into wire bytes is pure text parsing.
+    fn base32_decode_rfc4648(s: &str) -> Option<Vec<u8>> {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let s = s.trim_end_matches('=');
+        if s.is_empty() {
+            return Some(Vec::new());
+        }
+        // RFC 4648: only these unpadded lengths are canonical
+        if !matches!(s.len() % 8, 0 | 2 | 4 | 5 | 7) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(s.len() * 5 / 8);
+        let mut buf: u32 = 0;
+        let mut bits: u32 = 0;
+        for &ch in s.as_bytes() {
+            let up = ch.to_ascii_uppercase();
+            let v = ALPHABET.iter().position(|&c| c == up)? as u32;
+            buf = (buf << 5) | v;
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buf >> bits) as u8);
+            }
+        }
+        Some(out)
+    }
+
+    /// RFC 4648 base32 ENCODE (lowercase, unpadded, a-z2-7) — the inverse of
+    /// `base32_decode_rfc4648` and exactly tor's label text form. This is
+    /// bit-packing, not cryptography: the ed25519 key bytes come from tor,
+    /// this only spells them out the way a v3 onion address is written.
+    fn base32_encode_rfc4648(data: &[u8]) -> String {
+        const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+        let mut out = String::with_capacity(data.len() * 8 / 5 + 1);
+        let mut buf: u32 = 0;
+        let mut bits: u32 = 0;
+        for &b in data {
+            buf = (buf << 8) | b as u32;
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                out.push(ALPHABET[((buf >> bits) & 0x1f) as usize] as char);
+            }
+        }
+        if bits > 0 {
+            // final partial group: left-align the remaining bits
+            out.push(ALPHABET[((buf << (5 - bits)) & 0x1f) as usize] as char);
+        }
+        out
+    }
+
+    /// Text identity usable as a peer-store key:
+    ///  - tor_v3 → the reconstructed `.onion` HOSTNAME
+    ///    (`onion_hostname()` — the v3 checksum is a pure encoding of the
+    ///    tor-generated pubkey, so the hostname is exact, and it feeds the
+    ///    dial loop directly: `host.ends_with(".onion")` → dialable).
+    ///  - IPv4-mapped → dotted quad (never dialed on a Tor-only network,
+    ///    but round-trippable for the codec).
+    ///  - other shapes → None.
+    pub fn store_key(&self) -> Option<String> {
+        if self.is_tor_v3 {
+            self.onion_hostname()
+        } else if self.is_ipv4_mapped() {
+            Some(format!(
+                "{}.{}.{}.{}",
+                self.ip[12], self.ip[13], self.ip[14], self.ip[15]
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Inverse of `store_key`: hostname (`.onion`, 56-char label), 64-char
+    /// hex tor key, or dotted quad → wire form.
+    pub fn from_store_key(key: &str, port: u16, services: u64) -> Option<WireAddr> {
+        let lower = key.to_ascii_lowercase();
+        if lower.len() == 62 && lower.ends_with(".onion") {
+            return WireAddr::from_onion_label(&lower, port, services).ok();
+        }
+        if key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let raw = hex_decode(key).ok()?;
+            let mut tor_key = [0u8; 32];
+            tor_key.copy_from_slice(&raw);
+            return Some(WireAddr::onion_v3(tor_key, port, services));
+        }
+        let octets: Vec<u8> = key.split('.').filter_map(|o| o.parse().ok()).collect();
+        if octets.len() == 4 {
+            return Some(WireAddr::ipv4(
+                octets[0], octets[1], octets[2], octets[3], port, services,
+            ));
+        }
+        None
+    }
+
+    pub fn is_ipv4_mapped(&self) -> bool {
+        self.ip[..10] == [0u8; 10] && self.ip[10] == 0xff && self.ip[11] == 0xff
+    }
+
+    pub fn is_i2p_prefix(&self) -> bool {
+        self.ip[..6] == GARLICAT
+    }
+
+    /// CService (netbase.h): ip + tor key + flag + port BE = 51 bytes.
+    pub fn encode_service(&self, w: &mut Vec<u8>) {
         w.extend_from_slice(&self.ip);
         w.extend_from_slice(&self.tor_key);
         w.push(self.is_tor_v3 as u8);
-        w.push(self.is_i2p as u8);
         w.extend_from_slice(&self.port.to_be_bytes());
     }
 
+    /// CAddress without nTime (version-message form): services + CService
+    /// = 59 bytes. Legacy layout: NO i2p flag byte (i2p is implied by the
+    /// GarliCat ip prefix).
+    pub fn encode_no_time(&self, w: &mut Vec<u8>) {
+        w.extend_from_slice(&self.services.to_le_bytes());
+        self.encode_service(w);
+    }
+
+    /// CAddress with nTime (addr-message entry): time + services + CService
+    /// = 63 bytes.
+    pub fn encode_caddress(&self, time: u32) -> Vec<u8> {
+        let mut w = Vec::with_capacity(63);
+        w.extend_from_slice(&time.to_le_bytes());
+        self.encode_no_time(&mut w);
+        w
+    }
+
+    /// Legacy-shape decode (59 bytes without time). i2p comes from the
+    /// GarliCat ip prefix, never from a wire byte.
     pub fn decode_no_time(r: &mut Reader) -> Result<WireAddr, String> {
         let services = r.i64le()? as u64;
-        let mut ip = [0u8; 16];
-        for byte in ip.iter_mut() {
-            *byte = r.u8()?;
+        let (ip, tor_key, is_tor_v3) = decode_cnetaddr_body(r)?;
+        // legacy: port (big-endian u16) directly after the flag byte
+        let port = read_port_be(r)?;
+        let mut addr = WireAddr {
+            services,
+            ip,
+            tor_key,
+            is_tor_v3,
+            is_i2p: false,
+            port,
+        };
+        if addr.is_i2p_prefix() {
+            addr.is_i2p = true;
         }
-        let mut tor_key = [0u8; 32];
-        for byte in tor_key.iter_mut() {
-            *byte = r.u8()?;
-        }
-        let is_tor_v3 = r.u8()? != 0;
+        Ok(addr)
+    }
+
+    /// Old-tri7-shape decode (60 bytes without time): the pre-parity form
+    /// ip + key + m_is_tor_v3 + m_is_i2p + port — TWO flag bytes before the
+    /// port. Accepted leniently by parse_version/parse_addr so a mixed
+    /// fleet survives the encoding change; never produced anymore.
+    pub fn decode_no_time_compat(r: &mut Reader) -> Result<WireAddr, String> {
+        let services = r.i64le()? as u64;
+        let (ip, tor_key, is_tor_v3) = decode_cnetaddr_body(r)?;
         let is_i2p = r.u8()? != 0;
-        let hi = r.u8()? as u16;
-        let lo = r.u8()? as u16;
+        let port = read_port_be(r)?;
         Ok(WireAddr {
             services,
             ip,
             tor_key,
             is_tor_v3,
             is_i2p,
-            port: (hi << 8) | lo,
+            port,
         })
     }
+}
+
+/// The 47-byte CNetAddr body shared by both accepted shapes: ip[16] +
+/// tor_v3_pubkey[32] + m_is_tor_v3(1). The tail differs per shape (legacy:
+/// port; old tri7: i2p flag then port) and is consumed by the caller.
+fn decode_cnetaddr_body(r: &mut Reader) -> Result<([u8; 16], [u8; 32], bool), String> {
+    let mut ip = [0u8; 16];
+    for byte in ip.iter_mut() {
+        *byte = r.u8()?;
+    }
+    let mut tor_key = [0u8; 32];
+    for byte in tor_key.iter_mut() {
+        *byte = r.u8()?;
+    }
+    let is_tor_v3 = r.u8()? != 0;
+    Ok((ip, tor_key, is_tor_v3))
+}
+
+fn read_port_be(r: &mut Reader) -> Result<u16, String> {
+    let hi = r.u8()? as u16;
+    let lo = r.u8()? as u16;
+    Ok((hi << 8) | lo)
 }
 
 /// version payload (main.cpp:4862-4891 read order: nVersion, nServices, nTime,
@@ -308,13 +589,56 @@ pub fn encode_version(v: &VersionPayload) -> Vec<u8> {
 /// Lenient parse mirroring the daemon's version handler: subver and
 /// start_height are optional tail fields (main.cpp:4884-4893 `if
 /// (!vRecv.empty())`).
+///
+/// The CAddress fields are parsed leniently across BOTH wire shapes: the
+/// legacy layout (59-byte CAddress-no-time) first, then the old tri7 shape
+/// (60 bytes). The shapes are discriminated by total consumed length — a
+/// legacy parse of an old-shape payload leaves exactly 4 unconsumed bytes
+/// and vice versa, so exactly one shape can consume the payload with zero
+/// trailing bytes. Mixed-shape payloads are rejected.
 pub fn parse_version(payload: &[u8]) -> Result<VersionPayload, String> {
+    let mut legacy_err = None;
+    let mut compat_err = None;
+    match parse_version_shape(payload, false) {
+        Ok((v, 0)) => return Ok(v),
+        Ok(_) => {}
+        Err(e) => legacy_err = Some(e),
+    }
+    match parse_version_shape(payload, true) {
+        Ok((v, 0)) => return Ok(v),
+        Ok(_) => {}
+        Err(e) => compat_err = Some(e),
+    }
+    // neither shape consumed the payload exactly: report the legacy error
+    // (or accept a legacy parse with a non-canonical tail — e.g. junk after
+    // start_height — only when no shape matched at all)
+    if let Ok((v, _)) = parse_version_shape(payload, false) {
+        return Ok(v);
+    }
+    Err(legacy_err
+        .or(compat_err)
+        .unwrap_or_else(|| "version payload unparseable".into()))
+}
+
+fn parse_version_shape(
+    payload: &[u8],
+    old_tri7_shape: bool,
+) -> Result<(VersionPayload, usize), String> {
     let mut r = Reader::new(payload);
     let version = r.i32le()?;
     let services = r.i64le()? as u64;
     let timestamp = r.i64le()?;
-    let addr_you = WireAddr::decode_no_time(&mut r)?;
-    let addr_me = WireAddr::decode_no_time(&mut r)?;
+    let (addr_you, addr_me) = if old_tri7_shape {
+        (
+            WireAddr::decode_no_time_compat(&mut r)?,
+            WireAddr::decode_no_time_compat(&mut r)?,
+        )
+    } else {
+        (
+            WireAddr::decode_no_time(&mut r)?,
+            WireAddr::decode_no_time(&mut r)?,
+        )
+    };
     let nonce = r.i64le()? as u64;
     let user_agent = if r.remaining() > 0 {
         String::from_utf8_lossy(&r.var_bytes()?).into_owned()
@@ -322,16 +646,19 @@ pub fn parse_version(payload: &[u8]) -> Result<VersionPayload, String> {
         String::new()
     };
     let start_height = if r.remaining() >= 4 { r.i32le()? } else { -1 };
-    Ok(VersionPayload {
-        version,
-        services,
-        timestamp,
-        addr_you,
-        addr_me,
-        nonce,
-        user_agent,
-        start_height,
-    })
+    Ok((
+        VersionPayload {
+            version,
+            services,
+            timestamp,
+            addr_you,
+            addr_me,
+            nonce,
+            user_agent,
+            start_height,
+        },
+        r.remaining(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +787,74 @@ pub fn parse_ping(payload: &[u8]) -> Result<u64, String> {
         return Err(format!("ping payload length {}", payload.len()));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+// ---------------------------------------------------------------------------
+// addr / getaddr (net.cpp ProcessMessage "getaddr"/"addr"; the legacy client
+// gossiped CAddress vectors so CAddrMan stayed warm — tri7 reimplements the
+// same gossip so the network survives dead seeds)
+// ---------------------------------------------------------------------------
+/// protocol.h/net.h: the legacy client caps a served addr vector at 1000
+/// entries (vAddr.size() > MAX_ADDR_SIZE check); the same cap applies to
+/// what we accept.
+pub const MAX_ADDR_ENTRIES: usize = 1000;
+
+/// One addr entry: CAddress = nTime(u32 LE) + nServices(u64 LE) + CService.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AddrEntry {
+    pub time: u32,
+    pub addr: WireAddr,
+}
+
+/// addr payload: CompactSize count + N × CAddress(63 bytes, legacy layout).
+pub fn encode_addr(entries: &[AddrEntry]) -> Vec<u8> {
+    let mut w = Vec::with_capacity(5 + entries.len() * 63);
+    push_compact_size(&mut w, entries.len() as u64);
+    for e in entries {
+        w.extend_from_slice(&e.addr.encode_caddress(e.time));
+    }
+    w
+}
+
+/// addr payload parse. Strict, never panics:
+///  - count > 1000 → Err (legacy MAX_ADDR_SIZE);
+///  - body must be exactly count × 63 (legacy) or count × 64 (the old tri7
+///    shape, accepted leniently); anything else (truncation, trailing junk)
+///    → Err.
+pub fn parse_addr(payload: &[u8]) -> Result<Vec<AddrEntry>, String> {
+    let mut r = Reader::new(payload);
+    let n = r.compact_size()? as usize;
+    if n > MAX_ADDR_ENTRIES {
+        return Err(format!(
+            "addr count {} > MAX_ADDR_SIZE {}",
+            n, MAX_ADDR_ENTRIES
+        ));
+    }
+    let body = r.remaining();
+    let legacy = 63usize;
+    let compat = 64usize;
+    let shape = if body == n.checked_mul(legacy).unwrap_or(usize::MAX) {
+        legacy
+    } else if body == n.checked_mul(compat).unwrap_or(usize::MAX) {
+        compat
+    } else {
+        return Err(format!(
+            "addr payload body {} bytes does not match {} entries (63 or 64 bytes each)",
+            body, n
+        ));
+    };
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let time = r.u32le()?;
+        let addr = if shape == legacy {
+            WireAddr::decode_no_time(&mut r)?
+        } else {
+            WireAddr::decode_no_time_compat(&mut r)?
+        };
+        out.push(AddrEntry { time, addr });
+    }
+    r.expect_done()?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -772,19 +1167,420 @@ mod tests {
     }
 
     #[test]
-    fn wireaddr_ipv4_mapped_layout_is_60_bytes() {
+    fn wireaddr_ipv4_mapped_layout_is_59_bytes() {
         let a = WireAddr::ipv4(192, 168, 1, 5, 24113, NODE_NETWORK);
         let mut w = Vec::new();
         a.encode_no_time(&mut w);
-        // 8 services + 16 ip + 32 torkey + 1 + 1 flags + 2 port (BE)
-        assert_eq!(w.len(), 60);
+        // legacy CAddress-no-time: 8 services + 16 ip + 32 torkey + 1 flag
+        // + 2 port (BE) — the old tri7 shape carried an extra i2p byte (60)
+        assert_eq!(w.len(), 59);
         // IPv4-mapped prefix sits at ip[10], ip[11] → absolute 18, 19
         assert_eq!(w[18], 0xff);
         assert_eq!(w[19], 0xff);
         assert_eq!(&w[20..24], &[192, 168, 1, 5]);
         // port big-endian at the tail
-        assert_eq!(&w[58..60], &24113u16.to_be_bytes());
+        assert_eq!(&w[57..59], &24113u16.to_be_bytes());
         let mut r = Reader::new(&w);
         assert_eq!(WireAddr::decode_no_time(&mut r).unwrap(), a);
+        // round-trips through a full version message too
+        let mut v = sample_version(7, 10);
+        v.addr_you = a.clone();
+        let payload = encode_version(&v);
+        assert_eq!(parse_version(&payload).unwrap(), v);
+    }
+
+    // The verified-live DNS2 hidden service (docs/network-seeds.md). Its
+    // label base32-decodes (python: base64.b32decode) to 35 bytes:
+    // pubkey32 || checksum2 || version — the wire carries only the 32 key
+    // bytes.
+    const LIVE_SEED_ONION: &str = "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion";
+    const LIVE_SEED_KEY_HEX: &str =
+        "35eb13d77044da2f29c189e519139e0b04544db8081ee8edd1db859cd2edf1cb";
+
+    fn live_seed_addr() -> WireAddr {
+        let mut key = [0u8; 32];
+        for (i, b) in hex_decode(LIVE_SEED_KEY_HEX).unwrap().into_iter().enumerate() {
+            key[i] = b;
+        }
+        WireAddr::onion_v3(key, 24113, NODE_NETWORK)
+    }
+
+    /// A1: CService encode = 51 bytes, CAddress = 63 bytes, exact hex for the
+    /// verified-live seed onion.
+    #[test]
+    fn wireaddr_cservice_is_51_bytes_and_caddress_is_63() {
+        let a = live_seed_addr();
+        let mut svc = Vec::new();
+        a.encode_service(&mut svc);
+        assert_eq!(svc.len(), 51);
+        let svc_hex: String = svc.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(
+            svc_hex,
+            "fd87d87eeb4300000000000000000000".to_string()
+                + LIVE_SEED_KEY_HEX
+                + "01"   // m_is_tor_v3
+                + "5e31" // port 24113 BE
+        );
+        let caddr = a.encode_caddress(0x67ac_1d3d);
+        assert_eq!(caddr.len(), 63);
+        let hex: String = caddr.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(
+            hex,
+            "3d1dac67"            // nTime 0x67ac1d3d LE
+                .to_string()
+                + "0100000000000000" // nServices 1 LE
+                + "fd87d87eeb4300000000000000000000" // OnionCat ip[16]
+                + LIVE_SEED_KEY_HEX
+                + "01"  // m_is_tor_v3
+                + "5e31" // port 24113 BE
+        );
+        // and the whole 63-byte entry parses back through parse_addr
+        let entries = parse_addr(&{
+            let mut w = Vec::new();
+            push_compact_size(&mut w, 1);
+            w.extend_from_slice(&caddr);
+            w
+        })
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].time, 0x67ac_1d3d);
+        assert_eq!(entries[0].addr, a);
+    }
+
+    /// A2: a hand-built LEGACY 63-byte CAddress fixture parses to the
+    /// expected host (onion key + OnionCat prefix), port and flag.
+    #[test]
+    fn legacy_caddress_fixture_parses() {
+        // nTime | nServices | ip[16] | tor_v3_pubkey[32] | flag | port BE
+        let mut fixture = Vec::new();
+        fixture.extend_from_slice(&1_790_000_000u32.to_le_bytes()); // nTime
+        fixture.extend_from_slice(&NODE_NETWORK.to_le_bytes()); // nServices
+        fixture.extend_from_slice(&ONIONCAT);
+        fixture.extend_from_slice(&[0u8; 10]);
+        fixture.extend_from_slice(&[0x42u8; 32]); // tor_v3_pubkey
+        fixture.push(1); // m_is_tor_v3
+        fixture.extend_from_slice(&24113u16.to_be_bytes());
+        assert_eq!(fixture.len(), 63);
+        let entries = parse_addr(&{
+            let mut w = Vec::new();
+            push_compact_size(&mut w, 1);
+            w.extend_from_slice(&fixture);
+            w
+        })
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.time, 1_790_000_000);
+        assert_eq!(e.addr.services, NODE_NETWORK);
+        assert_eq!(e.addr.port, 24113);
+        assert!(e.addr.is_tor_v3);
+        assert!(!e.addr.is_i2p);
+        assert_eq!(e.addr.tor_key, [0x42u8; 32]);
+        assert_eq!(&e.addr.ip[..6], &ONIONCAT);
+        // CService-only (51 bytes) via decode_no_time after the services word
+        let mut w = Vec::new();
+        w.extend_from_slice(&NODE_NETWORK.to_le_bytes());
+        w.extend_from_slice(&fixture[12..]); // ip..port of the CAddress
+        let mut r = Reader::new(&w);
+        let back = WireAddr::decode_no_time(&mut r).unwrap();
+        assert_eq!(back, e.addr);
+    }
+
+    /// A3: the OLD tri7 shape (60-byte CService with the extra m_is_i2p byte,
+    /// 64-byte CAddress with time) still parses.
+    #[test]
+    fn old_tri7_shape_still_parses() {
+        // nTime | nServices | ip[16] | tor_v3_pubkey[32] | flag | i2p flag | port BE
+        let mut fixture = Vec::new();
+        fixture.extend_from_slice(&1_791_000_000u32.to_le_bytes());
+        fixture.extend_from_slice(&NODE_NETWORK.to_le_bytes());
+        fixture.extend_from_slice(&ONIONCAT);
+        fixture.extend_from_slice(&[0u8; 10]);
+        fixture.extend_from_slice(&[0x77u8; 32]);
+        fixture.push(1); // m_is_tor_v3
+        fixture.push(0); // m_is_i2p
+        fixture.extend_from_slice(&24113u16.to_be_bytes());
+        assert_eq!(fixture.len(), 64);
+        let entries = parse_addr(&{
+            let mut w = Vec::new();
+            push_compact_size(&mut w, 1);
+            w.extend_from_slice(&fixture);
+            w
+        })
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].addr.is_tor_v3);
+        assert!(!entries[0].addr.is_i2p);
+        assert_eq!(entries[0].addr.port, 24113);
+        assert_eq!(entries[0].addr.tor_key, [0x77u8; 32]);
+        // an i2p flag byte set on the old shape is preserved (layout: time4
+        // services8 ip16 key32 tor-flag@60 i2p-flag@61 port@62..64)
+        let mut i2p_fixture = fixture.clone();
+        i2p_fixture[12..18].copy_from_slice(&GARLICAT);
+        i2p_fixture[60] = 0; // m_is_tor_v3
+        i2p_fixture[61] = 1; // m_is_i2p
+        let entries = parse_addr(&{
+            let mut w = Vec::new();
+            push_compact_size(&mut w, 1);
+            w.extend_from_slice(&i2p_fixture);
+            w
+        })
+        .unwrap();
+        assert!(entries[0].addr.is_i2p);
+        assert!(!entries[0].addr.is_tor_v3);
+    }
+
+    /// A4: parse_addr returns Err (never panics) on truncation and on an
+    /// oversized count.
+    #[test]
+    fn parse_addr_errors_never_panics() {
+        let entry = live_seed_addr().encode_caddress(1);
+        // truncated: valid count, short body
+        let mut trunc = Vec::new();
+        push_compact_size(&mut trunc, 2);
+        trunc.extend_from_slice(&entry);
+        assert!(parse_addr(&trunc).is_err());
+        // truncated mid-entry under the legacy size (64 body vs count 1 →
+        // legacy 63 doesn't match, compat 64 doesn't match)
+        let mut trunc = Vec::new();
+        push_compact_size(&mut trunc, 1);
+        trunc.extend_from_slice(&entry[..40]);
+        assert!(parse_addr(&trunc).is_err());
+        // count = 5000 → over the cap
+        let mut big = Vec::new();
+        push_compact_size(&mut big, 5000);
+        big.extend_from_slice(&entry);
+        assert!(parse_addr(&big).is_err());
+        // empty and junk payloads
+        assert!(parse_addr(&[]).is_err());
+        assert!(parse_addr(&[0xff, 0xff, 0xff, 0xff, 0xff]).is_err());
+        // trailing junk (one extra byte would look like the 64-byte
+        // old-tri7 shape and parse leniently — two cannot match either form)
+        let mut junk = Vec::new();
+        push_compact_size(&mut junk, 1);
+        junk.extend_from_slice(&entry);
+        junk.extend_from_slice(&[0, 0]);
+        assert!(parse_addr(&junk).is_err());
+    }
+
+    /// encode_addr ↔ parse_addr round-trip; the getaddr codec carries
+    /// multiple entries and both shapes at their respective sizes.
+    #[test]
+    fn encode_addr_roundtrips_through_parse_addr() {
+        let entries = vec![
+            AddrEntry {
+                time: 1_792_222_222,
+                addr: live_seed_addr(),
+            },
+            AddrEntry {
+                time: 1_792_222_223,
+                addr: WireAddr::ipv4(10, 1, 2, 3, 24112, NODE_NETWORK),
+            },
+        ];
+        let payload = encode_addr(&entries);
+        // count(1) + 2×63
+        assert_eq!(payload.len(), 1 + 2 * 63);
+        assert_eq!(parse_addr(&payload).unwrap(), entries);
+        // an empty addr payload round-trips as zero entries
+        assert!(parse_addr(&encode_addr(&[])).unwrap().is_empty());
+    }
+
+    /// i2p has NO flag byte on the legacy wire — it is implied by the
+    /// GarliCat ip prefix (netbase.cpp IsI2P). Encoding drops any i2p byte.
+    #[test]
+    fn i2p_implied_by_garlicat_prefix_not_a_wire_byte() {
+        let mut a = live_seed_addr();
+        a.is_tor_v3 = false;
+        a.ip[..6].copy_from_slice(&GARLICAT);
+        a.is_i2p = false; // encoder must NOT carry this; the prefix implies it
+        let mut w = Vec::new();
+        a.encode_no_time(&mut w);
+        assert_eq!(w.len(), 59);
+        let mut r = Reader::new(&w);
+        let back = WireAddr::decode_no_time(&mut r).unwrap();
+        assert!(back.is_i2p, "GarliCat prefix implies i2p on decode");
+        assert!(!back.is_tor_v3);
+        // a legacy-encoded i2p CAddress parses with the flag derived
+        let mut fixture = Vec::new();
+        fixture.extend_from_slice(&0u32.to_le_bytes());
+        fixture.extend_from_slice(&NODE_NETWORK.to_le_bytes());
+        fixture.extend_from_slice(&GARLICAT);
+        fixture.extend_from_slice(&[0u8; 10]);
+        fixture.extend_from_slice(&[0u8; 32]);
+        fixture.push(0);
+        fixture.extend_from_slice(&24113u16.to_be_bytes());
+        let entries = parse_addr(&{
+            let mut w = Vec::new();
+            push_compact_size(&mut w, 1);
+            w.extend_from_slice(&fixture);
+            w
+        })
+        .unwrap();
+        assert!(entries[0].addr.is_i2p);
+    }
+
+    /// The published hostname parses to the exact wire key bytes (SetSpecial
+    /// parity), store_key reconstructs the HOSTNAME (dialable), and
+    /// store_key/from_store_key round-trip a wire-learned peer.
+    #[test]
+    fn onion_label_parses_to_wire_key_and_store_key_roundtrips() {
+        let a = WireAddr::from_onion_label(LIVE_SEED_ONION, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(a, live_seed_addr());
+        assert!(a.is_tor_v3);
+        // store key for a wire-learned onion is the reconstructed HOSTNAME
+        // (the peer store dials `.onion` hosts — hex keys never would)
+        let key = a.store_key().unwrap();
+        assert_eq!(key, LIVE_SEED_ONION);
+        let back = WireAddr::from_store_key(&key, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(back, a);
+        // a hostname itself round-trips too
+        let host = WireAddr::from_store_key(LIVE_SEED_ONION, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(host, a);
+        // legacy peers.json files may still carry the hex tor key — parsed
+        // for relay compatibility
+        let legacy = WireAddr::from_store_key(LIVE_SEED_KEY_HEX, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(legacy, a);
+        // bad labels rejected
+        assert!(WireAddr::from_onion_label("tooshort.onion", 24113, 1).is_err());
+        assert!(WireAddr::from_onion_label(
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+            24113,
+            1
+        )
+        .is_err());
+    }
+
+    /// RFC 4648 base32 encode: known vector, unpadded lowercase form, and
+    /// encode/decode round-trip at every length (the 35-byte onion label is
+    /// the exact case: 280 bits = 56 chars, no padding).
+    #[test]
+    fn base32_encode_rfc4648_vectors_and_roundtrip() {
+        // RFC 4648 §10 test vector for "foobar", unpadded + lowercase
+        assert_eq!(WireAddr::base32_encode_rfc4648(b"foobar"), "mzxw6ytboi");
+        // and the decoder agrees (it accepts both cases, strips '=')
+        assert_eq!(
+            WireAddr::base32_decode_rfc4648("MZXW6YTBOI======").unwrap(),
+            b"foobar".to_vec()
+        );
+        // round-trip at every length 0..=70 (exercises every padding class)
+        for n in 0..=70usize {
+            let data: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            let enc = WireAddr::base32_encode_rfc4648(&data);
+            assert!(enc
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+            assert_eq!(
+                WireAddr::base32_decode_rfc4648(&enc).unwrap(),
+                data,
+                "round-trip failed at length {}",
+                n
+            );
+        }
+        // the live seed's 35 bytes encode to exactly its 56-char label
+        let raw = WireAddr::base32_decode_rfc4648(
+            LIVE_SEED_ONION.strip_suffix(".onion").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw.len(), 35);
+        assert_eq!(
+            WireAddr::base32_encode_rfc4648(&raw),
+            LIVE_SEED_ONION.strip_suffix(".onion").unwrap(),
+            "encode must reproduce tor's label spelling exactly"
+        );
+    }
+
+    /// THE known-answer test: the live seed's hostname decodes to its
+    /// 32-byte pubkey, and that pubkey reconstructs — through the v3
+    /// checksum + base32 encode — to EXACTLY the same hostname. Also proves
+    /// the checksum is the real SHA3-256(".onion checksum") value: a wrong
+    /// checksum would produce a different label.
+    #[test]
+    fn onion_hostname_reconstructs_the_live_seed_exactly() {
+        let a = WireAddr::from_onion_label(LIVE_SEED_ONION, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(a.tor_key.len(), 32);
+        // the decoded key bytes are the documented seed pubkey
+        let want: [u8; 32] = hex_decode(LIVE_SEED_KEY_HEX).unwrap().try_into().unwrap();
+        assert_eq!(a.tor_key, want);
+        // decode → reconstruct → the SAME hostname, byte for byte
+        assert_eq!(
+            a.onion_hostname().as_deref(),
+            Some(LIVE_SEED_ONION),
+            "live seed must round-trip to itself"
+        );
+        // and the free-function label form agrees (56 chars, no suffix)
+        let label = onion_v3_label(&a.tor_key);
+        assert_eq!(label.len(), 56);
+        assert_eq!(
+            format!("{}.onion", label),
+            LIVE_SEED_ONION
+        );
+        // non-v3 addresses have no hostname
+        assert_eq!(WireAddr::ipv4(10, 0, 0, 1, 24113, 1).onion_hostname(), None);
+    }
+
+    /// A label whose 2 checksum bytes (or version byte) were tampered is
+    /// REJECTED — no hostname is fabricated from it. Every base32 position
+    /// matters: flipping any one char breaks the parse.
+    #[test]
+    fn from_onion_label_rejects_checksum_and_version_tamper() {
+        let label = LIVE_SEED_ONION.strip_suffix(".onion").unwrap();
+        let valid = WireAddr::from_onion_label(label, 24113, NODE_NETWORK).unwrap();
+        assert_eq!(valid.onion_hostname().as_deref(), Some(LIVE_SEED_ONION));
+        // flip chars in all three regions: pubkey bits (0), checksum bits
+        // (56 chars * 5 bits = 280; bytes 32..35 start at char 51), version
+        // bits (last char) — every flip must be refused
+        for pos in [0usize, 25, 51, 54, 55] {
+            let mut bad: Vec<char> = label.chars().collect();
+            bad[pos] = if bad[pos] == 'a' { 'b' } else { 'a' };
+            let bad: String = bad.into_iter().collect();
+            let err = WireAddr::from_onion_label(&bad, 24113, NODE_NETWORK)
+                .err()
+                .expect("tampered label must be rejected");
+            assert!(
+                err.contains("checksum") || err.contains("version"),
+                "pos {}: unexpected error {:?}",
+                pos,
+                err
+            );
+        }
+    }
+
+    /// version messages: legacy encoding round-trips, and a hand-built
+    /// OLD-tri7-shape version payload (60-byte addrs) still parses.
+    #[test]
+    fn version_message_parses_both_shapes() {
+        // legacy: encode_version → parse_version (encode is always legacy now)
+        let v = sample_version(9_876, 1234);
+        let payload = encode_version(&v);
+        let (back, trailing) = parse_version_shape(&payload, false).unwrap();
+        assert_eq!(trailing, 0);
+        assert_eq!(back, v);
+
+        // old tri7 shape: rebuild the payload with 60-byte addrs
+        let mut old = Vec::new();
+        old.extend_from_slice(&v.version.to_le_bytes());
+        old.extend_from_slice(&v.services.to_le_bytes());
+        old.extend_from_slice(&v.timestamp.to_le_bytes());
+        for addr in [&v.addr_you, &v.addr_me] {
+            old.extend_from_slice(&addr.services.to_le_bytes());
+            old.extend_from_slice(&addr.ip);
+            old.extend_from_slice(&addr.tor_key);
+            old.push(addr.is_tor_v3 as u8);
+            old.push(addr.is_i2p as u8);
+            old.extend_from_slice(&addr.port.to_be_bytes());
+        }
+        old.extend_from_slice(&v.nonce.to_le_bytes());
+        push_compact_size(&mut old, v.user_agent.len() as u64);
+        old.extend_from_slice(v.user_agent.as_bytes());
+        old.extend_from_slice(&v.start_height.to_le_bytes());
+        // a legacy parse of an old-shape payload cannot consume the payload
+        // (the shifted user-agent length lands on other fields), so exactly
+        // one shape consumes it fully — the discriminator
+        let (_legacy_mis, trailing) = parse_version_shape(&old, false).unwrap();
+        assert_ne!(trailing, 0);
+        // and parse_version resolves it to the old shape with flags intact
+        let back = parse_version(&old).unwrap();
+        assert_eq!(back, v);
+        assert_eq!(back.addr_me.port, v.addr_me.port);
     }
 }

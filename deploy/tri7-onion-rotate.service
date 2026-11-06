@@ -1,0 +1,54 @@
+[Unit]
+Description=tri7 Tor v3 onion lifecycle daemon (re-establish stored onions, rotate IN-PROCESS when due)
+Documentation=file:/opt/tri7/docs/tor-discovery-and-rotation.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tri7
+Group=tri7
+# Round-4 defect 2: the daemon authenticates with tor's control-port COOKIE
+# (CookieAuthentication, what stock Debian tor ships), and that cookie
+# (/run/tor/control.authcookie) is owned root:debian-tor with mode 0640.
+# Running as User=tri7 the service therefore needs membership in tor's
+# group to read it:
+SupplementaryGroups=debian-tor
+# CAVEATS:
+# - If your tor runs under a different group name (some distros ship it as
+#   "tor" instead of "debian-tor"), override this unit with
+#   `systemctl edit tri7-onion-rotate` and set
+#   SupplementaryGroups=<tor's group> accordingly.
+# - If your torrc points CookieAuthFile somewhere else (or disables the
+#   cookie entirely), also pass the real path on ExecStart:
+#   `--cookie /path/to/control.authcookie` (or use `--password` with
+#   HashedControlPassword). The daemon auto-probes the usual Debian paths
+#   only.
+# - NEVER "fix" this by making the cookie world-readable (chmod 0644): it
+#   is a live credential that grants full control of tor. That workaround
+#   is explicitly REJECTED.
+# Round-3 lifecycle (BRIEF_TOR_ROUND3): this is a DAEMON, not a run-and-exit
+# rotation. On startup it ALWAYS re-establishes the stored current service
+# and any in-grace previous service from their stored ed25519 keys
+# (ADD_ONION Key=ED25519-V3:...) — a tor crash brings both onions straight
+# back, whether or not a rotation is due. It then rotates IN-PROCESS on its
+# own 60s tick when the 60-day period is due and NEVER exits for being due,
+# so no timer can or must restart it (a timer cannot start an already-active
+# unit — that was the round-2 defect). Restart=always + RestartSec=15 covers
+# crashes and a control port that is not up yet.
+ExecStart=/opt/tri7/bin/tri7-onion-rotate \
+  --state-dir /var/lib/tri7 \
+  --hold
+Restart=always
+RestartSec=15
+# State (onion-state.json + node_identity.key) carries the ed25519 private
+# keys tor returned via ADD_ONION — 0600, never leave the state dir
+# world-readable.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tri7
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
