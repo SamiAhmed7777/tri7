@@ -25,6 +25,7 @@ pub mod sync_progress;
 pub mod smsg_net;
 pub mod spend;
 pub mod walletcrypto;
+pub mod wallet_encrypt;
 pub mod addrindex;
 pub mod stake;
 pub mod sweep;
