@@ -3835,6 +3835,13 @@ struct WalletLive {
     wallet: tri7_core::wallet::WalletKeys,
     base: u64,
     live: HashMap<(Hash, u32), LiveOut>,
+    /// true when the wallet file is encrypted and the secrets have not been
+    /// supplied yet: the node still syncs and watches its addresses, but it
+    /// cannot stake or sign. Cleared by `walletpassphrase`, restored by
+    /// `walletlock` or the unlock timeout.
+    locked: bool,
+    /// unix time at which a timed unlock expires
+    unlock_until: Option<u64>,
 }
 
 /// txpool::UtxoView over the live map — unspent-only (spends removed).
@@ -3873,6 +3880,8 @@ impl WalletLive {
             wallet,
             base,
             live: HashMap::new(),
+            locked: false,
+            unlock_until: None,
         };
         for h in base..=tip {
             let hit = store
@@ -4006,8 +4015,40 @@ impl WalletLive {
         (out, skipped_no_key, skipped_unlocated, skipped_nonstandard)
     }
 
+    /// Is this output payable to one of the wallet's keys?
+    fn owns(&self, o: &LiveOut) -> bool {
+        match tri7_core::spend::solver_type(&o.script) {
+            Some(tri7_core::spend::SpendType::PubKey(pk)) => {
+                self.wallet.keys.iter().any(|k| k.pubkey == pk)
+            }
+            Some(tri7_core::spend::SpendType::PubkeyHash(h)) => {
+                let want = tri7_core::address::ScriptDest::PubkeyHash(h).payload();
+                self.wallet
+                    .keys
+                    .iter()
+                    .any(|k| tri7_core::address::pubkey_payload(&k.pubkey) == want)
+            }
+            _ => false,
+        }
+    }
+
+    /// Sum of the wallet's OWN unspent outputs.
+    ///
+    /// `live` holds every output in the scanned window (spends are removed as
+    /// they are seen), which is what the stake-kernel walk needs. Summing it
+    /// whole — as this used to — reports the value of the window instead of the
+    /// wallet's coins: a fresh wallet with no funded keys showed 3,205 TRI.
     fn balance(&self) -> i64 {
-        self.live.values().map(|o| o.value).sum()
+        self.live
+            .values()
+            .filter(|o| self.owns(o))
+            .map(|o| o.value)
+            .sum()
+    }
+
+    /// Number of unspent outputs that pay the wallet.
+    fn owned_count(&self) -> usize {
+        self.live.values().filter(|o| self.owns(o)).count()
     }
 
     /// Legacy GetStakeWeight parity: Σ value·min(now−txTime, STAKE_MAX_AGE)
@@ -4045,6 +4086,8 @@ struct StakeState {
     /// last pass that met every pre-condition (wallet, index, tip)
     last_search_utc: Option<String>,
     last_hit_utc: Option<String>,
+    /// the "wallet is LOCKED" line has already been logged this lock
+    locked_logged: bool,
     /// (height, hash display, time_utc) of the last minted block
     last_stake: Option<(u64, String, String)>,
     last_error: Option<String>,
@@ -4257,6 +4300,31 @@ type TxAnnounce = Arc<Mutex<std::collections::VecDeque<Hash>>>;
 /// held (same discipline as a peer-validation batch — the RPC threads are
 /// try_lock/mirror safe). Returns Ok(true) when a block was minted.
 #[allow(clippy::too_many_arguments)]
+/// Relock an encrypted wallet once its unlock window has passed. Cheap: called
+/// from the same loop that stakes.
+fn enforce_unlock_timeout(wl: &SharedWalletLive) {
+    let mut g = match wl.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(w) = g.as_mut() else { return };
+    let Some(until) = w.unlock_until else { return };
+    if now_secs() >= until {
+        let mut n = 0usize;
+        for k in w.wallet.keys.iter_mut() {
+            if k.secret != [0u8; 32] {
+                n += 1;
+            }
+            k.secret = [0u8; 32];
+        }
+        w.locked = true;
+        w.unlock_until = None;
+        if n > 0 {
+            log(&format!("wallet: unlock window elapsed — {n} keys locked again, staking stops"));
+        }
+    }
+}
+
 fn stake_tick(
     cfg: &Config,
     stg: &mut ChainState,
@@ -4275,6 +4343,17 @@ fn stake_tick(
         return Err("tip entry missing".into());
     };
     stake_st.last_search_utc = Some(now_iso());
+    if wl.locked {
+        // Staking needs the private keys. An encrypted wallet that has not been
+        // unlocked cannot mint — say so once, then stay quiet.
+        if !stake_st.locked_logged {
+            log("stake: wallet is LOCKED — no staking until walletpassphrase");
+            stake_st.locked_logged = true;
+        }
+        stake_st.coins_considered = 0;
+        return Ok(false);
+    }
+    stake_st.locked_logged = false;
     let (candidates, _no_key, _unloc, _nonstd) = wl.candidates();
     stake_st.coins_considered = candidates.len() as u64;
     let balance = wl.balance();
@@ -4683,8 +4762,11 @@ impl OpsAdapter {
 
 impl tri7_core::rpc::NodeOps for OpsAdapter {
     fn ready(&self) -> bool {
-        self.smsg.is_some()
-            && self.wl.lock().map(|w| w.is_some()).unwrap_or(false)
+        // The ops engine needs the live wallet view, nothing else. Requiring the
+        // smsg engine here made a LOCKED (encrypted) wallet unable to answer
+        // walletpassphrase at all — the unlock verb sat behind a gate that only
+        // the unlock could open. smsg is optional and separate.
+        self.wl.lock().map(|w| w.is_some()).unwrap_or(false)
     }
 
     fn call(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, (i64, String)> {
@@ -5097,6 +5179,120 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     if hd { "derived from the wallet seed" } else { "fresh random key" }
                 ));
                 Ok(serde_json::json!(address))
+            }
+            // ---- wallet encryption (legacy crypter.cpp port) -------------
+            // These act on the SAME file the node stakes for. They are never
+            // called on their own: encryptwallet locks the running key set, and
+            // walletpassphrase is what brings signing back.
+            "encryptwallet" => {
+                let pass = ps(0).ok_or_else(|| (-8, "expected a passphrase".to_string()))?;
+                if pass.is_empty() {
+                    return Err((-8, "passphrase must not be empty".to_string()));
+                }
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                if tri7_core::wallet_encrypt::is_encrypted(&path) {
+                    return Err((-4, "wallet is already encrypted".to_string()));
+                }
+                tri7_core::wallet_encrypt::encrypt_wallet(&path, &pass)
+                    .map_err(|e| (-1, format!("encryptwallet: {e}")))?;
+                // lock the running key set immediately: the file no longer holds
+                // plaintext, and the node must not keep signing from memory as if
+                // nothing happened
+                let mut locked_keys = 0usize;
+                if let Some(w) = self.wl.lock().unwrap().as_mut() {
+                    for k in w.wallet.keys.iter_mut() {
+                        if k.secret != [0u8; 32] {
+                            locked_keys += 1;
+                        }
+                        k.secret = [0u8; 32];
+                    }
+                    w.locked = true;
+                    w.unlock_until = None;
+                    w.wallet.encrypted = true;
+                }
+                log(&format!(
+                    "encryptwallet: wallet encrypted, {locked_keys} keys locked — staking stops until walletpassphrase"
+                ));
+                Ok(serde_json::json!({
+                    "encrypted": true,
+                    "keys_locked": locked_keys,
+                    "note": "staking and signing are disabled until walletpassphrase"
+                }))
+            }
+            "walletpassphrase" => {
+                let pass = ps(0).ok_or_else(|| (-8, "expected a passphrase".to_string()))?;
+                // params arrive as JSON: ["pass", 120] puts a NUMBER in slot 1,
+                // so a str-only read silently fell back to the 60s default.
+                let secs: u64 = p(1)
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(60)
+                    .max(1);
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                if !tri7_core::wallet_encrypt::is_encrypted(&path) {
+                    return Err((-1, "wallet is not encrypted".to_string()));
+                }
+                let keys = tri7_core::wallet_encrypt::decrypt_wallet(&path, &pass)
+                    .map_err(|e| (-1, format!("walletpassphrase: {e}")))?;
+                let map: std::collections::HashMap<Vec<u8>, [u8; 32]> =
+                    keys.into_iter().collect();
+                let mut unlocked = 0usize;
+                if let Some(w) = self.wl.lock().unwrap().as_mut() {
+                    for k in w.wallet.keys.iter_mut() {
+                        if let Some(s) = map.get(&k.pubkey) {
+                            k.secret = *s;
+                            unlocked += 1;
+                        }
+                    }
+                    w.locked = unlocked == 0;
+                    w.unlock_until = Some(now_secs() + secs);
+                }
+                if unlocked == 0 {
+                    return Err((-1, "walletpassphrase: no key in the wallet was unlocked".to_string()));
+                }
+                if self.smsg.is_none() {
+                    // smsg identities are read once at startup from the plaintext
+                    // wallet; a wallet that started locked has no engine. Say so
+                    // instead of leaving messaging silently dead after an unlock.
+                    log("smsg: still off — messaging identities load on the next restart \
+                         (the wallet was locked at startup)");
+                }
+                log(&format!("walletpassphrase: {unlocked} keys unlocked for {secs}s"));
+                Ok(serde_json::json!({
+                    "unlocked": unlocked,
+                    "seconds": secs,
+                    "until": now_secs() + secs
+                }))
+            }
+            "walletlock" => {
+                // A plaintext wallet cannot be locked: there would be no
+                // passphrase to unlock it with, so zeroing the keys would just
+                // stop staking until a restart. Refuse, like the legacy daemon.
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                if !tri7_core::wallet_encrypt::is_encrypted(&path) {
+                    return Err((-1, "wallet is not encrypted".to_string()));
+                }
+                let mut n = 0usize;
+                if let Some(w) = self.wl.lock().unwrap().as_mut() {
+                    for k in w.wallet.keys.iter_mut() {
+                        if k.secret != [0u8; 32] {
+                            n += 1;
+                        }
+                        k.secret = [0u8; 32];
+                    }
+                    w.locked = true;
+                    w.unlock_until = None;
+                }
+                log(&format!("walletlock: {n} keys locked"));
+                Ok(serde_json::json!({ "locked": n }))
             }
             // Copy the wallet file. The legacy daemon refuses a destination
             // that already exists; keeping that rule means a mistyped path
@@ -6461,46 +6657,100 @@ fn main() {
     let announce_shared: TxAnnounce = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let peers_table: SharedPeers = Arc::new(Mutex::new(Vec::new()));
     // smsg engine: requires the wallet (keys are the smsg identities)
-    let smsg_engine: Option<Arc<tri7_core::smsg_net::SmsgEngine>> = match &cfg.wallet_path {
+    // ---- wallet load: plaintext, or public-only LOCKED when encrypted -----
+    // This is the single decision point. Everything below (smsg identities, the
+    // live-view seed thread, staking) keys off `wallet_keys`, so an encrypted
+    // wallet is not treated as "unreadable" and does not silently disable the
+    // node — it starts locked, with addresses watchable and signing withheld.
+    let mut wallet_locked_at_start = false;
+    let wallet_keys: Option<tri7_core::wallet::WalletKeys> = match &cfg.wallet_path {
         Some(wp) => match tri7_core::wallet::read_wallet(wp) {
-            Ok(keys) => {
-                let owned: Vec<tri7_core::smsg::SmsgKey> = keys
-                    .keys
-                    .iter()
-                    .map(|k| tri7_core::smsg::SmsgKey {
-                        address: k.address.clone(),
-                        secret: k.secret,
-                        pubkey: k.pubkey.clone(),
-                    })
-                    .collect();
-                match tri7_core::smsg_net::SmsgEngine::open(&cfg.state_dir.join("smsg"), owned) {
-                    Ok(e) => {
-                        log(&format!(
-                            "smsg: engine live with {} wallet key(s) — store {}",
-                            e.owned.len(),
-                            cfg.state_dir.join("smsg").display()
-                        ));
-                        Some(e)
-                    }
-                    Err(e) => {
-                        log(&format!("smsg: engine NOT started: {}", e));
-                        None
-                    }
-                }
-            }
+            Ok(keys) => Some(keys),
             Err(e) => {
-                log(&format!(
-                    "wallet {} unreadable: {} — staking + smsg disabled (broadcast relay view stays off)",
-                    wp.display(),
-                    e
-                ));
-                None
+                if tri7_core::wallet_encrypt::is_encrypted(wp) {
+                    match tri7_core::wallet_encrypt::read_pubkeys(wp) {
+                        Ok(pubs) => {
+                            let keys: Vec<tri7_core::wallet::WalletKey> = pubs
+                                .iter()
+                                .map(|pk| tri7_core::wallet::WalletKey {
+                                    pubkey: pk.clone(),
+                                    secret: [0u8; 32],
+                                    compressed: pk.len() == 33,
+                                    address: tri7_core::wallet::pubkey_to_address(pk),
+                                    created: None,
+                                })
+                                .collect();
+                            let first = keys.first().map(|k| k.pubkey.clone());
+                            let n = keys.len();
+                            wallet_locked_at_start = true;
+                            log(&format!(
+                                "wallet is ENCRYPTED — starting LOCKED with {n} public key(s); \
+                                 staking and signing wait for walletpassphrase"
+                            ));
+                            Some(tri7_core::wallet::WalletKeys {
+                                keys,
+                                default_key: first,
+                                best_block: None,
+                                version: None,
+                                names: Vec::new(),
+                                encrypted: true,
+                                hd_mnemonic: None,
+                                hd_passphrase: None,
+                                hd_chain_index: None,
+                            })
+                        }
+                        Err(e2) => {
+                            log(&format!("wallet {} encrypted but keys unreadable: {e2}", wp.display()));
+                            None
+                        }
+                    }
+                } else {
+                    log(&format!(
+                        "wallet {} unreadable: {} — staking + smsg disabled (broadcast relay view stays off)",
+                        wp.display(),
+                        e
+                    ));
+                    None
+                }
             }
         },
         None => {
             log("no --wallet given: staking/smsg off, sendrawtransaction view off");
             None
         }
+    };
+    // smsg identities are secret-key based: only a plaintext wallet can start one
+    let smsg_engine: Option<Arc<tri7_core::smsg_net::SmsgEngine>> = match (&wallet_keys, wallet_locked_at_start) {
+        (Some(keys), false) => {
+            let owned: Vec<tri7_core::smsg::SmsgKey> = keys
+                .keys
+                .iter()
+                .map(|k| tri7_core::smsg::SmsgKey {
+                    address: k.address.clone(),
+                    secret: k.secret,
+                    pubkey: k.pubkey.clone(),
+                })
+                .collect();
+            match tri7_core::smsg_net::SmsgEngine::open(&cfg.state_dir.join("smsg"), owned) {
+                Ok(e) => {
+                    log(&format!(
+                        "smsg: engine live with {} wallet key(s) — store {}",
+                        e.owned.len(),
+                        cfg.state_dir.join("smsg").display()
+                    ));
+                    Some(e)
+                }
+                Err(e) => {
+                    log(&format!("smsg: engine NOT started: {}", e));
+                    None
+                }
+            }
+        }
+        (Some(_), true) => {
+            log("smsg: skipped — wallet is locked (unlock it to send/receive encrypted messages)");
+            None
+        }
+        (None, _) => None,
     };
     // lock-free tip mirror for the RPC threads (deadlock-free validation path)
     let tip_mirror = {
@@ -6515,11 +6765,13 @@ fn main() {
     let recent_shared: Arc<Mutex<RecentBlocks>> = Arc::new(Mutex::new(RecentBlocks::new()));
     // wallet live UTXO view: seeded from the disk store in a background
     // thread once the index build finishes (needs heights_ok + bodies)
-    if smsg_engine.is_some() {
+    if let Some(start_keys) = wallet_keys.clone() {
         let store2 = Arc::clone(&store);
         let wl2 = Arc::clone(&wl_shared);
         let st2 = Arc::clone(&st_shared);
         let wp2 = cfg.wallet_path.clone();
+        let start_keys = start_keys.clone();
+        let locked_at_start = wallet_locked_at_start;
         std::thread::Builder::new()
             .name("wallet-seed".into())
             .spawn(move || loop {
@@ -6572,33 +6824,37 @@ fn main() {
                         seed_tip, tip
                     ));
                 }
-                match tri7_core::wallet::read_wallet(wp) {
-                    Ok(keys) => match WalletLive::seed(&store2, keys, base, seed_tip) {
-                        Ok(w) => {
-                            let bal = w.balance();
-                            let (mut owned_n, mut funded_n) = (0usize, 0usize);
-                            {
-                                let (cands, _nk, _ul, _ns) = w.candidates();
-                                owned_n = cands.len();
-                                funded_n = w.live.len();
-                            }
-                            *wl2.lock().unwrap() = Some(w);
-                            log(&format!(
-                                "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats",
-                                base,
-                                seed_tip,
-                                funded_n,
-                                owned_n,
-                                bal
-                            ));
-                            return;
+                let keys = start_keys.clone();
+                match WalletLive::seed(&store2, keys, base, seed_tip) {
+                    Ok(mut w) => {
+                        if locked_at_start {
+                            w.locked = true;
                         }
-                        Err(e) => log(&format!("wallet live seed retrying: {}", e)),
-                    },
-                    Err(e) => {
-                        log(&format!("wallet seed: wallet unreadable: {}", e));
+                        let bal = w.balance();
+                        let (mut owned_n, mut funded_n) = (0usize, 0usize);
+                        {
+                            let (cands, _nk, _ul, _ns) = w.candidates();
+                            owned_n = cands.len();
+                            funded_n = w.owned_count();
+                        }
+                        let nkeys = w.wallet.keys.len();
+                        *wl2.lock().unwrap() = Some(w);
+                        log(&format!(
+                            "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats{}",
+                            base,
+                            seed_tip,
+                            funded_n,
+                            owned_n,
+                            bal,
+                            if locked_at_start {
+                                format!(" [LOCKED: {} keys, public only]", nkeys)
+                            } else {
+                                String::new()
+                            }
+                        ));
                         return;
                     }
+                    Err(e) => log(&format!("wallet live seed retrying: {}", e)),
                 }
             })
             .expect("spawn wallet-seed thread");
@@ -7159,6 +7415,7 @@ fn main() {
             && last_stake_tick.elapsed() >= Duration::from_secs(cfg.stake_tick_secs)
         {
             last_stake_tick = Instant::now();
+            enforce_unlock_timeout(&wl_shared);
             let wl_ready = wl_shared.lock().unwrap().is_some();
             if wl_ready {
                 let mut wl_guard = wl_shared.lock().unwrap();
@@ -7606,6 +7863,113 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- wallet balance ownership ----
+
+    /// build a WalletLive from a synthetic wallet + live map, no store needed
+    fn wallet_live_with(pubkeys: &[Vec<u8>], outs: Vec<((Hash, u32), LiveOut)>) -> WalletLive {
+        let keys: Vec<tri7_core::wallet::WalletKey> = pubkeys
+            .iter()
+            .map(|pk| tri7_core::wallet::WalletKey {
+                pubkey: pk.clone(),
+                secret: [7u8; 32],
+                compressed: pk.len() == 33,
+                address: tri7_core::wallet::pubkey_to_address(pk),
+                created: None,
+            })
+            .collect();
+        WalletLive {
+            wallet: tri7_core::wallet::WalletKeys {
+                keys,
+                default_key: None,
+                best_block: None,
+                version: None,
+                names: Vec::new(),
+                encrypted: false,
+                hd_mnemonic: None,
+                hd_passphrase: None,
+                hd_chain_index: None,
+            },
+            base: 0,
+            live: outs.into_iter().collect(),
+            locked: false,
+            unlock_until: None,
+        }
+    }
+
+    fn p2pkh_script(pubkey: &[u8]) -> Vec<u8> {
+        let payload = tri7_core::address::pubkey_payload(pubkey);
+        let mut s = vec![0x76, 0xa9, 0x14];
+        s.extend_from_slice(&payload[1..21]);
+        s.extend_from_slice(&[0x88, 0xac]);
+        s
+    }
+
+    fn out(value: i64, script: Vec<u8>) -> LiveOut {
+        LiveOut {
+            height: 1,
+            block_time: 1,
+            tx_time: 1,
+            tx_offset: 0,
+            value,
+            script,
+            created_epoch: 1,
+            coinstake: false,
+            coinbase: false,
+        }
+    }
+
+    /// The regression this fixes: balance() used to sum EVERY output in the
+    /// scanned window, so a wallet with no funded keys reported the value of the
+    /// window (3,205 TRI on a 200-block window).
+    #[test]
+    fn balance_counts_only_owned_outputs() {
+        let secp = secp256k1::Secp256k1::signing_only();
+        let mine = secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap();
+        let mine_pub = secp256k1::PublicKey::from_secret_key(&secp, &mine)
+            .serialize()
+            .to_vec();
+        let theirs = secp256k1::SecretKey::from_slice(&[9u8; 32]).unwrap();
+        let theirs_pub = secp256k1::PublicKey::from_secret_key(&secp, &theirs)
+            .serialize()
+            .to_vec();
+
+        let h = [1u8; 32];
+        let wl = wallet_live_with(
+            &[mine_pub.clone()],
+            vec![
+                ((h, 0), out(500, p2pkh_script(&mine_pub))),
+                ((h, 1), out(1_000, p2pkh_script(&theirs_pub))),
+                ((h, 2), out(7_000, p2pkh_script(&theirs_pub))),
+            ],
+        );
+        assert_eq!(wl.balance(), 500, "only the owned output counts");
+        assert_eq!(wl.owned_count(), 1);
+    }
+
+    /// A wallet whose keys fund nothing must read zero, not the window total.
+    #[test]
+    fn balance_is_zero_for_unfunded_wallet() {
+        let secp = secp256k1::Secp256k1::signing_only();
+        let mine = secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap();
+        let mine_pub = secp256k1::PublicKey::from_secret_key(&secp, &mine)
+            .serialize()
+            .to_vec();
+        let other = secp256k1::SecretKey::from_slice(&[11u8; 32]).unwrap();
+        let other_pub = secp256k1::PublicKey::from_secret_key(&secp, &other)
+            .serialize()
+            .to_vec();
+        let h = [2u8; 32];
+        let wl = wallet_live_with(
+            &[mine_pub],
+            vec![
+                ((h, 0), out(15_000_000_000, p2pkh_script(&other_pub))),
+                ((h, 1), out(15_000_000_000, p2pkh_script(&other_pub))),
+            ],
+        );
+        assert_eq!(wl.balance(), 0);
+        assert_eq!(wl.owned_count(), 0);
+    }
 
     // ---- PeerTarget parsing ----
 
@@ -8140,6 +8504,8 @@ mod tests {
             },
             base: 100,
             live: HashMap::new(),
+            locked: false,
+            unlock_until: None,
         };
         // a funded block at h=101: coinbase + p2pkh output to our key
         let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());

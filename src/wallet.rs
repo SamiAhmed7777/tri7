@@ -8,6 +8,7 @@ use crate::legacy::Hash;
 use rusqlite::OpenFlags;
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct WalletKeys {
     /// (pubkey compressed-33, secret 32, address)
     pub keys: Vec<WalletKey>,
@@ -25,7 +26,7 @@ pub struct WalletKeys {
     pub hd_chain_index: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WalletKey {
     pub pubkey: Vec<u8>,
     pub secret: [u8; 32],

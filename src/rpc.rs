@@ -106,6 +106,9 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getnetworkhashps",
     "getnewaddress",
     "backupwallet",
+    "encryptwallet",
+    "walletpassphrase",
+    "walletlock",
     "sendtoaddress",
     "sendmany",
     "signmessage",
@@ -153,6 +156,9 @@ pub const OPS_METHODS: &[&str] = &[
     "getaddresstxids",
     "getnewaddress",
     "backupwallet",
+    "encryptwallet",
+    "walletpassphrase",
+    "walletlock",
     "sendtoaddress",
     "sendmany",
     "signmessage",
@@ -3022,9 +3028,10 @@ mod tests {
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         // Must name a wallet-write verb that has NO handler and is in NO list.
-        // (This assertion has had to move three times as verbs landed; if it
-        // fails again, pick the next unimplemented wallet-write verb.)
-        let v = call(&d, "encryptwallet", json!(["pass"]));
+        // (This assertion has had to move four times as verbs landed; if it
+        // fails again, pick the next unimplemented wallet-write verb. Recently
+        // landed: encryptwallet, walletpassphrase, walletlock.)
+        let v = call(&d, "zapwallettxes", json!([1]));
         assert_eq!(v["error"]["code"], -32601);
         // SECURITY: wallet-write methods must never hit the proxy
         assert!(p.calls.lock().unwrap().is_empty());

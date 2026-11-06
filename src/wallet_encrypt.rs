@@ -511,3 +511,25 @@ pub fn decrypt_wallet_file(
 fn tri7_core_der(secret: &[u8; 32], pubkey: &[u8]) -> Result<Vec<u8>, String> {
     crate::wallet::encode_der_privkey(secret, pubkey)
 }
+
+/// Public keys of an encrypted wallet, for a node that starts LOCKED: it can
+/// watch its addresses and keep syncing, but cannot sign until the passphrase
+/// is supplied.
+pub fn read_pubkeys(path: &std::path::Path) -> Result<Vec<Vec<u8>>, String> {
+    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut st = conn
+        .prepare("SELECT key FROM main")
+        .map_err(|e| e.to_string())?;
+    let mut q = st.query([]).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(row) = q.next().map_err(|e| e.to_string())? {
+        let k: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+        if k.len() > 8 && k[0] == 4 && &k[1..5] == b"ckey" {
+            let pl = k[5] as usize;
+            if k.len() >= 6 + pl && pl == 33 {
+                out.push(k[6..6 + pl].to_vec());
+            }
+        }
+    }
+    Ok(out)
+}
