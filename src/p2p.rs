@@ -257,9 +257,10 @@ pub fn onion_v3_label(pubkey: &[u8; 32]) -> String {
 /// tor_v3_pubkey = the 32 bytes from the onion label; m_is_tor_v3 = true.
 /// i2p is implied by ip[0..6] == FD 60 DB 4D DD B5 (GarliCat).
 ///
-/// The pre-parity tri7 shape (ip + key + flag + i2p-flag + port, 60 bytes
-/// without time) is still PARSED leniently so a mixed fleet survives the
-/// change; ENCODING is always the legacy layout.
+/// The tri7 shape (ip + key + flags + port, 60 bytes without time) is the
+/// STANDARD ENCODED form — what every deployed tri7 node parses. The legacy
+/// C++ 51-byte layout is still PARSED leniently so C++ daemons and mixed
+/// fleets interop during the migration; it is never encoded by tri7.
 ///
 /// The version-message form omits nTime because the version stream version
 /// is INIT_PROTO_VERSION (209) < CADDR_TIME_VERSION.
@@ -269,7 +270,7 @@ pub struct WireAddr {
     pub ip: [u8; 16],
     pub tor_key: [u8; 32],
     pub is_tor_v3: bool,
-    /// Parsed only from the old tri7 shape or the GarliCat ip prefix; never
+    /// Parsed only from the tri7 shape's i2p flag or the GarliCat ip prefix; never
     /// serialized (the legacy wire has no i2p byte).
     pub is_i2p: bool,
     pub port: u16,
@@ -477,18 +478,26 @@ impl WireAddr {
         w.extend_from_slice(&self.port.to_be_bytes());
     }
 
-    /// CAddress without nTime (version-message form): services + CService
-    /// = 59 bytes. Legacy layout: NO i2p flag byte (i2p is implied by the
-    /// GarliCat ip prefix).
+    /// CAddress without nTime (version-message form): the TRI7 shape —
+    /// services + ip + key + m_is_tor_v3 + m_is_i2p + port BE = 60 bytes.
+    /// This is the standard tri7 wire form and the fleet-compat default: the
+    /// 51-byte LEGACY C++ shape tri7 briefly emitted made every deployed node
+    /// reject the handshake ("short read: want 116"). The legacy C++ 51-byte
+    /// CService form remains available via `encode_service`, and the decoders
+    /// accept both shapes.
     pub fn encode_no_time(&self, w: &mut Vec<u8>) {
         w.extend_from_slice(&self.services.to_le_bytes());
-        self.encode_service(w);
+        w.extend_from_slice(&self.ip);
+        w.extend_from_slice(&self.tor_key);
+        w.push(self.is_tor_v3 as u8);
+        w.push(self.is_i2p as u8);
+        w.extend_from_slice(&self.port.to_be_bytes());
     }
 
-    /// CAddress with nTime (addr-message entry): time + services + CService
-    /// = 63 bytes.
+    /// CAddress with nTime (addr-message entry): time + the tri7 shape
+    /// above = 64 bytes — the form deployed tri7 peers parse.
     pub fn encode_caddress(&self, time: u32) -> Vec<u8> {
-        let mut w = Vec::with_capacity(63);
+        let mut w = Vec::with_capacity(64);
         w.extend_from_slice(&time.to_le_bytes());
         self.encode_no_time(&mut w);
         w
@@ -515,10 +524,10 @@ impl WireAddr {
         Ok(addr)
     }
 
-    /// Old-tri7-shape decode (60 bytes without time): the pre-parity form
-    /// ip + key + m_is_tor_v3 + m_is_i2p + port — TWO flag bytes before the
-    /// port. Accepted leniently by parse_version/parse_addr so a mixed
-    /// fleet survives the encoding change; never produced anymore.
+    /// tri7-shape decode (60 bytes without time): ip + m_is_tor_v3 +
+    /// m_is_i2p + port — TWO flag bytes before the port. This IS the encode
+    /// output (`encode_no_time`); the decoder is also leniently accepted from
+    /// peers so mixed fleets interop.
     pub fn decode_no_time_compat(r: &mut Reader) -> Result<WireAddr, String> {
         let services = r.i64le()? as u64;
         let (ip, tor_key, is_tor_v3) = decode_cnetaddr_body(r)?;
@@ -537,7 +546,7 @@ impl WireAddr {
 
 /// The 47-byte CNetAddr body shared by both accepted shapes: ip[16] +
 /// tor_v3_pubkey[32] + m_is_tor_v3(1). The tail differs per shape (legacy:
-/// port; old tri7: i2p flag then port) and is consumed by the caller.
+/// port; tri7 shape: i2p flag then port) and is consumed by the caller.
 fn decode_cnetaddr_body(r: &mut Reader) -> Result<([u8; 16], [u8; 32], bool), String> {
     let mut ip = [0u8; 16];
     for byte in ip.iter_mut() {
@@ -590,12 +599,18 @@ pub fn encode_version(v: &VersionPayload) -> Vec<u8> {
 /// start_height are optional tail fields (main.cpp:4884-4893 `if
 /// (!vRecv.empty())`).
 ///
-/// The CAddress fields are parsed leniently across BOTH wire shapes: the
-/// legacy layout (59-byte CAddress-no-time) first, then the old tri7 shape
-/// (60 bytes). The shapes are discriminated by total consumed length — a
-/// legacy parse of an old-shape payload leaves exactly 4 unconsumed bytes
-/// and vice versa, so exactly one shape can consume the payload with zero
-/// trailing bytes. Mixed-shape payloads are rejected.
+/// The CAddress fields are parsed across BOTH wire shapes: the legacy C++
+/// layout (59-byte CAddress-no-time) first, then the tri7 shape (60 bytes).
+/// The shapes are discriminated by total consumed length — exactly one shape
+/// consumes a well-formed payload with zero trailing bytes.
+///
+/// Deliberately permissive tail: if neither shape consumes exactly and the
+/// legacy parse succeeded with leftover bytes (e.g. a peer appended fields we
+/// do not know), `parse_version` accepts the legacy interpretation rather
+/// than dropping the peer. A payload that only the tri7 shape can consume is
+/// returned from that branch. Pinned by
+/// `version_message_parses_both_shapes` and
+/// `legacy_parse_with_unknown_trailing_bytes_is_accepted`.
 pub fn parse_version(payload: &[u8]) -> Result<VersionPayload, String> {
     let mut legacy_err = None;
     let mut compat_err = None;
@@ -609,9 +624,13 @@ pub fn parse_version(payload: &[u8]) -> Result<VersionPayload, String> {
         Ok(_) => {}
         Err(e) => compat_err = Some(e),
     }
-    // neither shape consumed the payload exactly: report the legacy error
-    // (or accept a legacy parse with a non-canonical tail — e.g. junk after
-    // start_height — only when no shape matched at all)
+    // Neither shape consumed exactly: prefer the TRI7 interpretation with a
+    // non-canonical tail over the legacy one (tri7 is the standard; an
+    // unknown-appended-fields payload from a newer peer must not be
+    // mis-read as legacy), then legacy-with-tail as the last resort.
+    if let Ok((v, _)) = parse_version_shape(payload, true) {
+        return Ok(v);
+    }
     if let Ok((v, _)) = parse_version_shape(payload, false) {
         return Ok(v);
     }
@@ -622,13 +641,13 @@ pub fn parse_version(payload: &[u8]) -> Result<VersionPayload, String> {
 
 fn parse_version_shape(
     payload: &[u8],
-    old_tri7_shape: bool,
+    tri7_shape: bool,
 ) -> Result<(VersionPayload, usize), String> {
     let mut r = Reader::new(payload);
     let version = r.i32le()?;
     let services = r.i64le()? as u64;
     let timestamp = r.i64le()?;
-    let (addr_you, addr_me) = if old_tri7_shape {
+    let (addr_you, addr_me) = if tri7_shape {
         (
             WireAddr::decode_no_time_compat(&mut r)?,
             WireAddr::decode_no_time_compat(&mut r)?,
@@ -806,7 +825,7 @@ pub struct AddrEntry {
     pub addr: WireAddr,
 }
 
-/// addr payload: CompactSize count + N × CAddress(63 bytes, legacy layout).
+/// addr payload: CompactSize count + N × CAddress(64 bytes, tri7 shape).
 pub fn encode_addr(entries: &[AddrEntry]) -> Vec<u8> {
     let mut w = Vec::with_capacity(5 + entries.len() * 63);
     push_compact_size(&mut w, entries.len() as u64);
@@ -818,7 +837,7 @@ pub fn encode_addr(entries: &[AddrEntry]) -> Vec<u8> {
 
 /// addr payload parse. Strict, never panics:
 ///  - count > 1000 → Err (legacy MAX_ADDR_SIZE);
-///  - body must be exactly count × 63 (legacy) or count × 64 (the old tri7
+///  - body must be exactly count × 63 (legacy C++) or count × 64 (tri7
 ///    shape, accepted leniently); anything else (truncation, trailing junk)
 ///    → Err.
 pub fn parse_addr(payload: &[u8]) -> Result<Vec<AddrEntry>, String> {
@@ -1167,21 +1186,23 @@ mod tests {
     }
 
     #[test]
-    fn wireaddr_ipv4_mapped_layout_is_59_bytes() {
+    fn wireaddr_ipv4_mapped_layout_is_60_bytes() {
         let a = WireAddr::ipv4(192, 168, 1, 5, 24113, NODE_NETWORK);
         let mut w = Vec::new();
         a.encode_no_time(&mut w);
-        // legacy CAddress-no-time: 8 services + 16 ip + 32 torkey + 1 flag
-        // + 2 port (BE) — the old tri7 shape carried an extra i2p byte (60)
-        assert_eq!(w.len(), 59);
+        // tri7 fleet-shape CAddress-no-time: 8 services + 16 ip + 32 torkey
+        // + 1 tor_v3 flag + 1 i2p flag + 2 port (BE) = 60 bytes
+        assert_eq!(w.len(), 60);
         // IPv4-mapped prefix sits at ip[10], ip[11] → absolute 18, 19
         assert_eq!(w[18], 0xff);
         assert_eq!(w[19], 0xff);
         assert_eq!(&w[20..24], &[192, 168, 1, 5]);
-        // port big-endian at the tail
-        assert_eq!(&w[57..59], &24113u16.to_be_bytes());
+        // flags then port big-endian at the tail
+        assert_eq!(w[56], 0, "tor_v3 flag");
+        assert_eq!(w[57], 0, "i2p flag");
+        assert_eq!(&w[58..60], &24113u16.to_be_bytes());
         let mut r = Reader::new(&w);
-        assert_eq!(WireAddr::decode_no_time(&mut r).unwrap(), a);
+        assert_eq!(WireAddr::decode_no_time_compat(&mut r).unwrap(), a);
         // round-trips through a full version message too
         let mut v = sample_version(7, 10);
         v.addr_you = a.clone();
@@ -1205,36 +1226,38 @@ mod tests {
         WireAddr::onion_v3(key, 24113, NODE_NETWORK)
     }
 
-    /// A1: CService encode = 51 bytes, CAddress = 63 bytes, exact hex for the
-    /// verified-live seed onion.
+    /// A1 (updated): the DEFAULT encode is the tri7 fleet shape the deployed
+    /// fleet parses — CAddress-no-time = 60 bytes, CAddress = 64 bytes — with
+    /// exact hex for the verified-live seed onion. The legacy C++ 51-byte
+    /// CService form is retained as `encode_service` for C++ daemons, and the
+    /// decoders accept all shapes.
     #[test]
-    fn wireaddr_cservice_is_51_bytes_and_caddress_is_63() {
+    fn wireaddr_encodes_the_fleet_shapes_and_roundtrips() {
         let a = live_seed_addr();
         let mut svc = Vec::new();
-        a.encode_service(&mut svc);
-        assert_eq!(svc.len(), 51);
+        a.encode_no_time(&mut svc);
+        assert_eq!(svc.len(), 60);
         let svc_hex: String = svc.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             svc_hex,
-            "fd87d87eeb4300000000000000000000".to_string()
+            "0100000000000000"     // nServices 1 LE
+                .to_string()
+                + "fd87d87eeb4300000000000000000000" // OnionCat ip[16]
                 + LIVE_SEED_KEY_HEX
                 + "01"   // m_is_tor_v3
+                + "00"   // m_is_i2p
                 + "5e31" // port 24113 BE
         );
         let caddr = a.encode_caddress(0x67ac_1d3d);
-        assert_eq!(caddr.len(), 63);
+        assert_eq!(caddr.len(), 64);
         let hex: String = caddr.iter().map(|b| format!("{:02x}", b)).collect();
         assert_eq!(
             hex,
-            "3d1dac67"            // nTime 0x67ac1d3d LE
+            "3d1dac67" // nTime 0x67ac1d3d LE
                 .to_string()
-                + "0100000000000000" // nServices 1 LE
-                + "fd87d87eeb4300000000000000000000" // OnionCat ip[16]
-                + LIVE_SEED_KEY_HEX
-                + "01"  // m_is_tor_v3
-                + "5e31" // port 24113 BE
+                + &svc_hex
         );
-        // and the whole 63-byte entry parses back through parse_addr
+        // the whole 64-byte entry parses back through parse_addr
         let entries = parse_addr(&{
             let mut w = Vec::new();
             push_compact_size(&mut w, 1);
@@ -1245,6 +1268,19 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].time, 0x67ac_1d3d);
         assert_eq!(entries[0].addr, a);
+
+        // retained legacy C++ CService form: 51 bytes, unchanged
+        let mut legacy = Vec::new();
+        a.encode_service(&mut legacy);
+        assert_eq!(legacy.len(), 51);
+        let legacy_hex: String = legacy.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(
+            legacy_hex,
+            "fd87d87eeb4300000000000000000000".to_string()
+                + LIVE_SEED_KEY_HEX
+                + "01"   // m_is_tor_v3
+                + "5e31" // port 24113 BE
+        );
     }
 
     /// A2: a hand-built LEGACY 63-byte CAddress fixture parses to the
@@ -1286,10 +1322,11 @@ mod tests {
         assert_eq!(back, e.addr);
     }
 
-    /// A3: the OLD tri7 shape (60-byte CService with the extra m_is_i2p byte,
-    /// 64-byte CAddress with time) still parses.
+    /// A3: the TRI7 shape (60-byte CAddress-no-time with the m_is_i2p byte,
+    /// 64-byte CAddress with time) parses — tri7 nodes interop with this form
+    /// and with the legacy C++ 63-byte form.
     #[test]
-    fn old_tri7_shape_still_parses() {
+    fn tri7_shape_parses() {
         // nTime | nServices | ip[16] | tor_v3_pubkey[32] | flag | i2p flag | port BE
         let mut fixture = Vec::new();
         fixture.extend_from_slice(&1_791_000_000u32.to_le_bytes());
@@ -1313,7 +1350,7 @@ mod tests {
         assert!(!entries[0].addr.is_i2p);
         assert_eq!(entries[0].addr.port, 24113);
         assert_eq!(entries[0].addr.tor_key, [0x77u8; 32]);
-        // an i2p flag byte set on the old shape is preserved (layout: time4
+        // an i2p flag byte set on the tri7 shape is preserved (layout: time4
         // services8 ip16 key32 tor-flag@60 i2p-flag@61 port@62..64)
         let mut i2p_fixture = fixture.clone();
         i2p_fixture[12..18].copy_from_slice(&GARLICAT);
@@ -1355,7 +1392,7 @@ mod tests {
         assert!(parse_addr(&[]).is_err());
         assert!(parse_addr(&[0xff, 0xff, 0xff, 0xff, 0xff]).is_err());
         // trailing junk (one extra byte would look like the 64-byte
-        // old-tri7 shape and parse leniently — two cannot match either form)
+        // tri7 shape and parse leniently — two cannot match either form)
         let mut junk = Vec::new();
         push_compact_size(&mut junk, 1);
         junk.extend_from_slice(&entry);
@@ -1378,25 +1415,37 @@ mod tests {
             },
         ];
         let payload = encode_addr(&entries);
-        // count(1) + 2×63
-        assert_eq!(payload.len(), 1 + 2 * 63);
+        // count(1) + 2×64 (old-tri7 CAddress with nTime)
+        assert_eq!(payload.len(), 1 + 2 * 64);
         assert_eq!(parse_addr(&payload).unwrap(), entries);
         // an empty addr payload round-trips as zero entries
         assert!(parse_addr(&encode_addr(&[])).unwrap().is_empty());
     }
 
-    /// i2p has NO flag byte on the legacy wire — it is implied by the
-    /// GarliCat ip prefix (netbase.cpp IsI2P). Encoding drops any i2p byte.
+    /// i2p on the wire: the FLEET shape carries the i2p flag byte faithfully,
+    /// while the retained legacy CService form has no i2p byte at all — the
+    /// GarliCat ip prefix is what implies i2p on decode (netbase.cpp IsI2P).
     #[test]
     fn i2p_implied_by_garlicat_prefix_not_a_wire_byte() {
         let mut a = live_seed_addr();
         a.is_tor_v3 = false;
         a.ip[..6].copy_from_slice(&GARLICAT);
-        a.is_i2p = false; // encoder must NOT carry this; the prefix implies it
+        a.is_i2p = true;
+        // fleet shape: the flag byte is carried and round-trips
         let mut w = Vec::new();
         a.encode_no_time(&mut w);
-        assert_eq!(w.len(), 59);
+        assert_eq!(w.len(), 60);
         let mut r = Reader::new(&w);
+        let back = WireAddr::decode_no_time(&mut r).unwrap();
+        assert!(back.is_i2p);
+        assert!(!back.is_tor_v3);
+        // legacy CService form: NO i2p byte on the wire (ip + key + flag + port);
+        // decode still derives i2p from the GarliCat prefix
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&a.services.to_le_bytes());
+        a.encode_service(&mut legacy);
+        assert_eq!(legacy.len(), 8 + 51);
+        let mut r = Reader::new(&legacy);
         let back = WireAddr::decode_no_time(&mut r).unwrap();
         assert!(back.is_i2p, "GarliCat prefix implies i2p on decode");
         assert!(!back.is_tor_v3);
@@ -1545,42 +1594,77 @@ mod tests {
         }
     }
 
-    /// version messages: legacy encoding round-trips, and a hand-built
-    /// OLD-tri7-shape version payload (60-byte addrs) still parses.
+    /// version messages: the FLEET (old-tri7) shape is the default encode and
+    /// the lenient parser still consumes a hand-built LEGACY-shape payload
+    /// (59-byte addrs) — both directions, both shapes.
     #[test]
     fn version_message_parses_both_shapes() {
-        // legacy: encode_version → parse_version (encode is always legacy now)
         let v = sample_version(9_876, 1234);
+
+        // fleet encode → lenient parse (old-tri7 shape branch)
         let payload = encode_version(&v);
-        let (back, trailing) = parse_version_shape(&payload, false).unwrap();
+        let (back, trailing) = parse_version_shape(&payload, true).unwrap();
         assert_eq!(trailing, 0);
         assert_eq!(back, v);
+        assert_eq!(parse_version(&payload).unwrap(), v);
 
-        // old tri7 shape: rebuild the payload with 60-byte addrs
-        let mut old = Vec::new();
-        old.extend_from_slice(&v.version.to_le_bytes());
-        old.extend_from_slice(&v.services.to_le_bytes());
-        old.extend_from_slice(&v.timestamp.to_le_bytes());
+        // hand-built LEGACY-shape payload (59-byte addrs) still parses
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&v.version.to_le_bytes());
+        legacy.extend_from_slice(&v.services.to_le_bytes());
+        legacy.extend_from_slice(&v.timestamp.to_le_bytes());
         for addr in [&v.addr_you, &v.addr_me] {
-            old.extend_from_slice(&addr.services.to_le_bytes());
-            old.extend_from_slice(&addr.ip);
-            old.extend_from_slice(&addr.tor_key);
-            old.push(addr.is_tor_v3 as u8);
-            old.push(addr.is_i2p as u8);
-            old.extend_from_slice(&addr.port.to_be_bytes());
+            legacy.extend_from_slice(&addr.services.to_le_bytes());
+            addr.encode_service(&mut legacy);
         }
-        old.extend_from_slice(&v.nonce.to_le_bytes());
-        push_compact_size(&mut old, v.user_agent.len() as u64);
-        old.extend_from_slice(v.user_agent.as_bytes());
-        old.extend_from_slice(&v.start_height.to_le_bytes());
-        // a legacy parse of an old-shape payload cannot consume the payload
-        // (the shifted user-agent length lands on other fields), so exactly
-        // one shape consumes it fully — the discriminator
-        let (_legacy_mis, trailing) = parse_version_shape(&old, false).unwrap();
-        assert_ne!(trailing, 0);
-        // and parse_version resolves it to the old shape with flags intact
-        let back = parse_version(&old).unwrap();
+        legacy.extend_from_slice(&v.nonce.to_le_bytes());
+        push_compact_size(&mut legacy, v.user_agent.len() as u64);
+        legacy.extend_from_slice(v.user_agent.as_bytes());
+        legacy.extend_from_slice(&v.start_height.to_le_bytes());
+        // an old-tri7 parse of a legacy payload cannot consume it fully —
+        // the discriminator between the two shapes: legacy branch consumes
+        // exactly, tri7 branch errors on the shifted fields
+        let legacy_only = parse_version_shape(&legacy, false).unwrap();
+        assert_eq!(legacy_only.1, 0);
+        assert!(
+            parse_version_shape(&legacy, true).is_err(),
+            "the tri7-shape parse must reject a legacy payload"
+        );
+        // and parse_version resolves it to the legacy shape
+        let back = parse_version(&legacy).unwrap();
         assert_eq!(back, v);
         assert_eq!(back.addr_me.port, v.addr_me.port);
+    }
+
+    /// The permissive tail is deliberate and pinned in BOTH directions:
+    /// a tri7 payload with unknown appended fields resolves via the tri7
+    /// branch (tri7 is the standard), and a legacy payload with unknown
+    /// appended fields resolves via the legacy branch instead of dropping
+    /// the peer.
+    #[test]
+    fn unknown_trailing_fields_do_not_drop_the_peer() {
+        // tri7 payload + unknown future fields
+        let v = sample_version(4_04_04, 77);
+        let mut payload = encode_version(&v);
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let back = parse_version(&payload).expect("tri7 + trailing must resolve");
+        assert_eq!(back, v);
+
+        // legacy payload + unknown future fields
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&v.version.to_le_bytes());
+        legacy.extend_from_slice(&v.services.to_le_bytes());
+        legacy.extend_from_slice(&v.timestamp.to_le_bytes());
+        for addr in [&v.addr_you, &v.addr_me] {
+            legacy.extend_from_slice(&addr.services.to_le_bytes());
+            addr.encode_service(&mut legacy);
+        }
+        legacy.extend_from_slice(&v.nonce.to_le_bytes());
+        push_compact_size(&mut legacy, v.user_agent.len() as u64);
+        legacy.extend_from_slice(v.user_agent.as_bytes());
+        legacy.extend_from_slice(&v.start_height.to_le_bytes());
+        legacy.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let back = parse_version(&legacy).expect("legacy + trailing must resolve");
+        assert_eq!(back, v);
     }
 }
