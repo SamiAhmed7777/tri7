@@ -16,6 +16,10 @@ pub struct WalletKeys {
     pub best_block: Option<Hash>,
     pub version: Option<i32>,
     pub names: Vec<(String, String)>,
+    /// Redeem scripts stored in the wallet (legacy `script` rows), as
+    /// (scriptID, redeem script) — the multisig P2SH watch list
+    /// (CWallet::AddCScript parity). Consumed via multisig::ScriptBook.
+    pub scripts: Vec<([u8; 20], Vec<u8>)>,
     pub encrypted: bool,
     /// HD seed wallet (legacy `hdmnemonic` row, plaintext mnemonic). None =
     /// wallet has no seed phrase (pre-HD random-key wallets).
@@ -168,6 +172,7 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
         best_block: None,
         version: None,
         names: Vec::new(),
+        scripts: Vec::new(),
         encrypted: false,
         hd_mnemonic: None,
         hd_passphrase: None,
@@ -268,6 +273,26 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
                 }
                 let ntime = i64::from_le_bytes(value[4..12].try_into().unwrap());
                 keymeta.insert(suffix[kpos..kpos + pk_len].to_vec(), ntime);
+            }
+            "script" => {
+                // Redeem script (CWallet::AddCScript → WriteCScript): key
+                // suffix = the raw 20-byte scriptID (no inner CompactSize),
+                // value = CS(len) + script. A malformed or hash-mismatched
+                // row is skipped, never fatal — it is watch-list data, not
+                // key material.
+                if suffix.len() == 20 {
+                    let mut vpos = 0usize;
+                    if let Ok(len) = decode_compact_size(&value, &mut vpos) {
+                        if value.len() >= vpos + len as usize {
+                            let script = value[vpos..vpos + len as usize].to_vec();
+                            let mut id = [0u8; 20];
+                            id.copy_from_slice(&suffix);
+                            if crate::address::hash160(&script) == id {
+                                w.scripts.push((id, script));
+                            }
+                        }
+                    }
+                }
             }
             "hdmnemonic" => {
                 // value = CompactSize(len) + mnemonic UTF-8 (legacy
@@ -587,6 +612,35 @@ pub fn encode_defaultkey_value(pubkey: &[u8]) -> Vec<u8> {
     push_compact_size(&mut v, pubkey.len() as u64);
     v.extend_from_slice(pubkey);
     v
+}
+
+/// `script` row key blob: 06 "script" + <20-byte scriptID> — the legacy
+/// CWalletDB::WriteCScript record (CWallet::AddCScript, wallet.cpp:190):
+/// `Write(make_pair(string("script"), scriptID), redeemScript)`. The
+/// scriptID is a uint160, which serializes as RAW bytes — unlike the
+/// vector-suffixed rows above it carries NO inner CompactSize.
+pub fn encode_script_keyblob(script_id: &[u8; 20]) -> Vec<u8> {
+    encode_key_blob("script", script_id)
+}
+
+/// `script` row value: CS(len) + raw redeem script bytes (CScript is a
+/// vector<unsigned char>: CompactSize + data, like encode_key_value).
+pub fn encode_script_value(script: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(script.len() + 3);
+    push_compact_size(&mut v, script.len() as u64);
+    v.extend_from_slice(script);
+    v
+}
+
+/// Decode a `script` row value (CS(len) + bytes) back to the raw redeem
+/// script. A malformed row is an error, never a guess.
+fn decode_script_value(value: &[u8]) -> Result<Vec<u8>, String> {
+    let mut pos = 0usize;
+    let len = decode_compact_size(value, &mut pos)? as usize;
+    if value.len() < pos + len {
+        return Err("script record: payload overruns value".into());
+    }
+    Ok(value[pos..pos + len].to_vec())
 }
 
 /// tri7's single wallet setting name: the seed-migration sweep-completion
@@ -1098,6 +1152,85 @@ impl WalletHandle {
             self.path.display()
         ));
         Ok(())
+    }
+
+    /// Store a redeem script keyed by its scriptID (hash160 of the script)
+    /// — the legacy CWallet::AddCScript → WriteCScript("script", scriptID)
+    /// row (wallet.cpp:190). Idempotent: the row is keyed by the scriptID,
+    /// so storing the same script twice is a no-op. Returns the scriptID.
+    pub fn put_redeem_script(&mut self, script: &[u8]) -> Result<[u8; 20], String> {
+        let id = crate::address::hash160(script);
+        let row = (encode_script_keyblob(&id), encode_script_value(script));
+        self.ensure_backup()?;
+        self.write_rows(&[row], "put_redeem_script")?;
+        // re-read proof: the stored value decodes back to the exact script
+        match self.get_redeem_script(&id)? {
+            Some(back) if back == script => {}
+            other => {
+                return Err(format!(
+                    "put_redeem_script verify: reader sees {} bytes, expected {}",
+                    other.map(|b| b.len()).unwrap_or(0),
+                    script.len()
+                ))
+            }
+        }
+        self.log(format!(
+            "put_redeem_script: scriptID {}… ({} bytes) wallet={}",
+            hex_short(&id),
+            script.len(),
+            self.path.display()
+        ));
+        Ok(id)
+    }
+
+    /// Read a stored redeem script by its 20-byte scriptID.
+    pub fn get_redeem_script(&self, script_id: &[u8; 20]) -> Result<Option<Vec<u8>>, String> {
+        let v: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![encode_script_keyblob(script_id)],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| format!("get_redeem_script: {e}"))?;
+        v.map(|bytes| decode_script_value(&bytes)).transpose()
+    }
+
+    /// Every stored redeem script as (scriptID, script) pairs, in key order.
+    /// A malformed row is skipped, never fatal (mirrors read_settings).
+    pub fn list_redeem_scripts(&self) -> Result<Vec<([u8; 20], Vec<u8>)>, String> {
+        // prefix = 0x06 (CompactSize of "script") + "script"
+        let mut prefix = Vec::with_capacity(7);
+        prefix.push(0x06);
+        prefix.extend_from_slice(b"script");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM main WHERE substr(key,1,7) = ?1 ORDER BY key")
+            .map_err(|e| format!("list_redeem_scripts: prepare: {e}"))?;
+        let mut rows = stmt
+            .query(rusqlite::params![prefix.as_slice()])
+            .map_err(|e| format!("list_redeem_scripts: query: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let key: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+            let value: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+            // a script row is exactly 06 "script" <20-byte id>; truncated or
+            // malformed rows are skipped like the settings reader skips them
+            if key.len() != 7 + 20 {
+                continue;
+            }
+            let mut id = [0u8; 20];
+            id.copy_from_slice(&key[7..27]);
+            if let Ok(script) = decode_script_value(&value) {
+                out.push((id, script));
+            }
+        }
+        Ok(out)
     }
 
     /// Update the wallet's best-block marker — the legacy `bestblock` row
@@ -2279,6 +2412,62 @@ mod tests {
         assert_eq!(h.hd_chain_index, 10);
         h.close();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Redeem scripts (P2SH multisig) round-trip through the wallet file as
+    /// the legacy `script` rows: 06 "script" <20-byte scriptID> | CS + script.
+    #[test]
+    fn redeem_script_rows_roundtrip_and_are_idempotent() {
+        let dir = test_dir("redeem");
+        let path = synth_wallet(&dir, "redeem");
+        let pks: Vec<Vec<u8>> = ["rw/m1", "rw/m2", "rw/m3"]
+            .iter()
+            .map(|l| synth_key(l).1)
+            .collect();
+        let redeem = crate::multisig::redeem_script(2, &pks).unwrap();
+        let id = crate::address::hash160(&redeem);
+
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        // the encoders produce the exact legacy row shape
+        let kb = encode_script_keyblob(&id);
+        assert_eq!(&kb[..7], b"\x06script");
+        assert_eq!(kb.len(), 27);
+        let val = encode_script_value(&redeem);
+        assert_eq!(val[0] as usize, redeem.len());
+        assert_eq!(&val[1..], &redeem);
+
+        // store → read back → list
+        assert_eq!(wh.put_redeem_script(&redeem).unwrap(), id);
+        assert_eq!(
+            wh.get_redeem_script(&id).unwrap().as_deref(),
+            Some(&redeem[..])
+        );
+        let listed = wh.list_redeem_scripts().unwrap();
+        assert_eq!(listed, vec![(id, redeem.clone())]);
+        // idempotent: storing the same script again changes nothing
+        assert_eq!(wh.put_redeem_script(&redeem).unwrap(), id);
+        assert_eq!(wh.list_redeem_scripts().unwrap().len(), 1);
+        // unknown scriptID → None
+        assert!(wh.get_redeem_script(&[0x55u8; 20]).unwrap().is_none());
+        wh.close();
+
+        // the row really is in the file with the exact legacy bytes
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let back: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![kb],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(back, val);
+        // and the whole file still reads cleanly through the standard reader
+        let w = read_wallet(&path).unwrap();
+        assert_eq!(w.keys.len(), 1, "pre-existing key untouched");
     }
 }
 

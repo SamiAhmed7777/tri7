@@ -27,6 +27,7 @@ fn main() {
         regular_txs: usize,
         out_p2pk: usize,
         out_p2pkh: usize,
+        out_p2sh: usize,
         out_other: usize,
         in_1push: usize,
         in_2push: usize,
@@ -96,6 +97,10 @@ fn main() {
                         b.out_p2pkh += 1;
                         kinds.push((n as u32, "p2pkh".to_string()));
                     }
+                    Some(SpendType::ScriptHash(_)) => {
+                        b.out_p2sh += 1;
+                        kinds.push((n as u32, "p2sh".to_string()));
+                    }
                     None => b.out_other += 1,
                 }
             }
@@ -114,12 +119,13 @@ fn main() {
     }
 
     println!(
-        "{:>10} {:>8} {:>8} {:>9} {:>9} {:>8} | {:>8} {:>8} | {:>8} {:>8} {:>8}",
+        "{:>10} {:>8} {:>8} {:>9} {:>9} {:>9} {:>8} | {:>8} {:>8} | {:>8} {:>8} {:>8}",
         "bucket",
         "blocks",
         "reg_txs",
         "out_p2pk",
         "out_p2pkh",
+        "out_p2sh",
         "out_oth",
         "in1push",
         "in2push",
@@ -132,12 +138,13 @@ fn main() {
             continue;
         }
         println!(
-            "{:>10} {:>8} {:>8} {:>9} {:>9} {:>8} | {:>8} {:>8} | {:>8} {:>8} {:>8}",
+            "{:>10} {:>8} {:>8} {:>9} {:>9} {:>9} {:>8} | {:>8} {:>8} | {:>8} {:>8} {:>8}",
             format!("{}k", i * BUCKET / 1000),
             b.blocks,
             b.regular_txs,
             b.out_p2pk,
             b.out_p2pkh,
+            b.out_p2sh,
             b.out_other,
             b.in_1push,
             b.in_2push,
