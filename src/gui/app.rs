@@ -3473,6 +3473,17 @@ impl Tri7App {
                     &mut self.tx_search,
                     Some("label / address / txid"),
                 );
+                // Legacy CSV export (transactionview.cpp exportClicked):
+                // Confirmed, Date, Type, Label, Address, Amount, ID. Written
+                // beside the wallet, so no file dialog is needed.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if th::secondary_button(ui, "Export CSV").clicked() {
+                        match self.st.export_transactions_csv_action() {
+                            Ok(path) => self.st.status_log.push(format!("CSV written: {path}")),
+                            Err(e) => self.st.load_error = Some(format!("CSV export: {e}")),
+                        }
+                    }
+                });
             });
             ui.add_space(6.0);
             // NO local derived wallet is required to show history: the rows

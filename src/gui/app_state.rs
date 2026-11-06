@@ -384,6 +384,53 @@ impl AppState {
     }
 
     /// Poll getstakinginfo for the live staking panel.
+    /// Export the wallet's full history as CSV in the legacy column order
+    /// (transactionview.cpp exportClicked): Confirmed, Date, Type, Label,
+    /// Address, Amount, ID. Written next to the wallet so it needs no file
+    /// dialog, and the path is reported back to the UI.
+    pub fn export_transactions_csv_action(&mut self) -> Result<String, String> {
+        let rows = self
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.wallet_history.clone())
+            .ok_or_else(|| "no history loaded yet".to_string())?;
+        if rows.is_empty() {
+            return Err("history is empty — nothing to export".into());
+        }
+        let tip = self
+            .debug_info
+            .as_ref()
+            .and_then(|d| d.blocks)
+            .unwrap_or(0) as u32;
+        let dir = std::path::Path::new(&self.cfg.wallet_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let stamp = {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            secs
+        };
+        let path = dir.join(format!("tri7-transactions-{stamp}.csv"));
+        let mut out = String::with_capacity(rows.len() * 96);
+        out.push_str(crate::legacy_rows::csv_header());
+        out.push('\n');
+        for r in &rows {
+            let lrow = crate::legacy_rows::row_from_history(r, tip);
+            let label = self
+                .wallet
+                .as_ref()
+                .and_then(|w| w.names.iter().find(|(a, _)| a == &r.address).map(|(_, l)| l.clone()))
+                .unwrap_or_default();
+            out.push_str(&crate::legacy_rows::csv_line(&lrow, &label));
+            out.push('\n');
+        }
+        std::fs::write(&path, out).map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(path.display().to_string())
+    }
+
     pub fn staking_poll_action(&mut self) {
         let Some(addr) = self.live_rpc_addr() else {
             self.staking_live.last_error = Some("RPC disabled in config".into());

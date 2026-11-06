@@ -571,3 +571,142 @@ mod chain_membership_tests {
         }
     }
 }
+
+/// Build the legacy row for one history record. Single source of truth for
+/// both the Transactions table and the CSV export — the table used to do this
+/// mapping inline, which meant an export would have had to copy it.
+pub fn row_from_history(u: &crate::history::HistoryRec, tip: u32) -> LegacyRow {
+    let lk = if !u.legacy_kind.is_empty() {
+        match u.legacy_kind.as_str() {
+            "mined" => LegacyKind::Generated,
+            "send" => LegacyKind::SendToAddress,
+            "self" => LegacyKind::SendToSelf,
+            "recv_from" => LegacyKind::RecvFromOther,
+            _ => LegacyKind::RecvWithAddress,
+        }
+    } else if u.kind == "coinbase" || u.kind == "coinstake" {
+        LegacyKind::Generated
+    } else if u.value_sats < 0 {
+        LegacyKind::SendToAddress
+    } else {
+        LegacyKind::RecvWithAddress
+    };
+    let depth = depth_of(u.height, tip as u64);
+    let (status, matures_in) = status_for(lk, depth, tip as u64, u.height);
+    LegacyRow {
+        txid: u.txid.clone(),
+        idx: u.idx as usize,
+        time: u.time,
+        height: u.height,
+        kind: lk,
+        address: u.address.clone(),
+        debit: if u.value_sats < 0 { u.value_sats } else { 0 },
+        credit: if u.value_sats > 0 { u.value_sats } else { 0 },
+        status,
+        depth,
+        matures_in,
+    }
+}
+
+/// CSV in the legacy column order (transactionview.cpp exportClicked):
+/// Confirmed, Date, Type, Label, Address, Amount, ID.
+pub fn csv_header() -> &'static str {
+    "Confirmed,Date,Type,Label,Address,Amount,ID"
+}
+
+pub fn csv_line(r: &LegacyRow, label: &str) -> String {
+    let esc = |s: &str| {
+        if s.contains(',') || s.contains('"') || s.contains('\n') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+    format!(
+        "{},{},{},{},{},{:.6},{}",
+        r.status_text(),
+        date_of(r.time),
+        r.kind.label(),
+        esc(label),
+        esc(&r.address),
+        r.amount() as f64 / 1_000_000.0,
+        r.txid
+    )
+}
+
+/// Legacy date format in transactiontablemodel.cpp: "yyyy-MM-dd HH:mm:ss".
+fn date_of(epoch: u32) -> String {
+    // Civil-from-days conversion (Howard Hinnant) — no chrono dependency.
+    let secs = epoch as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+#[cfg(test)]
+mod csv_tests {
+    use super::*;
+
+    #[test]
+    fn csv_matches_legacy_columns_and_date_format() {
+        let u = crate::history::HistoryRec {
+            txid: "ab".repeat(32),
+            height: 100,
+            time: 1_700_000_000,
+            value_sats: 1_234_567,
+            address: "TADDR".into(),
+            direction: "in".into(),
+            kind: "regular".into(),
+            spent: false,
+            idx: 0,
+            legacy_kind: String::new(),
+            coinstake: false,
+            stake_principal: 0,
+        };
+        let r = row_from_history(&u, 110);
+        assert_eq!(r.kind.label(), "Received with");
+        assert_eq!(date_of(1_700_000_000), "2023-11-14 22:13:20");
+        let line = csv_line(&r, "savings");
+        // depth_of is inclusive: tip 110 vs height 100 is 11 confirmations
+        assert!(line.contains("Confirmed (11 confirmations),2023-11-14 22:13:20"));
+        assert!(line.contains(",1.234567,"));
+    }
+
+    #[test]
+    fn csv_escapes_commas_and_quotes() {
+        let r = LegacyRow {
+            txid: "ff".repeat(32),
+            idx: 0,
+            time: 1_700_000_000,
+            height: 1,
+            kind: LegacyKind::SendToAddress,
+            address: "T,ADDR".into(),
+            debit: -1_000_000,
+            credit: 0,
+            status: LegacyStatus::Unconfirmed,
+            depth: 0,
+            matures_in: 0,
+        };
+        let line = csv_line(&r, "a \"quoted\" label");
+        assert!(line.contains("\"T,ADDR\""));
+        assert!(line.contains("\"a \"\"quoted\"\" label\""));
+    }
+}
