@@ -7045,14 +7045,68 @@ fn main() {
                         );
                     }
                     Err(e) => {
-                        finish(
-                            &cfg,
-                            &st,
-                            &stats,
-                            &rpc,
-                            EXIT_VALIDATE,
-                            &format!("from-zero sync: {}", e),
-                        );
+                        // A transient peer disconnect must not abandon an
+                        // hours-long sync. The Pi died at h756000 with
+                        // "peer closed connection" after an hour of work; the
+                        // tip was persisted, so resume from it instead of
+                        // reporting a validation failure.
+                        let mut attempts = 0u32;
+                        let mut last_err = e;
+                        loop {
+                            if attempts >= 20 {
+                                finish(
+                                    &cfg,
+                                    &st,
+                                    &stats,
+                                    &rpc,
+                                    EXIT_VALIDATE,
+                                    &format!(
+                                        "from-zero sync: {} (gave up after {} reconnects)",
+                                        last_err, attempts
+                                    ),
+                                );
+                            }
+                            attempts += 1;
+                            log(&format!(
+                                "from-zero sync: {} — reconnecting (attempt {}/20) from h{}",
+                                last_err, attempts, st.tip_height
+                            ));
+                            std::thread::sleep(std::time::Duration::from_secs(
+                                (attempts.min(6) * 5) as u64,
+                            ));
+                            let start = st.tip_height.min(usize::MAX as u64) as usize;
+                            match connect_and_handshake(&cfg, &mut stats, st.tip_height, start) {
+                                Ok((mut peer, _idx)) => {
+                                    let peer_tip = peer.start_height.max(0) as u64;
+                                    match sync_from_zero(
+                                        &cfg,
+                                        &mut peer.sess,
+                                        &mut st,
+                                        &rpc,
+                                        &mut stats,
+                                        &store,
+                                        peer_tip,
+                                    ) {
+                                        Ok(()) => {
+                                            cfg.backfill_headers = 0;
+                                            break;
+                                        }
+                                        Err(e2) if e2 == "__SIGINT__" => {
+                                            finish(
+                                                &cfg,
+                                                &st,
+                                                &stats,
+                                                &rpc,
+                                                130,
+                                                "from-zero sync interrupted (SIGINT/SIGTERM) — tipstate persisted, resumable",
+                                            );
+                                        }
+                                        Err(e2) => last_err = e2,
+                                    }
+                                }
+                                Err(e2) => last_err = format!("reconnect failed: {}", e2),
+                            }
+                        }
                     }
                 }
             }
