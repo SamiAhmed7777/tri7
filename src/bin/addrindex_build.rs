@@ -20,6 +20,81 @@ use tri7_core::legacy::{Block, Reader};
 
 const MAGIC: u32 = 0x0522_3570;
 
+/// Fail-closed quarantine: remove the index db (and its WAL/SHM), verifying
+/// absence. If removal fails, rename to a `.quarantine` name; if that fails,
+/// truncate the main db to zero bytes so SQLite treats it as not-a-database.
+/// Returns Err only when the main db still exists non-empty after all steps.
+fn quarantine_index_db(db: &std::path::Path) -> Result<(), String> {
+    let side = |s: &str| {
+        let mut n = db.as_os_str().to_owned();
+        n.push(s);
+        std::path::PathBuf::from(n)
+    };
+    let wal = side("-wal");
+    let shm = side("-shm");
+    let all = [db, &wal, &shm];
+
+    // Attempt 1: delete all three.
+    for f in all.iter() {
+        let _ = std::fs::remove_file(f);
+    }
+    // Attempt 2: rename survivors to quarantine names.
+    if all.iter().any(|f| f.exists()) {
+        for (f, tag) in [(db, "main"), (&wal, "wal"), (&shm, "shm")] {
+            if f.exists() {
+                let mut q = f.as_os_str().to_owned();
+                q.push(format!(".quarantine-{tag}"));
+                let _ = std::fs::rename(f, &q);
+            }
+        }
+    }
+    // Attempt 3: truncate survivors to zero bytes (SQLite then treats them as
+    // corrupt / not-a-database).
+    for f in all.iter() {
+        if f.exists() {
+            let _ = std::fs::write(f, b"");
+        }
+    }
+    // Verified disposition: NOTHING may remain non-empty — a leftover WAL with
+    // the main db gone can still resurrect data on the next open.
+    for f in all.iter() {
+        if f.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            return Err(format!("could not make {} unusable", f.display()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The quarantine cascade must leave NO usable index behind: main db,
+    /// WAL and SHM all gone from the directory.
+    #[test]
+    fn quarantine_removes_the_db_so_consumers_see_no_index() {
+        let dir = std::env::temp_dir().join(format!("tri7-quarantine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("addressindex.db");
+        std::fs::write(&db, b"not-a-real-db-but-nonempty").unwrap();
+        std::fs::write(dir.join("addressindex.db-wal"), b"wal").unwrap();
+        std::fs::write(dir.join("addressindex.db-shm"), b"shm").unwrap();
+        quarantine_index_db(&db).expect("quarantine must succeed on a normal directory");
+        // ALL three must be gone (or zero-length): a surviving WAL can
+        // resurrect the index on the next open.
+        for f in [db.clone(), dir.join("addressindex.db-wal"), dir.join("addressindex.db-shm")] {
+            let gone = !f.exists()
+                || f.metadata().map(|m| m.len() == 0).unwrap_or(true);
+            assert!(gone, "{} must not survive quarantine", f.display());
+        }
+        // NOTE: the rename/truncate fallback arms cannot be force-activated in
+        // a test running as root (root bypasses directory write-bits), so the
+        // fail-closed final check (nothing non-empty survives) is the tested
+        // guarantee.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -42,34 +117,11 @@ fn main() {
 
     let store = BlockStore::new(Some(store_path.clone()), None);
     store.spawn_build(None);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
-    let tip = loop {
-        match store.status() {
-            tri7_core::blockindex::StoreStatus::Ready { threaded_tip, .. } => match threaded_tip {
-                Some(t) => break t,
-                None => {
-                    eprintln!("store index has no threaded height yet");
-                    std::process::exit(2);
-                }
-            },
-            tri7_core::blockindex::StoreStatus::Failed(e) => {
-                eprintln!("block index: {e}");
-                std::process::exit(2);
-            }
-            _ => {
-                if std::time::Instant::now() > deadline {
-                    eprintln!("block index build timed out");
-                    std::process::exit(2);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        }
-    };
-    println!("store threaded to h{tip}");
-
-    // Heights above the store's threaded tip exist only in the tipstate
-    // window; without this map those blocks were skipped as "not in the
-    // chain", leaving the last few thousand blocks out of the index.
+    // The chain tip must come from the tipstate oracle BEFORE the wait: the
+    // store's threaded tip starts near genesis and a naive "any value" break
+    // fired at h11229, leaving 2.19M blocks unindexed (the whole point of the
+    // tool). Wait until threading has reached the tip, with a generous
+    // deadline for slow boards.
     let oracle: std::collections::HashMap<String, u64> = {
         let mut m = std::collections::HashMap::new();
         if let Ok(raw) = std::fs::read_to_string(state_dir.join("tipstate.json")) {
@@ -89,7 +141,52 @@ fn main() {
         m
     };
     println!("tipstate oracle: {} hashes", oracle.len());
-    let chain_tip = oracle.values().copied().max().unwrap_or(tip);
+    let chain_tip = oracle.values().copied().max().unwrap_or(0);
+    if oracle.is_empty() || chain_tip == 0 {
+        eprintln!(
+            "tipstate oracle is empty or has no positive height — cannot determine the chain tip; refusing to index"
+        );
+        std::process::exit(2);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    let tip = loop {
+        match store.status() {
+            tri7_core::blockindex::StoreStatus::Ready { threaded_tip, .. } => match threaded_tip {
+                Some(t) if t >= chain_tip && chain_tip > 0 => break t,
+                Some(t) => {
+                    if std::time::Instant::now() > deadline {
+                        eprintln!(
+                            "block index threading stalled at h{t} (need h{chain_tip}); raise the deadline or run on a faster board"
+                        );
+                        std::process::exit(2);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+                None => {
+                    // transient: the threading thread has not published a tip
+                    // yet — keep waiting within the deadline rather than
+                    // aborting the build on a startup race
+                    if std::time::Instant::now() > deadline {
+                        eprintln!("block index threading never reported a tip");
+                        std::process::exit(2);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+            },
+            tri7_core::blockindex::StoreStatus::Failed(e) => {
+                eprintln!("block index: {e}");
+                std::process::exit(2);
+            }
+            _ => {
+                if std::time::Instant::now() > deadline {
+                    eprintln!("block index build timed out");
+                    std::process::exit(2);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    };
+    println!("store threaded to h{tip}");
 
     let (conn, _) = match addrindex::begin(&state_dir) {
         Ok(v) => v,
@@ -106,6 +203,8 @@ fn main() {
         )
         .unwrap_or(0);
     let mut pos = if full { 0 } else { resume_off };
+    let mut unresolved: u64 = 0;
+    let mut lookup_err: Option<String> = None;
     if pos > 0 {
         println!("resuming at file offset {pos}");
     }
@@ -170,13 +269,27 @@ fn main() {
             Ok(Some(hit)) => match hit.height {
                 Some(h) if h <= tip => h,
                 _ => {
+                    // The store returned the frame but no usable height:
+                    // skipping silently would stamp the index "complete" while
+                    // canonical blocks are missing from it.
+                    unresolved += 1;
                     pos += (8 + blen) as u64;
                     continue;
                 }
             },
-            _ => {
+            Ok(None) => {
+                // The store knows nothing of this frame: a reorg leftover /
+                // not a canonical block. Skipped by design.
                 pos += (8 + blen) as u64;
-                continue; // reorg leftover / not in the chain
+                continue;
+            }
+            Err(e) => {
+                // A lookup ERROR is not evidence the block is absent — treat
+                // it as unresolved so the run refuses to stamp completion.
+                unresolved += 1;
+                lookup_err = Some(format!("{}: {}", display, e));
+                pos += (8 + blen) as u64;
+                continue;
             }
             },
         };
@@ -244,6 +357,37 @@ fn main() {
     // Save the last COMMITTED slice, not the position of a bad frame: saving
     // `pos` here would make every future resume halt on the same frame.
     addrindex::set_offset(&conn, last_slice_off).ok();
+    if unresolved > 0 {
+        // Canonical frames whose height could not be resolved were skipped:
+        // the index is INCOMPLETE, so it must not be stamped complete — a
+        // wallet reading it would silently miss those blocks' addresses.
+        // Explicitly clear any stale complete flag from a previous run. If
+        // even THIS clear fails, fail CLOSED: quarantine the index db —
+        // because a database that says complete=true while canonical frames
+        // are missing is worse than no database — every consumer must see
+        // "no index" rather than a lying one.
+        if let Err(e) = addrindex::set_complete(&conn, false) {
+            eprintln!(
+                "FAIL: could not clear the completion flag after unresolved skips ({e}) — quarantining the index db so no consumer can treat an incomplete index as complete"
+            );
+            drop(conn);
+            let db = addrindex::db_path(&state_dir).display().to_string();
+            if let Err(qe) = quarantine_index_db(std::path::Path::new(&db)) {
+                eprintln!("FAIL: quarantine also failed ({qe}) — the incomplete index may still be present and MUST be removed manually before any wallet reads it");
+                std::process::exit(4);
+            }
+            eprintln!("index db quarantined: consumers now see \"no index\"");
+            std::process::exit(3);
+        }
+        eprintln!(
+            "FAIL: {unresolved} canonical frame(s) skipped — index NOT marked complete{}",
+            lookup_err
+                .as_ref()
+                .map(|e| format!("; last lookup error: {e}"))
+                .unwrap_or_default()
+        );
+        std::process::exit(3);
+    }
     if reached_eof {
         addrindex::finish(&conn, chain_tip.max(last_height)).ok();
         addrindex::set_complete(&conn, true).ok();
