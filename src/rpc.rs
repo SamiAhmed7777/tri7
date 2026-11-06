@@ -324,6 +324,11 @@ pub trait WalletProvider: Send + Sync {
     fn extras(&self) -> WalletExtras {
         WalletExtras::default()
     }
+    /// Publish a fee setting into this provider's live extras. Returns Err when
+    /// the provider has no writable state (tests, read-only tools).
+    fn set_paytxfee(&self, _sats: i64) -> std::result::Result<(), String> {
+        Err("wallet state is not writable here".to_string())
+    }
     /// The legacy `defaultkey` record (33/65-byte pubkey), when known.
     fn default_key(&self) -> Option<Vec<u8>> {
         None
@@ -528,6 +533,22 @@ fn unlocked_until(deps: &Deps) -> Value {
     }
 }
 
+/// Directory the passive verbs persist operator settings into (the node's
+/// state dir, exported by follow_tip). None outside a real node.
+fn fee_setting_dir() -> Option<std::path::PathBuf> {
+    std::env::var("TRI7_STATE_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Confirmations for a wallet address. The snapshot map carries no per-tx
 /// heights, so this answers `null` (never a fabricated depth) until a caller
 /// can prove one — a wrong number here is worse than an honest null.
@@ -575,6 +596,12 @@ impl WalletProvider for SnapshotWallet {
 
     fn extras(&self) -> WalletExtras {
         self.extra.read().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    fn set_paytxfee(&self, sats: i64) -> std::result::Result<(), String> {
+        let mut g = self.extra.write().map_err(|e| format!("extras lock: {e}"))?;
+        g.paytxfee_sats = Some(sats);
+        Ok(())
     }
 
     fn default_key(&self) -> Option<Vec<u8>> {
@@ -2012,12 +2039,28 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         }
 
         "estimatefee" => {
-            // legacy rpcblockchain estimatefee: "Triangles uses a static
-            // minimum fee structure" — returns MIN_TX_FEE (= CENT/100 =
-            // 100 sats = 0.0001 TRI, main.h:58/util.h:53). tri7 has no
-            // nTransactionFee override, so the constant is exact.
+            // legacy rpcblockchain estimatefee <nblocks> returns the fee the
+            // wallet would pay for a typical transaction: nTransactionFee
+            // (main.cpp:113), which the operator can raise via settxfee.
+            //
+            // tri7 extension (optional 2nd/3rd params): the caller declares the
+            // transaction shape and gets the fee for THAT transaction, computed
+            // by the same function the builder uses (spend::estimate_fee):
+            //   estimatefee <nblocks> <n_inputs> <n_outputs>
+            // The amount is micro-TRI (1 TRI = 1e6), so 0.0001 TRI = 100 sats.
             let _nblocks = ptry!(p_u64(params, 0, "nblocks"));
-            NativeOutcome::Ok(json!(sats_to_tri(MIN_TX_FEE_SATS)))
+            let paytxfee = deps
+                .wallet
+                .extras()
+                .paytxfee_sats
+                .unwrap_or(MIN_TX_FEE_SATS)
+                .max(crate::spend::MIN_FEE_SATS);
+            let n_in = ptry!(p_u64(params, 1, "n_inputs")).unwrap_or(2) as usize;
+            let n_out = ptry!(p_u64(params, 2, "n_outputs")).unwrap_or(2) as usize;
+            let bytes = crate::spend::estimate_signed_size(n_in, n_out);
+            let outs = vec![1_000_000i64; n_out.max(1)];
+            let fee = crate::spend::estimate_fee(bytes, paytxfee, &outs);
+            NativeOutcome::Ok(json!(sats_to_tri(fee)))
         }
 
         // ---- legacy parity 2026-11-06: offline tx workflow ------------------
@@ -2051,23 +2094,34 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         }
 
         "settxfee" => {
-            // legacy rpcwallet settxfee <amount>: the fee is a chain constant
-            // here (MIN_TX_FEE, main.h:58 — "Triangles uses a static minimum
-            // fee"), so the ONLY accepted value is that constant. Anything
-            // else is refused loudly instead of being silently ignored: a
-            // client that thinks it raised the fee must not be told a lie.
+            // legacy rpcwallet settxfee <amount> — sets nTransactionFee, the
+            // fee the wallet ADDS on top of the chain minimum when it builds a
+            // transaction (wallet.cpp:1688/1785). Range per init.cpp:694:
+            // 0 .. 0.25 TRI. 0 means "pay the chain minimum".
             let Some(amount) = ptry!(p_f64(params, 0, "amount")) else {
                 return NativeOutcome::Err(-8, "expected amount parameter".into());
             };
-            let want = sats_to_tri(MIN_TX_FEE_SATS);
-            if (amount - want).abs() > 1e-9 {
+            if !(amount >= 0.0) || amount > 0.25 {
                 return NativeOutcome::Err(
                     -8,
-                    format!(
-                        "settxfee: this chain uses a fixed minimum fee of {:.6} — {} is refused",
-                        want, amount
-                    ),
+                    format!("settxfee: {amount} is outside the allowed range 0..0.25 TRI"),
                 );
+            }
+            // the value the chain will actually charge: cent-rounded, floored
+            // at MIN_FEE_SATS so 0 still means "the minimum"
+            let sats = ((amount * 1_000_000.0).round() as i64).max(crate::spend::MIN_FEE_SATS);
+            // Publish FIRST: if the live value cannot be set, say so instead of
+            // answering true while estimatefee/the builder still read the old
+            // number.
+            if let Err(e) = deps.wallet.set_paytxfee(sats) {
+                return NativeOutcome::Err(-1, format!("settxfee: publish: {e}"));
+            }
+            if let Some(dir) = fee_setting_dir() {
+                let path = dir.join("paytxfee.json");
+                let body = json!({ "paytxfee_sats": sats, "set_utc": unix_now() });
+                if let Err(e) = std::fs::write(&path, body.to_string()) {
+                    return NativeOutcome::Err(-1, format!("settxfee: persist: {e}"));
+                }
             }
             NativeOutcome::Ok(json!(true))
         }
@@ -3021,6 +3075,8 @@ mod tests {
         received: HashMap<String, i64>,
         mine: Vec<String>,
         utxos: Vec<UtxoRow>,
+        /// live fee setting (what settxfee publishes, what estimatefee reads)
+        paytxfee: std::sync::RwLock<Option<i64>>,
     }
     impl Default for StubWallet {
         fn default() -> Self {
@@ -3030,6 +3086,7 @@ mod tests {
                 33_665_763i64,
             );
             StubWallet {
+                paytxfee: std::sync::RwLock::new(None),
                 balance: Some(3_036_990_591),
                 received,
                 mine: vec!["T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY".to_string()],
@@ -3047,6 +3104,16 @@ mod tests {
         }
     }
     impl WalletProvider for StubWallet {
+        fn extras(&self) -> WalletExtras {
+            WalletExtras {
+                paytxfee_sats: self.paytxfee.read().ok().and_then(|g| *g),
+                ..Default::default()
+            }
+        }
+        fn set_paytxfee(&self, sats: i64) -> std::result::Result<(), String> {
+            *self.paytxfee.write().map_err(|e| e.to_string())? = Some(sats);
+            Ok(())
+        }
         fn balance(&self) -> Option<BalanceView> {
             self.balance.map(|sats| BalanceView {
                 sats,
@@ -4596,18 +4663,51 @@ fn decodescript_reports_asm_type_and_p2sh() {
     );
 }
 
+/// The fee service the operator actually uses: the estimate tracks settxfee
+/// (publishing through the provider), respects the 0..0.25 TRI range, and
+/// reports REAL amounts in the chain's coin (1 TRI = 1e6 sats).
 #[test]
-fn settxfee_accepts_the_chain_constant_and_refuses_anything_else() {
+fn estimatefee_tracks_settxfee_and_uses_the_chain_coin() {
     let t = T;
     let w = StubWallet::default();
     let b = StubBlocks { ready: true };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+
+    // default: the chain minimum for a typical 1-in/2-out spend
+    let base = call(&d, "estimatefee", json!([2, 1, 2]));
+    assert_eq!(base["result"], json!(0.0001));
+    // a bigger transaction crosses the 1000-byte step: 2 x the minimum
+    let big = call(&d, "estimatefee", json!([2, 8, 3]));
+    assert_eq!(big["result"], json!(0.0002));
+
+    // raising the setting moves the estimate — proof the value is published
+    assert_eq!(call(&d, "settxfee", json!([0.001]))["result"], true);
+    assert_eq!(call(&d, "estimatefee", json!([2, 1, 2]))["result"], json!(0.001));
+    assert_eq!(call(&d, "getwalletinfo", json!([]))["result"]["paytxfee"], 0.001);
+
+    // 0 means "pay the chain minimum", not "pay nothing"
+    assert_eq!(call(&d, "settxfee", json!([0]))["result"], true);
+    assert_eq!(call(&d, "estimatefee", json!([2, 1, 2]))["result"], json!(0.0001));
+
+    // outside the allowed range (init.cpp:694 -> 0.25 TRI cap) is refused
+    assert_eq!(call(&d, "settxfee", json!([-1]))["error"]["code"], -8);
+    assert_eq!(call(&d, "settxfee", json!([0.5]))["error"]["code"], -8);
+    assert_eq!(call(&d, "settxfee", json!([0.25]))["result"], true);
+}
+
+#[test]
+fn settxfee_accepts_the_operator_range_and_refuses_outside_it() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    // the setting is operator-controlled now (nTransactionFee): inside the
+    // range it is accepted and published, outside it is refused loudly
     assert_eq!(call(&d, "settxfee", json!([0.0001]))["result"], true);
-    // 100 sats is the chain's MIN_TX_FEE — a client asking for more must be
-    // told the truth, not silently charged the old value
-    let v = call(&d, "settxfee", json!([0.01]));
+    assert_eq!(call(&d, "settxfee", json!([0.01]))["result"], true);
+    let v = call(&d, "settxfee", json!([0.3]));
     assert_eq!(v["error"]["code"], -8);
-    assert!(v["error"]["message"].as_str().unwrap().contains("fixed minimum fee"));
+    assert!(v["error"]["message"].as_str().unwrap().contains("0..0.25"));
 }
 
 #[test]

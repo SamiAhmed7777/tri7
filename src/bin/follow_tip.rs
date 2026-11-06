@@ -4119,6 +4119,25 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
         self.state_dir.display().to_string()
     }
 
+    // The live provider OWNS the extras (fee setting, bestblock, unlock state):
+    // every native handler reads them through this, so a `settxfee` that lands
+    // anywhere else would be invisible to `estimatefee`/`getwalletinfo`.
+    fn extras(&self) -> tri7_core::rpc::WalletExtras {
+        tri7_core::rpc::WalletProvider::extras(self.snap.as_ref())
+    }
+
+    fn set_paytxfee(&self, sats: i64) -> std::result::Result<(), String> {
+        tri7_core::rpc::WalletProvider::set_paytxfee(self.snap.as_ref(), sats)
+    }
+
+    fn default_key(&self) -> Option<Vec<u8>> {
+        tri7_core::rpc::WalletProvider::default_key(self.snap.as_ref())
+    }
+
+    fn pubkey_for_address(&self, addr: &str) -> Option<Vec<u8>> {
+        tri7_core::rpc::WalletProvider::pubkey_for_address(self.snap.as_ref(), addr)
+    }
+
     fn balance(&self) -> Option<BalanceView> {
         if let Ok(g) = self.wl.lock() {
             if let Some(w) = g.as_ref() {
@@ -4734,20 +4753,35 @@ impl OpsAdapter {
             if pool.is_empty() {
                 continue;
             }
-            let target: i64 = outs.iter().map(|o| o.value).sum::<i64>()
-                + tri7_core::rpc::MIN_TX_FEE_SATS;
-            let selected = match tri7_core::spend::select_utxos_covering(&pool, target) {
+            // Coin selection AND fee converge through the one shared function:
+            // the fee depends on the shape, the shape on the fee. The builder
+            // then charges exactly the fee it converged on.
+            let paytxfee = self
+                .extras
+                .read()
+                .ok()
+                .and_then(|g| g.paytxfee_sats)
+                .unwrap_or(tri7_core::spend::MIN_FEE_SATS)
+                .max(tri7_core::spend::MIN_FEE_SATS);
+            let out_values: Vec<i64> = outs.iter().map(|o| o.value).collect();
+            let shape = match tri7_core::spend::select_with_fee(&pool, &out_values, paytxfee) {
                 Ok(s) => s,
                 Err(e) => {
                     last_err = e;
                     continue;
                 }
             };
-            let plan = match tri7_core::spend::build_spend_outputs(
+            let selected = shape.selected.clone();
+            let plan = match tri7_core::spend::build_spend_outputs_floor(
                 &selected,
                 outs.clone(),
                 Some(p2pkh_script_for_payload(&change_payload)),
-                tri7_core::rpc::MIN_TX_FEE_SATS,
+                // the builder applies the (1 + bytes/1000) multiplier itself,
+                // so it gets the RATE, not the converged total in shape.fee
+                paytxfee,
+                // and the converged total as an absolute floor, so the fee the
+                // caller was quoted is what the transaction pays
+                shape.fee,
                 now,
                 tip_h as u32,
             ) {
@@ -4761,6 +4795,20 @@ impl OpsAdapter {
                 if let Err(e) = tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey) {
                     return Err((-1, format!("self-verify failed: {e}")));
                 }
+            }
+            // EXACT fee equality, both directions: the signed size can push the
+            // schedule above the quote (paying more than the caller agreed to)
+            // or the floor can sit above the schedule. Neither may pass silently.
+            if plan.fee != shape.fee {
+                return Err((
+                    -1,
+                    format!(
+                        "fee mismatch: the signed transaction pays {} but the caller was quoted {} (real size {} bytes); re-run the estimate",
+                        plan.fee,
+                        shape.fee,
+                        plan.tx.serialize().len()
+                    ),
+                ));
             }
             if let Err(e) =
                 tri7_core::spend::connect_inputs_check(&plan.tx, &selected, tip_h as u32)
@@ -5340,21 +5388,41 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
             // exactly that (or 0, meaning "use the minimum") and refuse any
             // other value instead of pretending it took effect.
             "settxfee" => {
+                // nTransactionFee (wallet.cpp:1688): what the wallet ADDS on top
+                // of the chain minimum. Range 0..0.25 TRI (init.cpp:694); 0 or
+                // a value below the floor means "pay the minimum".
                 let amount = p(0)
                     .and_then(|v| v.as_f64())
                     .ok_or_else(|| (-8, "expected amount parameter".to_string()))?;
-                let min = tri7_core::rpc::MIN_TX_FEE_SATS as f64 / 1_000_000.0;
-                if !(amount == 0.0 || (amount - min).abs() < 1e-9) {
+                if !(amount >= 0.0) || amount > 0.25 {
                     return Err((
                         -8,
-                        format!("settxfee: this chain uses a fixed minimum fee of {min:.6} — {amount} is refused"),
+                        format!("settxfee: {amount} is outside the allowed range 0..0.25 TRI"),
                     ));
                 }
-                let effective = if amount == 0.0 { 0 } else { tri7_core::rpc::MIN_TX_FEE_SATS };
-                if let Ok(mut g) = self.extras.write() {
-                    g.paytxfee_sats = Some(effective);
+                let sats = ((amount * 1_000_000.0).round() as i64)
+                    .max(tri7_core::spend::MIN_FEE_SATS);
+                {
+                    let mut g = self
+                        .extras
+                        .write()
+                        .map_err(|e| (-1, format!("settxfee: fee state lock: {e}")))?;
+                    g.paytxfee_sats = Some(sats);
                 }
-                log(&format!("settxfee: paytxfee set to {effective} sats"));
+                let state_dir = self.state_dir.clone();
+                let body = serde_json::json!({
+                    "paytxfee_sats": sats,
+                    "set_utc": now_secs(),
+                });
+                let path = state_dir.join("paytxfee.json");
+                std::fs::write(&path, body.to_string()).map_err(|e| {
+                    (-1, format!("settxfee: persist to {}: {e}", path.display()))
+                })?;
+                log(&format!(
+                    "settxfee: paytxfee set to {sats} sats ({:.6} TRI) — persisted to {}",
+                    sats as f64 / 1_000_000.0,
+                    path.display()
+                ));
                 Ok(serde_json::json!(true))
             }
             // decryptwallet <passphrase> — the legacy "Remove encryption":
@@ -6757,6 +6825,7 @@ fn main() {
     if let Some(wp) = cfg.wallet_path.as_deref() {
         std::env::set_var("TRI7_WALLET_PATH", wp.display().to_string());
     }
+    std::env::set_var("TRI7_STATE_DIR", cfg.state_dir.display().to_string());
     // --new-wallet: brand-new wallet with BRAND-NEW keys (never copied) —
     // bootstrap the SQLite TRIw container (the wallet writer opens rw but
     // never creates), then insert freshly generated secrets via add_key.
@@ -7293,6 +7362,24 @@ fn main() {
                 })
                 .unwrap_or_default(),
         ));
+    // Operator fee setting persisted by settxfee (nTransactionFee). Restored
+    // BEFORE the RPC listener answers so estimatefee and every spend from
+    // second zero agree with the setting the operator last made.
+    if let Ok(mut g) = wallet_extras.write() {
+        match std::fs::read_to_string(cfg.state_dir.join("paytxfee.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("paytxfee_sats").and_then(|x| x.as_i64()))
+        {
+            Some(sats) => {
+                g.paytxfee_sats = Some(sats);
+                log(&format!("fee: paytxfee restored from paytxfee.json ({sats} sats)"));
+            }
+            None => {
+                g.paytxfee_sats = Some(tri7_core::spend::MIN_FEE_SATS);
+            }
+        }
+    }
     if cfg.rpc_enabled {
         let deps = Arc::new(rpc::ServerDeps {
             tip: Arc::new(LiveTip {

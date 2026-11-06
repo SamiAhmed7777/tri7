@@ -727,6 +727,42 @@ pub enum FeeMode {
     Relay,
 }
 
+/// The chain's fee floor, in micro-TRI (sats). ONE definition: consensus code,
+/// the GUI's send dialog and the RPC surface all read this, so a fee can never
+/// disagree with itself between the screen and the wire.
+///
+/// What the source says: `MIN_TX_FEE = CENT/100` (main.h:58) with
+/// `CENT = 10000` and `COIN = 1000000` (util.h:53), i.e. 100 micro-TRI =
+/// 0.0001 TRI, and `nTransactionFee` is initialised to it (main.cpp:113).
+/// An absolute floor, not a rate: it does NOT scale with the TRI amount.
+pub const MIN_FEE_SATS: i64 = MIN_TX_FEE;
+
+/// What a transaction pays for `tx_bytes`, computed EXACTLY the way the legacy
+/// builder decides it (wallet.cpp:1785-1793):
+///     nPayFee = nTransactionFee * (1 + nBytes/1000)      (integer div)
+///     nMinFee = GetMinFee(1, Send, nBytes)
+///     fee    >= max(nPayFee, nMinFee)
+/// `paytxfee_sats` is the operator's fee setting (nTransactionFee).
+pub fn estimate_fee(tx_bytes: usize, paytxfee_sats: i64, vout_values: &[i64]) -> i64 {
+    let n_pay_fee = paytxfee_sats * (1 + tx_bytes as i64 / 1000);
+    let n_min_fee = get_min_fee(vout_values, tx_bytes, 1, FeeMode::Block);
+    n_pay_fee.max(n_min_fee).max(MIN_FEE_SATS)
+}
+
+/// Estimated serialized size of a signed spend with `n_in` P2PKH inputs and
+/// `n_out` P2PKH outputs, in the chain's wire format. The wallet re-checks the
+/// REAL size after signing; this is for the dialog's estimate and for callers
+/// that must pick coins before a transaction exists.
+pub fn estimate_signed_size(n_in: usize, n_out: usize) -> usize {
+    // 4 version + 4 time + 1 input count + 1 output count + 4 locktime
+    let base = 4 + 4 + 1 + 1 + 4;
+    // P2PKH input: 32 prev-hash + 4 index + 1 script len + (1+72 sig + 1+33 key) + 4 sequence
+    let in_size = 32 + 4 + 1 + (1 + 72) + (1 + 33) + 4;
+    // P2PKH output: 8 value + 1 script len + 25 script
+    let out_size = 8 + 1 + 25;
+    base + n_in * in_size + n_out * out_size
+}
+
 /// GetMinFee (main.cpp:1000-1027). `n_block_size` is the caller's block-size
 /// context (CreateTransaction passes 1; ConnectInputs' GetMinFee() default is
 /// also Block mode with nBlockSize=1), so the near-full-block escalation
@@ -780,7 +816,7 @@ pub fn build_spend(
     dest_script: Vec<u8>,
     dest_value: i64,
     change_script: Option<Vec<u8>>,
-    fee: i64,
+    fee_rate_sats: i64,
     n_time: u32,
     spend_height: u32,
 ) -> Result<SpendPlan, String> {
@@ -791,7 +827,7 @@ pub fn build_spend(
             script_pubkey: dest_script,
         }],
         change_script,
-        fee,
+        fee_rate_sats,
         n_time,
         spend_height,
     )
@@ -801,11 +837,40 @@ pub fn build_spend(
 /// fee and size rules as `build_spend`; only the payment outputs differ, so the
 /// single-destination function is a thin wrapper over this one rather than a
 /// second copy of the logic.
+///
+/// `fee` is the PER-SIZE-STEP rate in sats (`nTransactionFee`), not an
+/// already-scaled total: this function multiplies it by (1 + nBytes/1000)
+/// itself (wallet.cpp:2096-2104). Passing a converged total would scale the
+/// fee twice; read the final number from the returned `SpendPlan::fee`.
 pub fn build_spend_outputs(
     inputs: &[SpendInput],
     dest_outputs: Vec<Vout>,
     change_script: Option<Vec<u8>>,
-    mut fee: i64,
+    mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+    n_time: u32,
+    spend_height: u32,
+) -> Result<SpendPlan, String> {
+    build_spend_outputs_floor(
+        inputs,
+        dest_outputs,
+        change_script,
+        fee_rate_sats,
+        0,
+        n_time,
+        spend_height,
+    )
+}
+
+/// Same construction with an explicit TOTAL floor: the operator may have agreed
+/// to a specific fee in sats (a typed fee in the Send dialog). The transaction
+/// must pay at least that, while the rate supplies the size schedule. This is
+/// the only way to honour a typed total without mistaking it for a rate.
+pub fn build_spend_outputs_floor(
+    inputs: &[SpendInput],
+    dest_outputs: Vec<Vout>,
+    change_script: Option<Vec<u8>>,
+    mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee)
+    fee_floor_sats: i64,    // absolute minimum total the operator agreed to
     n_time: u32,
     spend_height: u32,
 ) -> Result<SpendPlan, String> {
@@ -841,15 +906,24 @@ pub fn build_spend_outputs(
 
     let mut ordered: Vec<SpendInput> = inputs.to_vec();
     ordered.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
+    // `fee_rate_sats` is the caller's rate floor and seeds nFeeRet (wallet.cpp:1688
+    // starts nFeeRet at nTransactionFee and raises it in the loop below).
+    //
+    // CRITICAL: on entry this is a RATE — sats at the first size step — NOT an
+    // already size-scaled total. The loop below multiplies it by
+    // (1 + nBytes/1000), so passing a converged total would scale it a SECOND
+    // time and the built fee would exceed what was shown. Callers pass
+    // `paytxfee_sats` and read the final number from `SpendPlan.fee`.
+    let est_fee = fee_rate_sats.max(MIN_FEE_SATS);
 
     loop {
         // nValue + nFeeRet <= nValueIn is enforced below (value in < out)
         let mut vout = dest_outputs.clone();
-        let change = inputs_value - dest_total - fee;
+        let change = inputs_value - dest_total - fee_rate_sats;
         if change < 0 {
             return Err(format!(
-                "CreateTransaction: inputs ({}) < dest ({}) + fee ({})",
-                inputs_value, dest_total, fee
+                "CreateTransaction: inputs ({}) < dest ({}) + fee_rate_sats ({})",
+                inputs_value, dest_total, fee_rate_sats
             ));
         }
         if change > 0 {
@@ -905,16 +979,19 @@ pub fn build_spend_outputs(
         // Fee check (wallet.cpp:2096-2104): nPayFee = nTransactionFee *
         // (1 + nBytes/1000) with the nTransactionFee default (main.cpp:450);
         // nMinFee = GetMinFee(1, Send, nBytes).
-        let n_pay_fee = DEFAULT_TRANSACTION_FEE * (1 + n_bytes as i64 / 1000);
+        let n_pay_fee = est_fee * (1 + n_bytes as i64 / 1000);
         let n_min_fee = get_min_fee(
             &tx.vout.iter().map(|o| o.value).collect::<Vec<_>>(),
             n_bytes,
             1,
             FeeMode::Block,
         );
-        let required = n_pay_fee.max(n_min_fee);
-        if fee < required {
-            fee = required;
+        let required = n_pay_fee
+            .max(n_min_fee)
+            .max(MIN_FEE_SATS)
+            .max(fee_floor_sats);
+        if fee_rate_sats < required {
+            fee_rate_sats = required;
             continue;
         }
 
@@ -924,11 +1001,77 @@ pub fn build_spend_outputs(
 
         return Ok(SpendPlan {
             tx,
-            fee,
+            fee: fee_rate_sats,
             inputs_value,
             change: change.max(0),
         });
     }
+}
+
+/// Converge coins + fee_rate_sats for a spend whose shape decides its own fee_rate_sats.
+///
+/// The fee_rate_sats scales with the SIGNED SIZE, the size grows with the input count,
+/// and the input count depends on how much the fee_rate_sats takes — a fixed point. This
+/// walks it: select for (amount + fee_rate_sats(shape)), re-derive the fee_rate_sats for the shape
+/// we got, repeat until the count stops changing. Callers that must agree
+/// (the RPC builder, the GUI estimate and the GUI validation) all go through
+/// this ONE function, so the number on screen is the number built.
+///
+/// `inputs` are the spendable candidates; `out_values` every payment output
+/// (a change output is assumed when change can occur). Returns the selected
+/// coins, the converged fee, and the shape used, or an explicit insufficiency error.
+#[derive(Debug, Clone)]
+pub struct FeeShape {
+    pub selected: Vec<SpendInput>,
+    /// the CONVERGED total fee for this shape (what the operator is shown)
+    pub fee: i64,
+    pub n_inputs: usize,
+    pub n_outputs: usize,
+}
+
+pub fn select_with_fee(
+    inputs: &[SpendInput],
+    out_values: &[i64],
+    paytxfee_sats: i64,
+) -> Result<FeeShape, String> {
+    let pay = paytxfee_sats.max(MIN_FEE_SATS);
+    let amount: i64 = out_values.iter().sum();
+    if amount <= 0 {
+        return Err("select: amount must be positive".into());
+    }
+    let mut n_in = 1usize;
+    for _ in 0..8 {
+        // the shape we are about to build: n_in inputs, payments + change
+        let fee = estimate_fee(estimate_signed_size(n_in, out_values.len() + 1), pay, out_values);
+        let selected = select_utxos_covering(inputs, amount + fee)?;
+        let got = selected.len();
+        if got == n_in {
+            return Ok(FeeShape {
+                selected,
+                fee,
+                n_inputs: n_in,
+                n_outputs: out_values.len() + 1,
+            });
+        }
+        n_in = got;
+    }
+    // nine iterations without settling means the pool cannot cover it
+    Err("Insufficient funds!".into())
+}
+
+/// The fee an already-decided selection will pay (the value the builder will
+/// charge after it signs): same inputs+outputs, same schedule. Used to compare
+/// against what the caller was shown.
+pub fn fee_for_selection(
+    selected: &[SpendInput],
+    out_values: &[i64],
+    paytxfee_sats: i64,
+) -> i64 {
+    estimate_fee(
+        estimate_signed_size(selected.len(), out_values.len() + 1),
+        paytxfee_sats.max(MIN_FEE_SATS),
+        out_values,
+    )
 }
 
 /// ConnectInputs port (main.cpp:1980-2067) for our own spends. `prevs` must
@@ -1060,6 +1203,149 @@ mod tests {
             ],
             locktime: 0,
         }
+    }
+
+    /// A spendable coin with a distinct outpoint, for selection tests. The
+    /// prevout must be a REAL p2pkh paying the coin's own pubkey hash, because
+    /// select_utxos_covering enforces `assert_owns_prevout`.
+    fn coin(seed: u8, value: i64) -> SpendInput {
+        let mut sk = [0u8; 32];
+        sk[31] = seed;
+        sk[0] = 1;
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&sk).expect("sk");
+        let pubkey = secret_key.public_key(&secp).serialize().to_vec();
+        let h = crate::address::hash160(&pubkey);
+        let mut script = vec![OP_DUP, OP_HASH160, 20];
+        script.extend_from_slice(&h);
+        script.push(OP_EQUALVERIFY);
+        script.push(OP_CHECKSIG);
+        SpendInput {
+            txid: [seed; 32],
+            n: seed as u32,
+            value,
+            script_pubkey: script,
+            height: 1,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: sk,
+            pubkey,
+        }
+    }
+
+    #[test]
+    fn select_with_fee_converges_and_crosses_the_1000_byte_boundary() {
+        // Many small coins: the selected count pushes the signed size past
+        // 1000 bytes, which doubles the byte schedule. A fixed two-input
+        // allowance would under-fund this and then fail inside the builder.
+        let pool: Vec<SpendInput> = (1..=80u8).map(|i| coin(i, 1_000_000)).collect();
+        let pay = MIN_FEE_SATS;
+        let shape = select_with_fee(&pool, &[40_000_000], pay).expect("select");
+
+        assert!(shape.n_inputs >= 40, "needs many coins: {}", shape.n_inputs);
+        let bytes = estimate_signed_size(shape.n_inputs, shape.n_outputs);
+        assert!(bytes > 1000, "test must cross the boundary: {} bytes", bytes);
+
+        // the fee is the schedule for the shape actually selected ...
+        let expected = estimate_fee(bytes, pay, &[40_000_000]);
+        assert_eq!(shape.fee, expected);
+        // schedule: pay * (1 + bytes/1000) with INTEGER division — a ~1400
+        // byte transaction is one step above 1000, so 2x the minimum
+        let steps = 1 + bytes / 1000;
+        assert_eq!(
+            shape.fee,
+            pay * steps as i64,
+            "{} bytes -> {} steps",
+            bytes,
+            steps
+        );
+        assert!(shape.fee > MIN_FEE_SATS, "fee must exceed the 1x minimum");
+
+        // ... and the selection really covers amount + that fee
+        let sum: i64 = shape.selected.iter().map(|c| c.value).sum();
+        assert!(sum >= 40_000_000 + shape.fee, "{} < amount + fee", sum);
+
+        // fee_for_selection agrees with what select_with_fee reported: this is
+        // the equality the GUI display / validation / builder all rely on
+        assert_eq!(
+            fee_for_selection(&shape.selected, &[40_000_000], pay),
+            shape.fee
+        );
+    }
+
+    #[test]
+    fn built_transaction_fee_equals_the_converged_fee_above_1000_bytes() {
+        // The end-to-end guard against double-scaling: converge the shape, then
+        // BUILD + SIGN the real transaction with the same inputs and assert the
+        // plan's final fee is exactly the converged fee (not a second
+        // multiplication of it).
+        let pool: Vec<SpendInput> = (1..=80u8).map(|i| coin(i, 1_000_000)).collect();
+        let amount = 40_000_000i64;
+        let pay = MIN_FEE_SATS;
+        let shape = select_with_fee(&pool, &[amount], pay).expect("select");
+        let bytes = estimate_signed_size(shape.n_inputs, shape.n_outputs);
+        assert!(bytes > 1000, "must cross the boundary: {} bytes", bytes);
+
+        let dest = pool[0].script_pubkey.clone();
+        let change = pool[1].script_pubkey.clone();
+        let plan = build_spend(
+            &shape.selected,
+            dest,
+            amount,
+            Some(change),
+            pay, // RATE, exactly what the RPC builder passes
+            1_400_500_000,
+            100,
+        )
+        .expect("build");
+
+        // no double scaling: the built fee is the same schedule value the
+        // display showed, i.e. pay * (1 + real_bytes/1000)
+        let real_bytes = plan.tx.serialize().len();
+        let expected = estimate_fee(real_bytes, pay, &[amount]);
+        assert_eq!(
+            plan.fee, expected,
+            "built fee {} != scheduled {} for {} bytes",
+            plan.fee, expected, real_bytes
+        );
+        assert_eq!(
+            plan.fee, shape.fee,
+            "built fee {} != converged/displayed fee {}",
+            plan.fee, shape.fee
+        );
+        // and the change is exact: inputs - amount - fee
+        let input_sum: i64 = shape.selected.iter().map(|c| c.value).sum();
+        assert_eq!(plan.change, input_sum - amount - plan.fee);
+        assert!(plan.change > 0, "change must be positive here");
+    }
+
+    #[test]
+    fn select_with_fee_is_idempotent_and_stable() {
+        let pool: Vec<SpendInput> = (1..=12u8).map(|i| coin(i, 300_000)).collect();
+        let a = select_with_fee(&pool, &[1_500_000], 500).expect("select");
+        let b = select_with_fee(&pool, &[1_500_000], 500).expect("select");
+        assert_eq!(a.n_inputs, b.n_inputs);
+        assert_eq!(a.fee, b.fee);
+        assert_eq!(a.selected.len(), b.selected.len());
+        // a higher operator setting costs more and never selects fewer coins
+        let c = select_with_fee(&pool, &[1_500_000], 50_000).expect("select");
+        assert!(c.fee >= a.fee);
+        assert!(c.n_inputs >= a.n_inputs);
+    }
+
+    #[test]
+    fn select_with_fee_reports_insufficiency_honestly() {
+        let pool: Vec<SpendInput> = (1..=3u8).map(|i| coin(i, 1_000)).collect();
+        // the pool cannot cover 10 TRI: the selector's own message is the
+        // honest answer (the GUI maps it to the legacy "Insufficient funds!")
+        let err = select_with_fee(&pool, &[10_000_000], MIN_FEE_SATS).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("insufficient"),
+            "expected an insufficiency error, got: {}",
+            err
+        );
+        assert!(err.contains("have 3000"), "reports what it had: {}", err);
     }
 
     #[test]
@@ -1702,6 +1988,24 @@ mod tests {
         assert_eq!(COINBASE_MATURITY, 7);
         assert_eq!(DEFAULT_TRANSACTION_FEE, MIN_TX_FEE);
         // GetMinFee: (1 + bytes/1000) * 100 in Block mode
+        // The estimator must obey the CHAIN's coin (1e6 sats = 1 TRI), not a
+        // Bitcoin habit: 0.0001 TRI is 100 sats, NOT 10 000.
+        assert_eq!(MIN_FEE_SATS, 100);
+        assert_eq!(estimate_fee(1, MIN_FEE_SATS, &[1_000]), 100);
+        // legacy wallet.cpp:1785 rule — nTransactionFee * (1 + bytes/1000)
+        assert_eq!(estimate_fee(1000, 100, &[1_000]), 200);
+        assert_eq!(estimate_fee(1999, 100, &[1_000]), 200);
+        assert_eq!(estimate_fee(2000, 100, &[1_000]), 300);
+        // a higher operator setting is honoured on the same schedule
+        assert_eq!(estimate_fee(500, 1000, &[1_000]), 1000);
+        // and the floor survives a zero/garbage setting
+        assert_eq!(estimate_fee(10, 0, &[1_000]), 100);
+        // estimated signed size: 1-in/2-out lands under the 1000-byte step, so
+        // the fee stays at the minimum — the estimate and the builder agree
+        let size = estimate_signed_size(1, 2);
+        assert_eq!(size, 14 + 148 + 2 * 34);
+        let derived = estimate_fee(size, MIN_FEE_SATS, &[1_000, 500]);
+        assert_eq!(estimate_fee(999, MIN_FEE_SATS, &[1_000]), derived);
         assert_eq!(get_min_fee(&[1000], 999, 1, FeeMode::Block), 100);
         assert_eq!(get_min_fee(&[1000], 1000, 1, FeeMode::Block), 200);
         assert_eq!(get_min_fee(&[1000], 1999, 1, FeeMode::Block), 200);

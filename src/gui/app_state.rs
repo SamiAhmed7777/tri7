@@ -321,6 +321,10 @@ pub struct AppState {
     pub stake: Option<StakeStatus>,
     pub send: SendFormState,
     pub send_result: Option<Result<SendBuild, String>>,
+    /// node's live paytxfee (sats) from the last refresh; None = node silent
+    pub fee_live_sats: Option<i64>,
+    /// last Options apply failure (shown in the dialog until it succeeds)
+    pub options_save_error: Option<String>,
     pub receive: ReceiveForm,
     pub addressbook: Vec<AbEntry>,
     pub keystore: Vec<AbEntry>,
@@ -407,6 +411,8 @@ impl AppState {
             tip: None,
             stake: None,
             send: SendFormState::default(),
+            fee_live_sats: None,
+            options_save_error: None,
             send_result: None,
             receive: ReceiveForm::default(),
             addressbook,
@@ -1530,7 +1536,12 @@ impl AppState {
         };
         let keys = self.key_map();
         let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
-        self.send_result = Some(match validate_send_form(&self.send, &derived, &keys) {
+        self.send_result = Some(match crate::gui::state::validate_send_form_with_fee(
+            &self.send,
+            &derived,
+            &keys,
+            self.live_paytxfee_sats(),
+        ) {
             Ok(req) => {
                 // coin-control manual pool
                 let manual = if self.send.selected.is_empty() {
@@ -2033,6 +2044,13 @@ impl AppState {
     pub fn refresh_debug_info_action(&mut self) {
         let mut info = DebugInfo::default();
         if let Some(addr) = self.cfg.rpc_addr.clone() {
+            // pick up the node's live fee setting on the same poll as the rest
+            // of the status (the Send estimate and Options both read it)
+            if let Ok(wi) = rpc_client::rpc_call(&addr, "getwalletinfo", &[]) {
+                if let Some(f) = wi.get("paytxfee").and_then(|v| v.as_f64()) {
+                    self.fee_live_sats = Some((f * 1_000_000.0).round() as i64);
+                }
+            }
             match rpc_client::rpc_call(&addr, "getconnectioncount", &[]) {
                 Ok(v) => {
                     info.reachable = true;
@@ -2213,6 +2231,52 @@ impl AppState {
         Ok(copied)
     }
 
+    /// Live fee setting from the node (getwalletinfo.paytxfee); falls back to
+    /// the chain minimum when no node answers. The Send panel and validation
+    /// both read THIS, so the number on screen is the number the node charges.
+    pub fn live_paytxfee_sats(&self) -> i64 {
+        self.fee_live_sats
+            .unwrap_or(crate::spend::MIN_FEE_SATS)
+            .max(crate::spend::MIN_FEE_SATS)
+    }
+
+    /// The converged plan (coins + fee) for the Send form, from the SAME
+    /// function the RPC builder and validation use. `None` while the form is
+    /// not yet usable (no amount / no key), so a half-typed form shows no
+    /// estimate instead of a wrong one.
+    pub fn send_plan(&self) -> Option<crate::spend::FeeShape> {
+        let derived = self.derived.as_ref()?;
+        let keys = self.key_map();
+        crate::gui::state::plan_send(&self.send, derived, &keys, self.live_paytxfee_sats())
+    }
+
+    /// Why there is no estimate right now (shown instead of a silent blank):
+    /// bad amount, no key, or genuinely insufficient funds.
+    pub fn send_plan_error(&self) -> Option<String> {
+        let derived = self.derived.as_ref()?;
+        let keys = self.key_map();
+        match crate::gui::state::plan_send_why(
+            &self.send,
+            derived,
+            &keys,
+            self.live_paytxfee_sats(),
+        ) {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
+    }
+
+    /// Estimated network fee for the transaction the Send form would build —
+    /// the fee that plan converges on, i.e. the number actually charged.
+    pub fn send_fee_estimate_sats(&self) -> Option<i64> {
+        self.send_plan().map(|p| p.fee)
+    }
+
+    /// Inputs the plan selected (None when the form is not usable yet).
+    pub fn send_estimate_inputs(&self) -> Option<usize> {
+        self.send_plan().map(|p| p.n_inputs)
+    }
+
     /// File ▸ Encrypt Wallet… — opens the legacy askpassphrasedialog against
     /// the REAL wallet engine (src/wallet_encrypt.rs), choosing the mode from
     /// the wallet's current state. Encryption itself always runs through the
@@ -2319,11 +2383,48 @@ impl AppState {
         Ok(format!("{}: {}", dlg.mode.title(), reply))
     }
 
+    /// Push the Options "Pay transaction fee" value to the node (settxfee).
+    /// The dialog is the operator's control; the node owns the wallet, so the
+    /// setting must land there to affect anything — saving the text box alone
+    /// would be a lie the next spend exposes.
+    fn push_paytxfee_to_node(&mut self) -> Result<(), String> {
+        let fee = parse_tri(&self.options.pay_fee)
+            .map_err(|e| format!("Pay transaction fee is not valid: {e}"))?;
+        if !(0..=250_000).contains(&fee) {
+            return Err("Pay transaction fee must be between 0 and 0.25 TRI".into());
+        }
+        let Some(addr) = self.live_rpc_addr() else {
+            // offline GUI: the stored value applies the next time a node is
+            // reachable; say so instead of pretending it took effect
+            return Err("no node reachable — the fee is saved locally but not applied".into());
+        };
+        let tri = fee as f64 / 1_000_000.0;
+        crate::gui::rpc_client::rpc_call(&addr, "settxfee", &[serde_json::json!(tri)])
+            .map(|_| ())
+            .map_err(|e| format!("settxfee: {e}"))
+    }
+
     pub fn save_options_action(&mut self) -> Result<(), String> {
         // validate the fee is a real amount before persisting
         parse_tri(&self.options.pay_fee)
             .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
-        persist_options(&self.cfg.options_path(), &self.options)
+        // the node charges the fee, not the text box: apply it there too and
+        // report a failure instead of silently diverging
+        match self.push_paytxfee_to_node() {
+            Ok(()) => {
+                self.options_save_error = None;
+                self.status_log
+                    .push(format!("fee: node paytxfee set to {}", self.options.pay_fee));
+                persist_options(&self.cfg.options_path(), &self.options)
+            }
+            Err(e) => {
+                // keep the operator's typed value on disk so the next launch
+                // retries it, but tell the caller the node did NOT take it
+                let _ = persist_options(&self.cfg.options_path(), &self.options);
+                self.status_log.push(format!("fee: {e}"));
+                Err(e)
+            }
+        }
     }
 
     /// Explorer: the search box action (classify + jump).

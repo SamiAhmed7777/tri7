@@ -2442,14 +2442,53 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         .num_columns(2)
                         .spacing([12.0, 12.0])
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Fee:").color(th::TEXT_SECONDARY));
+                            ui.label(
+                                egui::RichText::new("Fee (optional floor):")
+                                    .color(th::TEXT_SECONDARY),
+                            );
                             ui.horizontal(|ui| {
                                 th::text_input(ui, 180.0, &mut st.send.fee);
-                                ui.label(
-                                    egui::RichText::new("(auto-raised to the legacy GetMinFee minimum)")
-                                        .color(th::TEXT_MUTED),
-                                );
                             });
+                            ui.end_row();
+                            // Live estimate: the SAME function the builder
+                            // charges with, the node's live fee setting, and the
+                            // shape this form actually implies (selected inputs
+                            // or the coins the selector would need).
+                            ui.label(
+                                egui::RichText::new("Estimated network fee:")
+                                    .color(th::TEXT_SECONDARY),
+                            );
+                            let setting = st.live_paytxfee_sats();
+                            let setting_txt = format!(
+                                "{} {} per the legacy nTransactionFee schedule",
+                                s::format_tri(setting),
+                                s::TICKER
+                            );
+                            match st.send_fee_estimate_sats() {
+                                Some(est) => {
+                                    let n_in = st.send_estimate_inputs().unwrap_or(0);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} {}  ({} input{}, {})",
+                                            s::format_tri(est),
+                                            s::TICKER,
+                                            n_in,
+                                            if n_in == 1 { "" } else { "s" },
+                                            setting_txt
+                                        ))
+                                        .color(th::TEXT_MUTED),
+                                    );
+                                }
+                                None => {
+                                    let why = st
+                                        .send_plan_error()
+                                        .unwrap_or_else(|| "enter an amount".into());
+                                    ui.label(
+                                        egui::RichText::new(format!("{}  ({})", why, setting_txt))
+                                            .color(th::TEXT_MUTED),
+                                    );
+                                }
+                            }
                             ui.end_row();
                             ui.label(egui::RichText::new("Change:").color(th::TEXT_SECONDARY));
                             ui.horizontal(|ui| {
@@ -4888,6 +4927,10 @@ impl Tri7App {
                 .on_disabled_hover_text("Requires daemon integration");
             }
         });
+        if let Some(err) = self.st.options_save_error.clone() {
+            th::inline_notice(ui, th::Notice::Error, "Options not applied", &err);
+            ui.add_space(6.0);
+        }
         // sticky footer: Cancel / Apply / OK
         ui.add_space(8.0);
         ui.separator();
@@ -4903,8 +4946,19 @@ impl Tri7App {
                 }
             }
             if th::primary_button(ui, "OK").clicked() {
-                let _ = self.st.save_options_action();
-                self.st.goto(ret);
+                // OK must not hide a failed apply: if the node refused the fee
+                // (or is unreachable) the dialog STAYS OPEN with the reason,
+                // exactly like the legacy apply-then-close behaviour.
+                match self.st.save_options_action() {
+                    Ok(()) => {
+                        self.st.status_log.push("options saved".into());
+                        self.st.goto(ret);
+                    }
+                    Err(e) => {
+                        self.st.options_save_error = Some(e.clone());
+                        self.st.status_log.push(format!("options: {}", e));
+                    }
+                }
             }
             for line in self.st.status_log.iter().rev().take(2) {
                 th::text_meta(ui, line);

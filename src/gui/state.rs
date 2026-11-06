@@ -1018,16 +1018,118 @@ pub struct SendRequest {
     pub from: String,
     pub dest_payload: [u8; 21],
     pub amount_sats: i64,
+    /// the CONVERGED total the operator was shown (funding + display only)
     pub fee_sats: i64,
+    /// the LIVE per-size-step rate (nTransactionFee) the builder must scale —
+    /// never the converged total, or the builder would scale it twice
+    pub fee_rate_sats: i64,
     pub change_payload: [u8; 21],
 }
 
 /// Validate the form exactly like the legacy Send Coins dialog (labels from
 /// sendcoinsdialog.ui). Returns the resolved request.
+/// The transaction this form implies, converged with the SAME function the
+/// RPC builder uses (`spend::select_with_fee`). `None` when the form has no
+/// usable numbers yet (empty/invalid amount), so a half-typed form shows no
+/// estimate instead of a wrong one.
+pub fn plan_send(
+    form: &SendFormState,
+    derived: &DerivedWallet,
+    keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
+    paytxfee_sats: i64,
+) -> Option<spend::FeeShape> {
+    plan_send_why(form, derived, keys, paytxfee_sats).ok()
+}
+
+/// Same as `plan_send` but keeps the reason, so the GUI can explain WHY there
+/// is no estimate (bad amount vs. no key vs. insufficient funds).
+pub fn plan_send_why(
+    form: &SendFormState,
+    derived: &DerivedWallet,
+    keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
+    paytxfee_sats: i64,
+) -> Result<spend::FeeShape, String> {
+    let amount = parse_tri(&form.amount)
+        .map_err(|e| format!("amount: {e}"))
+        .and_then(|a| {
+            if a > 0 {
+                Ok(a)
+            } else {
+                Err("amount must be larger than 0".to_string())
+            }
+        })?;
+    let pool = spend_pool(form, derived, keys)?;
+    if pool.is_empty() {
+        return Err(format!("no spendable inputs for {}", form.from));
+    }
+    spend::select_with_fee(&pool, &[amount], paytxfee_sats)
+}
+
+/// Candidate coins for the form: the coin-control selection when one exists,
+/// otherwise every coin of the sending address. Keys come from the derived
+/// wallet so each candidate carries the pubkey/secret the builder would use.
+fn spend_pool(
+    form: &SendFormState,
+    derived: &DerivedWallet,
+    keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
+) -> Result<Vec<spend::SpendInput>, String> {
+    let rows: Vec<&UtxoRec> = if form.selected.is_empty() {
+        derived
+            .utxos
+            .iter()
+            .filter(|u| u.address == form.from)
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        for i in &form.selected {
+            let u = derived
+                .utxos
+                .get(*i)
+                .ok_or_else(|| format!("coin control index {} out of range", i))?;
+            if u.address != form.from {
+                return Err("Coin control inputs must belong to the sending address".into());
+            }
+            v.push(u);
+        }
+        v
+    };
+    let mut out = Vec::new();
+    for u in rows {
+        let key = keys
+            .get(&u.address)
+            .ok_or_else(|| format!("no key for {}", u.address))?;
+        out.push(spend::SpendInput {
+            txid: u.txid,
+            n: u.n,
+            value: u.value_sats,
+            script_pubkey: u.script.clone(),
+            height: u.height,
+            tx_time: u.tx_time,
+            is_coinbase: u.prev_kind == "coinbase",
+            is_coinstake: u.prev_kind == "coinstake",
+            secret: key.1,
+            pubkey: key.0.clone(),
+        });
+    }
+    Ok(out)
+}
+
 pub fn validate_send_form(
     form: &SendFormState,
     derived: &DerivedWallet,
     keys: &HashMap<String, (Vec<u8>, [u8; 32])>, // address -> (pubkey, secret)
+) -> Result<SendRequest, String> {
+    // no live node: the chain minimum is the honest floor
+    validate_send_form_with_fee(form, derived, keys, spend::MIN_FEE_SATS)
+}
+
+/// Same validation with the node's LIVE fee setting (getwalletinfo.paytxfee).
+/// Kept as one implementation: the old single-argument form delegates here.
+pub fn validate_send_form_with_fee(
+    form: &SendFormState,
+    derived: &DerivedWallet,
+    keys: &HashMap<String, (Vec<u8>, [u8; 32])>,
+    paytxfee_sats: i64,
 ) -> Result<SendRequest, String> {
     if form.from.is_empty() {
         return Err("Select a sending address (from-address)".into());
@@ -1042,11 +1144,29 @@ pub fn validate_send_form(
     if amount <= 0 {
         return Err("The amount to pay must be larger than 0".into());
     }
-    let fee = if form.fee.trim().is_empty() {
+    // The fee box is a FLOOR, not an override: consensus charges the chain
+    // minimum (0.0001 TRI) plus the wallet's byte schedule no matter what is
+    // typed here, so a lower value is refused with the real number instead of
+    // silently becoming a transaction the network can reject.
+    let typed = if form.fee.trim().is_empty() {
         0i64
     } else {
         parse_tri(&form.fee).map_err(|e| format!("The fee is not valid: {}", e))?
     };
+    // Floor from the CONVERGED plan for this very form — the same call the
+    // Send panel displays and the RPC builder charges, so the number the
+    // operator sees, the number validated here and the number built are one.
+    let plan = spend::select_with_fee(&spend_pool(form, derived, keys)?, &[amount], paytxfee_sats)
+        .map_err(|_| "Insufficient funds!".to_string())?;
+    let floor = plan.fee;
+    if typed > 0 && typed < floor {
+        return Err(format!(
+            "The fee is below the network minimum ({} {})",
+            format_tri(floor),
+            TICKER
+        ));
+    }
+    let fee = typed.max(floor);
     let change_payload = if form.use_custom_change && !form.custom_change.trim().is_empty() {
         validate_address(&form.custom_change)
             .map_err(|e| format!("The custom change address is not valid: {}", e))?
@@ -1086,6 +1206,7 @@ pub fn validate_send_form(
         from: form.from.clone(),
         dest_payload,
         amount_sats: amount,
+        fee_rate_sats: paytxfee_sats.max(spend::MIN_FEE_SATS),
         fee_sats: fee,
         change_payload,
     })
@@ -1176,30 +1297,61 @@ pub fn build_signed_send(
         })
         .collect::<Result<_, String>>()?;
 
-    let target = req
-        .amount_sats
-        .checked_add(req.fee_sats)
-        .ok_or_else(|| "amount + fee overflow".to_string())?;
     // Legacy dialog wording (sendcoinsdialog.ui) — checked before selection so
     // the operator sees the exact legacy error, not the raw selector text.
     let pool_total: i64 = pool.iter().map(|u| u.value_sats).sum();
-    if target > pool_total {
+    if req.amount_sats.checked_add(req.fee_sats).map(|t| t > pool_total).unwrap_or(true) {
         return Err("Insufficient funds!".into());
     }
-    let selected = spend::select_utxos_covering(&inputs, target)?;
+    // Converge coins and fee with the SAME function the panel and validation
+    // use, so the built transaction cannot drift from what was shown. A typed
+    // fee above the estimate is a FLOOR the operator chose: selection must
+    // reserve it, so pass max(rate, floor) — the builder then pays the floor on
+    // any shape whose own scheduled fee is at or below it.
+    let rate = req.fee_rate_sats.max(spend::MIN_FEE_SATS);
+    let floor = req.fee_sats.max(spend::MIN_FEE_SATS);
+    // reserve the floor: converge with the rate, but never select less than
+    // amount + the fee the operator agreed to
+    let mut shape = spend::select_with_fee(&inputs, &[req.amount_sats], rate)?;
+    if shape.fee < floor {
+        let sum: i64 = shape.selected.iter().map(|c| c.value).sum();
+        if sum < req.amount_sats + floor {
+            shape.selected = spend::select_utxos_covering(&inputs, req.amount_sats + floor)?;
+            shape.fee = floor;
+            shape.n_inputs = shape.selected.len();
+        }
+    }
+    let selected = shape.selected.clone();
     let dest_script = p2pkh_script_for(&req.dest_payload);
     let change_script = p2pkh_script_for(&req.change_payload);
     let n_time = now.max(selected.iter().map(|i| i.tx_time).max().unwrap_or(0));
     let spend_height = tip_height + 1;
-    let plan = spend::build_spend(
+    let plan = spend::build_spend_outputs_floor(
         &selected,
-        dest_script,
-        req.amount_sats,
+        vec![crate::legacy::Vout {
+            value: req.amount_sats,
+            script_pubkey: dest_script,
+        }],
         Some(change_script),
-        req.fee_sats,
+        rate,   // size schedule
+        floor,  // the total the operator agreed to, honoured verbatim
         n_time,
         spend_height,
     )?;
+    // FEE POLICY (documented, symmetric):
+    //   req.fee_sats is the floor the operator agreed to (the converged estimate
+    //   unless they typed a higher number). The builder converges the shape at
+    //   the live RATE; the signed transaction must then pay EXACTLY that floor.
+    //     built < floor  -> the tx would underpay what was shown  -> refuse
+    //     built > floor  -> the real signed size forced more       -> refuse
+    //                       (the operator never agreed to that number; they
+    //                        must re-estimate and confirm)
+    if plan.fee != req.fee_sats {
+        return Err(format!(
+            "fee mismatch: the signed transaction pays {} but the form was set to {}; the shape changed, so re-open Send to accept the new estimate",
+            plan.fee, req.fee_sats
+        ));
+    }
     // self-verify exactly like the CLI dry runs
     for (i, input) in selected.iter().enumerate() {
         spend::verify_input(&plan.tx, i, &input.script_pubkey)?;
