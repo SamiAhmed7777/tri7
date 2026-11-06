@@ -449,6 +449,29 @@ pub fn text_input_h(
     .inner
 }
 
+/// Styled MASKED single-line input (passphrases): identical treatment to
+/// `text_input_h`, with the characters hidden. Never attaches a copy menu —
+/// a passphrase must not land on the clipboard by accident.
+pub fn password_input(ui: &mut Ui, width: f32, buf: &mut String) -> egui::Response {
+    ui.scope(|ui| {
+        let v = &mut ui.style_mut().visuals.widgets;
+        v.inactive.bg_fill = INPUT_BG;
+        v.inactive.weak_bg_fill = INPUT_BG;
+        v.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+        v.hovered.bg_fill = INPUT_BG;
+        v.hovered.bg_stroke = Stroke::new(1.0, INPUT_HOVER);
+        v.active.bg_fill = INPUT_BG;
+        v.active.bg_stroke = Stroke::new(1.5, BRAND_RED);
+        ui.add(
+            egui::TextEdit::singleline(buf)
+                .password(true)
+                .desired_width(width)
+                .margin(egui::Margin::symmetric(10.0, 8.0)),
+        )
+    })
+    .inner
+}
+
 /// Styled single-line input with placeholder text.
 pub fn text_input_hint(ui: &mut Ui, width: f32, buf: &mut String, hint: &str) -> egui::Response {
     text_input_h(ui, width, buf, Some(hint))

@@ -164,10 +164,71 @@ impl GuiSync {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// What the passphrase dialog is about to do (legacy askpassphrasedialog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassphraseMode {
+    /// encrypt a currently-unencrypted wallet
+    Encrypt,
+    /// change the passphrase of an encrypted wallet
+    Change,
+    /// temporarily unlock an encrypted wallet for staking/spending
+    Unlock,
+    /// remove encryption entirely
+    Decrypt,
+}
+
+impl PassphraseMode {
+    pub fn title(&self) -> &'static str {
+        match self {
+            PassphraseMode::Encrypt => "Encrypt Wallet",
+            PassphraseMode::Change => "Change Passphrase",
+            PassphraseMode::Unlock => "Unlock Wallet",
+            PassphraseMode::Decrypt => "Remove Encryption",
+        }
+    }
+    /// Two passphrase boxes, or one?
+    pub fn needs_confirm(&self) -> bool {
+        matches!(self, PassphraseMode::Encrypt | PassphraseMode::Change)
+    }
+    /// Does the current passphrase have to be supplied?
+    pub fn needs_old(&self) -> bool {
+        !matches!(self, PassphraseMode::Encrypt)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PassphraseDialog {
+    pub mode: PassphraseMode,
+    pub old_pass: String,
+    pub new_pass: String,
+    pub confirm: String,
+    pub error: Option<String>,
+    /// unlock duration in seconds (Unlock mode)
+    pub unlock_secs: String,
+}
+
+impl PassphraseDialog {
+    pub fn new(mode: PassphraseMode) -> Self {
+        PassphraseDialog {
+            mode,
+            old_pass: String::new(),
+            new_pass: String::new(),
+            confirm: String::new(),
+            error: None,
+            unlock_secs: "300".into(),
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct Dialogs {
     pub about: bool,
     pub qr: bool,
+    /// passphrase dialog state (legacy askpassphrasedialog): encrypt, change,
+    /// unlock or decrypt the open wallet. Fields live here so the modal is
+    /// pure view and every action goes through one tested entry point.
+    pub passphrase: Option<PassphraseDialog>,
+    /// result banner for the last passphrase action (Ok = message, Err = why)
     pub encrypt: Option<String>,
     pub backup: Option<Result<String, String>>,
     pub save_tx_path: String,
@@ -1185,7 +1246,13 @@ impl AppState {
     }
 
     /// The load-screen action: wallet + UTXO derivation pass + tip + stake.
+    /// Open the configured wallet. First open of a LEGACY Berkeley-DB wallet
+    /// transitions it to SQLite automatically (Sami: "the wallet should
+    /// automatically transition from BDB to SQLite"): every record section is
+    /// carried over, the original file is kept beside it as
+    /// `wallet.bdb-<timestamp>`, and the modern wallet opens at the same path.
     pub fn load_wallet_action(&mut self) -> Result<(), String> {
+        self.auto_migrate_legacy_wallet()?;
         let wallet = load_wallet(Path::new(&self.cfg.wallet_path))?;
         // ONE-FOLDER DESIGN (Sami): the chosen folder IS the wallet
         // environment - state files live beside wallet.dat automatically.
@@ -1279,6 +1346,33 @@ impl AppState {
         // GUI keystore with the reason in the status log).
         self.ensure_wallet_rw();
         Ok(())
+    }
+
+    /// BDB → SQLite transition on open (idempotent; a no-op for SQLite files).
+    fn auto_migrate_legacy_wallet(&mut self) -> Result<(), String> {
+        let path = Path::new(&self.cfg.wallet_path);
+        if !crate::bdb_import::is_bdb_wallet(path) {
+            return Ok(());
+        }
+        match crate::bdb_import::auto_convert_in_place(path)? {
+            crate::bdb_import::AutoConvert::Converted(r) => {
+                let msg = format!(
+                    "Legacy Berkeley-DB wallet converted to SQLite: {} keys, {} encrypted, \
+                     {} labels, {} settings, {} keypool entries carried; the original was kept \
+                     as a .bdb-* file beside it. Legacy transaction records are rebuilt from \
+                     the chain ({} not copied).",
+                    r.keys, r.encrypted_keys, r.names, r.settings, r.pool,
+                    if r.not_copied.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        r.not_copied.join(", ")
+                    }
+                );
+                self.status_log.push(msg);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Open (or keep) the READ-WRITE wallet.dat session for `cfg.wallet_path`.
@@ -2119,13 +2213,110 @@ impl AppState {
         Ok(copied)
     }
 
+    /// File ▸ Encrypt Wallet… — opens the legacy askpassphrasedialog against
+    /// the REAL wallet engine (src/wallet_encrypt.rs), choosing the mode from
+    /// the wallet's current state. Encryption itself always runs through the
+    /// node RPC (it owns the wallet file); the dialog is the only UI.
     pub fn encrypt_wallet_stub_action(&mut self) {
-        self.dialogs.encrypt = Some(
-            "Wallet encryption is not yet supported in the tri7 wallet engine. \
-             The legacy wallet.dat is unencrypted; this button will gain its \
-             original function (askpassphrasedialog) with daemon integration."
-                .into(),
-        );
+        let mode = if self.wallet_encrypted() {
+            PassphraseMode::Change
+        } else {
+            PassphraseMode::Encrypt
+        };
+        self.dialogs.passphrase = Some(PassphraseDialog::new(mode));
+        self.dialogs.encrypt = None;
+    }
+
+    /// True when the open wallet carries mkey/ckey rows.
+    pub fn wallet_encrypted(&self) -> bool {
+        crate::wallet_encrypt::is_encrypted(Path::new(&self.cfg.wallet_path))
+    }
+
+    /// Validate the pending dialog and build the RPC call it implies.
+    ///
+    /// Split out from `apply_passphrase_action` so the rules are testable
+    /// without a live node: the eight-character minimum applies ONLY when a
+    /// NEW passphrase is being set (encrypt / change), while Unlock and
+    /// Decrypt only ever need the CURRENT one.
+    pub fn passphrase_request(&self) -> Result<(String, Vec<serde_json::Value>), String> {
+        let Some(dlg) = self.dialogs.passphrase.clone() else {
+            return Err("no passphrase action pending".into());
+        };
+        match dlg.mode {
+            PassphraseMode::Encrypt => {
+                if dlg.new_pass != dlg.confirm {
+                    return Err("The passphrase and its confirmation do not match.".into());
+                }
+                if dlg.new_pass.len() < 8 {
+                    return Err(
+                        "Use at least 8 characters — this passphrase guards every key.".into(),
+                    );
+                }
+                Ok(("encryptwallet".into(), vec![serde_json::json!(dlg.new_pass)]))
+            }
+            PassphraseMode::Change => {
+                if dlg.old_pass.is_empty() {
+                    return Err("Enter the current passphrase.".into());
+                }
+                if dlg.new_pass != dlg.confirm {
+                    return Err("The passphrase and its confirmation do not match.".into());
+                }
+                if dlg.new_pass.len() < 8 {
+                    return Err(
+                        "Use at least 8 characters — this passphrase guards every key.".into(),
+                    );
+                }
+                Ok((
+                    "walletpassphrasechange".into(),
+                    vec![
+                        serde_json::json!(dlg.old_pass),
+                        serde_json::json!(dlg.new_pass),
+                    ],
+                ))
+            }
+            PassphraseMode::Unlock => {
+                if dlg.old_pass.is_empty() {
+                    return Err("Enter the current passphrase.".into());
+                }
+                let secs = dlg.unlock_secs.trim().parse::<u64>().unwrap_or(0);
+                if secs == 0 {
+                    return Err("Unlock duration must be a positive number of seconds.".into());
+                }
+                Ok((
+                    "walletpassphrase".into(),
+                    vec![serde_json::json!(dlg.old_pass), serde_json::json!(secs)],
+                ))
+            }
+            PassphraseMode::Decrypt => {
+                if dlg.old_pass.is_empty() {
+                    return Err("Enter the current passphrase.".into());
+                }
+                Ok(("decryptwallet".into(), vec![serde_json::json!(dlg.old_pass)]))
+            }
+        }
+    }
+
+    /// Run whatever the passphrase dialog asked for. Returns the message the
+    /// dialog then shows; on error nothing on disk has changed.
+    pub fn apply_passphrase_action(&mut self) -> Result<String, String> {
+        let dlg = self
+            .dialogs
+            .passphrase
+            .clone()
+            .ok_or("no passphrase action pending")?;
+        let (method, args) = self.passphrase_request()?;
+        let addr = self
+            .live_rpc_addr()
+            .ok_or("wallet encryption needs the node: set the RPC address (tri7d listens on loopback)")?;
+        let reply = crate::gui::rpc_client::rpc_call(&addr, &method, &args)
+            .map_err(|e| format!("{method}: {e}"))?;
+        self.dialogs.passphrase = None;
+        // the daemon owns the wallet file: re-read it so the UI reflects the
+        // new state immediately (and never pretends a failed write landed)
+        if let Err(e) = self.reload_wallet_keys() {
+            self.status_log.push(format!("reload after {method}: {e}"));
+        }
+        Ok(format!("{}: {}", dlg.mode.title(), reply))
     }
 
     pub fn save_options_action(&mut self) -> Result<(), String> {

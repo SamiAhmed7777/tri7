@@ -872,6 +872,43 @@ impl BlockStore {
         })
     }
 
+    /// Cache-ONLY load: swap in the on-disk cache when it matches the blocks
+    /// file, otherwise leave the store unready. Never builds, never writes —
+    /// a read-only consumer (tx prevout lookup) must not disturb an index the
+    /// live node owns. Returns true when the cache was adopted.
+    pub fn load_cache_only(&self) -> bool {
+        let (Some(path), Some(dir)) = (self.path.clone(), self.cache_dir.clone()) else {
+            return false;
+        };
+        let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) else {
+            return false;
+        };
+        let Ok(Some(b)) = load_caches(&dir, len, None) else {
+            return false;
+        };
+        // READ-ONLY handle: a lookup consumer must never append to the store
+        let Ok(file) = std::fs::File::open(&path) else {
+            return false;
+        };
+        let inner = StoreInner {
+            blocks: b.blocks,
+            txs: b.txs,
+            heights_ok: b.heights_ok,
+            file,
+            build_secs: 0,
+            appendix: std::sync::RwLock::new(Vec::new()),
+            appendix_by_key: std::sync::RwLock::new(std::collections::HashMap::new()),
+            unsynced: std::sync::atomic::AtomicU64::new(0),
+            writable: std::sync::atomic::AtomicBool::new(false),
+        };
+        if let Ok(mut g) = self.state.write() {
+            *g = Some(Arc::new(inner));
+            true
+        } else {
+            false
+        }
+    }
+
     /// Background build: cache-first, fall back to a full scan, then swap the
     /// ready store in. Failures are recorded, never panicked into callers.
     pub fn spawn_build(self: &Arc<Self>, oracle: Option<BuildOracle>) {

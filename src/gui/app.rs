@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use crate::gui::app_state::AppState;
 use crate::gui::explorer as ex;
+use crate::gui::app_state as ap;
 use crate::gui::state as s;
 use crate::gui::state::{Screen, UiConfig, UtxoRec};
 use crate::gui::theme as th;
@@ -5694,6 +5695,134 @@ impl Tri7App {
                     });
                 });
             self.st.dialogs.about = open;
+        }
+        // ---- passphrase dialog (legacy askpassphrasedialog) --------------
+        if self.st.dialogs.passphrase.is_some() {
+            // bind the LIVE dialog state so typing reaches the model
+            let mut dlg = self.st.dialogs.passphrase.clone().unwrap();
+            let mut open = true;
+            let mut submit = false;
+            let mut cancel = false;
+            let mut confirm_now = false;
+            egui::Window::new(dlg.mode.title())
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    let what = match dlg.mode {
+                        ap::PassphraseMode::Encrypt => {
+                            "Encrypting writes a new master key into wallet.dat. \
+                             The passphrase is required to stake, send or read keys \
+                             afterwards — nothing is stored in this wallet without it."
+                        }
+                        ap::PassphraseMode::Change => {
+                            "Changing the passphrase re-encrypts every key with the new one."
+                        }
+                        ap::PassphraseMode::Unlock => {
+                            "Unlocks the wallet for a limited time so it can stake and \
+                             sign. It locks itself again when the time runs out."
+                        }
+                        ap::PassphraseMode::Decrypt => {
+                            "Removing encryption writes every key back in PLAINTEXT. \
+                             Only do this if you fully trust this computer."
+                        }
+                    };
+                    th::inline_notice(
+                        ui,
+                        if dlg.mode == ap::PassphraseMode::Decrypt {
+                            th::Notice::Warning
+                        } else {
+                            th::Notice::Info
+                        },
+                        dlg.mode.title(),
+                        what,
+                    );
+                    ui.add_space(6.0);
+                    egui::Grid::new("passphrase_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            if dlg.mode.needs_old() {
+                                ui.label(
+                                    egui::RichText::new("Current passphrase:")
+                                        .color(th::TEXT_SECONDARY),
+                                );
+                                th::password_input(ui, 240.0, &mut dlg.old_pass);
+                                ui.end_row();
+                            }
+                            // only the modes that SET a passphrase show the
+                            // new-passphrase pair; Unlock and Decrypt never do
+                            if dlg.mode.needs_confirm() {
+                                ui.label(
+                                    egui::RichText::new("New passphrase:")
+                                        .color(th::TEXT_SECONDARY),
+                                );
+                                th::password_input(ui, 240.0, &mut dlg.new_pass);
+                                ui.end_row();
+                            }
+                            if dlg.mode.needs_confirm() {
+                                ui.label(
+                                    egui::RichText::new("Repeat:")
+                                        .color(th::TEXT_SECONDARY),
+                                );
+                                th::password_input(ui, 240.0, &mut dlg.confirm);
+                                ui.end_row();
+                            }
+                            if dlg.mode == ap::PassphraseMode::Unlock {
+                                ui.label(
+                                    egui::RichText::new("Unlock for (seconds):")
+                                        .color(th::TEXT_SECONDARY),
+                                );
+                                th::text_input(ui, 90.0, &mut dlg.unlock_secs);
+                                ui.end_row();
+                            }
+                        });
+                    if let Some(err) = &dlg.error {
+                        ui.add_space(4.0);
+                        th::inline_notice(ui, th::Notice::Error, "Cannot continue", err);
+                    }
+                    if dlg.mode.needs_confirm() && !dlg.new_pass.is_empty() && dlg.new_pass == dlg.confirm
+                    {
+                        // legacy askpassphrasedialog: OK stays disabled until
+                        // the confirmation matches
+                        confirm_now = true;
+                    }
+                    ui.add_space(6.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ready = !dlg.mode.needs_confirm() || confirm_now;
+                        if th::primary_button(ui, "OK").clicked() && ready {
+                            submit = true;
+                        }
+                        if th::secondary_button(ui, "Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            // write the edited fields back into the model (typing lives above)
+            if let Some(cur) = self.st.dialogs.passphrase.as_mut() {
+                cur.old_pass = dlg.old_pass.clone();
+                cur.new_pass = dlg.new_pass.clone();
+                cur.confirm = dlg.confirm.clone();
+                cur.unlock_secs = dlg.unlock_secs.clone();
+            }
+            if submit {
+                match self.st.apply_passphrase_action() {
+                        Ok(msg) => {
+                            self.st.status_log.push(msg.clone());
+                            self.st.dialogs.encrypt = Some(msg);
+                        }
+                        Err(e) => {
+                            if let Some(mut stay) = self.st.dialogs.passphrase.take() {
+                                stay.error = Some(e.clone());
+                                self.st.dialogs.passphrase = Some(stay);
+                            }
+                            self.st.status_log.push(format!("passphrase: {e}"));
+                        }
+                }
+            } else if cancel || !open {
+                self.st.dialogs.passphrase = None;
+            }
         }
         if let Some(msg) = self.st.dialogs.encrypt.clone() {
             let mut open = true;

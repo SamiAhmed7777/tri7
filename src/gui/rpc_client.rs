@@ -1,7 +1,11 @@
-//! Read-only JSON-RPC client for the tri7d native surface (127.0.0.1:19114).
+//! JSON-RPC client for the tri7d native surface (127.0.0.1:19114).
 //! Pure std (no HTTP crate) — mirrors follow_tip.rs's probe. Used by the
-//! Debug window (rpcconsole) and the connection-info panel. No wallet-write
-//! method is ever callable through tri7d anyway (-32601, never forwarded);
+//! Debug window (rpcconsole), the connection-info panel, and the passphrase
+//! dialog. The allow list is deliberately RESTRICTED: reads, the staking /
+//! messaging operations the GUI drives, and the wallet-file passphrase verbs
+//! (encrypt / change / unlock / lock / decrypt). Anything that moves coins or
+//! exports secrets (sendtoaddress, dumpprivkey, dumpwallet, import*, move) is
+//! refused client-side before a byte hits the wire;
 //! this client additionally restricts itself to the read-only method allow
 //! list as defense in depth.
 
@@ -47,6 +51,13 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // wallet file state (File ▸ Encrypt / Change / Unlock / Remove) — the
+    // passphrase is never stored by the GUI, and the node validates it
+    "encryptwallet",
+    "walletpassphrase",
+    "walletpassphrasechange",
+    "walletlock",
+    "decryptwallet",
 ];
 
 pub fn is_allowed(method: &str) -> bool {
@@ -122,7 +133,13 @@ mod tests {
     fn rpc_call_parses_canned_response_and_enforces_allowlist() {
         // allow-list enforcement happens before any I/O
         assert!(!is_allowed("sendtoaddress"));
-        assert!(!is_allowed("walletpassphrase"));
+        assert!(!is_allowed("dumpprivkey"));
+        assert!(!is_allowed("move"));
+        // the passphrase verbs ARE reachable: the Encrypt dialog drives them
+        assert!(is_allowed("walletpassphrase"));
+        assert!(is_allowed("encryptwallet"));
+        assert!(is_allowed("walletpassphrasechange"));
+        assert!(is_allowed("decryptwallet"));
         assert!(is_allowed("getconnectioncount"));
         assert!(rpc_call("127.0.0.1:1", "sendtoaddress", &[]).is_err());
 

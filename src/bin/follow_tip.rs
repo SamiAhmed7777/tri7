@@ -4526,6 +4526,10 @@ struct OpsAdapter {
     wallet_path: Option<PathBuf>,
     /// state dir — locates the opt-in address index (addressindex.db)
     state_dir: PathBuf,
+    /// wallet bookkeeping published to the passive native handlers
+    extras: Arc<std::sync::RwLock<rpc::WalletExtras>>,
+    /// address → pubkey for the wallet's own keys
+    pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 /// Legacy address-index verbs take either `[["addr1","addr2"]]` or
@@ -4604,7 +4608,58 @@ fn p2pkh_script_for_payload(payload: &[u8; 21]) -> Vec<u8> {
     s
 }
 
+/// Compressed public key for a secret (the wallet's key shape).
+fn pubkey_from_secret(secret: &[u8; 32]) -> Vec<u8> {
+    let secp = secp256k1::Secp256k1::signing_only();
+    match secp256k1::SecretKey::from_slice(secret) {
+        Ok(sk) => secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Find the scriptPubKey of (prev_hash, prev_n) in the node's own block store
+/// by opening the blockindex read-only and reading the containing tx. Used by
+/// signrawtransaction when the caller did not pass prevtxs. Returns None when
+/// the prevout is not in this node's store (nothing is guessed).
+fn lookup_prev_script(state_dir: &std::path::Path, prev_hash: &Hash, prev_n: u32) -> Option<Vec<u8>> {
+    let index_dir = state_dir.join("index");
+    let blocks = state_dir.join("blk0001.dat");
+    if !blocks.exists() || !index_dir.exists() {
+        return None;
+    }
+    // read-only BlockStore: cache-first load, never builds/writes an index
+    let store = tri7_core::blockindex::BlockStore::new(Some(blocks), Some(index_dir));
+    if !store.load_cache_only() {
+        return None; // no warm cache: refuse rather than scan/rewrite
+    }
+    match store.tx_by_id(prev_hash) {
+        Ok(Some(hit)) => hit.tx.vout.get(prev_n as usize).map(|o| o.script_pubkey.clone()),
+        _ => None,
+    }
+}
+
+/// RPC verbs that must answer from the moment the socket is open, before the
+/// live wallet view finishes seeding. Each has a file-only or process-only
+/// implementation in the passive layer, so gating them on `ready()` only
+/// produces a "warming up" error for work that is already possible.
+const EARLY_OPS: &[&str] = &[
+    "stop",
+    "createrawtransaction",
+    "encryptwallet",
+    "walletpassphrasechange",
+    "decryptwallet",
+    "getnewpubkey",
+    "settxfee",
+];
+
 impl OpsAdapter {
+    /// True when this verb may run before the live wallet view is ready.
+    fn ready_early(&self, method: &str) -> bool {
+        rpc::NodeOps::ready(self) || EARLY_OPS.contains(&method)
+    }
+
     /// Build and sign a spend from this node's wallet: pick a source address by
     /// balance, select coins, build, sign, then self-verify (signature per
     /// input + connect check). Shared by sendtoaddress and sendmany so neither
@@ -5035,6 +5090,313 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     .map_err(|e| (-1, format!("checkwallet: {e}")))?;
                 Ok(rep.to_json())
             }
+            // ---- legacy parity 2026-11-06: offline tx workflow --------------
+            // signrawtransaction <hex> [prevtxs] [privkeys] [sighashtype]
+            //
+            // Signs each input whose prevout the live wallet can resolve:
+            //   1. prevtxs entries carry {txid, vout, scriptPubKey} (the
+            //      offline/cold path, where the node has no index for it)
+            //   2. otherwise the node's own block store is consulted
+            //   3. privkeys supplement the wallet's keys by WIF
+            // Every signature is verified against the resulting scriptSig
+            // before it is reported, so `complete` is a proven claim.
+            "signrawtransaction" | "signrawtransactionwithwallet" => {
+                let hex_in = ps(0).ok_or_else(|| (-8, "expected raw tx hex".to_string()))?;
+                let mut tx = tri7_core::rawtx::tx_from_hex(&hex_in)
+                    .map_err(|e| (-22, format!("TX decode failed: {e}")))?;
+                // sighash type: legacy accepts the NAME ("ALL", "NONE",
+                // "SINGLE", each optionally ANYONECANPAY)
+                let hash_type = match ps(3).map(|s| s.to_ascii_uppercase()) {
+                    None => 1,
+                    Some(s) => {
+                        let mut any = 1;
+                        if s.contains("ANYONECANPAY") { any = 0x80; }
+                        if s.starts_with("SINGLE") { any | 3 }
+                        else if s.starts_with("NONE") { any | 2 }
+                        else { any | 1 }
+                    }
+                };
+
+                // extra keys supplied by the caller (offline signing)
+                let mut extra: HashMap<Vec<u8>, [u8; 32]> = HashMap::new();
+                if let Some(serde_json::Value::Array(wifs)) = p(2) {
+                    for w in wifs {
+                        let Some(wif) = w.as_str() else { continue };
+                        let (secret, compressed) = tri7_core::keytool::wif_decode(wif)
+                            .map_err(|e| (-5, format!("bad privkey: {e}")))?;
+                        if !compressed {
+                            // the wallet stores compressed rows only; an
+                            // uncompressed key would sign for a different
+                            // address than the one it was exported for
+                            return Err((-5, "uncompressed WIF is not supported — its address differs".to_string()));
+                        }
+                        let pubkey = pubkey_from_secret(&secret);
+                        extra.insert(pubkey, secret);
+                    }
+                }
+                // caller-supplied prevout scripts
+                let mut given: HashMap<(String, u32), Vec<u8>> = HashMap::new();
+                if let Some(serde_json::Value::Array(list)) = p(1) {
+                    for e in list {
+                        let (Some(txid), Some(vout), Some(spk)) = (
+                            e.get("txid").and_then(|v| v.as_str()),
+                            e.get("vout").and_then(|v| v.as_u64()),
+                            e.get("scriptPubKey").and_then(|v| v.as_str()),
+                        ) else {
+                            return Err((-8, "each prevtxs entry needs txid, vout and scriptPubKey".to_string()));
+                        };
+                        let bytes = tri7_core::p2p::hex_decode(spk)
+                            .map_err(|e| (-8, format!("prevtxs scriptPubKey: {e}")))?;
+                        given.insert((txid.to_string(), vout as u32), bytes);
+                    }
+                }
+
+                let wl = self.wl.lock().unwrap();
+                let wallet_ready = wl.is_some();
+                if wl.is_none() && p(2).is_none() {
+                    // a locked/absent wallet is not an error by itself — but
+                    // without either the wallet or caller keys nothing can be
+                    // signed, and saying so keeps `complete:false` honest
+                    log("signrawtransaction: wallet view not ready and no privkeys supplied");
+                }
+                let mut complete = true;
+                let mut errors: Vec<String> = Vec::new();
+                let mut signed = 0usize;
+                for i in 0..tx.vin.len() {
+                    let prev_hash = tx.vin[i].prev_hash;
+                    let prev_n = tx.vin[i].prev_n;
+                    let display = tri7_core::p2p::internal_to_display(&prev_hash);
+                    if !tx.vin[i].script_sig.is_empty() {
+                        continue; // already signed; legacy leaves it alone
+                    }
+                    let prev_script = match given.get(&(display.clone(), prev_n)) {
+                        Some(s) => s.clone(),
+                        None => match lookup_prev_script(&self.state_dir, &prev_hash, prev_n) {
+                            Some(s) => s,
+                            None => {
+                                complete = false;
+                                errors.push(format!("input {i}: prevout {display}:{prev_n} unavailable (pass it in prevtxs)"));
+                                continue;
+                            }
+                        },
+                    };
+                    // who owns this prevout?
+                    let owner = match tri7_core::address::script_to_dest(&prev_script) {
+                        Some(d) => d.payload(),
+                        None => {
+                            complete = false;
+                            errors.push(format!("input {i}: non-standard scriptPubKey"));
+                            continue;
+                        }
+                    };
+                    let mut chosen: Option<(Vec<u8>, [u8; 32])> = None;
+                    let mut chosen_by_wallet = false;
+                    if let Some(w) = wl.as_ref() {
+                        for k in w.wallet.keys.iter() {
+                            if tri7_core::address::pubkey_payload(&k.pubkey) == owner {
+                                chosen = Some((k.pubkey.clone(), k.secret));
+                                chosen_by_wallet = true;
+                                break;
+                            }
+                        }
+                    }
+                    if chosen.is_none() {
+                        for (pk, sec) in extra.iter() {
+                            if tri7_core::address::pubkey_payload(pk) == owner {
+                                chosen = Some((pk.clone(), *sec));
+                                break;
+                            }
+                        }
+                    }
+                    let Some((pubkey, secret)) = chosen else {
+                        complete = false;
+                        errors.push(format!("input {i}: no key for {}", tri7_core::address::payload_to_address(&owner)));
+                        continue;
+                    };
+                    if chosen_by_wallet && wl.as_ref().map(|w| w.locked).unwrap_or(false) {
+                        complete = false;
+                        errors.push("wallet is locked — run walletpassphrase first".to_string());
+                        continue;
+                    }
+                    if let Err(e) = tri7_core::spend::sign_input(&mut tx, i, &prev_script, &secret, &pubkey, hash_type) {
+                        complete = false;
+                        errors.push(format!("input {i}: {e}"));
+                        continue;
+                    }
+                    // PROVE the signature we just produced before claiming it
+                    if let Err(e) = tri7_core::spend::verify_input(&tx, i, &prev_script) {
+                        complete = false;
+                        errors.push(format!("input {i}: self-verify failed: {e}"));
+                        continue;
+                    }
+                    signed += 1;
+                }
+                drop(wl);
+                let raw = tx.serialize();
+                let hex_out: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+                log(&format!("signrawtransaction: {signed} input(s) signed, complete={complete}"));
+                Ok(serde_json::json!({
+                    "hex": hex_out,
+                    "complete": complete,
+                    "txid": tri7_core::p2p::internal_to_display(&tx.hash()),
+                    "signed_inputs": signed,
+                    "errors": errors,
+                }))
+            }
+            // createrawtransaction [{"txid":..,"vout":..}] {"addr":amount,...}
+            // — unsigned only. Stamped with now so a later sign+broadcast has
+            // the legacy tx-time ordering the chain expects.
+            "createrawtransaction" => {
+                let Some(serde_json::Value::Array(ins)) = p(0) else {
+                    return Err((-8, "expected an array of {txid,vout} inputs".to_string()));
+                };
+                let inputs: Vec<(String, u32)> = ins
+                    .iter()
+                    .map(|e| {
+                        let txid = e.get("txid").and_then(|v| v.as_str()).ok_or((
+                            -8,
+                            "each input needs a txid".to_string(),
+                        ))?;
+                        let vout = e.get("vout").and_then(|v| v.as_u64()).ok_or((
+                            -8,
+                            "each input needs a vout".to_string(),
+                        ))?;
+                        Ok((txid.to_string(), vout as u32))
+                    })
+                    .collect::<Result<_, (i64, String)>>()?;
+                let Some(serde_json::Value::Object(outs)) = p(1) else {
+                    return Err((-8, "expected {\"address\":amount,...} outputs".to_string()));
+                };
+                let mut outputs: Vec<(String, i64)> = Vec::new();
+                let mut scripts: Vec<(String, Vec<u8>)> = Vec::new();
+                for (dest, amt) in outs.iter() {
+                    // legacy "data" destination: the value is a RAW SCRIPT hex
+                    if dest == "data" {
+                        let Some(hex_script) = amt.as_str() else {
+                            return Err((
+                                -3,
+                                "createrawtransaction: \"data\" takes a script hex string".to_string(),
+                            ));
+                        };
+                        let script = tri7_core::p2p::hex_decode(hex_script)
+                            .map_err(|e| (-8, format!("createrawtransaction: data script: {e}")))?;
+                        scripts.push((dest.clone(), script));
+                        continue;
+                    }
+                    let amount = amt
+                        .as_f64()
+                        .ok_or_else(|| (-8, format!("createrawtransaction: amount for {dest} is not a number")))?;
+                    if amount < 0.0 {
+                        return Err((-3, format!("createrawtransaction: amount for {dest} out of range")));
+                    }
+                    outputs.push((dest.clone(), (amount * 1_000_000.0).round() as i64));
+                }
+                let tx = tri7_core::rawtx::create_raw(&inputs, &outputs, &scripts, now_secs() as u32)
+                    .map_err(|e| (-8, e))?;
+                let raw = tx.serialize();
+                let hex_out: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(serde_json::json!({
+                    "hex": hex_out,
+                    "txid": tri7_core::p2p::internal_to_display(&tx.hash()),
+                }))
+            }
+            // getnewpubkey [account] — the wallet's default key in hex, or the
+            // key of the funded address when no defaultkey row exists.
+            "getnewpubkey" => {
+                let wl = self.wl.lock().unwrap();
+                let w = wl
+                    .as_ref()
+                    .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+                let default = tri7_core::wallet::read_wallet(
+                    self.wallet_path
+                        .as_deref()
+                        .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?,
+                )
+                .ok()
+                .and_then(|k| k.default_key);
+                if let Some(dk) = default {
+                    return Ok(serde_json::json!(dk.iter().map(|b| format!("{:02x}", b)).collect::<String>()));
+                }
+                let mut best: Vec<&tri7_core::wallet::WalletKey> = w.wallet.keys.iter().collect();
+                best.sort_by_key(|k| {
+                    std::cmp::Reverse(
+                        w.live
+                            .values()
+                            .filter(|o| {
+                                tri7_core::address::script_to_dest(&o.script)
+                                    .map(|d| tri7_core::address::payload_to_address(&d.payload()) == k.address)
+                                    .unwrap_or(false)
+                            })
+                            .map(|o| o.value)
+                            .sum::<i64>(),
+                    )
+                });
+                match best.first() {
+                    Some(k) => Ok(serde_json::json!(k.pubkey.iter().map(|b| format!("{:02x}", b)).collect::<String>())),
+                    None => Err((-1, "wallet has no keys".to_string())),
+                }
+            }
+            // settxfee <amount> — the fee here is the chain constant; accept
+            // exactly that (or 0, meaning "use the minimum") and refuse any
+            // other value instead of pretending it took effect.
+            "settxfee" => {
+                let amount = p(0)
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| (-8, "expected amount parameter".to_string()))?;
+                let min = tri7_core::rpc::MIN_TX_FEE_SATS as f64 / 1_000_000.0;
+                if !(amount == 0.0 || (amount - min).abs() < 1e-9) {
+                    return Err((
+                        -8,
+                        format!("settxfee: this chain uses a fixed minimum fee of {min:.6} — {amount} is refused"),
+                    ));
+                }
+                let effective = if amount == 0.0 { 0 } else { tri7_core::rpc::MIN_TX_FEE_SATS };
+                if let Ok(mut g) = self.extras.write() {
+                    g.paytxfee_sats = Some(effective);
+                }
+                log(&format!("settxfee: paytxfee set to {effective} sats"));
+                Ok(serde_json::json!(true))
+            }
+            // decryptwallet <passphrase> — the legacy "Remove encryption":
+            // every ckey row is rewritten as a plaintext key row and the
+            // mkey/dirty rows are dropped, after the passphrase is PROVEN by
+            // decrypting every key (decrypt_wallet_file verifies as it goes).
+            "decryptwallet" => {
+                let pass = ps(0).ok_or_else(|| (-8, "expected passphrase".to_string()))?;
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                if !tri7_core::wallet_encrypt::is_encrypted(&path) {
+                    return Err((-1, "wallet is not encrypted".to_string()));
+                }
+                let n = tri7_core::wallet_encrypt::decrypt_wallet_file(&path, &pass)
+                    .map_err(|e| (-1, format!("decryptwallet: {e}")))?;
+                // the live key view keeps DECRYPTED secrets either way, so only
+                // the lock flag has to change
+                if let Some(w) = self.wl.lock().unwrap().as_mut() {
+                    w.locked = false;
+                    w.unlock_until = None;
+                }
+                if let Ok(mut g) = self.extras.write() {
+                    g.unlocked_until = None;
+                }
+                log(&format!("decryptwallet: {n} keys rewritten as plaintext"));
+                Ok(serde_json::json!({ "keys": n }))
+            }
+            "walletpassphrasechange" => {
+                let old = ps(0).ok_or_else(|| (-8, "expected old passphrase".to_string()))?;
+                let new = ps(1).ok_or_else(|| (-8, "expected new passphrase".to_string()))?;
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                if !tri7_core::wallet_encrypt::is_encrypted(&path) {
+                    return Err((-1, "wallet is not encrypted".to_string()));
+                }
+                let n = tri7_core::wallet_encrypt::change_passphrase(&path, &old, &new)
+                    .map_err(|e| (-1, format!("walletpassphrasechange: {e}")))?;
+                log(&format!("walletpassphrasechange: {n} keys re-encrypted"));
+                Ok(serde_json::json!({ "keys": n }))
+            }
             "getstakinginfo" => {
                 let (tip_height, entry) = self.tip();
                 let wl = self.wl.lock().unwrap();
@@ -5253,6 +5615,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     w.locked = unlocked == 0;
                     w.unlock_until = Some(now_secs() + secs);
                 }
+                if let Ok(mut g) = self.extras.write() {
+                    g.unlocked_until = Some(secs);
+                }
                 if unlocked == 0 {
                     return Err((-1, "walletpassphrase: no key in the wallet was unlocked".to_string()));
                 }
@@ -5290,6 +5655,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     }
                     w.locked = true;
                     w.unlock_until = None;
+                }
+                if let Ok(mut g) = self.extras.write() {
+                    g.unlocked_until = Some(0);
                 }
                 log(&format!("walletlock: {n} keys locked"));
                 Ok(serde_json::json!({ "locked": n }))
@@ -6384,6 +6752,11 @@ fn main() {
         status_exit(&cfg); // early: no conf read, no network
     }
     install_signal_handlers();
+    // publish the wallet path so the passive native handlers (encryption,
+    // getnewpubkey) can serve before the live wallet view finishes seeding
+    if let Some(wp) = cfg.wallet_path.as_deref() {
+        std::env::set_var("TRI7_WALLET_PATH", wp.display().to_string());
+    }
     // --new-wallet: brand-new wallet with BRAND-NEW keys (never copied) —
     // bootstrap the SQLite TRIw container (the wallet writer opens rw but
     // never creates), then insert freshly generated secrets via add_key.
@@ -6883,6 +7256,43 @@ fn main() {
             );
         }
     }
+    // Wallet-file bookkeeping published TO the passive native handlers
+    // (bestblock / fee / unlock state / address→pubkey map). The ops engine
+    // refreshes these from the real wallet; unwired stays honest (null).
+    let wallet_extras: Arc<std::sync::RwLock<rpc::WalletExtras>> = {
+        let mut e = rpc::WalletExtras::default();
+        if let Some(wp) = cfg.wallet_path.as_deref() {
+            match tri7_core::wallet::read_wallet(wp) {
+                Ok(keys) => {
+                    e.default_key = keys.default_key.clone();
+                    if let Some(h) = keys.best_block {
+                        // bestblock carries no height in the legacy row; the
+                        // ops engine fills the height from the live tip
+                        e.bestblock_hash =
+                            Some(tri7_core::p2p::internal_to_display(&h));
+                    }
+                }
+                Err(err) => log(&format!("wallet bookkeeping: {err}")),
+            }
+        }
+        Arc::new(std::sync::RwLock::new(e))
+    };
+    let wallet_pubkeys: Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>> =
+        Arc::new(std::sync::RwLock::new(
+            wl_shared
+                .lock()
+                .ok()
+                .and_then(|g| {
+                    g.as_ref().map(|w| {
+                        w.wallet
+                            .keys
+                            .iter()
+                            .map(|k| (k.address.clone(), k.pubkey.clone()))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default(),
+        ));
     if cfg.rpc_enabled {
         let deps = Arc::new(rpc::ServerDeps {
             tip: Arc::new(LiveTip {
@@ -6896,6 +7306,8 @@ fn main() {
                 snap: Arc::new(SnapshotWallet {
                     balances: balances_snap,
                     utxos: utxos_snap,
+                    extra: Arc::clone(&wallet_extras),
+                    pubkeys: Arc::clone(&wallet_pubkeys),
                 }),
                 wl: Arc::clone(&wl_shared),
                 st: Arc::clone(&st_shared),
@@ -6921,6 +7333,8 @@ fn main() {
             ops: Some(Arc::new(OpsAdapter {
                 st: Arc::clone(&st_shared),
                 mirror: Arc::clone(&tip_mirror),
+                extras: Arc::clone(&wallet_extras),
+                pubkeys: Arc::clone(&wallet_pubkeys),
                 wl: Arc::clone(&wl_shared),
                 pool: Arc::clone(&pool_shared),
                 stake_st: Arc::clone(&stake_st_shared),
@@ -6977,6 +7391,20 @@ fn main() {
         }
     };
 
+    // Bookkeeping publish BEFORE the first state write: getwalletinfo must not
+    // answer null just because the live wallet view is still seeding.
+    if let Ok(mut g) = wallet_extras.write() {
+        let (h, hash) = {
+            let stg = st_shared.lock().unwrap();
+            (
+                stg.tip_height,
+                tri7_core::p2p::internal_to_display(&stg.tip_hash),
+            )
+        };
+        g.bestblock_height = Some(h);
+        g.bestblock_hash = Some(hash);
+    }
+
     // 5. live follow loop
     let deadline = if cfg.forever {
         None // daemon mode: no deadline, run until signalled (systemd restarts on failure)
@@ -7001,6 +7429,12 @@ fn main() {
         if deadline.map_or(false, |d| Instant::now() >= d) {
             break;
         }
+        // RPC `stop` and SIGTERM share this exit: the block is already
+        // applied + persisted, so leaving here is a clean, resumable stop.
+        if tri7_core::shutdown::requested() {
+            log("shutdown requested (RPC stop) — exiting with state persisted");
+            break;
+        }
 
         // poll tick — rotation retry + getheaders with an alternating locator
         // (the legacy daemon silently drops a consecutive duplicate getheaders)
@@ -7015,6 +7449,16 @@ fn main() {
                 .and_then(|v| v.as_i64())
             {
                 st_shared.lock().unwrap().daemon_tip = Some(dt);
+                // keep getwalletinfo's bestblock bookkeeping current — it is
+                // what the GUI shows as "last block seen by this wallet"
+                if let Ok(mut g) = wallet_extras.write() {
+                    let (h, hash) = {
+                        let stg = st_shared.lock().unwrap();
+                        (stg.tip_height, tri7_core::p2p::internal_to_display(&stg.tip_hash))
+                    };
+                    g.bestblock_height = Some(h);
+                    g.bestblock_hash = Some(hash);
+                }
             }
             let have_outbound = peers.iter().any(|p| p.outbound);
             if !have_outbound {

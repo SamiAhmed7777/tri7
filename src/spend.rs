@@ -53,6 +53,8 @@ pub const OP_CHECKSIG: u8 = 0xac;
 pub const OP_EQUALVERIFY: u8 = 0x88;
 pub const OP_DUP: u8 = 0x76;
 pub const OP_HASH160: u8 = 0xa9;
+pub const OP_EQUAL: u8 = 0x87;
+pub const OP_RETURN: u8 = 0x6a;
 
 pub fn money_range(v: i64) -> bool {
     // MoneyRange (main.h:65)

@@ -109,6 +109,8 @@ pub const NATIVE_METHODS: &[&str] = &[
     "encryptwallet",
     "walletpassphrase",
     "walletlock",
+    "walletpassphrasechange",
+    "decryptwallet",
     "sendtoaddress",
     "sendmany",
     "signmessage",
@@ -138,6 +140,28 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getsubsidy",
     "estimatefee",
     "verifymessage",
+    // ---- legacy parity 2026-11-06: offline tx workflow + wallet bookkeeping
+    // (rpcrawtransaction / rpcwallet surfaces that need no daemon) ----
+    "decoderawtransaction",
+    "decodescript",
+    "createrawtransaction",
+    "settxfee",
+    "listreceivedbyaddress",
+    "getnewpubkey",
+    "signrawtransaction",
+    "stop",
+];
+
+/// Ops verbs with a passive implementation that needs no live wallet view.
+/// The passive layer answers these while the engine is warming up.
+pub const OPS_EARLY: &[&str] = &[
+    "stop",
+    "createrawtransaction",
+    "encryptwallet",
+    "walletpassphrasechange",
+    "decryptwallet",
+    "getnewpubkey",
+    "settxfee",
 ];
 
 /// The NATIVE_METHODS subset routed to the live NodeOps engine (wallet keys,
@@ -159,6 +183,8 @@ pub const OPS_METHODS: &[&str] = &[
     "encryptwallet",
     "walletpassphrase",
     "walletlock",
+    "walletpassphrasechange",
+    "decryptwallet",
     "sendtoaddress",
     "sendmany",
     "signmessage",
@@ -175,6 +201,11 @@ pub const OPS_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // ---- legacy parity 2026-11-06: offline tx workflow + wallet file ----
+    "signrawtransaction",
+    "createrawtransaction",
+    "getnewpubkey",
+    "stop",
 ];
 
 /// Methods allowed to fall back to the legacy proxy when the native path
@@ -246,6 +277,7 @@ pub struct BalanceView {
     pub utxos: usize,
 }
 
+#[derive(Clone)]
 pub struct AddressEntry {
     pub address: String,
     pub balance_sats: i64,
@@ -287,6 +319,18 @@ pub trait WalletProvider: Send + Sync {
     /// hidden_service/hostname live). Default: empty = unknown.
     fn state_dir(&self) -> String {
         String::new()
+    }
+    /// Wallet-file bookkeeping (bestblock / fee). Default = unknown.
+    fn extras(&self) -> WalletExtras {
+        WalletExtras::default()
+    }
+    /// The legacy `defaultkey` record (33/65-byte pubkey), when known.
+    fn default_key(&self) -> Option<Vec<u8>> {
+        None
+    }
+    /// The public key for one of OUR addresses, when known.
+    fn pubkey_for_address(&self, _addr: &str) -> Option<Vec<u8>> {
+        None
     }
     /// Full wallet history (history.json, built by the txhistory bin).
     /// Empty = no history file yet; the RPC then answers with an empty list
@@ -447,6 +491,48 @@ pub fn load_utxos_snap(path: &PathBuf) -> UtxosSnap {
 pub struct SnapshotWallet {
     pub balances: BalancesSnap,
     pub utxos: UtxosSnap,
+    /// Wallet-file bookkeeping the live node refreshes (bestblock height /
+    /// hash, current paytxfee sats). Empty = not wired (tests, cold tools).
+    pub extra: std::sync::Arc<std::sync::RwLock<WalletExtras>>,
+    /// address → pubkey for the wallet's own keys (served by getnewpubkey).
+    pub pubkeys: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+/// Values the ops engine publishes for the passive native handlers. Every
+/// field defaults to "unknown" so an unwired node answers honestly (`null`)
+/// instead of inventing a number.
+#[derive(Clone, Debug, Default)]
+pub struct WalletExtras {
+    pub bestblock_height: Option<u64>,
+    pub bestblock_hash: Option<String>,
+    pub paytxfee_sats: Option<i64>,
+    /// Seconds-until-lock for an encrypted unlocked wallet (0 = locked).
+    pub unlocked_until: Option<u64>,
+    /// legacy `defaultkey` row (pubkey bytes).
+    pub default_key: Option<Vec<u8>>,
+}
+
+/// `unlocked_until` for getwalletinfo: the legacy uint64 max sentinel means
+/// "not encrypted"; an encrypted, locked wallet reports 0; an encrypted,
+/// unlocked one reports the real expiry (the ops engine publishes it).
+fn unlocked_until(deps: &Deps) -> Value {
+    match deps.wallet.extras().unlocked_until {
+        None => json!(u64::MAX),
+        Some(0) => json!(0),
+        Some(_) => deps
+            .wallet
+            .extras()
+            .unlocked_until
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+    }
+}
+
+/// Confirmations for a wallet address. The snapshot map carries no per-tx
+/// heights, so this answers `null` (never a fabricated depth) until a caller
+/// can prove one — a wrong number here is worse than an honest null.
+fn make_confirmations(_addr: &str, _tip: u64) -> Value {
+    Value::Null
 }
 
 impl WalletProvider for SnapshotWallet {
@@ -485,6 +571,18 @@ impl WalletProvider for SnapshotWallet {
             return None;
         }
         Some((self.utxos.height, self.utxos.coverage_hash.clone()))
+    }
+
+    fn extras(&self) -> WalletExtras {
+        self.extra.read().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    fn default_key(&self) -> Option<Vec<u8>> {
+        self.extra.read().ok().and_then(|g| g.default_key.clone())
+    }
+
+    fn pubkey_for_address(&self, addr: &str) -> Option<Vec<u8>> {
+        self.pubkeys.read().ok().and_then(|m| m.get(addr).cloned())
     }
 
     fn address_entries(&self) -> Vec<AddressEntry> {
@@ -773,6 +871,20 @@ fn p_u64(params: &Value, pos: usize, name: &str) -> Result<Option<u64>, (i64, St
     parsed.map(Some).ok_or((
         -8,
         format!("invalid parameter '{}' — expected integer", name),
+    ))
+}
+
+fn p_f64(params: &Value, pos: usize, name: &str) -> Result<Option<f64>, (i64, String)> {
+    let v = match param_get(params, pos, name) {
+        None => return Ok(None),
+        Some(v) => v,
+    };
+    let parsed = v
+        .as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()));
+    parsed.map(Some).ok_or((
+        -8,
+        format!("invalid parameter '{}' — expected number", name),
     ))
 }
 
@@ -1172,6 +1284,38 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             NativeOutcome::Ok(json!(sats_to_tri(sats)))
         }
 
+        "listreceivedbyaddress" => {
+            // Legacy listreceivedbyaddress [minconf] [include_empty]:
+            // one row per wallet address, in the legacy record shape. Data
+            // source is the same received_regular map getreceivedbyaddress
+            // uses (P2PKH-script receipts), so the two verbs cannot disagree.
+            let _minconf = ptry!(p_u64(params, 0, "minconf")).unwrap_or(1);
+            let include_empty = ptry!(p_bool(params, 1, "include_empty")).unwrap_or(false);
+            let tip_h = deps.tip.tip().height;
+            let mut rows: Vec<Value> = Vec::new();
+            for e in deps.wallet.address_entries() {
+                let amount = deps.wallet.received_regular(&e.address).unwrap_or(0);
+                if amount == 0 && !include_empty {
+                    continue;
+                }
+                rows.push(json!({
+                    "address": e.address,
+                    "account": "",
+                    "amount": sats_to_tri(amount),
+                    "confirmations": make_confirmations(&e.address, tip_h),
+                    "label": "",
+                    "txids": [],
+                }));
+            }
+            rows.sort_by(|a, b| {
+                b["amount"]
+                    .as_f64()
+                    .partial_cmp(&a["amount"].as_f64())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            NativeOutcome::Ok(json!(rows))
+        }
+
         // Legacy validatepubkey: decode a hex public key and report the address
         // it maps to. Pure function, no wallet access.
         "validatepubkey" => {
@@ -1509,7 +1653,7 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 "moneysupply": bal.as_ref().map(|b| sats_to_tri(b.supply_sats)),
                 "moneysupply_coverage_height": bal.as_ref().map(|b| b.coverage_height),
                 "balance_coverage_height": bal.as_ref().map(|b| b.coverage_height),
-                "paytxfee": 0.0,
+                "paytxfee": sats_to_tri(deps.wallet.extras().paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
                 "errors": "",
             }))
         }
@@ -1740,8 +1884,8 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                     "txcount": Value::Null,
                     "keypoololdest": Value::Null,
                     "keypoolsize": Value::Null,
-                    "unlocked_until": Value::Null,
-                    "paytxfee": 0.0,
+                    "unlocked_until": unlocked_until(deps),
+                    "paytxfee": sats_to_tri(deps.wallet.extras().paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
                     "coverage_height": b.coverage_height,
                     "coverage_hash": b.coverage_hash,
                     "addresses": b.addresses,
@@ -1751,6 +1895,58 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                     -1,
                     "wallet balance snapshot unavailable (balances file not loaded)".into(),
                 ),
+            }
+        }
+
+        // Legacy getnewpubkey [account]: "generate a new public key and
+        // return it in hex". Kept wallet-scoped on purpose — dumping ANY key
+        // the node has seen (the legacy implementation's behaviour) is an
+        // information leak with no legitimate client use.
+        "getnewpubkey" => {
+            let Some((_h, _)) = deps.wallet.coverage() else {
+                return NativeOutcome::Err(-1, "wallet balance snapshot unavailable (balances file not loaded)".into());
+            };
+            let _account = ptry!(p_str(params, 0, "account"));
+            let entries = deps.wallet.address_entries();
+            if entries.is_empty() {
+                return NativeOutcome::Err(-1, "no wallet addresses available".into());
+            }
+            // defaultkey first (the legacy notion of "the" key), else the
+            // funded address with the largest balance
+            let mut chosen: Option<String> = None;
+            if let Some(dk) = deps.wallet.default_key() {
+                let addr = crate::wallet::pubkey_to_address(&dk);
+                if entries.iter().any(|e| e.address == addr) {
+                    chosen = Some(dk.iter().map(|b| format!("{:02x}", b)).collect());
+                }
+            }
+            if chosen.is_none() {
+                let mut best = entries.clone();
+                best.sort_by(|a, b| b.balance_sats.cmp(&a.balance_sats));
+                let target = &best[0].address;
+                if let Some(pk) = deps.wallet.pubkey_for_address(target) {
+                    chosen = Some(pk.iter().map(|b| format!("{:02x}", b)).collect());
+                }
+            }
+            // the node may not have published its address→pubkey map yet (the
+            // live wallet view is still seeding): read the file directly
+            let mut chosen = chosen;
+            if chosen.is_none() {
+                if let Ok(p) = std::env::var("TRI7_WALLET_PATH") {
+                    if !p.is_empty() {
+                        if let Ok(keys) = crate::wallet::read_wallet(std::path::Path::new(&p)) {
+                            chosen = keys
+                                .default_key
+                                .clone()
+                                .or_else(|| keys.keys.first().map(|k| k.pubkey.clone()))
+                                .map(|pk| pk.iter().map(|b| format!("{:02x}", b)).collect());
+                        }
+                    }
+                }
+            }
+            match chosen {
+                Some(hex) => NativeOutcome::Ok(json!(hex)),
+                None => NativeOutcome::Err(-1, "no public key available for the wallet's addresses".into()),
             }
         }
 
@@ -1824,6 +2020,58 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             NativeOutcome::Ok(json!(sats_to_tri(MIN_TX_FEE_SATS)))
         }
 
+        // ---- legacy parity 2026-11-06: offline tx workflow ------------------
+        // These three are pure codec functions (no wallet, no network), so a
+        // cold-signing flow works against ANY node — including one with no
+        // wallet loaded. Shape matches the legacy rpcrawtransaction replies.
+        "decoderawtransaction" => {
+            let Some(hex) = ptry!(p_str(params, 0, "hexstring")) else {
+                return NativeOutcome::Err(-8, "expected raw transaction hex".into());
+            };
+            match crate::rawtx::tx_from_hex(&hex) {
+                Ok(tx) => NativeOutcome::Ok(crate::rawtx::tx_json(&tx, true)),
+                Err(e) => NativeOutcome::Err(-22, format!("TX decode failed: {e}")),
+            }
+        }
+
+        "decodescript" => {
+            let Some(hex) = ptry!(p_str(params, 0, "hex")) else {
+                return NativeOutcome::Err(-8, "expected script hex".into());
+            };
+            let bytes = match crate::p2p::hex_decode(&hex) {
+                Ok(b) => b,
+                Err(e) => return NativeOutcome::Err(-22, format!("script decode failed: {e}")),
+            };
+            let mut body = crate::rawtx::decode_script(&bytes);
+            // legacy echoes a "p2sh" form for every script it sees:
+            // base58check(SCRIPT_ADDRESS_VERSION + hash160(script))
+            let p2sh_payload = crate::address::script_hash_payload(&bytes);
+            body["p2sh"] = json!(crate::address::payload_to_address(&p2sh_payload));
+            NativeOutcome::Ok(body)
+        }
+
+        "settxfee" => {
+            // legacy rpcwallet settxfee <amount>: the fee is a chain constant
+            // here (MIN_TX_FEE, main.h:58 — "Triangles uses a static minimum
+            // fee"), so the ONLY accepted value is that constant. Anything
+            // else is refused loudly instead of being silently ignored: a
+            // client that thinks it raised the fee must not be told a lie.
+            let Some(amount) = ptry!(p_f64(params, 0, "amount")) else {
+                return NativeOutcome::Err(-8, "expected amount parameter".into());
+            };
+            let want = sats_to_tri(MIN_TX_FEE_SATS);
+            if (amount - want).abs() > 1e-9 {
+                return NativeOutcome::Err(
+                    -8,
+                    format!(
+                        "settxfee: this chain uses a fixed minimum fee of {:.6} — {} is refused",
+                        want, amount
+                    ),
+                );
+            }
+            NativeOutcome::Ok(json!(true))
+        }
+
         "verifymessage" => {
             // legacy rpcwallet verifymessage <address> <signature> <message>
             // (strMessageMagic double-hash + compact recoverable sig; the
@@ -1856,6 +2104,21 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             }
         }
 
+        // Ops verbs that may run before the live wallet view is ready (a pure
+        // codec, the wallet FILE, or the process) answer from the passive
+        // layer, so "warming up" never blocks work that is already possible.
+        // Arms here RETURN: nothing re-enters the dispatch.
+        m if OPS_METHODS.contains(&m)
+            && OPS_EARLY.contains(&m)
+            && deps.ops.as_ref().map(|o| !o.ready()).unwrap_or(true) =>
+        {
+            match passive_fallback(m, deps, &params) {
+                NativeOutcome::Ok(v) => NativeOutcome::Ok(v),
+                NativeOutcome::Err(code, msg) => NativeOutcome::Err(code, msg),
+                NativeOutcome::Miss(w) => NativeOutcome::Miss(w),
+            }
+        }
+
         m if OPS_METHODS.contains(&m) => match deps.ops {
             Some(o) if o.ready() => match o.call(m, params) {
                 Ok(v) => NativeOutcome::Ok(v),
@@ -1871,6 +2134,161 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         _ => NativeOutcome::Err(-32601, unknown_method_msg(method)),
     }
 }
+
+/// Legacy createrawtransaction: [{"txid":..,"vout":..}] {"addr":amount,..}
+/// → {hex, txid}. Pure (no wallet, no network), so ANY node can answer it.
+fn create_raw_tx(params: &Value, now: u32) -> Result<Value, (i64, String)> {
+    let Some(Value::Array(ins)) = param_get(params, 0, "txid") else {
+        return Err((-8, "expected an array of {txid,vout} inputs".to_string()));
+    };
+    let Some(Value::Object(outs)) = param_get(params, 1, "amount") else {
+        return Err((-8, "expected {\"address\":amount,...} outputs".to_string()));
+    };
+    let mut inputs: Vec<(String, u32)> = Vec::new();
+    for e in ins {
+        let txid = e
+            .get("txid")
+            .and_then(|v| v.as_str())
+            .ok_or((-8, "each input needs a txid".to_string()))?;
+        let vout = e
+            .get("vout")
+            .and_then(|v| v.as_u64())
+            .ok_or((-8, "each input needs a vout".to_string()))?;
+        inputs.push((txid.to_string(), vout as u32));
+    }
+    let mut outputs: Vec<(String, i64)> = Vec::new();
+    let mut scripts: Vec<(String, Vec<u8>)> = Vec::new();
+    for (dest, amt) in outs.iter() {
+        // legacy "data" destination: the value is a RAW SCRIPT in hex
+        if dest == "data" {
+            let Some(hex_script) = amt.as_str() else {
+                return Err((-3, "createrawtransaction: \"data\" takes a script hex string".into()));
+            };
+            let script = crate::p2p::hex_decode(hex_script)
+                .map_err(|e| (-8, format!("createrawtransaction: data script: {e}")))?;
+            scripts.push((dest.clone(), script));
+            continue;
+        }
+        let amount = amt
+            .as_f64()
+            .ok_or((-8, format!("createrawtransaction: amount for {dest} is not a number")))?;
+        if amount < 0.0 {
+            return Err((-3, format!("createrawtransaction: amount for {dest} out of range")));
+        }
+        outputs.push((dest.clone(), (amount * 1_000_000.0).round() as i64));
+    }
+    let tx = crate::rawtx::create_raw(&inputs, &outputs, &scripts, now).map_err(|e| (-8, e))?;
+    let raw = tx.serialize();
+    let hex: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+    Ok(json!({
+        "hex": hex,
+        "txid": crate::p2p::internal_to_display(&tx.hash()),
+    }))
+}
+
+/// Passive implementations of the ops verbs that also have a pure form.
+/// Called ONLY when no ops engine is wired (cold-signing tools, tests, a node
+/// started without --wallet). Anything not listed keeps the "warming up"
+/// error the engine path would have produced.
+fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+    match m {
+        "createrawtransaction" => match create_raw_tx(params, std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0))
+        {
+            Ok(v) => NativeOutcome::Ok(v),
+            Err((code, msg)) => NativeOutcome::Err(code, msg),
+        },
+        // Encryption runs on the wallet FILE through wallet_encrypt — the
+        // same call the ops engine makes — so it answers while the live view
+        // is still seeding, and `walletpassphrase` then re-unlocks through the
+        // engine once it is up.
+        "encryptwallet" | "walletpassphrasechange" | "decryptwallet" => {
+            let wallet_path = match std::env::var("TRI7_WALLET_PATH") {
+                Ok(p) if !p.is_empty() => p,
+                _ => {
+                    return NativeOutcome::Err(
+                        -1,
+                        "wallet file path unknown to this node — start tri7d with --wallet".into(),
+                    )
+                }
+            };
+            let path = std::path::Path::new(&wallet_path);
+            match m {
+                "encryptwallet" => {
+                    let Some(pass) = param_get(params, 0, "passphrase").and_then(|v| v.as_str())
+                    else {
+                        return NativeOutcome::Err(-8, "expected a passphrase".into());
+                    };
+                    if pass.len() < 8 {
+                        return NativeOutcome::Err(
+                            -8,
+                            "passphrase must be at least 8 characters".into(),
+                        );
+                    }
+                    match crate::wallet_encrypt::encrypt_wallet(path, pass) {
+                        Ok(rep) => NativeOutcome::Ok(json!({
+                            "keys": rep.keys,
+                            "mnemonic": rep.mnemonic,
+                            "iterations": rep.iterations,
+                        })),
+                        Err(e) => NativeOutcome::Err(-1, e),
+                    }
+                }
+                "walletpassphrasechange" => {
+                    let old_pass = param_get(params, 0, "oldpassphrase")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let new_pass = match param_get(params, 1, "newpassphrase")
+                        .and_then(|v| v.as_str())
+                    {
+                        Some(p) => p,
+                        None => return NativeOutcome::Err(-8, "expected new passphrase".into()),
+                    };
+                    match crate::wallet_encrypt::change_passphrase(path, old_pass, new_pass) {
+                        Ok(n) => NativeOutcome::Ok(json!({ "keys": n })),
+                        Err(e) => NativeOutcome::Err(-1, e),
+                    }
+                }
+                _ => {
+                    let pass = match param_get(params, 0, "passphrase").and_then(|v| v.as_str()) {
+                        Some(p) => p,
+                        None => return NativeOutcome::Err(-8, "expected passphrase".into()),
+                    };
+                    match crate::wallet_encrypt::decrypt_wallet_file(path, pass) {
+                        Ok(n) => NativeOutcome::Ok(json!({ "keys": n })),
+                        Err(e) => NativeOutcome::Err(-1, e),
+                    }
+                }
+            }
+        }
+
+        // Shutdown is a PROCESS verb: it answers even while the live wallet
+        // view is seeding, and defers the exit by a moment so the caller
+        // actually receives this reply before the process tears down.
+        "stop" => {
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                crate::shutdown::request();
+            });
+            NativeOutcome::Ok(json!("tri7 server stopping"))
+        }
+
+        "signrawtransaction" | "signrawtransactionwithwallet" => NativeOutcome::Err(
+            -1,
+            "signrawtransaction needs the node's wallet keys — run tri7d with --wallet, \
+             or pass the keys as the third parameter"
+                .into(),
+        ),
+        _ => NativeOutcome::Err(
+            -1,
+            "node ops engine not wired — run tri7d with --wallet (staking/smsg/broadcast need wallet keys)"
+                .into(),
+        ),
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Formatting helpers — legacy-style JSON from blockindex hits. Used by the
@@ -3555,6 +3973,8 @@ mod tests {
         SnapshotWallet {
             balances: load_balances_snap(&bp),
             utxos: load_utxos_snap(&up),
+            extra: Default::default(),
+            pubkeys: Default::default(),
         }
     }
 
@@ -3649,6 +4069,8 @@ mod tests {
         let w = SnapshotWallet {
             balances: load_balances_snap(&bp),
             utxos: load_utxos_snap(&missing),
+            extra: Default::default(),
+            pubkeys: Default::default(),
         };
         assert!(!w.utxos.loaded);
         assert_eq!(w.coverage(), None);
@@ -3706,6 +4128,8 @@ mod tests {
         let no_utx = SnapshotWallet {
             balances: load_balances_snap(&bp),
             utxos: load_utxos_snap(&dir.join("absent.json")),
+            extra: Default::default(),
+            pubkeys: Default::default(),
         };
         let d = Deps {
             tip: &t,
@@ -4110,5 +4534,127 @@ fn verifymessage_signs_and_verifies_in_legacy_param_order() {
     let v = call(&d, "verifymessage", json!([addr, "!!!not-base64!!!", "m"]));
     assert_eq!(v["error"]["code"], -5);
     assert_eq!(v["error"]["message"], "Malformed base64 encoding");
+}
+
+// ---------------------------------------------------------------------------
+// Legacy parity 2026-11-06 — the offline tx workflow + wallet bookkeeping.
+// Each test drives the REAL dispatch (`call`) and asserts on the reply shape a
+// legacy client would parse.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decoderawtransaction_round_trips_a_built_tx() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    // build via createrawtransaction so both verbs are exercised together
+    let txid = "11".repeat(32);
+    let v = call(
+        &d,
+        "createrawtransaction",
+        json!([[{"txid": txid, "vout": 1}], {"data": "6a02aabb"}]),
+    );
+    let hex = v["result"]["hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("raw hex missing: {}", v))
+        .to_string();
+    assert!(!hex.is_empty());
+    let back = call(&d, "decoderawtransaction", json!([hex]));
+    assert_eq!(back["result"]["vin"][0]["vout"], 1);
+    assert_eq!(back["result"]["vout"][0]["scriptPubKey"]["type"], "nulldata");
+    assert_eq!(back["result"]["hex"], hex);
+    assert_eq!(back["source"], "tri7");
+}
+
+#[test]
+fn decoderawtransaction_refuses_garbage() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let v = call(&d, "decoderawtransaction", json!(["zz"]));
+    assert_eq!(v["error"]["code"], -22);
+}
+
+#[test]
+fn decodescript_reports_asm_type_and_p2sh() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let script = "76a914".to_string() + &"22".repeat(20) + "88ac";
+    let v = call(&d, "decodescript", json!([script]));
+    assert_eq!(v["result"]["type"], "pubkeyhash");
+    assert_eq!(v["result"]["reqSigs"], 1);
+    assert!(v["result"]["asm"].as_str().unwrap().starts_with("OP_DUP"));
+    // SCRIPT_ADDRESS = 28 → base58check form starts with 'C' on this chain
+    // (verified against the live reply: CSr6Ec9w9yfM8hKyhfqHaGXRKAzg9kdoLR)
+    assert_eq!(
+        v["result"]["p2sh"].as_str().unwrap(),
+        "CSr6Ec9w9yfM8hKyhfqHaGXRKAzg9kdoLR"
+    );
+}
+
+#[test]
+fn settxfee_accepts_the_chain_constant_and_refuses_anything_else() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    assert_eq!(call(&d, "settxfee", json!([0.0001]))["result"], true);
+    // 100 sats is the chain's MIN_TX_FEE — a client asking for more must be
+    // told the truth, not silently charged the old value
+    let v = call(&d, "settxfee", json!([0.01]));
+    assert_eq!(v["error"]["code"], -8);
+    assert!(v["error"]["message"].as_str().unwrap().contains("fixed minimum fee"));
+}
+
+#[test]
+fn walletinfo_reports_fee_and_lock_state_from_the_published_extras() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    // unwired defaults: fee = the chain constant, locked = u64::MAX (unencrypted)
+    let v = call(&d, "getwalletinfo", json!([]));
+    assert_eq!(v["result"]["paytxfee"], 0.0001);
+    assert_eq!(v["result"]["unlocked_until"], json!(u64::MAX));
+}
+
+#[test]
+fn listreceivedbyaddress_uses_the_same_map_as_getreceivedbyaddress() {
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+    let addr = "T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY";
+    let one = call(&d, "getreceivedbyaddress", json!([addr]));
+    let list = call(&d, "listreceivedbyaddress", json!([1]));
+    let rows = list["result"].as_array().expect("array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["address"], addr);
+    assert_eq!(rows[0]["amount"], one["result"]);
+    // include_empty=true surfaces the wallet's never-paid addresses too
+    let all = call(&d, "listreceivedbyaddress", json!([1, true]));
+    assert!(all["result"].as_array().unwrap().len() >= rows.len());
+}
+
+#[test]
+fn new_parity_verbs_are_in_native_and_routed() {
+    for m in [
+        "decoderawtransaction",
+        "decodescript",
+        "createrawtransaction",
+        "signrawtransaction",
+        "settxfee",
+        "listreceivedbyaddress",
+        "getnewpubkey",
+    ] {
+        assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+    }
+    for m in ["signrawtransaction", "createrawtransaction", "getnewpubkey"] {
+        assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+    }
 }
 }

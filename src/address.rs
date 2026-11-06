@@ -62,6 +62,12 @@ fn payload_for(version: u8, hash: &[u8; 20]) -> [u8; 21] {
     p
 }
 
+/// base58check payload for a P2SH address of `script` (hash160(script) with
+/// the script-address version byte) — the legacy `decodescript` p2sh field.
+pub fn script_hash_payload(script: &[u8]) -> [u8; 21] {
+    payload_for(SCRIPT_ADDRESS, &hash160(script))
+}
+
 /// Address payload for a raw public key (wallet keys → their P2PKH address).
 pub fn pubkey_payload(key: &[u8]) -> [u8; 21] {
     payload_for(PUBKEY_ADDRESS, &hash160(key))

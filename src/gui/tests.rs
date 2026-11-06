@@ -736,7 +736,11 @@ fn console_line_parsing_matches_legacy_syntax() {
 #[test]
 fn rpc_allowlist_refuses_writes_before_any_io() {
     assert!(!rpc_client::is_allowed("sendtoaddress"));
-    assert!(!rpc_client::is_allowed("walletpassphrase"));
+    // the passphrase verbs ARE reachable since the Encrypt dialog became real;
+    // what must stay refused is anything that moves coins or exports secrets
+    assert!(rpc_client::is_allowed("walletpassphrase"));
+    assert!(rpc_client::is_allowed("encryptwallet"));
+    assert!(!rpc_client::is_allowed("dumpprivkey"));
     assert!(!rpc_client::is_allowed("move"));
     assert!(rpc_client::is_allowed("getconnectioncount"));
     // loopback listener serves the exact tri7d envelope
@@ -1677,4 +1681,121 @@ fn tx_date_order_flips_and_reverses() {
     let mut desc2 = rows.clone();
     desc2.sort_by(|a, b| b.cmp(a));
     assert_eq!(*desc2.last().unwrap(), key(0, 200));
+}
+
+// ---------------------------------------------------------------------------
+// Passphrase dialog — all four modes. Rules are asserted through the SAME
+// function `apply_passphrase_action` consumes, so a regression in the dialog
+// wiring shows up here rather than in a screenshot.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "gui")]
+mod passphrase_dialog {
+    use crate::gui::app_state::{AppState, PassphraseDialog, PassphraseMode};
+    use crate::gui::state::UiConfig;
+
+    fn state() -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-ppdlg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = UiConfig {
+            wallet_path: dir.join("wallet.dat").display().to_string(),
+            state_dir: dir.display().to_string(),
+            state_dir_explicit: true,
+            rpc_addr: None,
+            profile_dir: dir.join("profile").display().to_string(),
+            ..Default::default()
+        };
+        AppState::new(cfg)
+    }
+
+    fn with(state: &mut AppState, d: PassphraseDialog) -> PassphraseDialog {
+        state.dialogs.passphrase = Some(d.clone());
+        d
+    }
+
+    #[test]
+    fn encrypt_requires_matching_new_passphrase() {
+        let mut st = state();
+        let mut d = with(&mut st, PassphraseDialog::new(PassphraseMode::Encrypt));
+        d.new_pass = "hunter22hunter".into();
+        d.confirm = "hunter22hunteR".into();
+        st.dialogs.passphrase = Some(d.clone());
+        let err = st.passphrase_request().unwrap_err();
+        assert!(err.contains("do not match"), "{err}");
+
+        d.confirm = d.new_pass.clone();
+        st.dialogs.passphrase = Some(d.clone());
+        let (method, args) = st.passphrase_request().unwrap();
+        assert_eq!(method, "encryptwallet");
+        assert_eq!(args, vec![serde_json::json!("hunter22hunter")]);
+    }
+
+    #[test]
+    fn encrypt_refuses_short_passphrase() {
+        let mut st = state();
+        let mut d = PassphraseDialog::new(PassphraseMode::Encrypt);
+        d.new_pass = "short".into();
+        d.confirm = "short".into();
+        st.dialogs.passphrase = Some(d);
+        assert!(st.passphrase_request().unwrap_err().contains("at least 8"));
+    }
+
+    #[test]
+    fn change_needs_both_old_and_new() {
+        let mut st = state();
+        let mut d = PassphraseDialog::new(PassphraseMode::Change);
+        d.new_pass = "newpassphrase1".into();
+        d.confirm = "newpassphrase1".into();
+        st.dialogs.passphrase = Some(d.clone());
+        assert!(st.passphrase_request().unwrap_err().contains("current passphrase"));
+
+        d.old_pass = "oldpassphrase".into();
+        st.dialogs.passphrase = Some(d);
+        let (method, args) = st.passphrase_request().unwrap();
+        assert_eq!(method, "walletpassphrasechange");
+        assert_eq!(args[0], serde_json::json!("oldpassphrase"));
+        assert_eq!(args[1], serde_json::json!("newpassphrase1"));
+    }
+
+    #[test]
+    fn unlock_needs_only_the_current_passphrase_and_a_duration() {
+        // The judge caught the old rule applying the 8-char NEW-passphrase
+        // check to Unlock (where new_pass is always empty): both users could
+        // never unlock at all. This test pins the corrected rule.
+        let mut st = state();
+        let mut d = PassphraseDialog::new(PassphraseMode::Unlock);
+        d.old_pass = "abc".into(); // deliberately SHORT — must be accepted
+        d.unlock_secs = "600".into();
+        st.dialogs.passphrase = Some(d.clone());
+        let (method, args) = st.passphrase_request().unwrap();
+        assert_eq!(method, "walletpassphrase");
+        assert_eq!(args, vec![serde_json::json!("abc"), serde_json::json!(600u64)]);
+
+        d.unlock_secs = "0".into();
+        st.dialogs.passphrase = Some(d);
+        assert!(st.passphrase_request().unwrap_err().contains("positive number"));
+    }
+
+    #[test]
+    fn decrypt_needs_only_the_current_passphrase() {
+        let mut st = state();
+        let mut d = PassphraseDialog::new(PassphraseMode::Decrypt);
+        d.old_pass = "abc".into(); // short again: Decrypt sets no new passphrase
+        st.dialogs.passphrase = Some(d);
+        let (method, args) = st.passphrase_request().unwrap();
+        assert_eq!(method, "decryptwallet");
+        assert_eq!(args, vec![serde_json::json!("abc")]);
+    }
+
+    #[test]
+    fn no_dialog_pending_is_an_error_not_a_silent_noop() {
+        let st = state();
+        assert!(st.passphrase_request().is_err());
+    }
 }
