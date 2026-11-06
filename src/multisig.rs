@@ -192,8 +192,19 @@ pub fn assemble_multisig_scriptsig(
     }
     let mut s = Vec::new();
     s.push(0x00); // OP_0 — the CHECKMULTISIG dummy
-    for sig in sigs.iter().flatten() {
-        push_data(&mut s, sig);
+    // CHECKMULTISIG consumes exactly m signatures, and they must appear in the
+    // same relative order as their pubkeys. Pushing every signature we hold (a
+    // wallet with all n keys can sign every slot) leaves unconsumed items on the
+    // stack and makes the scriptSig larger than the fee estimate budgeted.
+    let mut taken = 0usize;
+    for slot in sigs.iter() {
+        if let Some(sig) = slot {
+            push_data(&mut s, sig);
+            taken += 1;
+            if taken == m as usize {
+                break;
+            }
+        }
     }
     push_data(&mut s, redeem);
     Ok(s)

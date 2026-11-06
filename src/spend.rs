@@ -3097,6 +3097,93 @@ mod tests {
         );
     }
 
+    /// A wallet can hold MORE than m of a redeem's keys. Assembly must still
+    /// emit exactly m signatures in pubkey order: CHECKMULTISIG consumes only m,
+    /// so any extra push is unconsumed stack garbage — and it would make the
+    /// signed transaction larger than the fee quote budgeted.
+    #[test]
+    fn two_of_three_holding_all_three_keys_emits_exactly_m_and_never_undercounts() {
+        let keys = ms_keys(&["all3/a", "all3/b", "all3/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        assert_eq!(redeem.len(), 105, "2-of-3 redeem length");
+        // ALL THREE keys, not keys[..2] — this is the case the estimate missed.
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..],
+        );
+        let p2sh_coin = SpendInput {
+            txid: [0x97u8; 32],
+            n: 0,
+            value: 500_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        p2sh_coin
+            .assert_owns_prevout_with(&book)
+            .expect("the book owns the coin");
+
+        let est = estimate_signed_size_for(&[p2sh_coin.clone()], 2, &book);
+        let dest = script_pubkey_p2pkh(&synthetic_key("all3/dest").1);
+        let change = script_pubkey_p2pkh(&synthetic_key("all3/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[p2sh_coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("a 2-of-3 spend with all three keys must build");
+
+        // Walk the scriptSig: OP_0, then data pushes, then the redeem last.
+        let sig_script = &plan.tx.vin[0].script_sig;
+        assert_eq!(sig_script[0], 0x00, "OP_0 dummy");
+        let (mut i, mut sig_pushes) = (1usize, 0usize);
+        while i < sig_script.len() {
+            let op = sig_script[i];
+            let (len, hdr) = if op <= 75 {
+                (op as usize, 1usize)
+            } else if op == 0x4c {
+                (sig_script[i + 1] as usize, 2)
+            } else {
+                panic!("unexpected push opcode 0x{op:02x} at {i}");
+            };
+            if i + hdr + len == sig_script.len() && len == redeem.len() {
+                break; // the trailing redeem push
+            }
+            sig_pushes += 1;
+            i += hdr + len;
+        }
+        assert_eq!(
+            sig_pushes, 2,
+            "a 2-of-3 must carry exactly m=2 signatures even though the book holds 3 keys"
+        );
+
+        let real = plan.tx.serialize().len();
+        assert!(
+            est >= real,
+            "estimate {} must not undercount the real signed size {} when the book holds all n keys",
+            est,
+            real
+        );
+        assert!(
+            est - real <= 5,
+            "estimate {} overcounts the real signed size {} by more than 5 bytes",
+            est,
+            real
+        );
+    }
+
     /// A mixed pool (1 P2PKH + 1 2-of-3 P2SH) converges through the
     /// per-input fee schedule and builds a transaction whose fee is exactly
     /// the converged quote — every input verifies.
