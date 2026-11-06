@@ -7180,6 +7180,9 @@ fn main() {
                                 best_block: None,
                                 version: None,
                                 names: Vec::new(),
+                                // locked: redeem script rows are unreadable,
+                                // so no P2SH coins are watchable yet
+                                scripts: Vec::new(),
                                 encrypted: true,
                                 hd_mnemonic: None,
                                 hd_passphrase: None,

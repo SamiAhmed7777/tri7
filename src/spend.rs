@@ -953,6 +953,49 @@ pub fn estimate_signed_size(n_in: usize, n_out: usize) -> usize {
     base + n_in * in_size + n_out * out_size
 }
 
+/// Per-input signed-size estimate: the same wire schedule as
+/// [`estimate_signed_size`], but each input sized by its SOLVER TYPE so a
+/// mixed / multisig pool stops being quoted as if every input were P2PKH.
+///
+///   - PubkeyHash: 32+4+1+(1+72)+(1+33)+4 = 148   (today's value, unchanged)
+///   - PubKey:     32+4+1+(1+72)+4        = 114   (bare key, no hash push)
+///   - ScriptHash: 32+4+1 + m*(1+72+1) + 1 + redeem_len + 4
+///     (m from the redeem script via the `book`; the sigs + the OP_0 dummy +
+///     the redeemScript push dominate — a 2-of-3 with a 105-byte redeem is
+///     ~295 bytes, not 148)
+///
+/// Base (4+4+1+1+4) and per-output (8+1+25) match `estimate_signed_size`.
+/// A P2SH input the book cannot name a redeem for (or a non-standard script —
+/// which selection refuses anyway) falls back to the conservative 148.
+pub fn estimate_signed_size_for(
+    inputs: &[SpendInput],
+    n_out: usize,
+    book: &crate::multisig::ScriptBook,
+) -> usize {
+    let base = 4 + 4 + 1 + 1 + 4;
+    let out_size = 8 + 1 + 25;
+    let mut total = base + n_out * out_size;
+    for i in inputs {
+        total += match solver_type(&i.script_pubkey) {
+            Some(SpendType::PubkeyHash(_)) => 32 + 4 + 1 + (1 + 72) + (1 + 33) + 4,
+            Some(SpendType::PubKey(_)) => 32 + 4 + 1 + (1 + 72) + 4,
+            Some(SpendType::ScriptHash(_)) => book
+                .redeem_for(&i.script_pubkey)
+                .and_then(|r| {
+                    crate::multisig::parse_multisig(r)
+                        .ok()
+                        .map(|(m, _)| (m as usize, r.len()))
+                })
+                .map(|(m, redeem_len)| {
+                    32 + 4 + 1 + m * (1 + 72 + 1) + 1 + redeem_len + 4
+                })
+                .unwrap_or(148),
+            None => 148,
+        };
+    }
+    total
+}
+
 /// GetMinFee (main.cpp:1000-1027). `n_block_size` is the caller's block-size
 /// context (CreateTransaction passes 1; ConnectInputs' GetMinFee() default is
 /// also Block mode with nBlockSize=1), so the near-full-block escalation
@@ -1194,6 +1237,26 @@ pub fn build_spend_outputs_floor_with_book(
     // `paytxfee_sats` and read the final number from `SpendPlan.fee`.
     let est_fee = fee_rate_sats.max(MIN_FEE_SATS);
 
+    // Multisig shapes: seed the fee reservation with the PER-INPUT estimate
+    // (a 2-of-3 input is ~295 bytes, so its schedule can exceed the raw
+    // rate below the first 1000-byte step of the count-based formula).
+    // Reserving the estimate up front makes the first change computation
+    // honest; the loop below still converges on the REAL signed size, and
+    // the reservation never exceeds what that fixed point would charge.
+    // Single-key shapes skip this branch and stay byte-identical.
+    if ordered
+        .iter()
+        .any(|i| matches!(solver_type(&i.script_pubkey), Some(SpendType::ScriptHash(_))))
+    {
+        let est_bytes = estimate_signed_size_for(&ordered, dest_outputs.len() + 1, book);
+        let est_schedule = estimate_fee(
+            est_bytes,
+            est_fee,
+            &dest_outputs.iter().map(|o| o.value).collect::<Vec<_>>(),
+        );
+        fee_rate_sats = fee_rate_sats.max(est_schedule);
+    }
+
     loop {
         // nValue + nFeeRet <= nValueIn is enforced below (value in < out)
         let mut vout = dest_outputs.clone();
@@ -1351,13 +1414,25 @@ pub fn select_with_fee_with_book(
     if amount <= 0 {
         return Err("select: amount must be positive".into());
     }
+    // Seed with the count-based 1-input estimate, then converge on the
+    // PER-INPUT size of the selection we actually got (a 2-of-3 input is
+    // ~295 bytes, not 148 — the quoted fee must schedule what will be
+    // signed, or the builder's exact-equality guard refuses). Uniform
+    // single-key pools reproduce the old sequence exactly: the per-input
+    // function returns the same 148 the count formula used.
     let mut n_in = 1usize;
+    let mut fee = estimate_fee(estimate_signed_size(n_in, out_values.len() + 1), pay, out_values);
     for _ in 0..8 {
-        // the shape we are about to build: n_in inputs, payments + change
-        let fee = estimate_fee(estimate_signed_size(n_in, out_values.len() + 1), pay, out_values);
         let selected = select_utxos_covering_with_book(inputs, amount + fee, book)?;
         let got = selected.len();
-        if got == n_in {
+        let real_fee = estimate_fee(
+            estimate_signed_size_for(&selected, out_values.len() + 1, book),
+            pay,
+            out_values,
+        );
+        // settled: the same input count AND a fee that schedules exactly
+        // this selection's per-input shape
+        if got == n_in && real_fee == fee {
             return Ok(FeeShape {
                 selected,
                 fee,
@@ -1366,6 +1441,7 @@ pub fn select_with_fee_with_book(
             });
         }
         n_in = got;
+        fee = real_fee;
     }
     // nine iterations without settling means the pool cannot cover it
     Err("Insufficient funds!".into())
@@ -2877,6 +2953,186 @@ mod tests {
         verify_input(&plan.tx, 0, &p2pkh_coin.script_pubkey)
             .expect("the single-key input verifies");
         connect_inputs_check(&plan.tx, &[p2pkh_coin], 200)
+            .expect("connect_inputs_check passes");
+    }
+
+    // ---- round 3, blocker B: per-input fee/size estimation ----
+
+    /// 1-in/2-out P2PKH estimate is UNCHANGED: 148 + (4+4+1+1+4) + 2*(8+1+25)
+    /// = 230 — the exact number the count-based formula always produced, and
+    /// the per-input function reproduces it for a P2PKH coin (148) and a
+    /// bare-P2PK coin (114).
+    #[test]
+    fn p2pkh_estimate_unchanged_and_per_input_matches() {
+        assert_eq!(
+            estimate_signed_size(1, 2),
+            148 + (4 + 4 + 1 + 1 + 4) + 2 * (8 + 1 + 25),
+            "1-in/2-out P2PKH estimate must stay 230 bytes"
+        );
+        let empty = crate::multisig::ScriptBook::empty();
+        // P2PKH coin: 148 per input — identical to the old estimate
+        let p2pkh = coin(3, 1_000_000);
+        assert_eq!(
+            estimate_signed_size_for(&[p2pkh], 2, &empty),
+            14 + 148 + 2 * 34,
+            "per-input P2PKH estimate must be 230"
+        );
+        // bare-P2PK coin: 32+4+1+(1+72)+4 = 114
+        let pk = synthetic_key("est/p2pk").1;
+        let p2pk = SpendInput {
+            txid: [0x21u8; 32],
+            n: 0,
+            value: 1_000_000,
+            script_pubkey: script_pubkey_p2pk(&pk).unwrap(),
+            height: 1,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: [1u8; 32],
+            pubkey: pk,
+        };
+        p2pk.assert_owns_prevout().expect("owns the bare-p2pk coin");
+        assert_eq!(
+            estimate_signed_size_for(&[p2pk], 2, &empty),
+            14 + 114 + 2 * 34,
+            "per-input bare-P2PK estimate must be 196"
+        );
+    }
+
+    /// The 2-of-3 P2SH estimate lands within 5 bytes of the REAL serialized
+    /// size of the signed transaction (both numbers asserted). Estimate for
+    /// the 105-byte 2-of-3 redeem: 14 + (32+4+1 + 2*74 + 1 + 105 + 4) + 2*34
+    /// = 377; the real scriptSig's DER sigs are 71-72 bytes, so reality is
+    /// within a couple of bytes.
+    #[test]
+    fn two_of_three_estimate_matches_real_signed_size_within_5_bytes() {
+        let keys = ms_keys(&["est2/a", "est2/b", "est2/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        assert_eq!(redeem.len(), 105, "2-of-3 redeem length");
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        let p2sh_coin = SpendInput {
+            txid: [0x96u8; 32],
+            n: 0,
+            value: 500_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        p2sh_coin
+            .assert_owns_prevout_with(&book)
+            .expect("the book owns the coin");
+
+        let est = estimate_signed_size_for(&[p2sh_coin.clone()], 2, &book);
+        assert_eq!(
+            est,
+            14 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 1 + 105 + 4) + 2 * 34,
+            "estimate formula: base + 2-of-3 input + 2 P2PKH outputs = 377"
+        );
+
+        // BOTH outputs P2PKH — the estimator's per-output shape (8+1+25)
+        let dest = script_pubkey_p2pkh(&synthetic_key("est2/dest").1);
+        let change = script_pubkey_p2pkh(&synthetic_key("est2/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &[p2sh_coin],
+            vec![Vout {
+                value: 100_000,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            0,
+            0,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("2-of-3 spend must build");
+        let real = plan.tx.serialize().len();
+        assert!(
+            est.abs_diff(real) <= 5,
+            "estimate {} must be within 5 bytes of the real signed size {}",
+            est,
+            real
+        );
+        println!(
+            "round3: 2-of-3 P2SH estimate = {} bytes, real signed size = {} bytes (diff {})",
+            est,
+            real,
+            est.abs_diff(real)
+        );
+    }
+
+    /// A mixed pool (1 P2PKH + 1 2-of-3 P2SH) converges through the
+    /// per-input fee schedule and builds a transaction whose fee is exactly
+    /// the converged quote — every input verifies.
+    #[test]
+    fn mixed_p2pkh_p2sh_pool_converges_and_builds() {
+        let keys = ms_keys(&["est3/a", "est3/b", "est3/c"]);
+        let redeem = crate::multisig::redeem_script(2, &ms_pubkeys(&keys)).unwrap();
+        let book = crate::multisig::ScriptBook::from_scripts(
+            &[(crate::address::hash160(&redeem), redeem.clone())],
+            &keys[..2],
+        );
+        let p2pkh_coin = coin(9, 1_000_000);
+        let p2sh_coin = SpendInput {
+            txid: [0x97u8; 32],
+            n: 0,
+            value: 1_000_000,
+            script_pubkey: p2sh_spk(&redeem),
+            height: 100,
+            tx_time: 1_400_000_000,
+            is_coinbase: false,
+            is_coinstake: false,
+            secret: keys[0].0,
+            pubkey: keys[0].1.clone(),
+        };
+        let amount = 1_500_000i64;
+        let shape = select_with_fee_with_book(
+            &[p2pkh_coin.clone(), p2sh_coin.clone()],
+            &[amount],
+            MIN_FEE_SATS,
+            &book,
+        )
+        .expect("the mixed pool must converge");
+        assert_eq!(shape.n_inputs, 2, "both coins adopted");
+        // the quote schedules the per-input sizes: 14 + (148 + 295) + 2*34
+        assert_eq!(
+            estimate_signed_size_for(&shape.selected, shape.n_outputs, &book),
+            14 + (148 + (32 + 4 + 1 + 2 * (1 + 72 + 1) + 1 + 105 + 4)) + 2 * 34,
+        );
+
+        let dest = script_pubkey_p2pk(&synthetic_key("est3/dest").1).unwrap();
+        let change = script_pubkey_p2pkh(&synthetic_key("est3/change").1);
+        let plan = build_spend_outputs_floor_with_book(
+            &shape.selected,
+            vec![Vout {
+                value: amount,
+                script_pubkey: dest,
+            }],
+            Some(change),
+            MIN_FEE_SATS,
+            shape.fee,
+            &book,
+            1_400_003_600,
+            200,
+        )
+        .expect("the mixed spend must build and sign");
+        // the exact-equality the GUI guard applies: built fee == quoted fee
+        assert_eq!(
+            plan.fee, shape.fee,
+            "the signed transaction pays exactly the converged quote"
+        );
+        for (i, input) in shape.selected.iter().enumerate() {
+            verify_input(&plan.tx, i, &input.script_pubkey)
+                .unwrap_or_else(|e| panic!("input {} must verify: {}", i, e));
+        }
+        connect_inputs_check(&plan.tx, &shape.selected, 200)
             .expect("connect_inputs_check passes");
     }
 }

@@ -942,16 +942,47 @@ pub struct DerivedWallet {
 /// balances. Falls back to snapshot-only with an explanatory note when the
 /// blockindex caches are absent/stale. `label_of` resolves address labels
 /// (wallet names + GUI address book).
+///
+/// `scripts` are the wallet's stored redeem scripts (`WalletData.scripts`):
+/// each contributes a P2SH watch script `a9 14 hash160(redeem) 87` — the
+/// 'C' address (SCRIPT_ADDRESS = 28) — so UTXOs paying the multisig
+/// addresses enter `derived.utxos` exactly like key-owned coins. P2SH
+/// outputs whose redeem is NOT stored are dropped (not wallet-owned).
 pub fn derive_wallet(
     dump: UtxoDump,
     wallet_payloads: HashSet<[u8; 21]>,
+    scripts: &[([u8; 20], Vec<u8>)],
     cfg: &UiConfig,
     tip: &TipInfo,
     label_of: &dyn Fn(&str) -> Option<String>,
 ) -> Result<DerivedWallet, String> {
     let snapshot_height = dump.height;
     let snapshot_tip = dump.covered_tip_hash.clone();
-    let snapshot = dump.into_recs()?;
+    let mut snapshot = dump.into_recs()?;
+    // The P2SH watch list: base58check payload (version 28 ‖ hash160) per
+    // stored redeem — the same payload a P2SH output solves to.
+    let watch: HashSet<[u8; 21]> = scripts
+        .iter()
+        .map(|(_, redeem)| crate::address::script_hash_payload(redeem))
+        .collect();
+    // Keep only P2SH snapshot rows the wallet holds the redeem for, and
+    // attribute the address from the script itself (a P2SH row's address is
+    // derivable without the redeem: base58check(28 ‖ scriptPubKey hash)).
+    snapshot.retain(|u| match crate::address::script_to_dest(&u.script) {
+        Some(dest @ crate::address::ScriptDest::ScriptHash(_)) => watch.contains(&dest.payload()),
+        _ => true,
+    });
+    for u in snapshot.iter_mut() {
+        if let Some(dest @ crate::address::ScriptDest::ScriptHash(_)) =
+            crate::address::script_to_dest(&u.script)
+        {
+            u.address = crate::address::payload_to_address(&dest.payload());
+        }
+    }
+    // the live tail watches the same P2SH scripts (apply_tail_bookkeeping
+    // matches additions by payload and derives the address from it)
+    let mut watched_payloads = wallet_payloads;
+    watched_payloads.extend(watch.iter().cloned());
     let (utxos, reconcile) = match tail_offsets(
         &cfg.index_dir(),
         &cfg.archive_path(),
@@ -963,7 +994,7 @@ pub fn derive_wallet(
             snapshot,
             snapshot_height,
             Some(snapshot_tip.as_str()),
-            &wallet_payloads,
+            &watched_payloads,
             &cfg.archive_path(),
             &offsets,
             tip.height,

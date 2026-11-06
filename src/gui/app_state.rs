@@ -1288,6 +1288,9 @@ impl AppState {
             .iter()
             .map(|k| crate::address::pubkey_payload(&k.pubkey))
             .collect();
+        // derive_wallet also watches the stored redeem scripts' P2SH
+        // addresses (passed separately — the payloads here are key-owned
+        // only, the 'C' multisig addresses ride `wallet.scripts`)
         let tip = load_tipstate(&self.cfg.tipstate_path())?;
         let dump = load_utxo_dump(&self.cfg.utxo_dump_path())?;
         // label lookup needs wallet+side files; build the closure over a
@@ -1304,7 +1307,7 @@ impl AppState {
                     .or_insert_with(|| e.label.clone());
             }
         }
-        let derived = derive_wallet(dump, payloads, &self.cfg, &tip, &|a: &str| {
+        let derived = derive_wallet(dump, payloads, &wallet.scripts, &self.cfg, &tip, &|a: &str| {
             labels.get(a).cloned()
         })?;
         let stake = {
