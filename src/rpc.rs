@@ -92,6 +92,8 @@ pub const NATIVE_METHODS: &[&str] = &[
     "listwalletaddresses",
     "getreceivedbyaddress",
     "validateaddress",
+    "validatepubkey",
+    "makekeypair",
     "health",
     "getsyncinfo",
     // ---- phase 7 milestone 2: broadcast / staking / connections / smsg ----
@@ -658,6 +660,14 @@ fn handle_one(deps: &Deps, req: &Value) -> (&'static str, Value) {
     };
     let params = req.get("params").cloned().unwrap_or_else(|| json!([]));
 
+    // Legacy alias (rpcblockchain.cpp): getblockbynumber <height> is
+    // getblock <height>. Aliased here so there is one implementation, not two.
+    let method = if method == "getblockbynumber" {
+        "getblock".to_string()
+    } else {
+        method
+    };
+
     // proxy-only methods (never in the native table): forward directly
     if !NATIVE_METHODS.contains(&method.as_str()) {
         return if PROXY_FALLBACK_METHODS.contains(&method.as_str()) {
@@ -1154,6 +1164,57 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 0
             };
             NativeOutcome::Ok(json!(sats_to_tri(sats)))
+        }
+
+        // Legacy validatepubkey: decode a hex public key and report the address
+        // it maps to. Pure function, no wallet access.
+        "validatepubkey" => {
+            let pk_hex = match ptry!(p_str(params, 0, "pubkey")) {
+                Some(s) => s,
+                None => return NativeOutcome::Err(-8, "expected public key hex".into()),
+            };
+            let bytes = match crate::p2p::hex_decode(&pk_hex) {
+                Ok(b) => b,
+                Err(e) => return NativeOutcome::Err(-5, format!("Invalid public key: {e}")),
+            };
+            let compressed = bytes.len() == 33;
+            if !(compressed || bytes.len() == 65) {
+                return NativeOutcome::Err(
+                    -5,
+                    "Invalid public key: expected 33 (compressed) or 65 (uncompressed) bytes"
+                        .into(),
+                );
+            }
+            // reject anything that is not a point on the curve
+            match secp256k1::PublicKey::from_slice(&bytes) {
+                Ok(_) => {
+                    let address = crate::wallet::pubkey_to_address(&bytes);
+                    NativeOutcome::Ok(json!({
+                        "isvalid": true,
+                        "address": address,
+                        "iscompressed": compressed,
+                    }))
+                }
+                Err(_) => NativeOutcome::Ok(json!({ "isvalid": false })),
+            }
+        }
+
+        // Legacy makekeypair: a fresh keypair with no wallet side effects.
+        "makekeypair" => {
+            let mut secret = [0u8; 32];
+            if let Err(e) = getrandom::getrandom(&mut secret) {
+                return NativeOutcome::Err(-1, format!("keygen entropy: {e}"));
+            }
+            let secp = secp256k1::Secp256k1::signing_only();
+            let sk = match secp256k1::SecretKey::from_slice(&secret) {
+                Ok(k) => k,
+                Err(e) => return NativeOutcome::Err(-1, format!("bad secret: {e}")),
+            };
+            let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+            NativeOutcome::Ok(json!({
+                "privatekey": crate::keytool::wif_encode(&secret, true),
+                "publickey": pk.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            }))
         }
 
         "validateaddress" => {
