@@ -423,3 +423,91 @@ pub fn is_encrypted(path: &std::path::Path) -> bool {
     .unwrap_or(false)
 }
 
+
+/// Re-encrypt the master key under a new passphrase (legacy ChangePassphrase).
+/// The keys themselves are NOT re-encrypted: only the mkey row changes, exactly
+/// as the legacy code does it.
+pub fn change_passphrase(
+    path: &std::path::Path,
+    old_pass: &str,
+    new_pass: &str,
+) -> Result<u32, String> {
+    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut mk_k = Vec::new();
+    push_cs(&mut mk_k, 4);
+    mk_k.extend_from_slice(b"mkey");
+    let mut st = conn
+        .prepare("SELECT key, value FROM main WHERE substr(key,1,5) = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut q = st.query(params![mk_k]).map_err(|e| e.to_string())?;
+    let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
+    while let Some(row) = q.next().map_err(|e| e.to_string())? {
+        let k: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+        let v: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+        found = Some((k, v));
+    }
+    let (rowkey, mv) = found.ok_or("wallet is not encrypted")?;
+    let (crypted_master, salt, method, iterations) = decode_master_key(&mv)?;
+    if method != 0 {
+        return Err(format!("unsupported derivation method {method}"));
+    }
+    let (dk, div) = derive_key_iv(old_pass, &salt, iterations);
+    let master = decrypt(&dk, &div, &crypted_master)
+        .map_err(|_| "wrong passphrase (the master key did not decrypt)".to_string())?;
+
+    // fresh salt + iterations, new passphrase, same master key
+    let mut new_salt = [0u8; 8];
+    getrandom::getrandom(&mut new_salt).map_err(|e| format!("entropy: {e}"))?;
+    let (dk2, div2) = derive_key_iv(new_pass, &new_salt, iterations);
+    let recrypted = encrypt(&dk2, &div2, &master);
+    let new_value = encode_master_key(&recrypted, &new_salt, method, iterations);
+    conn.execute(
+        "UPDATE main SET value = ?1 WHERE key = ?2",
+        params![new_value, rowkey],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // prove the new passphrase opens the wallet before returning
+    let check = decrypt_wallet(path, new_pass)?;
+    Ok(check.len() as u32)
+}
+
+/// Strip encryption: rewrite every ckey row as a plaintext "key" row and delete
+/// mkey. Requires the passphrase and PROVES each secret against its pubkey.
+pub fn decrypt_wallet_file(
+    path: &std::path::Path,
+    passphrase: &str,
+) -> Result<usize, String> {
+    let keys = decrypt_wallet(path, passphrase)?;
+    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut done = 0usize;
+    for (pubkey, sec) in &keys {
+        // write the plaintext key row in the legacy DER form tri7 uses
+        let der = tri7_core_der(sec, pubkey)?;
+        let pk = key_blob("key", &pubkey_suffix(pubkey));
+        tx.execute(
+            "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+            params![pk, der],
+        )
+        .map_err(|e| e.to_string())?;
+        let ck = key_blob("ckey", &pubkey_suffix(pubkey));
+        tx.execute("DELETE FROM main WHERE key = ?1", params![ck])
+            .map_err(|e| e.to_string())?;
+        done += 1;
+    }
+    let mut mk_k = Vec::new();
+    push_cs(&mut mk_k, 4);
+    mk_k.extend_from_slice(b"mkey");
+    tx.execute("DELETE FROM main WHERE substr(key,1,5) = ?1", params![mk_k])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(done)
+}
+
+/// The legacy DER encoding of a private key (i2d_ECPrivateKey shape), which is
+/// what tri7's plaintext rows hold: SEQUENCE { INTEGER 1, OCTET STRING <32>,
+/// [0] curve OID, [1] BIT STRING pubkey }.
+fn tri7_core_der(secret: &[u8; 32], pubkey: &[u8]) -> Result<Vec<u8>, String> {
+    crate::wallet::encode_der_privkey(secret, pubkey)
+}
