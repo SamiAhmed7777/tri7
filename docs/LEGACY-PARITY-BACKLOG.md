@@ -62,11 +62,12 @@ out of scope (with reason).
 - [x] **`sendtoaddress`** — builds and signs with the GUI's builder, relays via
       the sendrawtransaction path; a non-legacy `dryrun` third parameter builds
       without relaying.
-- [ ] **`sendmany`** — multiple recipients in one transaction (same builder,
-      more outputs). Still missing.
+- [x] **`sendmany`** — multiple recipients in one transaction; the
+      single-destination builder is now a wrapper over the multi-output one, so
+      there is one construction/signing/fee implementation.
 - [–] **`sendfrom` / `move`** — legacy account-model verbs; not ported.
-- [ ] **`signmessage`** — signing exists in `gui::state` for the GUI page but is
-      **not exposed on RPC**. (`verifymessage` is native.)
+- [x] **`signmessage`** — exposed on RPC with the same implementation the GUI
+      Sign page uses; a sign -> verify round trip was proven on DNS2.
 - [x] **`backupwallet`** — copies the wallet, refuses an existing destination.
 - [x] **`listtransactions` / `listsinceblock`** — paginated window in legacy
       record shape (newest-first window, ascending result); listsinceblock
@@ -81,10 +82,12 @@ out of scope (with reason).
       index, not a wallet-scoped shortcut: it must cover foreign addresses too.
       A wallet-scoped implementation would answer differently from legacy and
       is therefore not acceptable.
-      STATUS: index + three RPCs shipped and unit-tested; the full chain build
-      runs at ~240 blocks/s (~2.5 h on DNS2, resumable, commits every 500
-      blocks). Known limit: it is a separate pass, not incremental during block
-      acceptance, so it goes stale as the tip advances until re-run.
+      STATUS: shipped. Full chain builds in ~11 minutes (4,700-6,000 blocks/s
+      after adding the missing out(txid,n) index; it was 17 blocks/s before).
+      The index is now updated ON BLOCK ACCEPTANCE (opt-in preserved: only when
+      addressindex.db exists) and refuses out-of-order heights instead of
+      writing a gap. A 5-minute systemd timer remains as catch-up for reorg
+      adoption, gap backfill and historical sync.
 - [x] **`gettxoutsetinfo`** — height, bestblock, txouts and total_amount from
       the wallet replay view; transactions/bogosize/hash_serialized_2 are null
       with a note because no full UTXO-set pass exists.
