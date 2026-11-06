@@ -30,6 +30,8 @@ pub mod walletcrypto;
 pub mod wallet_encrypt;
 pub mod addrindex;
 pub mod bdb_import;
+pub mod onion;
+pub mod peers;
 pub mod stake;
 pub mod sweep;
 pub mod txpool;

@@ -11,8 +11,10 @@
 //! PoW target / PoS kernel + block signature + tx finality), persistent
 //! tipstate.json.
 //!
-//! Strict safety: read-only participation — we never relay transactions,
-//! never serve getdata/getheaders/getblocks/getaddr, never send addr. On any
+//! Strict safety: read-only participation — we never relay transactions.
+//! Discovery (BRIEF_TOR_V2): getaddr is sent after verack, addr gossip is
+//! merged into the persistent peer store (peers.json) and served back to
+//! peers asking for it — Tor-only, up to the legacy 1000-entry cap. On any
 //! frame parse failure the socket is disconnected cleanly.
 //!
 //! Validation context (window):
@@ -1241,7 +1243,64 @@ fn parse_args() -> Config {
             }
         }
     }
+    // conf-file `addnode=<host>:<port>` — Tor-only: .onion targets join the
+    // attach list; any cleartext IP/hostname is IGNORED with a log line.
+    if let Ok(text) = std::fs::read_to_string(&cfg.conf_path) {
+        // ignored entries are already logged inside addnode_targets_from_conf
+        let (targets, _) = addnode_targets_from_conf(&text, &cfg.socks, &cfg.i2p_socks);
+        if !targets.is_empty() {
+            if !explicit_peers {
+                // replace the 127.0.0.1:24113 built-in default exactly like
+                // the first --daemon does (self-connect guard)
+                cfg.peers.clear();
+                explicit_peers = true;
+            }
+            cfg.peers.extend(targets);
+        }
+    }
+    cfg.explicit_peers = explicit_peers;
     cfg
+}
+
+/// Parse `addnode=<host>:<port>` lines (last one wins per host, like the
+/// legacy client's repeated-flag handling). Tor-only rule: ONLY `.onion`
+/// hosts are accepted; a cleartext IP/hostname is dropped AND logged. The
+/// companion file `addnode=` targets must never crash on junk lines — a
+/// malformed entry is ignored with a log line too. Returns the accepted
+/// targets plus the ignored `host:port` strings (each already logged).
+fn addnode_targets_from_conf(
+    conf_text: &str,
+    socks: &(String, u16),
+    i2p_socks: &(String, u16),
+) -> (Vec<PeerTarget>, Vec<String>) {
+    let mut targets = Vec::new();
+    let mut ignored = Vec::new();
+    for line in conf_text.lines() {
+        let Some(spec) = line.trim().strip_prefix("addnode=") else {
+            continue;
+        };
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let host = spec.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+        if host.ends_with(".onion") {
+            match PeerTarget::parse(spec, socks, i2p_socks) {
+                Ok(t) => {
+                    log(&format!("addnode={} accepted (tor)", t.endpoint()));
+                    targets.push(t);
+                }
+                Err(e) => log(&format!("addnode={} ignored ({})", spec, e)),
+            }
+        } else {
+            log(&format!(
+                "addnode={} ignored: Tor-only — only .onion addnode hosts are accepted",
+                spec
+            ));
+            ignored.push(spec.to_string());
+        }
+    }
+    (targets, ignored)
 }
 
 /// Persist `key=value` into the conf file (staking on|off). Replaces an
@@ -1356,6 +1415,8 @@ struct Stats {
     recv: HashMap<String, u64>,
     headers_processed: u64,
     headers_new: u64,
+    /// addr replies served for inbound getaddr (discovery)
+    getaddr_served: u64,
     headers_backfilled: u64,
     blocks_received: u64,
     blocks_validated_live: u64,
@@ -1545,6 +1606,11 @@ struct PeerInfo {
     subver: String,
     start_height: i32,
     services: u64,
+    /// the peer's advertised listening address from its `version` addr_me,
+    /// as a peer-store key (reconstructed onion hostname / dotted quad; a
+    /// legacy peers.json may still hold hex tor keys) — None when it is a
+    /// loopback placeholder (their tor builds use 127.0.0.1)
+    advertised: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,6 +1778,7 @@ fn handshake(
                         subver: v.user_agent.clone(),
                         start_height: v.start_height,
                         services: v.services,
+                        advertised: advertised_store_key(&v.addr_me),
                     });
                     if !verack_sent {
                         sess.send("verack", &[], stats)?;
@@ -1732,6 +1799,11 @@ fn handshake(
     if !veracked {
         return Err("handshake timed out waiting for verack".into());
     }
+    // Discovery: ask for the peer's address book right after verack
+    // (net.cpp ProcessMessage — the legacy client's getaddr/addr gossip is
+    // what keeps the network alive once the static seeds die). Answers come
+    // back as `addr` and land in peers.json via handle_message.
+    sess.send("getaddr", &[], stats)?;
     // Prefer headers announcements (main.cpp sendheaders → fPreferHeaders);
     // inv announcements are handled too.
     sess.send("sendheaders", &[], stats)?;
@@ -1741,7 +1813,95 @@ fn handshake(
         subver: "?".into(),
         start_height: -1,
         services: 0,
+        advertised: None,
     }))
+}
+
+/// Peer-store key for an address a peer advertised about ITSELF (version
+/// addr_me / addr gossip). Loopback and unspecified addresses are
+/// placeholders (tor peers announce 127.0.0.1) — never recorded.
+fn advertised_store_key(addr: &tri7_core::p2p::WireAddr) -> Option<String> {
+    if !addr.is_tor_v3 && addr.is_ipv4_mapped() {
+        let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+        if a == 127 || a == 0 {
+            return None;
+        }
+    }
+    addr.store_key()
+}
+
+fn peers_path(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("peers.json")
+}
+
+/// Our own identities (for the peer store's self-skip): the current onion
+/// from onion-state.json when present, plus the hex tor key of any onion
+/// address we know.
+fn self_identities(cfg: &Config) -> Vec<String> {
+    let mut ids = Vec::new();
+    let path = cfg.state_dir.join("onion-state.json");
+    if let Some(st) = tri7_core::onion::OnionState::load(&path) {
+        ids.push(st.current.clone());
+        if let Some(key) = tri7_core::p2p::WireAddr::from_onion_label(&st.current, 0, 0)
+            .ok()
+            .and_then(|a| a.store_key())
+        {
+            ids.push(key);
+        }
+    }
+    ids
+}
+
+/// Load the peer store, register our own identities, hand it to `f`, and
+/// save — the house atomic write, tolerating failure with a log line (peer
+/// bookkeeping must never take the node down).
+fn with_peer_store<T>(
+    cfg: &Config,
+    f: impl FnOnce(&mut tri7_core::peers::PeerStore) -> T,
+) -> Option<T> {
+    let path = peers_path(cfg);
+    let mut store = tri7_core::peers::PeerStore::load(&path);
+    store.set_self(&self_identities(cfg));
+    let out = f(&mut store);
+    if let Err(e) = store.save(&path) {
+        log(&format!("peer store save failed (continuing): {}", e));
+    }
+    Some(out)
+}
+
+/// Record a successful dial/handshake against the store.
+fn record_peer_ok(cfg: &Config, endpoint: &str, services: u64, advertised: Option<String>) {
+    let now = tri7_core::peers::unix_now();
+    with_peer_store(cfg, |store| {
+        if let Some((host, port)) = split_endpoint(endpoint) {
+            store.upsert(&host, port, services, "listen", now);
+            store.record_ok(&host, port, now);
+        }
+        if let Some(adv) = advertised {
+            if let Some(port) = split_endpoint(endpoint).map(|(_, p)| p) {
+                store.upsert(&adv, port, services, "listen", now);
+            }
+        }
+    });
+}
+
+/// Record a failed dial/handshake (drives the store's exponential backoff).
+fn record_peer_fail(cfg: &Config, endpoint: &str) {
+    let now = tri7_core::peers::unix_now();
+    with_peer_store(cfg, |store| {
+        if let Some((host, port)) = split_endpoint(endpoint) {
+            store.record_fail(&host, port, now);
+        }
+    });
+}
+
+fn split_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    let (host, port) = endpoint.rsplit_once(':')?;
+    let port = port.parse().ok()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port))
 }
 
 // ---------------------------------------------------------------------------
@@ -5917,6 +6077,17 @@ fn handle_message(
                 "peer version: {} ({}) start height {}",
                 v.version, v.user_agent, v.start_height
             ));
+            // learn the peer's advertised listening address when it is a
+            // real (non-loopback) address — a peer that connected to us is
+            // reachable by definition
+            if let Some(adv) = advertised_store_key(&v.addr_me) {
+                if v.addr_me.port != 0 {
+                    let now = tri7_core::peers::unix_now();
+                    with_peer_store(cfg, |store| {
+                        store.upsert(&adv, v.addr_me.port, v.services, "listen", now);
+                    });
+                }
+            }
             Ok(())
         }
         "verack" => Ok(()),
@@ -6212,11 +6383,48 @@ fn handle_message(
                 .send("headers", &tri7_core::p2p::encode_headers(&headers), stats)?;
             Ok(())
         }
+        "getaddr" => {
+            // Answer with up to MAX_ADDR_ENTRIES known-good peers from the
+            // store (the legacy client's CAddrMan relay; our own onion is
+            // included by the store when onion-state.json exists).
+            let now = tri7_core::peers::unix_now();
+            let store = tri7_core::peers::PeerStore::load(&peers_path(cfg));
+            let entries = store.addr_entries(now, tri7_core::p2p::MAX_ADDR_ENTRIES);
+            stats.getaddr_served += 1;
+            peer.sess
+                .send("addr", &tri7_core::p2p::encode_addr(&entries), stats)?;
+            Ok(())
+        }
+        "addr" => {
+            // Merge gossip into the peer store. A malformed payload is a
+            // log line, not a disconnect — gossip noise must not kill peers.
+            match tri7_core::p2p::parse_addr(&msg.payload) {
+                Ok(entries) => {
+                    let now = tri7_core::peers::unix_now();
+                    with_peer_store(cfg, |store| {
+                        let merged = store.merge_addr(&entries, now);
+                        if merged > 0 {
+                            log(&format!(
+                                "addr: merged {} of {} entries (store {} peers)",
+                                merged,
+                                entries.len(),
+                                store.len()
+                            ));
+                        }
+                    });
+                    Ok(())
+                }
+                Err(e) => {
+                    log(&format!("addr payload rejected from {}: {}", peer.label, e));
+                    Ok(())
+                }
+            }
+        }
         // read-only inbound noise: announce preferences and compact-block
         // negotiation carry no data we act on
-        "getblocks" | "getaddr" | "mempool" | "getwalletaddr"
-        | "getsnap" | "getsnapchunk" | "addr" | "walletaddr" | "seeder"
-        | "getseederlist" | "seederlist" | "cmpctblock" | "sendcmpct" | "sendheaders" => Ok(()),
+        "getblocks" | "mempool" | "getwalletaddr" | "getsnap" | "getsnapchunk"
+        | "walletaddr" | "seeder" | "getseederlist" | "seederlist" | "cmpctblock"
+        | "sendcmpct" | "sendheaders" => Ok(()),
         c if c.starts_with("smsg") => {
             // smsg wire engine: ping/pong/inv/show/have/want/msg/match/ignore
             match smsg {
@@ -8199,6 +8407,7 @@ fn accept_handshake(
                     subver: v.user_agent.clone(),
                     start_height: v.start_height,
                     services: v.services,
+                    advertised: advertised_store_key(&v.addr_me),
                 });
             } else {
                 buffered.push_back(msg);
@@ -8265,6 +8474,8 @@ fn accept_handshake(
     if !veracked {
         return Err("inbound handshake: no verack from client".into());
     }
+    // Discovery: same as outbound — ask for their address book after verack.
+    sess.send("getaddr", &[], stats)?;
     sess.send("sendheaders", &[], stats)?;
     stats.handshakes += 1;
     Ok(Peer {
@@ -8290,10 +8501,40 @@ fn connect_and_handshake(
     height: u64,
     start: usize,
 ) -> Result<(Peer, usize), String> {
-    let n = cfg.peers.len();
+    // Dial order (BRIEF_TOR_V2 item 3): peers that have answered before and
+    // are out of backoff first, then fresh store entries, then the
+    // configured targets (seeds last — they are the network's last resort).
+    // Store hosts are reconstructed .onion hostnames (dialable); leftover
+    // legacy hex-tor-key entries and clearnet quads are relay-only and are
+    // never dialed: the network is Tor-only.
+    let mut targets: Vec<PeerTarget> = Vec::new();
+    let now = tri7_core::peers::unix_now();
+    let seeds: Vec<(String, u16)> = cfg
+        .peers
+        .iter()
+        .map(|t| (t.host.clone(), t.port))
+        .collect();
+    let store = tri7_core::peers::PeerStore::load(&peers_path(cfg));
+    for (host, port) in store.dial_order(now, &seeds) {
+        if !host.ends_with(".onion") {
+            continue;
+        }
+        if let Ok(t) = PeerTarget::parse(&format!("{}:{}", host, port), &cfg.socks, &cfg.i2p_socks)
+        {
+            if !targets.iter().any(|e| e.host == t.host && e.port == t.port) {
+                targets.push(t);
+            }
+        }
+    }
+    for t in &cfg.peers {
+        if !targets.iter().any(|e| e.host == t.host && e.port == t.port) {
+            targets.push(t.clone());
+        }
+    }
+    let n = targets.len();
     for off in 0..n {
         let idx = (start + off) % n;
-        let target = &cfg.peers[idx];
+        let target = &targets[idx];
         match Session::connect_target(target) {
             Ok(mut sess) => match handshake(&mut sess, stats, height, target) {
                 Ok(peer) => {
@@ -8305,6 +8546,12 @@ fn connect_and_handshake(
                         peer.start_height,
                         peer.services
                     ));
+                    record_peer_ok(
+                        cfg,
+                        &target.endpoint(),
+                        peer.services,
+                        peer.advertised.clone(),
+                    );
                     return Ok((
                         Peer {
                             label: format!("out:{}", target.endpoint()),
@@ -8326,10 +8573,14 @@ fn connect_and_handshake(
                 }
                 Err(e) => {
                     log(&format!("handshake {} failed: {}", target.endpoint(), e));
+                    record_peer_fail(cfg, &target.endpoint());
                     sess.shutdown();
                 }
             },
-            Err(e) => log(&format!("connect {} failed: {}", target.endpoint(), e)),
+            Err(e) => {
+                log(&format!("connect {} failed: {}", target.endpoint(), e));
+                record_peer_fail(cfg, &target.endpoint());
+            }
         }
     }
     Err(format!("no outbound target reachable ({} tried)", n))
@@ -8954,6 +9205,75 @@ mod tests {
         let c = PeerTarget::parse("100.85.236.10:24112", &tor, &i2p).unwrap();
         assert_eq!(c.transport, Transport::Clearnet);
         assert_eq!(c.socks, None);
+    }
+
+    /// A9: `addnode=<onion>:<port>` is kept as a tor target;
+    /// `addnode=1.2.3.4:24112` (cleartext) is IGNORED with a log line — the
+    /// Tor-only rule. Junk lines never panic.
+    #[test]
+    fn addnode_conf_parsing_tor_only() {
+        let tor = ("127.0.0.1".to_string(), 9050u16);
+        let i2p = ("127.0.0.1".to_string(), 4447u16);
+        let conf = "\
+rpcuser=u
+rpcpassword=p
+port=24113
+addnode=1.2.3.4:24112
+addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+addnode=somehost.example.com:24113
+addnode=jbpfhe7zdeadseeddeadseeddeadseeddeadseeddeadseeddeadseed0.onion:24112
+addnode=
+addnode=nonsense-no-port
+";
+        let (targets, ignored) = addnode_targets_from_conf(conf, &tor, &i2p);
+        // exactly the two onion targets survive
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0].endpoint(),
+            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+        );
+        assert_eq!(targets[0].transport, Transport::Tor);
+        assert_eq!(targets[0].socks.as_ref().map(|(h, _)| h.as_str()), Some("127.0.0.1"));
+        assert_eq!(targets[1].port, 24112);
+        // the cleartext hosts are in the ignored list (each was logged by the
+        // parser — visible with `cargo test -- --nocapture`)
+        assert_eq!(ignored.len(), 2);
+        assert!(ignored.contains(&"1.2.3.4:24112".to_string()));
+        assert!(ignored.contains(&"somehost.example.com:24113".to_string()));
+        // malformed lines are ignored without entries and without panic
+        let (targets, _) = addnode_targets_from_conf("addnode=nonsense-no-port\n", &tor, &i2p);
+        assert!(targets.is_empty());
+    }
+
+    /// Peer-store keys and the advertised-address filter: loopback and
+    /// unspecified placeholders are never recorded.
+    #[test]
+    fn advertised_store_key_filters_loopback_placeholders() {
+        use tri7_core::p2p::WireAddr;
+        // loopback IPv4-mapped (tor peers announce 127.0.0.1) → None
+        let lo = WireAddr::ipv4(127, 0, 0, 1, 24113, 1);
+        assert_eq!(advertised_store_key(&lo), None);
+        // unspecified → None
+        let un = WireAddr::ipv4(0, 0, 0, 0, 24113, 1);
+        assert_eq!(advertised_store_key(&un), None);
+        // a routable IPv4 → dotted quad key
+        let ok = WireAddr::ipv4(10, 1, 2, 3, 24113, 1);
+        assert_eq!(
+            advertised_store_key(&ok).as_deref(),
+            Some("10.1.2.3")
+        );
+        // an onion (tor_v3) → the reconstructed HOSTNAME (dialable — this is
+        // what makes gossip-discovered peers connectable)
+        let onion = WireAddr::from_onion_label(
+            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion",
+            24113,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            advertised_store_key(&onion).as_deref(),
+            Some("gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion")
+        );
     }
 
     #[test]

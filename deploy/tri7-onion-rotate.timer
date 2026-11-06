@@ -1,0 +1,22 @@
+[Unit]
+Description=Monthly tri7 onion RETIRE sweep (NOT rotation — the daemon rotates in-process)
+
+[Timer]
+# Round 3 (BRIEF_TOR_ROUND3): this timer NO LONGER triggers
+# tri7-onion-rotate.service and has NOTHING to do with rotation. The
+# lifecycle daemon (tri7-onion-rotate.service, --hold) rotates IN-PROCESS on
+# its own tick when due and never exits, so a monthly timer cannot and must
+# not start it (a timer cannot start an already-active unit — the round-2
+# defect). This timer now only fires a SEPARATE one-shot unit,
+# tri7-onion-rotate-retire.service, that DEL_ONIONs an expired previous
+# address left over by a manual one-shot run; the daemon performs the same
+# retirement itself on its tick, so this sweep is only a safety net.
+# RandomizedDelaySec staggers the fleet; Persistent=true catches a missed
+# fire while the host was down.
+OnCalendar=*-*-01 03:00:00
+RandomizedDelaySec=6h
+Persistent=true
+Unit=tri7-onion-rotate-retire.service
+
+[Install]
+WantedBy=timers.target

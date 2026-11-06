@@ -1,0 +1,27 @@
+[Unit]
+Description=tri7 onion retire sweep (one-shot DEL_ONION of an expired previous address)
+Documentation=file:/opt/tri7/docs/tor-discovery-and-rotation.md
+
+[Service]
+Type=oneshot
+User=tri7
+Group=tri7
+# A stock Debian tor keeps /run/tor/control.authcookie as root:debian-tor 0640,
+# so this unit needs tor's group to use CookieAuthentication at all. Without it
+# the client falls back to bare AUTHENTICATE, DEL_ONION is refused, and (before
+# the round-4 fix) the sweep cleared state anyway. Making the cookie
+# world-readable is explicitly rejected as a workaround.
+SupplementaryGroups=debian-tor
+# NOT the daemon unit: the lifecycle daemon (tri7-onion-rotate.service,
+# --hold) retires expired previous services on its own tick and always
+# re-establishes/holds the live ones. This oneshot exists only so the
+# monthly timer (tri7-onion-rotate.timer) can sweep up a previous address
+# left behind by a manual one-shot run; while grace is open it refuses.
+ExecStart=/opt/tri7/bin/tri7-onion-rotate \
+  --state-dir /var/lib/tri7 \
+  --retire
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tri7
+PrivateTmp=yes
