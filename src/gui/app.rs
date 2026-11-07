@@ -313,19 +313,14 @@ impl Tri7App {
                 // menu (right) — the panel ui itself is top-down, so without
                 // this the menu would land on a clipped second row.
                 ui.horizontal(|ui| {
-                    if let Some(tex) = self.tex(ui.ctx(), "brand/mark64") {
+                    // The wordmark IS the operator's artwork (brand/header =
+                    // the supplied PNG lockup: triangle + styled lettering) —
+                    // never a plain-font text label (operator 2026-11-07: the
+                    // label rendered in the default egui font, not his mark).
+                    if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
                         ui.add_space(20.0);
-                        ui.add(img(&tex, Vec2::splat(44.0)));
-                        ui.add_space(12.0);
-                        ui.vertical(|ui| {
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Cryptographic Triangles")
-                                    .size(20.0)
-                                    .color(th::BRAND_RED)
-                                    .strong(),
-                            );
-                        });
+                        let aspect = 600.0 / 126.0;
+                        ui.add(img(&tex, Vec2::new(48.0 * aspect, 48.0)));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
