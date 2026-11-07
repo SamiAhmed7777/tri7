@@ -219,6 +219,48 @@ fn chrono_epoch() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss)
 }
 
+/// Inverse of civil_from_days (Hinnant): days since 1970-01-01 from a
+/// proleptic Gregorian date.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 } as u64; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d as u64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Parse the legacy client's ISO-8601 UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`
+/// (Triangles v5.5.5.0 dumpwallet writes TimeString, not epoch). Strict about
+/// the SHAPE (exactly 20 bytes, fixed separators) and the RANGES (month
+/// 1-12, day 1-31, hour <=23, min <=59, sec <=60) but DELIBERATELY PERMISSIVE
+/// about per-month calendar validity: `created` is wallet metadata only
+/// (keymeta is stamped at import), so an impossible day such as 2021-02-30
+/// normalizes harmlessly in the epoch arithmetic instead of failing the line.
+/// Anything else is None and the line is skipped, exactly like a non-epoch
+/// field was before.
+fn parse_iso8601_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |a: usize, n: usize| -> Option<i64> { s.get(a..a + n)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
+    let (hh, mm, ss) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    Some(days_from_civil(y, mo as u32, d as u32) * 86_400 + hh * 3_600 + mm * 60 + ss)
+}
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -261,7 +303,12 @@ pub fn parse_dump_lines<R: BufRead>(r: R) -> Result<Vec<(String, i64, Option<Str
         }
         let created = match toks[1].parse::<i64>() {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => match parse_iso8601_utc(toks[1]) {
+                Some(t) => t,
+                // Neither epoch nor ISO-8601: not a dump key line we can
+                // interpret (the old client never wrote anything else).
+                None => continue,
+            },
         };
         let mut label = None;
         let mut labeled = false;
@@ -521,6 +568,46 @@ garbage
         assert_eq!(got[0].2.as_deref(), Some("Main"));
         assert_eq!(got[1].2, None, "change=1 clears the label");
         assert_eq!(got[2].2, None, "reserve=1 clears the label");
+    }
+
+    #[test]
+    fn parse_dump_lines_accepts_iso8601_created() {
+        // Verbatim grammar of a Triangles v5.5.5.0 dumpwallet (the 2026-04
+        // dump this fix was written against): ISO-8601 TimeString in field 1,
+        // `label=` with an empty value, and `change=1` variants.
+        let body = "\
+# Wallet dump created by Triangles v5.5.5.0 (Apr  4 2026, 08:28:42)
+Vx1x2x3x4x5x6x7x8x9x0xAxBxCxDxExFxGxHxJxKxLxMxN 2021-02-17T23:26:09Z label= # addr=TH7U7iH884zZ99FG7zyh2B3wMUHisFtUHX
+Vy1y2y3y4y5y6y7y8y9y0yAyByCyDyEyFyGyHyJyKyLyMyN 2021-02-17T23:26:09Z change=1 # addr=TPw5Z7neRj2B9hySevsxht7MJUEC6wz8u8
+Vz1z2z3z4z5z6z7z8z9z0zAzBzCzDzEzFzGzHzJzKzLzMzN 2026-04-05T06:08:40Z label=Mining # addr=TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3
+Vbad 2021-13-45T99:99:99Z label=nope # addr=TNotARealAddress
+Vbad2 not-a-timestamp label=nope # addr=TNotARealAddress
+";
+        let got = parse_dump_lines(body.as_bytes()).unwrap();
+        assert_eq!(got.len(), 3, "malformed timestamps skipped, ISO ones kept");
+        assert_eq!(got[0].1, 1_613_604_369, "2021-02-17T23:26:09Z epoch");
+        assert_eq!(got[0].2.as_deref(), Some(""), "label= means an empty label");
+        assert_eq!(got[1].1, 1_613_604_369);
+        assert_eq!(got[1].2, None, "change=1 clears the label");
+        assert_eq!(got[2].2.as_deref(), Some("Mining"));
+    }
+
+    #[test]
+    fn iso8601_utc_known_vectors_and_rejections() {
+        assert_eq!(parse_iso8601_utc("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso8601_utc("2021-02-17T23:26:09Z"), Some(1_613_604_369));
+        assert_eq!(parse_iso8601_utc("2026-11-06T23:26:09Z"), Some(1_794_007_569));
+        // date -> days -> date identity across a leap-year boundary
+        let (y, m, d) = civil_from_days(days_from_civil(2000, 2, 29));
+        assert_eq!((y, m, d), (2000, 2, 29));
+        assert_eq!(parse_iso8601_utc("2021-13-01T00:00:00Z"), None, "month 13");
+        // Day validity is checked 1..=31 only: created is wallet METADATA
+        // (keymeta is stamped at import anyway), so an impossible calendar
+        // day like Feb 30 normalizes harmlessly in the epoch arithmetic
+        // instead of being a parse error.
+        assert_eq!(parse_iso8601_utc("2021-02-30T00:00:00Z"), Some(1_614_643_200));
+        assert_eq!(parse_iso8601_utc("2021-02-17 23:26:09"), None, "missing T/Z separators");
+        assert_eq!(parse_iso8601_utc("1700000000"), None, "epoch is not ISO; the epoch branch handles it");
     }
 
     /// Build a synthetic wallet file through the REAL write path (same

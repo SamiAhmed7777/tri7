@@ -1297,10 +1297,25 @@ fn addnode_targets_from_conf(
                 "addnode={} ignored: Tor-only — only .onion addnode hosts are accepted",
                 spec
             ));
-            ignored.push(spec.to_string());
+            // `ignored` carries rejected host:port specs (the function doc's
+            // contract): the shape check mirrors what the accepted path needs,
+            // so junk with or without a colon never enters the list.
+            if is_host_port_shape(spec) {
+                ignored.push(spec.to_string());
+            }
         }
     }
     (targets, ignored)
+}
+
+/// True when spec has the host:port shape the accepted addnode path requires:
+/// a non-empty host part and a port that parses as u16 (split on the LAST
+/// colon, so hosts containing colons still resolve their port).
+fn is_host_port_shape(spec: &str) -> bool {
+    match spec.rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
+        None => false,
+    }
 }
 
 /// Persist `key=value` into the conf file (staking on|off). Replaces an
@@ -9327,6 +9342,8 @@ addnode=somehost.example.com:24113
 addnode=jbpfhe7zdeadseeddeadseeddeadseeddeadseeddeadseeddeadseed0.onion:24112
 addnode=
 addnode=nonsense-no-port
+addnode=:24112
+addnode=host:notaport
 ";
         let (targets, ignored) = addnode_targets_from_conf(conf, &tor, &i2p);
         // exactly the two onion targets survive
@@ -9343,9 +9360,27 @@ addnode=nonsense-no-port
         assert_eq!(ignored.len(), 2);
         assert!(ignored.contains(&"1.2.3.4:24112".to_string()));
         assert!(ignored.contains(&"somehost.example.com:24113".to_string()));
-        // malformed lines are ignored without entries and without panic
+        // malformed lines — including colon-carrying junk (:24112 empty host,
+        // host:notaport unparsable port) — are ignored without entries and
+        // without panic
+        assert!(!ignored.iter().any(|s| !s.contains('.')));
         let (targets, _) = addnode_targets_from_conf("addnode=nonsense-no-port\n", &tor, &i2p);
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn addnode_ignored_list_requires_host_port_shape() {
+        let tor = ("127.0.0.1".to_string(), 9050u16);
+        let i2p = ("127.0.0.1".to_string(), 4447u16);
+        let (targets, ignored) = addnode_targets_from_conf(
+            "addnode=:24112\naddnode=host:notaport\naddnode=ok.example.com:24113\n\
+             addnode=nonsense-no-port\naddnode=host:99999\n",
+            &tor,
+            &i2p,
+        );
+        // only the well-formed cleartext host:port enters the ignored list
+        assert!(targets.is_empty());
+        assert_eq!(ignored, vec!["ok.example.com:24113".to_string()]);
     }
 
     /// Peer-store keys and the advertised-address filter: loopback and
