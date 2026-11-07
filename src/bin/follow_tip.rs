@@ -4055,15 +4055,47 @@ impl tri7_core::txpool::UtxoView for WalletThenStoreUtxoView<'_> {
                 tx_time: o.tx_time,
             });
         }
-        let store = self.store?;
-        let hit = store.tx_by_id(&key.0).ok()??;
-        let o = hit.tx.vout.get(key.1 as usize)?;
-        Some(tri7_core::txpool::PoolUtxo {
-            value: o.value,
-            script_pubkey: o.script_pubkey.clone(),
-            height: hit.block_height.unwrap_or(0),
-            tx_time: hit.block_time,
-        })
+        let Some(store) = self.store else {
+            log("pool deep-coin fallback: no store wired (wallet-only view)");
+            return None;
+        };
+        log(&format!(
+            "pool deep-coin fallback: live miss for {}, consulting store (wired)",
+            tri7_core::p2p::internal_to_display(&key.0)
+        ));
+        match store.tx_by_id(&key.0) {
+            Ok(Some(hit)) => {
+                let Some(o) = hit.tx.vout.get(key.1 as usize) else {
+                    log(&format!(
+                        "pool deep-coin fallback: prevout vout {} missing on parent {}",
+                        key.1,
+                        tri7_core::p2p::internal_to_display(&key.0)
+                    ));
+                    return None;
+                };
+                Some(tri7_core::txpool::PoolUtxo {
+                    value: o.value,
+                    script_pubkey: o.script_pubkey.clone(),
+                    height: hit.block_height.unwrap_or(0),
+                    tx_time: hit.block_time,
+                })
+            }
+            Ok(None) => {
+                log(&format!(
+                    "pool deep-coin fallback: store miss for {} (store present)",
+                    tri7_core::p2p::internal_to_display(&key.0)
+                ));
+                None
+            }
+            Err(e) => {
+                log(&format!(
+                    "pool deep-coin fallback: store error for {}: {}",
+                    tri7_core::p2p::internal_to_display(&key.0),
+                    e
+                ));
+                None
+            }
+        }
     }
 }
 
@@ -5138,6 +5170,7 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
         let ps = |i: usize| p(i).and_then(|v| v.as_str()).map(|s| s.to_string());
         match method {
             "sendrawtransaction" => {
+                log("sendrawtransaction: entered ops arm");
                 let Some(hex) = ps(0) else {
                     return Err((-8, "expected raw tx hex".into()));
                 };
