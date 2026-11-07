@@ -1458,11 +1458,14 @@ pub fn build_signed_send_with_book(
             plan.fee, req.fee_sats
         ));
     }
-    // self-verify exactly like the CLI dry runs
-    for (i, input) in selected.iter().enumerate() {
+    // self-verify exactly like the CLI dry runs (vin order = (txid, n) sorted,
+    // matching build_spend_outputs — NOT the selection order)
+    let mut ordered_sel = selected.clone();
+    ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
+    for (i, input) in ordered_sel.iter().enumerate() {
         spend::verify_input(&plan.tx, i, &input.script_pubkey)?;
     }
-    spend::connect_inputs_check(&plan.tx, &selected, spend_height)?;
+    spend::connect_inputs_check(&plan.tx, &ordered_sel, spend_height)?;
     Ok(SendBuild {
         txid_display: hash_to_display(&plan.tx.hash()),
         tx_hex: plan

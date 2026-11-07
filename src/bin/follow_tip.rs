@@ -5099,8 +5099,14 @@ impl OpsAdapter {
                     ),
                 ));
             }
+            // the tx vin is built in (txid, n) sorted order (build_spend_outputs);
+            // re-checking against the SELECTION order would misalign the zip on
+            // any multi-input spend (2026-11-07: every multi-input sendtoaddress
+            // self-rejected with "prevout map misaligned with vin")
+            let mut ordered_sel = selected.clone();
+            ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
             if let Err(e) =
-                tri7_core::spend::connect_inputs_check(&plan.tx, &selected, tip_h as u32)
+                tri7_core::spend::connect_inputs_check(&plan.tx, &ordered_sel, tip_h as u32)
             {
                 return Err((-1, format!("connect check failed: {e}")));
             }
