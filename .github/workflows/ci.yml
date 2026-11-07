@@ -81,6 +81,7 @@ jobs:
           path: |
             target/release/follow_tip.exe
             target/release/tri7_wallet_gui.exe
+            target/release/txhistory.exe
       # Updater release-asset shapes (src/updater.rs resolves exactly these
       # names on GitHub Releases):
       #   CryptographicTriangles-<ver>-win64-setup.exe        (NSIS /S)

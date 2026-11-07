@@ -566,6 +566,11 @@ pub struct UtxoRec {
     /// legacy row kind from history.json ("mined" | "recv_with" | "send" | ...)
     /// — empty for rows derived from the live/snapshot set
     pub legacy_kind: String,
+    /// legacy transactionrecord.cpp stake amount: GetCredit - GetDebit (the
+    /// reward) for coinstake rows; None when unknown (old history files,
+    /// live rows). Render uses this instead of the raw principal+reward
+    /// value.
+    pub stake_net: Option<i64>,
 }
 
 impl UtxoRec {
@@ -661,6 +666,7 @@ impl UtxoDump {
                     tx_time: u.tx_time,
                     legacy_kind: String::new(),
                     prev_kind: u.prev_kind,
+                    stake_net: None,
                 })
             })
             .collect()
@@ -828,6 +834,7 @@ fn apply_tail_bookkeeping(
                 tx_time,
                 legacy_kind: String::new(),
                 prev_kind: kind.into(),
+                stake_net: None,
             });
         }
     }

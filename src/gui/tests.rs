@@ -51,6 +51,7 @@ fn many_coin_wallet(n: u8, value: i64) -> (DerivedWallet, std::collections::Hash
             tx_time: 1_400_000_000,
             prev_kind: "regular".into(),
             legacy_kind: String::new(),
+            stake_net: None,
         });
     }
     let balances = compute_balances(&utxos, &|_| None);
@@ -338,6 +339,7 @@ fn compute_balances_totals_and_sorts() {
         height: 100,
         tx_time: 1_700_000_000,
         legacy_kind: String::new(),
+        stake_net: None,
         prev_kind: "regular".into(),
     };
     let utxos = vec![mk(&addr_a, 500), mk(&addr_b, 9_000), mk(&addr_a, 1_500)];
@@ -391,6 +393,7 @@ fn funded_utxo(label: &str, value: i64, kind: &str, height: u32) -> (UtxoRec, [u
         height,
         tx_time: 1_700_000_000,
         legacy_kind: String::new(),
+        stake_net: None,
         prev_kind: kind.into(),
     };
     (utxo, secret, pubkey)
@@ -633,6 +636,7 @@ fn reconcile_tail_applies_spends_and_wallet_additions() {
         height: snapshot_height,
         tx_time: 1_700_000_000,
         legacy_kind: String::new(),
+        stake_net: None,
         prev_kind: "regular".into(),
     };
     let mut tx_a = Tx {
@@ -839,6 +843,7 @@ fn stake_status_parses_dryrun_and_counts_mature_weight() {
         height: 2_203_769,
         tx_time: 1_700_000_000 - 4000, // mature vs STAKE_MIN_AGE=3600 at tip_time
         legacy_kind: String::new(),
+        stake_net: None,
         prev_kind: "coinstake".into(),
     };
     let st = load_stake_status(&dry, &tip, &[utxo]);
@@ -1620,6 +1625,7 @@ fn sweep_fixture_derived(funded_addr: &str, script: Vec<u8>) -> gs::DerivedWalle
         height: 100,
         tx_time: 1_400_000_000,
         legacy_kind: String::new(),
+        stake_net: None,
         prev_kind: "regular".into(),
     };
     gs::DerivedWallet {
@@ -1920,6 +1926,154 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
     });
     let lbl2 = st.status_blocks_label();
     assert!(!lbl2.contains("Syncing"), "{}", lbl2);
+}
+
+/// transactiontablemodel.cpp amount/tooltip parity for the shared row view:
+/// stake rows render the legacy net (the reward, NOT principal+reward),
+/// sends render a leading "-", and the tooltip is formatTooltip() verbatim
+/// (status \n type, plus the address only for address-typed rows).
+#[test]
+fn tx_row_view_renders_stake_net_send_sign_and_legacy_tooltip() {
+    let st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
+    let tip = 2_207_233u32;
+    let mk = |value_sats: i64, prev_kind: &str, legacy_kind: &str, stake_net: i64| UtxoRec {
+        txid: [7u8; 32],
+        n: 0,
+        value_sats,
+        script: Vec::new(),
+        address: "TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL".into(),
+        height: tip - 100,
+        tx_time: 1_700_000_300,
+        prev_kind: prev_kind.into(),
+        legacy_kind: legacy_kind.into(),
+        stake_net: if stake_net == 0 { None } else { Some(stake_net) },
+    };
+
+    // stake: raw output 33.372923 TRI but net reward +0.039590 TRI
+    let stake = mk(33_372_923, "coinstake", "mined", 39_590);
+    let v = st.tx_row_view(&stake, tip);
+    assert_eq!(v.amount_text, "+0.039590 TRI", "{}", v.amount_text);
+    assert_eq!(v.type_label, "Mined");
+    assert_eq!(v.status_text, "Confirmed (101 confirmations)");
+    // Generated rows: status \n type, no address suffix (legacy formatTooltip)
+    assert_eq!(v.tooltip, "Confirmed (101 confirmations)\nMined");
+    assert!(!v.negative);
+
+    // old history files (stake_net 0): fall back to the raw output value
+    let old = mk(33_372_923, "coinstake", "mined", 0);
+    assert_eq!(st.tx_row_view(&old, tip).amount_text, "+33.372923 TRI");
+
+    // send: "-5.001000 TRI" — never "+-5.001000 TRI"
+    let send = mk(-5_000_100, "regular", "send", 0);
+    let v = st.tx_row_view(&send, tip);
+    assert_eq!(v.amount_text, "-5.000100 TRI", "{}", v.amount_text);
+    assert!(v.negative);
+    // SendToAddress rows DO get the address suffix in the tooltip
+    assert_eq!(
+        v.tooltip,
+        "Confirmed (101 confirmations)\nSent to TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL"
+    );
+
+    // received row keeps the tri7 "+" prefix and gets the suffix too
+    let recv = mk(1_500_000, "regular", "recv_with", 0);
+    let v = st.tx_row_view(&recv, tip);
+    assert_eq!(v.amount_text, "+1.500000 TRI");
+    assert!(v.tooltip.starts_with("Confirmed (101 confirmations)\nReceived with "));
+}
+
+/// merged_transaction_rows is the page's ONE row source: coinstake history
+/// rows collapse to a single row per txid (legacy hashPrev guard, the net is
+/// preserved), a live coin of a collapsed stake never duplicates the tx, and
+/// ordinary (txid, value) dedupe still filters live recv coins already in the
+/// history file.
+#[test]
+fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
+    use crate::history::{save_cache, HistoryCache, HistoryRec};
+    let dir = std::env::temp_dir().join(format!("tri7-merged-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wallet = dir.join("wallet.dat");
+    let rec = |txid: &str, value: i64, coinstake: bool, net: i64, addr: &str| HistoryRec {
+        txid: txid.into(),
+        height: 2_205_300,
+        time: 1_700_000_000,
+        value_sats: value,
+        address: addr.into(),
+        direction: "in".into(),
+        kind: if coinstake { "coinstake" } else { "regular" }.into(),
+        spent: false,
+        idx: 0,
+        legacy_kind: if coinstake { "mined" } else { "recv_with" }.into(),
+        coinstake,
+        stake_principal: 0,
+        stake_net: Some(net),
+    };
+    let cache = HistoryCache {
+        scanned_height: 2_205_300,
+        scanned_offset: 999,
+        rows: vec![
+            rec(&"aa".repeat(32), 14_260_000, true, 4_058, "TStake"),
+            rec(&"aa".repeat(32), 14_260_241, true, 4_058, "TStake"),
+            rec(&"bb".repeat(32), 2_000_000, false, 0, "TRecv"),
+        ],
+    };
+    save_cache(&dir, &cache).unwrap();
+
+    let mut cfg = gs::UiConfig::default();
+    cfg.wallet_path = wallet.display().to_string();
+    let mut st = crate::gui::app_state::AppState::new(cfg);
+    let hex_to_internal = |s: &str| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out.reverse();
+        out
+    };
+    let utxo = |txid_hex: &str, value: i64, kind: &str| UtxoRec {
+        txid: hex_to_internal(txid_hex),
+        n: 0,
+        value_sats: value,
+        script: Vec::new(),
+        address: "TX".into(),
+        height: 2_205_301,
+        tx_time: 1_700_000_100,
+        prev_kind: kind.into(),
+        legacy_kind: String::new(),
+        stake_net: None,
+    };
+    st.debug_info = Some(crate::gui::app_state::DebugInfo {
+        reachable: true,
+        connections: Some(1),
+        blocks: Some(2_205_301),
+        sync: None,
+        daemon_balance_sats: None,
+        daemon_utxos: Some(vec![
+            // the collapsed stake's live coins (full values): must NOT duplicate
+            utxo(&"aa".repeat(32), 14_260_000, "coinstake"),
+            utxo(&"aa".repeat(32), 14_260_241, "coinstake"),
+            // recv already in the file: (txid, value) dedupe
+            utxo(&"bb".repeat(32), 2_000_000, "regular"),
+            // a genuinely new live coin: kept
+            utxo(&"cc".repeat(32), 500_000, "regular"),
+        ]),
+        wallet_history: None,
+        local_onion: None,
+        local_i2p: None,
+        error: None,
+    });
+
+    let merged = st.merged_transaction_rows();
+    let stakes: Vec<_> = merged.iter().filter(|r| r.prev_kind == "coinstake").collect();
+    assert_eq!(stakes.len(), 1, "one row per stake tx, got {}", stakes.len());
+    assert_eq!(stakes[0].value_sats, 14_260_000);
+    assert_eq!(stakes[0].stake_net, Some(4_058));
+    let recv_rows: Vec<_> = merged
+        .iter()
+        .filter(|r| r.txid_display().starts_with(&"bb".repeat(8)))
+        .collect();
+    assert_eq!(recv_rows.len(), 1, "live recv deduped against history");
+    assert!(merged.iter().any(|r| r.txid_display().starts_with(&"cc".repeat(8))));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

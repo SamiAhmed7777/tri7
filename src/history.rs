@@ -55,6 +55,15 @@ pub struct HistoryRec {
     /// row needs principal + reward, not the reward alone.
     #[serde(default)]
     pub stake_principal: i64,
+    /// legacy transactionrecord.cpp decomposition for a stake:
+    /// credit = nNet = GetCredit() - GetDebit() — the REWARD only, not the
+    /// whole stake output (one row per coinstake, subsequent our-outputs
+    /// skipped by the hashPrev guard). recv_total - spent_total here.
+    /// None on rows written before this field existed and on non-stake rows
+    /// (render falls back to the raw output value; a real net is > 0, and
+    /// Some distinguishes a known net from an unknown one).
+    #[serde(default)]
+    pub stake_net: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -337,6 +346,7 @@ fn apply_block(
         }
 
         // outputs paying us
+        let rows_before_tx = rows.len();
         let mut recv_total: i64 = 0;
         let mut first_addr = String::new();
         for (n, vout) in tx.vout.iter().enumerate() {
@@ -384,8 +394,26 @@ fn apply_block(
                     } else {
                         0
                     },
+                    // filled after the outputs loop (needs recv_total +
+                    // spent_total); None keeps old files loadable
+                    stake_net: None,
                 });
                 owned.insert((txid_internal, n as u32), rows.len() - 1);
+            }
+        }
+
+        // legacy nNet for every coinstake row of this tx: the reward, not the
+        // principal+reward output value (transactionrecord.cpp
+        // `sub.credit = nNet > 0 ? nNet : GetValueOut() - nDebit`). Both
+        // sides are known only after the outputs loop, so fill the rows this
+        // call pushed.
+        if is_coinstake {
+            let net = recv_total - spent_total;
+            let pushed = rows.len() - rows_before_tx;
+            for r in rows.iter_mut().rev().take(pushed) {
+                if r.coinstake {
+                    r.stake_net = Some(net);
+                }
             }
         }
 
@@ -405,6 +433,7 @@ fn apply_block(
                 legacy_kind: "send".into(),
                 coinstake: false,
                 stake_principal: 0,
+                stake_net: None,
             });
         }
     }
@@ -501,6 +530,7 @@ mod tests {
                 legacy_kind: "recv_with".into(),
                 coinstake: false,
                 stake_principal: 0,
+                stake_net: None,
             }],
         };
         save_cache(&dir, &c).unwrap();
@@ -509,5 +539,173 @@ mod tests {
         assert_eq!(back.rows.len(), 1);
         assert_eq!(back.rows[0].value_sats, 500);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// transactionrecord.cpp stake decomposition: the row's rendered amount
+    /// is nNet (GetCredit - GetDebit = the reward), never the principal+
+    /// reward output value; one net per tx shared by every coinstake row of
+    /// that tx; non-stake rows keep 0 (unknown net).
+    #[test]
+    fn coinstake_rows_carry_the_legacy_net_reward() {
+        use crate::legacy::{Block, Tx, Vin, Vout};
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[11u8; 32]).unwrap();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec();
+        let payload = crate::address::pubkey_payload(&pubkey);
+        let addr = crate::address::payload_to_address(&payload);
+        let mut by_payload = HashMap::new();
+        by_payload.insert(payload.clone(), addr.clone());
+        let mut by_pubkey = HashMap::new();
+        by_pubkey.insert(pubkey.clone(), addr.clone());
+        let p2pkh = {
+            let mut s = vec![0x76, 0xa9, 0x14];
+            s.extend_from_slice(&payload[1..21]);
+            s.extend_from_slice(&[0x88, 0xac]);
+            s
+        };
+
+        let mut rows: Vec<HistoryRec> = Vec::new();
+        let mut owned: HashMap<([u8; 32], u32), usize> = HashMap::new();
+
+        // h100: a coinbase paying us 33_333_333
+        let coinbase = Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout {
+                value: 33_333_333,
+                script_pubkey: p2pkh.clone(),
+            }],
+            locktime: 0,
+        };
+        let cb_block = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_000,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![coinbase],
+            block_sig: Vec::new(),
+        };
+        apply_block(&cb_block, 100, &by_payload, &by_pubkey, &mut rows, &mut owned);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stake_net, None, "non-stake rows have no net");
+
+        // h101: single-output stake — 33_333_333 in, 33_372_923 out => +39_590
+        let stake1 = Tx {
+            version: 1,
+            time: 1_700_000_300,
+            vin: vec![Vin {
+                prev_hash: cb_block.vtx[0].hash(),
+                prev_n: 0,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 0,
+                    script_pubkey: Vec::new(),
+                },
+                Vout {
+                    value: 33_372_923,
+                    script_pubkey: p2pkh.clone(),
+                },
+            ],
+            locktime: 0,
+        };
+        let stake_block1 = Block {
+            version: 1,
+            prev_hash: [2u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_300,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![empty_tx(), stake1],
+            block_sig: Vec::new(),
+        };
+        apply_block(
+            &stake_block1,
+            101,
+            &by_payload,
+            &by_pubkey,
+            &mut rows,
+            &mut owned,
+        );
+        let s1: Vec<&HistoryRec> = rows.iter().filter(|r| r.coinstake).collect();
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].value_sats, 33_372_923, "raw output value preserved");
+        assert_eq!(s1[0].stake_net, Some(39_590), "rendered amount = the reward");
+
+        // h102: split stake — 33_372_923 in, two our-outputs 20_000_000 +
+        // 13_373_003 => recv 33_373_003, net +80 on BOTH rows
+        let stake2 = Tx {
+            version: 1,
+            time: 1_700_000_600,
+            vin: vec![Vin {
+                prev_hash: stake_block1.vtx[1].hash(),
+                prev_n: 1,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 0,
+                    script_pubkey: Vec::new(),
+                },
+                Vout {
+                    value: 20_000_000,
+                    script_pubkey: p2pkh.clone(),
+                },
+                Vout {
+                    value: 13_373_003,
+                    script_pubkey: p2pkh.clone(),
+                },
+            ],
+            locktime: 0,
+        };
+        let stake_block2 = Block {
+            version: 1,
+            prev_hash: [3u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_600,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![empty_tx(), stake2],
+            block_sig: Vec::new(),
+        };
+        apply_block(
+            &stake_block2,
+            102,
+            &by_payload,
+            &by_pubkey,
+            &mut rows,
+            &mut owned,
+        );
+        let s2: Vec<&HistoryRec> = rows.iter().filter(|r| r.coinstake).skip(1).collect();
+        assert_eq!(s2.len(), 2, "per-output rows preserved for ownership");
+        assert_eq!(s2[0].value_sats, 20_000_000);
+        assert_eq!(s2[1].value_sats, 13_373_003);
+        assert_eq!(s2[0].stake_net, Some(80));
+        assert_eq!(s2[1].stake_net, Some(80));
+    }
+
+    /// minimal non-coinbase filler for vtx[0] of test blocks (produces no
+    /// history rows)
+    fn empty_tx() -> crate::legacy::Tx {
+        crate::legacy::Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: Vec::new(),
+            vout: Vec::new(),
+            locktime: 0,
+        }
     }
 }

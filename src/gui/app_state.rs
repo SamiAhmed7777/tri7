@@ -97,6 +97,28 @@ pub struct ConsoleEntry {
     pub error: Option<String>,
 }
 
+/// One rendered Transactions row — everything the page (and the headless
+/// --history-probe) shows for it, produced by AppState::tx_row_view.
+#[derive(Debug, Clone)]
+pub struct TxRowView {
+    /// the confirmation sentence the tooltip leads with
+    pub status_text: String,
+    /// the Amount cell string, e.g. "+0.004058 TRI" / "-0.500000 TRI"
+    pub amount_text: String,
+    /// legacy formatTooltip(): status \n type [label/address]
+    pub tooltip: String,
+    /// status glyph asset key ("icons/tx_confirmed" ...)
+    pub glyph_key: &'static str,
+    /// Type column text
+    pub type_label: String,
+    /// Label/Address column text
+    pub label: String,
+    /// legacy status enum (the page maps it to a colour)
+    pub status: crate::legacy_rows::LegacyStatus,
+    /// outgoing (amount in the red family)
+    pub negative: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DebugInfo {
     pub reachable: bool,
@@ -1848,35 +1870,51 @@ impl AppState {
     /// appeared even though the balance kept climbing.
     pub fn merged_transaction_rows(&self) -> Vec<crate::gui::state::UtxoRec> {
         let (hist, _) = self.load_history_file();
-        let mut rows: Vec<crate::gui::state::UtxoRec> = hist
-            .into_iter()
-            .map(|h| {
-                let mut txid = [0u8; 32];
-                if h.txid.len() == 64 {
-                    let bytes: Vec<u8> = (0..32)
-                        .filter_map(|i| u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok())
-                        .collect();
-                    if bytes.len() == 32 {
-                        txid.copy_from_slice(&bytes);
-                        txid.reverse();
-                    }
+        // legacy transactionrecord.cpp decomposeTransaction: a coinstake is
+        // ONE row (credit = nNet, the reward); its per-output history rows
+        // collapse here so the page never shows the same stake twice. The
+        // raw output rows stay in history.json for ownership tracking.
+        let mut collapsed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut rows: Vec<crate::gui::state::UtxoRec> = Vec::new();
+        for h in hist {
+            if h.coinstake {
+                if !collapsed.insert(h.txid.clone()) {
+                    continue; // hashPrev guard: skip extra our-outputs
                 }
-                crate::gui::state::UtxoRec {
-                    txid,
-                    n: 0,
-                    value_sats: h.value_sats,
-                    script: Vec::new(),
-                    address: h.address,
-                    height: h.height as u32,
-                    tx_time: h.time,
-                    prev_kind: h.kind,
-                    legacy_kind: h.legacy_kind,
+            }
+            let mut txid = [0u8; 32];
+            if h.txid.len() == 64 {
+                let bytes: Vec<u8> = (0..32)
+                    .filter_map(|i| u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok())
+                    .collect();
+                if bytes.len() == 32 {
+                    txid.copy_from_slice(&bytes);
+                    txid.reverse();
                 }
-            })
-            .collect();
+            }
+            rows.push(crate::gui::state::UtxoRec {
+                txid,
+                n: 0,
+                value_sats: h.value_sats,
+                script: Vec::new(),
+                address: h.address,
+                height: h.height as u32,
+                tx_time: h.time,
+                prev_kind: h.kind,
+                legacy_kind: h.legacy_kind,
+                stake_net: h.stake_net,
+            });
+        }
         let mut seen: std::collections::HashSet<(String, i64)> = rows
             .iter()
             .map(|r| (r.txid_display(), r.value_sats))
+            .collect();
+        // collapsed coinstake txids: a live coin of a stake whose history row
+        // shows the NET would otherwise duplicate the tx (values differ)
+        let stake_txids: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|r| r.stake_net.is_some() || r.prev_kind == "coinstake")
+            .map(|r| r.txid_display())
             .collect();
         let live = self
             .debug_info
@@ -1887,12 +1925,120 @@ impl AppState {
             if u.value_sats <= 0 {
                 continue;
             }
+            if u.prev_kind == "coinstake" && stake_txids.contains(&u.txid_display()) {
+                continue;
+            }
             if seen.insert((u.txid_display(), u.value_sats)) {
                 rows.push(u);
             }
         }
         rows.sort_by(|a, b| b.tx_time.cmp(&a.tx_time).then(b.height.cmp(&a.height)));
         rows
+    }
+
+    /// What the legacy type column shows (transactiontablemodel.cpp
+    /// formatTxType for Generated rows: "Mined" / "Stake reward").
+    pub fn tx_type_name(prev_kind: &str) -> &'static str {
+        if prev_kind == "coinbase" {
+            "Mined"
+        } else if prev_kind == "coinstake" {
+            "Stake reward"
+        } else {
+            "Received with"
+        }
+    }
+
+    /// One Transactions row exactly as the page renders it. ONE
+    /// implementation shared by the page, the CSV export and the headless
+    /// --history-probe so they cannot drift; the probe line prints
+    /// `status_text` + `amount_text` verbatim.
+    ///
+    /// Amount semantics (transactiontablemodel.cpp formatTxAmount +
+    /// decomposeTransaction): stake rows show the legacy net nNet
+    /// (GetCredit - GetDebit = the reward) via `stake_net`; sends render a
+    /// leading "-"; received rows keep the "+" the tri7 design adds.
+    pub fn tx_row_view(&self, u: &crate::gui::state::UtxoRec, tip: u32) -> TxRowView {
+        let lk = if !u.legacy_kind.is_empty() {
+            match u.legacy_kind.as_str() {
+                "mined" => crate::legacy_rows::LegacyKind::Generated,
+                "send" => crate::legacy_rows::LegacyKind::SendToAddress,
+                "self" => crate::legacy_rows::LegacyKind::SendToSelf,
+                "recv_from" => crate::legacy_rows::LegacyKind::RecvFromOther,
+                _ => crate::legacy_rows::LegacyKind::RecvWithAddress,
+            }
+        } else if u.prev_kind == "coinbase" || u.prev_kind == "coinstake" {
+            crate::legacy_rows::LegacyKind::Generated
+        } else if u.value_sats < 0 {
+            crate::legacy_rows::LegacyKind::SendToAddress
+        } else {
+            crate::legacy_rows::LegacyKind::RecvWithAddress
+        };
+        let depth_legacy = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
+        let (lstatus, matures_in) =
+            crate::legacy_rows::status_for(lk, depth_legacy, tip as u64, u.height as u64);
+        let display_sats = u.stake_net.unwrap_or(u.value_sats);
+        let lrow = crate::legacy_rows::LegacyRow {
+            txid: u.txid_display(),
+            idx: 0,
+            time: u.tx_time,
+            height: u.height as u64,
+            kind: lk,
+            address: u.address.clone(),
+            debit: if display_sats < 0 { display_sats } else { 0 },
+            credit: if display_sats > 0 { display_sats } else { 0 },
+            status: lstatus,
+            depth: depth_legacy,
+            matures_in,
+        };
+        let status_text = lrow.status_text();
+        let glyph_key = crate::legacy_rows::status_glyph(
+            &lstatus,
+            depth_legacy,
+            !matches!(lstatus, crate::legacy_rows::LegacyStatus::Immature),
+            matures_in,
+        )
+        .unwrap_or("icons/tx_zero");
+        let type_label: String = if lk.label().is_empty() {
+            Self::tx_type_name(&u.prev_kind).to_string()
+        } else {
+            lk.label().to_string()
+        };
+        let label = self
+            .label_of(&u.address)
+            .unwrap_or_else(|| u.address.clone());
+        let amount_text = if display_sats < 0 {
+            format!(
+                "{} {}",
+                crate::gui::state::format_tri(display_sats),
+                crate::gui::state::TICKER
+            )
+        } else {
+            format!(
+                "+{} {}",
+                crate::gui::state::format_tri(display_sats),
+                crate::gui::state::TICKER
+            )
+        };
+        // formatTooltip(): status, newline, type — plus the (labeled)
+        // address for address-typed rows only
+        let tooltip = match lk {
+            crate::legacy_rows::LegacyKind::RecvWithAddress
+            | crate::legacy_rows::LegacyKind::RecvFromOther
+            | crate::legacy_rows::LegacyKind::SendToAddress => {
+                format!("{}\n{} {}", status_text, type_label, label)
+            }
+            _ => format!("{}\n{}", status_text, type_label),
+        };
+        TxRowView {
+            status_text,
+            amount_text,
+            tooltip,
+            glyph_key,
+            type_label,
+            label,
+            status: lstatus,
+            negative: display_sats < 0,
+        }
     }
 
     /// The Overview balance split, computed exactly like the page does:
@@ -2132,6 +2278,7 @@ impl AppState {
                                     tx_time: r.get("tx_time").and_then(|x| x.as_i64()).unwrap_or(0) as u32,
                                     prev_kind: r.get("prev_kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
                                     legacy_kind: String::new(),
+                                    stake_net: None,
                                 });
                             }
                             if !out.is_empty() {
@@ -2181,6 +2328,7 @@ impl AppState {
                                 legacy_kind: String::new(),
                                 coinstake: r.get("kind").and_then(|x| x.as_str()) == Some("coinstake"),
                                 stake_principal: 0,
+                                stake_net: r.get("stake_net").and_then(|x| x.as_i64()),
                             };
                             out.push(rec);
                         }

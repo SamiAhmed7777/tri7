@@ -593,6 +593,9 @@ pub fn row_from_history(u: &crate::history::HistoryRec, tip: u32) -> LegacyRow {
     };
     let depth = depth_of(u.height, tip as u64);
     let (status, matures_in) = status_for(lk, depth, tip as u64, u.height);
+    // stake rows render the legacy net (the reward), not the whole output;
+    // None (old files, non-stake rows) falls back to the raw value
+    let amount_sats = u.stake_net.unwrap_or(u.value_sats);
     LegacyRow {
         txid: u.txid.clone(),
         idx: u.idx as usize,
@@ -600,8 +603,8 @@ pub fn row_from_history(u: &crate::history::HistoryRec, tip: u32) -> LegacyRow {
         height: u.height,
         kind: lk,
         address: u.address.clone(),
-        debit: if u.value_sats < 0 { u.value_sats } else { 0 },
-        credit: if u.value_sats > 0 { u.value_sats } else { 0 },
+        debit: if amount_sats < 0 { amount_sats } else { 0 },
+        credit: if amount_sats > 0 { amount_sats } else { 0 },
         status,
         depth,
         matures_in,
@@ -680,6 +683,7 @@ mod csv_tests {
             legacy_kind: String::new(),
             coinstake: false,
             stake_principal: 0,
+            stake_net: None,
         };
         let r = row_from_history(&u, 110);
         assert_eq!(r.kind.label(), "Received with");

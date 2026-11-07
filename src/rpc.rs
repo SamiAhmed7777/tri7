@@ -1698,6 +1698,9 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                         "time": r.time,
                         "amount": sats_to_tri(r.value_sats),
                         "amount_sats": r.value_sats,
+                        // legacy stake decomposition: the reward (net), 0 on
+                        // rows written before the field existed
+                        "stake_net": r.stake_net,
                         "address": r.address,
                         "direction": r.direction,
                         "category": r.direction,
@@ -3968,6 +3971,7 @@ mod tests {
             legacy_kind: String::new(),
             coinstake: false,
             stake_principal: 0,
+            stake_net: None,
         }
     }
 

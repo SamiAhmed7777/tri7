@@ -103,42 +103,56 @@ fn main() {
             im as f64 / 1e6,
             total as f64 / 1e6
         );
-        // sample row statuses exactly as the Transactions table renders them
+        // sample rows EXACTLY as the page renders them: the shared row view
+        // (page == CSV == probe), printing the rendered status sentence and
+        // amount string verbatim, plus the hover tooltip it would show
         let (_, _, _, _, _, tip_h) = st.balance_split();
-        for r in rows.iter().take(5) {
-            let lk = if r.kind == "coinbase" || r.kind == "coinstake" {
-                tri7_core::legacy_rows::LegacyKind::Generated
-            } else if r.value_sats < 0 {
-                tri7_core::legacy_rows::LegacyKind::SendToAddress
-            } else {
-                tri7_core::legacy_rows::LegacyKind::RecvWithAddress
-            };
-            let depth = tri7_core::legacy_rows::depth_of(r.height, tip_h);
-            let (status, matures) =
-                tri7_core::legacy_rows::status_for(lk, depth, tip_h, r.height);
-            let row = tri7_core::legacy_rows::LegacyRow {
-                txid: r.txid.clone(),
-                idx: 0,
-                time: r.time,
-                height: r.height,
-                kind: lk,
-                address: r.address.clone(),
-                debit: 0,
-                credit: r.value_sats,
-                status,
-                depth,
-                matures_in: matures,
-            };
+        let mut stake_printed = 0usize;
+        let mut send_printed = 0usize;
+        for (i, r) in merged.iter().enumerate() {
+            let view = st.tx_row_view(r, tip_h as u32);
+            let is_stake = r.prev_kind == "coinstake" || r.legacy_kind == "mined";
+            let is_send = view.negative;
+            if i >= 5 {
+                if !(is_stake && stake_printed < 3) && !(is_send && send_printed < 3) {
+                    continue;
+                }
+                if is_stake {
+                    stake_printed += 1;
+                } else if is_send {
+                    send_printed += 1;
+                }
+            }
             println!(
-                "row h{} depth {} -> {}",
+                "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
                 r.height,
-                depth,
-                row.status_text()
+                tri7_core::legacy_rows::depth_of(r.height as u64, tip_h),
+                view.status_text,
+                view.amount_text,
+                r.txid_display(),
+                view.tooltip.replace('\n', " / ")
             );
         }
         println!("--- what the page would print ---");
         println!("{}", st.history_status_line());
-        std::process::exit(if rows.is_empty() { 1 } else { 0 });
+        // --history-probe-full: audit dump — EVERY merged row through the
+        // same shared view (the default samples 5 + 3 stake + 3 send)
+        if args.iter().any(|a| a == "--history-probe-full") {
+            println!("--- full dump: {} rows ---", merged.len());
+            for r in merged.iter() {
+                let view = st.tx_row_view(r, tip_h as u32);
+                println!(
+                    "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
+                    r.height,
+                    tri7_core::legacy_rows::depth_of(r.height as u64, tip_h),
+                    view.status_text,
+                    view.amount_text,
+                    r.txid_display(),
+                    view.tooltip.replace('\n', " / ")
+                );
+            }
+        }
+        std::process::exit(if merged.is_empty() { 1 } else { 0 });
     }
     if selfcheck {
         report = get("--report", &args);

@@ -3467,25 +3467,8 @@ impl Tri7App {
     // -----------------------------------------------------------------------
     // §10.5 Transactions
     // -----------------------------------------------------------------------
-    fn tx_type_name(prev_kind: &str) -> &'static str {
-        if prev_kind == "coinbase" {
-            "Mined"
-        } else if prev_kind == "coinstake" {
-            "Stake reward"
-        } else {
-            "Received with"
-        }
-    }
-
-    fn tx_type_index(prev_kind: &str) -> usize {
-        if prev_kind == "coinbase" {
-            2
-        } else if prev_kind == "coinstake" {
-            3
-        } else {
-            1
-        }
-    }
+    // tx_type_name moved to AppState::tx_type_name (shared with the probe/CSV
+    // row view) — one implementation, no drift.
 
     fn page_transactions(&mut self, ui: &mut egui::Ui) {
         th::page_header(ui, "Transactions", "");
@@ -3664,73 +3647,29 @@ impl Tri7App {
             }
             let sel_idx = self.tx_selected;
             for (i, (orig_idx, u)) in rows.iter().enumerate() {
-                let depth = tip.saturating_sub(u.height);
-                let confirmed = depth >= 6;
-                // legacy status machine (src/legacy_rows.rs) — "Confirmed (12
-                // confirmations)", "Immature (3 confirmations, will be
-                // available after 7)", "Confirming (2 of 4 confirmations)"
-                let lk = if !u.legacy_kind.is_empty() {
-                    match u.legacy_kind.as_str() {
-                        "mined" => crate::legacy_rows::LegacyKind::Generated,
-                        "send" => crate::legacy_rows::LegacyKind::SendToAddress,
-                        "self" => crate::legacy_rows::LegacyKind::SendToSelf,
-                        "recv_from" => crate::legacy_rows::LegacyKind::RecvFromOther,
-                        _ => crate::legacy_rows::LegacyKind::RecvWithAddress,
-                    }
-                } else if u.prev_kind == "coinbase" || u.prev_kind == "coinstake" {
-                    crate::legacy_rows::LegacyKind::Generated
-                } else if u.value_sats < 0 {
-                    crate::legacy_rows::LegacyKind::SendToAddress
-                } else {
-                    crate::legacy_rows::LegacyKind::RecvWithAddress
-                };
-                let depth_legacy = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
-                let (lstatus, matures_in) =
-                    crate::legacy_rows::status_for(lk, depth_legacy, tip as u64, u.height as u64);
-                let lrow = crate::legacy_rows::LegacyRow {
-                    txid: u.txid_display(),
-                    idx: 0,
-                    time: u.tx_time,
-                    height: u.height as u64,
-                    kind: lk,
-                    address: u.address.clone(),
-                    debit: if u.value_sats < 0 { u.value_sats } else { 0 },
-                    credit: if u.value_sats > 0 { u.value_sats } else { 0 },
-                    status: lstatus,
-                    depth: depth_legacy,
-                    matures_in,
-                };
-                let status_text = lrow.status_text();
-                let glyph_key = crate::legacy_rows::status_glyph(
-                    &lstatus,
-                    depth_legacy,
-                    !matches!(lstatus, crate::legacy_rows::LegacyStatus::Immature),
-                    matures_in,
-                )
-                .unwrap_or("icons/tx_zero");
-                let glyph = glyph_for(glyph_key);
+                // ONE shared render computation (page == CSV == probe)
+                let view = self.st.tx_row_view(u, tip);
+                let glyph = glyph_for(view.glyph_key);
                 let tex = glyph.as_ref();
-                // colour follows the glyph, exactly like the legacy column:
-                // grey unconfirmed, amber while confirming, green when confirmed
-                let color = match lstatus {
-                    crate::legacy_rows::LegacyStatus::Confirmed => th::TX_IN_GREEN_BRIGHT,
-                    crate::legacy_rows::LegacyStatus::Confirming
-                    | crate::legacy_rows::LegacyStatus::Immature => th::TEXT_PRIMARY,
-                    crate::legacy_rows::LegacyStatus::Conflicted => th::ERROR,
-                    _ => th::TEXT_SECONDARY,
-                };
-                let type_label: String = if lk.label().is_empty() {
-                    Self::tx_type_name(&u.prev_kind).to_string()
+                // colour follows the glyph ladder (grey unconfirmed, amber
+                // confirming, green confirmed) — but OUTGOING amounts keep
+                // the red family (palette rule: received deep green vs red)
+                let color = if view.negative {
+                    th::ERROR
                 } else {
-                    lk.label().to_string()
+                    match view.status {
+                        crate::legacy_rows::LegacyStatus::Confirmed => th::TX_IN_GREEN_BRIGHT,
+                        crate::legacy_rows::LegacyStatus::Confirming
+                        | crate::legacy_rows::LegacyStatus::Immature => th::TEXT_PRIMARY,
+                        crate::legacy_rows::LegacyStatus::Conflicted => th::ERROR,
+                        _ => th::TEXT_SECONDARY,
+                    }
                 };
-                let label = self
-                    .st
-                    .label_of(&u.address)
-                    .map(|l| l.to_string())
-                    .unwrap_or_else(|| u.address.clone());
-                let amt = format!("+{} {}", s::format_tri(u.value_sats), s::TICKER);
-                let conf_label = status_text.clone();
+                let type_label = view.type_label.clone();
+                let label = view.label.clone();
+                let amt = view.amount_text.clone();
+                // tooltip = legacy formatTooltip (status / type / address)
+                let conf_label = view.tooltip.clone();
                 let date = fmt_unix(u.tx_time);
                 let selected = sel_idx == Some(*orig_idx);
                 let ir = th::table_row(ui, i, selected, w, |rui| {
@@ -3771,22 +3710,40 @@ impl Tri7App {
     }
 
     fn tx_details(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let Some(derived) = self.st.derived.clone() else {
-            return;
-        };
-        let Some(u) = derived.utxos.get(idx) else {
+        // The drawer MUST read the same list the table rendered (merged
+        // rows). It used to index derived.utxos — a different list — so the
+        // clicked row and the shown details could be entirely unrelated
+        // transactions, and it bailed out entirely on fresh installs with no
+        // local snapshot.
+        let merged = self.st.merged_transaction_rows();
+        let Some(u) = merged.get(idx) else {
             self.tx_selected = None;
             return;
         };
-        let tip = self.st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
+        let tip = self
+            .st
+            .debug_info
+            .as_ref()
+            .filter(|d| d.reachable)
+            .and_then(|d| d.blocks)
+            .or_else(|| self.st.tip.as_ref().map(|x| x.height))
+            .unwrap_or(0) as u32;
+        let view = self.st.tx_row_view(u, tip);
         let depth = tip.saturating_sub(u.height);
         let confirmed = depth >= 6;
         let txid = u.txid_display().clone();
+        let address = u.address.clone();
+        let status_sentence = view.status_text.clone();
+        let type_label = view.type_label.clone();
+        let amount_text = view.amount_text.clone();
+        let amount_neg = view.negative;
         let label = self
             .st
-            .label_of(&u.address)
+            .label_of(&address)
             .map(|l| l.to_string())
             .unwrap_or_default();
+        let d = fmt_unix(u.tx_time);
+        let d = if d.is_empty() { "—".to_string() } else { d };
         ui.add_space(8.0);
         th::card_titled(ui, "Transaction details", |ui| {
             egui::Grid::new("tx_detail_grid")
@@ -3798,7 +3755,7 @@ impl Tri7App {
                     ui.end_row();
                     ui.label(egui::RichText::new("Status:").color(th::TEXT_SECONDARY));
                     ui.label(
-                        egui::RichText::new(if confirmed { "Confirmed" } else { "Pending" })
+                        egui::RichText::new(&status_sentence)
                             .color(if confirmed { th::SUCCESS } else { th::WARNING }),
                     );
                     ui.end_row();
@@ -3806,14 +3763,13 @@ impl Tri7App {
                     ui.label(egui::RichText::new(depth.to_string()).monospace());
                     ui.end_row();
                     ui.label(egui::RichText::new("Date:").color(th::TEXT_SECONDARY));
-                    let d = fmt_unix(u.tx_time);
-                    ui.label(if d.is_empty() { "—".to_string() } else { d });
+                    ui.label(&d);
                     ui.end_row();
                     ui.label(egui::RichText::new("Type:").color(th::TEXT_SECONDARY));
-                    ui.label(Self::tx_type_name(&u.prev_kind));
+                    ui.label(&type_label);
                     ui.end_row();
                     ui.label(egui::RichText::new("Address:").color(th::TEXT_SECONDARY));
-                    ui.label(egui::RichText::new(&u.address).monospace());
+                    ui.label(egui::RichText::new(&address).monospace());
                     ui.end_row();
                     if !label.is_empty() {
                         ui.label(egui::RichText::new("Label:").color(th::TEXT_SECONDARY));
@@ -3822,13 +3778,9 @@ impl Tri7App {
                     }
                     ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
                     ui.label(
-                        egui::RichText::new(format!(
-                            "+{} {}",
-                            s::format_tri(u.value_sats),
-                            s::TICKER
-                        ))
-                        .monospace()
-                        .color(th::TX_IN_GREEN_BRIGHT),
+                        egui::RichText::new(&amount_text)
+                            .monospace()
+                            .color(if amount_neg { th::ERROR } else { th::TX_IN_GREEN_BRIGHT }),
                     );
                     ui.end_row();
                 });
