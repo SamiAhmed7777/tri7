@@ -4033,6 +4033,40 @@ impl tri7_core::txpool::UtxoView for LiveUtxoView<'_> {
     }
 }
 
+/// The live wallet map first; on a miss, the block store's full tx index
+/// resolves DEEP coins the staking live view evicted (the live view is a
+/// recent-blocks window — coins past the cap were unspendable because the
+/// pool could not resolve their prevouts). Without this fallback only the
+/// staker's own recent coins could ever be mined (2026-11-07: the parked
+/// old-funds tx was rejected by DNS2 while sami-pc accepted the identical
+/// bytes — each node's pool saw only its own wallet's coins).
+struct WalletThenStoreUtxoView<'a> {
+    live: &'a HashMap<(Hash, u32), LiveOut>,
+    store: Option<&'a tri7_core::blockindex::BlockStore>,
+}
+
+impl tri7_core::txpool::UtxoView for WalletThenStoreUtxoView<'_> {
+    fn utxo(&self, key: &(Hash, u32)) -> Option<tri7_core::txpool::PoolUtxo> {
+        if let Some(o) = self.live.get(key) {
+            return Some(tri7_core::txpool::PoolUtxo {
+                value: o.value,
+                script_pubkey: o.script.clone(),
+                height: o.height,
+                tx_time: o.tx_time,
+            });
+        }
+        let store = self.store?;
+        let hit = store.tx_by_id(&key.0).ok()??;
+        let o = hit.tx.vout.get(key.1 as usize)?;
+        Some(tri7_core::txpool::PoolUtxo {
+            value: o.value,
+            script_pubkey: o.script_pubkey.clone(),
+            height: hit.block_height.unwrap_or(0),
+            tx_time: hit.block_time,
+        })
+    }
+}
+
 
 /// A block is a PoW block when its first transaction is a coinbase (no real
 /// prevout and a zero-value first output).
@@ -4724,6 +4758,9 @@ struct OpsAdapter {
     extras: Arc<std::sync::RwLock<rpc::WalletExtras>>,
     /// address → pubkey for the wallet's own keys
     pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+    /// block store for the pool's deep-coin prevout fallback
+    /// (WalletThenStoreUtxoView); None keeps the wallet-only view
+    store: Option<Arc<BlockStore>>,
 }
 
 /// Legacy address-index verbs take either `[["addr1","addr2"]]` or
@@ -5057,8 +5094,12 @@ impl OpsAdapter {
         let w = wl
             .as_ref()
             .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+        let view = WalletThenStoreUtxoView {
+            live: &w.live,
+            store: self.store.as_deref(),
+        };
         let rep = pool
-            .accept(&raw, &LiveUtxoView(&w.live), now_secs() as i64)
+            .accept(&raw, &view, now_secs() as i64)
             .map_err(|e| (-25, e))?;
         let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
         self.announce
@@ -5108,8 +5149,12 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     return Err((-1, "wallet live UTXO view not ready yet".into()));
                 };
                 let now = now_secs() as i64;
+                let view = WalletThenStoreUtxoView {
+                    live: &wl.live,
+                    store: self.store.as_deref(),
+                };
                 let rep = pool
-                    .accept(&raw, &LiveUtxoView(&wl.live), now)
+                    .accept(&raw, &view, now)
                     .map_err(|e| (-25, e))?;
                 let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
                 self.announce
@@ -7756,6 +7801,7 @@ fn main() {
                 conf_path: cfg.conf_path.clone(),
                 wallet_path: cfg.wallet_path.clone(),
                 state_dir: cfg.state_dir.clone(),
+                store: Some(Arc::clone(&store)),
             })),
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,
