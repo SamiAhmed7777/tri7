@@ -15,7 +15,13 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_PEER: &str = "194.163.161.162:24113";
+/// Primary bootstrap: the Pi's clearnet listener on 443 — reachable from the
+/// open internet AND from machines behind outbound-web-port filters (laptops
+/// on managed networks can only dial 80/443).
+pub const DEFAULT_PEER: &str = "46.62.249.20:443";
+/// Secondary bootstrap: samihost's clearnet listener on the conventional p2p
+/// port (unrestricted networks reach this one too).
+pub const FALLBACK_PEER: &str = "194.163.161.162:24113";
 /// how long the supervisor waits for the node's RPC before considering a
 /// spawn failed (cold index builds are slow — retry window is generous)
 const RPC_WAIT: Duration = Duration::from_secs(25);

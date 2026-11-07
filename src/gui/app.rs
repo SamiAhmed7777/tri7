@@ -1724,7 +1724,7 @@ impl eframe::App for Tri7App {
                     match n.ensure_running(
                         Path::new(&wallet),
                         &node_dir,
-                        &[crate::gui::node_supervisor::DEFAULT_PEER],
+                        &[crate::gui::node_supervisor::DEFAULT_PEER, crate::gui::node_supervisor::FALLBACK_PEER],
                     ) {
                         Ok(_) => {
                             // first-sync finished? generate the wallet
@@ -1939,7 +1939,22 @@ impl Tri7App {
                  swept in one transaction to the phrase's own addresses",
             );
             ui.add_space(4.0);
-            if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
+            let migrated = self
+                .st
+                .wallet
+                .as_ref()
+                .map(|w| w.seed_migrated)
+                .unwrap_or(false);
+            if migrated {
+                th::inline_notice(
+                    ui,
+                    th::Notice::Success,
+                    "This wallet already has a seed phrase",
+                    "Seed migration already ran: the balance lives on the phrase's own \
+                     derived addresses. Another phrase is disabled to prevent a \
+                     double-sweep.",
+                );
+            } else if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
                 .clicked()
             {
                 if let Err(e) = self.st.begin_seed_migration_action() {
@@ -2905,7 +2920,22 @@ impl Tri7App {
                      moves the balance to seed-derived addresses.",
                 );
                 ui.add_space(4.0);
-                if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
+                let migrated = self
+                    .st
+                    .wallet
+                    .as_ref()
+                    .map(|w| w.seed_migrated)
+                    .unwrap_or(false);
+                if migrated {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Success,
+                        "This wallet already has a seed phrase",
+                        "Seed migration already ran: the whole balance now lives on the \
+                         phrase's own derived addresses (see Receive). Adding another \
+                         phrase would double-sweep, so it's disabled.",
+                    );
+                } else if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
                     if let Err(e) = self.st.begin_seed_migration_action() {
                         self.st.status_log.push(format!("seed migration: {}", e));
                     }
