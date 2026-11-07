@@ -14,8 +14,13 @@ winresource = "0.1"
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
 
+[[bin]]
+name = "tri7"
+path = "src/bin/tri7_cli.rs"
+
 [dependencies]
 base58 = "0.2"
+clap = { version = "4", features = ["derive"] }
 primitive-types = "0.13"
 ripemd = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }

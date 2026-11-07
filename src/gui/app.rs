@@ -318,9 +318,9 @@ impl Tri7App {
                     // never a plain-font text label (operator 2026-11-07: the
                     // label rendered in the default egui font, not his mark).
                     if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
-                        ui.add_space(20.0);
+                        ui.add_space(16.0);
                         let aspect = 600.0 / 126.0;
-                        ui.add(img(&tex, Vec2::new(48.0 * aspect, 48.0)));
+                        ui.add(img(&tex, Vec2::new(56.0 * aspect, 56.0)));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
