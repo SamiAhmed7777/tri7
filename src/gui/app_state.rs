@@ -2484,11 +2484,29 @@ impl AppState {
         }
     }
 
-    /// Explorer: rich list from the balances.json snapshot.
+    /// Explorer: rich list — the LIVE daemon `richlist` verb first (item
+    /// EXPLORER-VERB), the balances.json snapshot file only as fallback when
+    /// the verb can't answer (older daemon, RPC down, no rpc_addr).
     pub fn explorer_rich_action(&mut self, top: usize) {
+        let mut live_err: Option<String> = None;
+        if let Some(addr) = self.live_rpc_addr() {
+            match crate::gui::rpc_client::rpc_call(&addr, "richlist", &[serde_json::json!(top)]) {
+                Ok(v) => {
+                    if self.explorer.load_rich_list_rpc_action(v, top).is_ok() {
+                        return; // live source won — done
+                    }
+                    live_err = Some("verb response unusable".to_string());
+                }
+                Err(e) => live_err = Some(e),
+            }
+        }
+        // fallback: the local snapshot file (honest labeling inside parse_rich_list)
         let path = self.cfg.balances_path.clone();
         if let Err(e) = self.explorer.load_rich_list_action(Path::new(&path), top) {
-            self.explorer.last_error = Some(e);
+            self.explorer.last_error = Some(match live_err {
+                Some(le) => format!("live daemon richlist unavailable ({}); snapshot fallback: {}", le, e),
+                None => e,
+            });
         }
     }
 

@@ -165,6 +165,11 @@ impl EmbeddedNode {
             // headers-only (Sami laptop: ops engine never warmed without it)
             .arg("--blocks-file")
             .arg(state_dir.join("blk0001.dat"))
+            // explorer: the node BUILDS + maintains its balances snapshot
+            // (native `richlist` verb data); every GUI install is an explorer
+            // without any manual snapshot tooling
+            .arg("--balances")
+            .arg(state_dir.join("balances.json"))
             .arg("--backfill")
             .arg("6000")
             .arg("--wallet")

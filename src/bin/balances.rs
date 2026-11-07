@@ -1,9 +1,12 @@
-//! Phase 1e: per-address balances from full-archive replay.
+//! Phase 1e: per-address balances from full-archive replay (CLI form).
 //!
-//! Replays the live chain (genesis..stale-branch stop) over the shared
-//! ArchiveWalker skeleton, maintaining the live UTXO set with per-output
-//! address payloads (kernel::UtxoSet — bare-pubkey / P2PKH / P2SH extraction
-//! in tri7_core::address), and reports:
+//! The replay/aggregate/write engine lives in tri7_core::balances_build —
+//! this bin is the standalone CLI over it (the tri7d `--balances` builder
+//! thread calls the SAME function in-process, so the snapshot a node serves
+//! through the native `richlist` verb and the one this bin writes can never
+//! drift).
+//!
+//! Replays the live chain (genesis..stale-branch stop) and reports:
 //!
 //!   1. Total chain balance — the sum of all live UTXO values. The deployed
 //!      daemon tracks the same quantity as nMoneySupply (running
@@ -23,29 +26,15 @@
 //! stay part of the total chain balance.
 //!
 //! Usage: balances [blk_file] [end_height] [--allow-stale] [--wallet path]
-//!                [--out path]
-//! Exit 0 ONLY if: the wallet was read with at least one key, at least one
-//! non-empty output was processed (coverage), and the replay reached
-//! end_height (or stopped at the stale branch WITH --allow-stale).
+//!                [--out path] [--utxos-out path]
+//! Exit 0 ONLY if: the wallet was read with at least one key (when given),
+//! at least one non-empty output was processed (coverage), and the replay
+//! reached end_height (or stopped at the stale branch WITH --allow-stale).
 //! Anomaly counters (untracked spends / duplicate txids) are reported in the
 //! JSON, never silently dropped.
 
-use std::collections::HashMap;
-use tri7_core::address::{payload_to_address, pubkey_payload};
-use tri7_core::consensus;
-use tri7_core::kernel::UtxoSet;
-use tri7_core::replay::{check_coverage, ArchiveWalker, Step};
-use tri7_core::wallet;
-
-/// One live wallet-owned UTXO (phase-3 spend record for --utxos-out).
-struct WalletUtxo {
-    value: i64,
-    script: Vec<u8>,
-    height: u32,
-    tx_time: u32,
-    from_coinbase: bool,
-    from_coinstake: bool,
-}
+use std::io::Write;
+use tri7_core::balances_build::{build_balances_snapshot, BalancesBuildOpts};
 
 fn die(msg: &str) -> ! {
     eprintln!("FAIL: {}", msg);
@@ -66,8 +55,7 @@ fn main() {
     let wallet_path = args
         .iter()
         .position(|a| a == "--wallet")
-        .and_then(|i| args.get(i + 1).cloned())
-        .unwrap_or_else(|| "/root/.triangles/wallet.dat".to_string());
+        .and_then(|i| args.get(i + 1).cloned());
     let out_path = args
         .iter()
         .position(|a| a == "--out")
@@ -80,423 +68,84 @@ fn main() {
         .position(|a| a == "--utxos-out")
         .and_then(|i| args.get(i + 1).cloned());
 
-    // ---- wallet: every address derivable from the live keys ----------------
-    let wall = wallet::read_wallet(std::path::Path::new(&wallet_path))
-        .unwrap_or_else(|e| die(&format!("wallet read failed: {}", e)));
-    if wall.keys.is_empty() {
-        die("wallet has zero keys");
-    }
-    // (payload, canonical address string) per key — payloads may in principle
-    // collide (same key imported twice); distinct payloads are what matters.
-    let mut wallet_payloads: Vec<([u8; 21], String)> = wall
-        .keys
-        .iter()
-        .map(|k| (pubkey_payload(&k.pubkey), k.address.clone()))
-        .collect();
-    for (payload, addr) in &wallet_payloads {
-        debug_assert_eq!(&payload_to_address(payload), addr);
-    }
-    wallet_payloads.sort();
-    wallet_payloads.dedup();
-    let distinct_wallet_payloads = wallet_payloads.len();
-
-    // ---- replay ------------------------------------------------------------
-    let mut walker = ArchiveWalker::open(&path).unwrap_or_else(|e| die(&e));
-    let mut utxos = UtxoSet::new();
-    // daemon getreceivedbyaddress semantics (regular txs, P2PKH scripts only)
-    let mut received_regular: HashMap<[u8; 21], i64> = HashMap::new();
-    // diagnostic: every non-empty output with a destination, any tx kind
-    let mut received_all: HashMap<[u8; 21], i64> = HashMap::new();
-
-    let mut stale_at: Option<usize> = None;
-    let mut blocks = 0usize;
-    let mut pos_blocks = 0usize;
-    let mut outputs_processed = 0u64; // every non-empty vout seen on the live chain
-    let mut outputs_attributed = 0u64; // ...whose script resolves to an address
-    let mut regular_txs = 0u64;
-    let mut untracked_spends = 0usize;
-    let mut duplicate_txids = 0usize;
-    let mut tip_hash = [0u8; 32];
-    // wallet-owned live UTXOs for the --utxos-out dump (same lifecycle rules
-    // as UtxoSet: per-tx all-or-nothing spend removal, IsEmpty never tracked)
-    let mut wallet_utxo_set: HashMap<(tri7_core::legacy::Hash, u32), WalletUtxo> = HashMap::new();
-    let wallet_payload_set: std::collections::HashSet<[u8; 21]> =
-        wallet_payloads.iter().map(|(p, _)| *p).collect();
-
-    loop {
-        let (_height, block, hash) = match walker.step() {
-            Err(e) => die(&e),
-            Ok(Step::Eof) => break,
-            Ok(Step::StaleBranch(h)) => {
-                stale_at = Some(h);
-                break;
-            }
-            Ok(Step::Block(h, b, hash)) => (h, b, hash),
-        };
-
-        for tx in &block.vtx {
-            let is_coinbase = consensus::tx_is_coin_base(tx);
-            let is_coinstake = consensus::tx_is_coin_stake(tx);
-            if !is_coinbase && !is_coinstake {
-                regular_txs += 1;
-            }
-            for vout in &tx.vout {
-                // CTxOut::IsEmpty(): the coinstake vout[0] marker (value 0,
-                // empty script) creates no UTXO and carries no address.
-                if vout.value == 0 && vout.script_pubkey.is_empty() {
-                    continue;
-                }
-                outputs_processed += 1;
-                let dest = match tri7_core::address::script_to_dest(&vout.script_pubkey) {
-                    Some(d) => d,
-                    None => continue,
-                };
-                outputs_attributed += 1;
-                let payload = dest.payload();
-                *received_all.entry(payload).or_insert(0) += vout.value;
-                // getreceivedbyaddress: coinbase/coinstake txs are skipped
-                // outright; P2PKH is the only form its script equality hits.
-                if !is_coinbase && !is_coinstake && dest.is_pubkey_hash() {
-                    *received_regular.entry(payload).or_insert(0) += vout.value;
-                }
-            }
-        }
-
-        // wallet-owned UTXO lifecycle, mirroring UtxoSet::apply_block_reported
-        // (per-tx all-or-nothing spend removal; runs BEFORE apply_block so the
-        // "all vins resolve" check reads the pre-application set)
-        for tx in &block.vtx {
-            let is_coinbase = consensus::tx_is_coin_base(tx);
-            let is_coinstake = consensus::tx_is_coin_stake(tx);
-            if !is_coinbase {
-                let all_resolve = tx
-                    .vin
-                    .iter()
-                    .all(|vin| utxos.get(&(vin.prev_hash, vin.prev_n)).is_some());
-                if all_resolve {
-                    for vin in &tx.vin {
-                        wallet_utxo_set.remove(&(vin.prev_hash, vin.prev_n));
-                    }
-                }
-            }
-            for (n, vout) in tx.vout.iter().enumerate() {
-                if vout.value == 0 && vout.script_pubkey.is_empty() {
-                    continue; // IsEmpty marker
-                }
-                let Some(dest) = tri7_core::address::script_to_dest(&vout.script_pubkey) else {
-                    continue;
-                };
-                let payload = dest.payload();
-                if wallet_payload_set.contains(&payload) {
-                    wallet_utxo_set.insert(
-                        (tx.hash(), n as u32),
-                        WalletUtxo {
-                            value: vout.value,
-                            script: vout.script_pubkey.clone(),
-                            height: _height as u32,
-                            tx_time: tx.time,
-                            from_coinbase: is_coinbase,
-                            from_coinstake: is_coinstake,
-                        },
-                    );
-                }
-            }
-        }
-
-        let rep = utxos.apply_block_reported(&block, _height);
-        untracked_spends += rep.untracked_spends;
-        duplicate_txids += rep.duplicate_txids;
-
-        blocks += 1;
-        tip_hash = hash;
-        if consensus::block_is_proof_of_stake(&block) {
-            pos_blocks += 1;
-        }
-        if blocks % 100_000 == 0 {
-            println!(
-                "... {} blocks ({} outputs, {} live UTXOs)",
-                blocks,
-                outputs_processed,
-                utxos.len()
-            );
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
-    }
-
-    // ---- coverage contract (shared skeleton) --------------------------------
-    let covered_to = walker.height().saturating_sub(1);
-    if outputs_processed == 0 {
-        eprintln!(
-            "FAIL: zero outputs processed over heights 0..{} — no coverage",
-            covered_to
-        );
-        std::process::exit(1);
-    }
-    if let Err(e) = check_coverage(stale_at, covered_to, end_height, allow_stale) {
-        eprintln!("FAIL: {}", e);
-        std::process::exit(1);
-    }
-
-    // ---- aggregate ----------------------------------------------------------
-    let totals = utxos.address_balances();
-    let attributed_sats: i64 = totals.per_address.values().map(|(v, _)| v).sum();
-    let attributed_utxos: u64 = totals.per_address.values().map(|(_, n)| n).sum();
-    let total_balance_sats = attributed_sats + totals.unattributed_sats;
-    let live_utxos = attributed_utxos + totals.unattributed_utxos;
-
-    // wallet slice
-    let mut wallet_balance_sats = 0i64;
-    let mut wallet_utxos = 0u64;
-    let mut wallet_received_regular_sats = 0i64;
-    let mut wallet_received_all_sats = 0i64;
-    let mut funded_wallet_addresses = 0usize;
-    let mut wallet_rows: Vec<[String; 5]> = Vec::with_capacity(wallet_payloads.len());
-    for (payload, addr) in &wallet_payloads {
-        let (bal, n) = totals.per_address.get(payload).copied().unwrap_or((0, 0));
-        let rec_r = received_regular.get(payload).copied().unwrap_or(0);
-        let rec_a = received_all.get(payload).copied().unwrap_or(0);
-        wallet_balance_sats += bal;
-        wallet_utxos += n;
-        wallet_received_regular_sats += rec_r;
-        wallet_received_all_sats += rec_a;
-        if bal != 0 || rec_r != 0 || rec_a != 0 {
-            funded_wallet_addresses += 1;
-        }
-        wallet_rows.push([
-            addr.clone(),
-            bal.to_string(),
-            n.to_string(),
-            rec_r.to_string(),
-            rec_a.to_string(),
-        ]);
-    }
-
-    // ---- JSON ----------------------------------------------------------------
-    // {"totals":{...}, "wallet":[...], "balances":{addr:sats},
-    //  "received_regular":{addr:sats}} — sorted keys, sats everywhere.
-    let mut balances_sorted: Vec<(&[u8; 21], &(i64, u64))> = totals.per_address.iter().collect();
-    balances_sorted.sort_by_key(|(p, _)| payload_to_address(p));
-    let mut received_sorted: Vec<(&[u8; 21], &i64)> = received_regular.iter().collect();
-    received_sorted.sort_by_key(|(p, _)| payload_to_address(p));
-
-    let mut j = String::with_capacity(1 << 22);
-    j.push_str("{\n");
-    j.push_str(&format!("  \"height\": {},\n", covered_to));
-    j.push_str(&format!(
-        "  \"covered_tip_hash\": \"{}\",\n",
-        tri7_core::legacy::hash_to_display(&tip_hash)
-    ));
-    j.push_str("  \"totals\": {\n");
-    j.push_str(&format!("    \"blocks_replayed\": {},\n", blocks));
-    j.push_str(&format!("    \"pos_blocks\": {},\n", pos_blocks));
-    j.push_str(&format!("    \"live_utxos\": {},\n", live_utxos));
-    j.push_str(&format!(
-        "    \"total_balance_sats\": {},\n",
-        total_balance_sats
-    ));
-    j.push_str(&format!(
-        "    \"attributed_balance_sats\": {},\n",
-        attributed_sats
-    ));
-    j.push_str(&format!(
-        "    \"unattributed_balance_sats\": {},\n",
-        totals.unattributed_sats
-    ));
-    j.push_str(&format!(
-        "    \"unattributed_utxos\": {},\n",
-        totals.unattributed_utxos
-    ));
-    j.push_str(&format!(
-        "    \"outputs_processed\": {},\n",
-        outputs_processed
-    ));
-    j.push_str(&format!(
-        "    \"outputs_attributed_to_address\": {},\n",
-        outputs_attributed
-    ));
-    j.push_str(&format!("    \"regular_txs\": {},\n", regular_txs));
-    j.push_str(&format!(
-        "    \"untracked_spends\": {},\n",
-        untracked_spends
-    ));
-    j.push_str(&format!("    \"duplicate_txids\": {},\n", duplicate_txids));
-    j.push_str(&format!("    \"wallet_key_count\": {},\n", wall.keys.len()));
-    j.push_str(&format!(
-        "    \"wallet_addresses_distinct\": {},\n",
-        distinct_wallet_payloads
-    ));
-    j.push_str(&format!(
-        "    \"wallet_funded_addresses\": {},\n",
-        funded_wallet_addresses
-    ));
-    j.push_str(&format!(
-        "    \"wallet_balance_sats\": {},\n",
-        wallet_balance_sats
-    ));
-    j.push_str(&format!("    \"wallet_utxos\": {},\n", wallet_utxos));
-    j.push_str(&format!(
-        "    \"wallet_received_regular_sats\": {},\n",
-        wallet_received_regular_sats
-    ));
-    j.push_str(&format!(
-        "    \"wallet_received_all_sats\": {}\n",
-        wallet_received_all_sats
-    ));
-    j.push_str("  },\n");
-    j.push_str("  \"wallet\": [\n");
-    for (i, row) in wallet_rows.iter().enumerate() {
-        j.push_str(&format!(
-            "    {{\"address\": \"{}\", \"balance_sats\": {}, \"utxos\": {}, \"received_regular_sats\": {}, \"received_all_sats\": {}}}{}\n",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            if i + 1 == wallet_rows.len() { "" } else { "," }
-        ));
-    }
-    j.push_str("  ],\n");
-    j.push_str("  \"balances\": {");
-    for (i, (payload, (bal, _))) in balances_sorted.iter().enumerate() {
-        j.push_str(&format!(
-            "{}\"{}\":{}",
-            if i % 6 == 0 { "\n    " } else { " " },
-            payload_to_address(payload),
-            bal
-        ));
-        if i + 1 != balances_sorted.len() {
-            j.push(',');
-        }
-    }
-    j.push_str("\n  },\n");
-    j.push_str("  \"received_regular\": {");
-    for (i, (payload, sats)) in received_sorted.iter().enumerate() {
-        j.push_str(&format!(
-            "{}\"{}\":{}",
-            if i % 6 == 0 { "\n    " } else { " " },
-            payload_to_address(payload),
-            sats
-        ));
-        if i + 1 != received_sorted.len() {
-            j.push(',');
-        }
-    }
-    j.push_str("\n  }\n}\n");
-    std::fs::write(&out_path, &j).unwrap_or_else(|e| die(&format!("write {}: {}", out_path, e)));
-
-    // ---- wallet UTXO dump (phase 3) ------------------------------------------
-    if let Some(dump_path) = &utxos_out_path {
-        let mut rows: Vec<(tri7_core::legacy::Hash, u32, &WalletUtxo)> = wallet_utxo_set
-            .iter()
-            .map(|((t, n), u)| (*t, *n, u))
-            .collect();
-        rows.sort_by(|a, b| {
-            (a.2.height, tri7_core::legacy::hash_to_display(&a.0), a.1).cmp(&(
-                b.2.height,
-                tri7_core::legacy::hash_to_display(&b.0),
-                b.1,
-            ))
-        });
-        let mut d = String::with_capacity(1 << 20);
-        d.push_str("{\n");
-        d.push_str(&format!("  \"height\": {},\n", covered_to));
-        // coverage tip hash: required by the tri7d listunspent consistency
-        // gate (height AND hash must match the balances snapshot)
-        d.push_str(&format!(
-            "  \"covered_tip_hash\": \"{}\",\n",
-            tri7_core::legacy::hash_to_display(&tip_hash)
-        ));
-        d.push_str(&format!("  \"count\": {},\n", rows.len()));
-        d.push_str(&format!(
-            "  \"total_value_sats\": {},\n",
-            rows.iter().map(|(_, _, u)| u.value).sum::<i64>()
-        ));
-        d.push_str("  \"utxos\": [\n");
-        for (i, (txid, n, u)) in rows.iter().enumerate() {
-            let payload = tri7_core::address::script_to_dest(&u.script).map(|dest| dest.payload());
-            let addr = payload
-                .map(|p| payload_to_address(&p))
-                .unwrap_or_else(|| "".to_string());
-            let kind = if u.from_coinbase {
-                "coinbase"
-            } else if u.from_coinstake {
-                "coinstake"
-            } else {
-                "regular"
-            };
-            d.push_str(&format!(
-                "    {{\"txid\": \"{}\", \"n\": {}, \"value_sats\": {}, \"script_hex\": \"{}\", \
-                 \"address\": \"{}\", \"height\": {}, \"tx_time\": {}, \"prev_kind\": \"{}\"}}{}\n",
-                tri7_core::legacy::hash_to_display(txid),
-                n,
-                u.value,
-                u.script
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>(),
-                addr,
-                u.height,
-                u.tx_time,
-                kind,
-                if i + 1 == rows.len() { "" } else { "," }
-            ));
-        }
-        d.push_str("  ]\n}\n");
-        let tmp = format!("{}.tmp", dump_path);
-        std::fs::write(&tmp, &d).unwrap_or_else(|e| die(&format!("write {}: {}", tmp, e)));
-        std::fs::rename(&tmp, dump_path)
-            .unwrap_or_else(|e| die(&format!("rename {}: {}", dump_path, e)));
-        println!(
-            "utxo dump: {} wallet-owned live UTXOs ({} sats) -> {}",
-            rows.len(),
-            rows.iter().map(|(_, _, u)| u.value).sum::<i64>(),
-            dump_path
-        );
-    }
+    let mut progress = |blocks: usize, live_utxos: usize| {
+        println!("... {} blocks ({} live UTXOs)", blocks, live_utxos);
+        let _ = std::io::stdout().flush();
+    };
+    let opts = BalancesBuildOpts {
+        blk: std::path::Path::new(&path),
+        out: std::path::Path::new(&out_path),
+        wallet: wallet_path.as_deref().map(std::path::Path::new),
+        utxos_out: utxos_out_path.as_deref().map(std::path::Path::new),
+        end_height,
+        allow_stale,
+    };
+    let rep = match build_balances_snapshot(&opts, &mut progress) {
+        Ok(r) => r,
+        Err(e) => die(&e),
+    };
 
     // ---- report --------------------------------------------------------------
     println!(
         "replay: {} blocks (genesis..{}), tip {}",
-        blocks,
-        covered_to,
-        tri7_core::legacy::hash_to_display(&tip_hash)
+        rep.blocks, rep.covered_to, rep.tip_hash_display
     );
     println!(
         "outputs: {} non-empty processed, {} attributed to an address, {} live UTXOs held",
-        outputs_processed, outputs_attributed, live_utxos
+        rep.outputs_processed, rep.outputs_attributed, rep.live_utxos
     );
     println!(
         "supply: total live balance {} sats ({} attributed + {} unattributed in {} UTXOs)",
-        total_balance_sats, attributed_sats, totals.unattributed_sats, totals.unattributed_utxos
+        rep.total_balance_sats, rep.attributed_sats, rep.unattributed_sats, rep.unattributed_utxos
     );
     println!(
         "anomalies: {} untracked spends, {} duplicate-txid overwrites",
-        untracked_spends, duplicate_txids
+        rep.untracked_spends, rep.duplicate_txids
     );
+    if let Some(dump_path) = &rep.utxos_out_path {
+        println!(
+            "utxo dump: {} wallet-owned live UTXOs ({} sats) -> {}",
+            rep.utxos_count, rep.utxos_total_sats, dump_path.display()
+        );
+    }
     println!(
         "wallet: {} keys / {} distinct addresses, {} funded; balance {} sats in {} UTXOs; received(regular/P2PKH) {} sats; received(all) {} sats",
-        wall.keys.len(),
-        distinct_wallet_payloads,
-        funded_wallet_addresses,
-        wallet_balance_sats,
-        wallet_utxos,
-        wallet_received_regular_sats,
-        wallet_received_all_sats
+        rep.wallet_key_count,
+        rep.wallet_addresses_distinct,
+        rep.wallet_funded_addresses,
+        rep.wallet_balance_sats,
+        rep.wallet_utxos,
+        rep.wallet_received_regular_sats,
+        rep.wallet_received_all_sats
     );
-    // top 10 wallet balances for eyeballing
-    let mut top: Vec<(i64, u64, &String)> = Vec::new();
-    for (payload, addr) in &wallet_payloads {
-        let (bal, n) = totals.per_address.get(payload).copied().unwrap_or((0, 0));
-        if bal > 0 {
-            top.push((bal, n, addr));
+    // top 10 wallet balances for eyeballing — re-read them from the snapshot
+    // (the aggregation stays in the lib; the CLI keeps only display extras)
+    if let Ok(v) =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&rep.out_path).unwrap_or_default())
+    {
+        let mut top: Vec<(i64, String)> = v["wallet"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|w| {
+                        let b = w["balance_sats"].as_i64()?;
+                        if b <= 0 {
+                            return None;
+                        }
+                        let addr = w["address"].as_str()?.to_string();
+                        Some((b, addr))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        top.sort_by(|a, b| b.0.cmp(&a.0));
+        if !top.is_empty() {
+            println!("top wallet balances (sats):");
+            for (bal, addr) in top.iter().take(10) {
+                println!("  {:>16}  {}", bal, addr);
+            }
         }
     }
-    top.sort_by(|a, b| b.0.cmp(&a.0));
-    println!("top wallet balances (sats):");
-    for (bal, n, addr) in top.iter().take(10) {
-        println!("  {:>16} in {:>3} UTXOs  {}", bal, n, addr);
-    }
-    println!("JSON written: {}", out_path);
+    println!("JSON written: {}", rep.out_path.display());
     println!("ALL BALANCE CHECKS PASSED");
 }

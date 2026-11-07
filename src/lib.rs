@@ -5,6 +5,7 @@
 //! so that the same bytes produce the same hashes and the same chain.
 
 pub mod address;
+pub mod balances_build;
 pub mod blkfile;
 pub mod blockindex;
 pub mod consensus;

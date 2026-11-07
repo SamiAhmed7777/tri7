@@ -36,6 +36,10 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "getlocalinfo",
     "listwalletaddresses",
     "getreceivedbyaddress",
+    // explorer 2026-11-07: the daemon's native rich-list verb (GUI explorer
+    // prefers it, falls back to the balances.json snapshot when the node is
+    // older than the verb)
+    "richlist",
     "validateaddress",
     "health",
     // phase 7 milestone 2

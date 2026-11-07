@@ -940,6 +940,10 @@ struct Config {
     proxy_timeout_secs: u64,
     blocks_file: Option<PathBuf>,
     balances_path: PathBuf,
+    /// true when `--balances PATH` was given EXPLICITLY: the node then
+    /// BUILDS and maintains the snapshot at that path (background builder
+    /// thread, atomic writes) instead of only serving an existing file.
+    balances_build: bool,
     wallet_utxos_path: PathBuf,
     index_dir: PathBuf,
     // ---- phase 7 milestone 2: staking / wallet / smsg / i2p ----
@@ -1042,7 +1046,12 @@ fn usage() -> ! {
                              then /root/.triangles/blk0001.dat). The index is\n\
                              built in a background thread and cached under\n\
                              <state-dir>/index/.\n\
-         --balances PATH     replay-derived balances snapshot (balances.json)\n\
+         --balances PATH     replay-derived balances snapshot (balances.json).\n\
+                             Given EXPLICITLY, the node BUILDS and maintains\n\
+                             the snapshot at PATH in a background thread\n\
+                             (atomic writes; the native `richlist` explorer\n\
+                             verb serves it). Without the flag the node only\n\
+                             SERVES an existing snapshot and never writes one.\n\
          --wallet-utxos PATH replay-derived wallet UTXO snapshot\n\
          --index-dir DIR     where index caches live (default <state-dir>/index)"
     );
@@ -1085,6 +1094,7 @@ fn parse_args() -> Config {
         proxy_timeout_secs: 10,
         blocks_file: None,             // resolved against state_dir / archive below
         balances_path: PathBuf::new(), // defaults filled below
+        balances_build: false,
         wallet_utxos_path: PathBuf::new(),
         index_dir: PathBuf::new(),
         stake: None,
@@ -1222,7 +1232,10 @@ fn parse_args() -> Config {
                 cfg.proxy_timeout_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
             }
             "--blocks-file" => cfg.blocks_file = Some(PathBuf::from(need(&mut i, &args))),
-            "--balances" => cfg.balances_path = PathBuf::from(need(&mut i, &args)),
+            "--balances" => {
+                cfg.balances_path = PathBuf::from(need(&mut i, &args));
+                cfg.balances_build = true;
+            }
             "--wallet-utxos" => cfg.wallet_utxos_path = PathBuf::from(need(&mut i, &args)),
             "--index-dir" => cfg.index_dir = PathBuf::from(need(&mut i, &args)),
             _ => usage(),
@@ -4360,11 +4373,41 @@ struct LiveWalletProvider {
     st: SharedState,
     /// state dir holding history.json (full wallet history, txhistory bin)
     state_dir: std::path::PathBuf,
+    /// balances.json path for the `richlist` explorer verb. Parsed through an
+    /// mtime+len keyed cache (RichListCache): a background `--balances`
+    /// rebuild is picked up on the next call WITHOUT a restart, and an
+    /// unchanged multi-MB snapshot is never re-parsed per call.
+    balances_path: std::path::PathBuf,
+    rich_cache: Arc<Mutex<tri7_core::rpc::RichListCache>>,
 }
 
 impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     fn state_dir(&self) -> String {
         self.state_dir.display().to_string()
+    }
+
+    fn rich_list(&self, top: usize) -> Result<serde_json::Value, String> {
+        // Explorer verb data path: snapshot file → mtime-keyed parse → ranked
+        // top addresses. NO daemon locks on the hot path (the state lock is
+        // sampled try_lock-only for the tip comparison — explorer pressure
+        // must never block consensus-critical flow).
+        let mut cache = self
+            .rich_cache
+            .lock()
+            .map_err(|e| format!("rich list cache poisoned: {e}"))?;
+        let data = cache.get(&self.balances_path)?;
+        let chain_tip = self.st.try_lock().ok().map(|g| g.tip_height);
+        let source = format!(
+            "balances snapshot {} (full-archive replay h{})",
+            self.balances_path.display(),
+            data.height
+        );
+        Ok(tri7_core::rpc::rich_list_json(
+            &data,
+            chain_tip,
+            &source,
+            top,
+        ))
     }
 
     // The live provider OWNS the extras (fee setting, bestblock, unlock state):
@@ -7499,6 +7542,123 @@ fn main() {
     // The follow loop keeps exclusive ownership via the mutex; RPC threads take
     // short per-call locks (no lock is held across the 40 ms sleep).
     let st_shared: SharedState = Arc::new(Mutex::new(st));
+    // ---- explorer: `--balances` builder thread -------------------------------
+    // An EXPLICIT --balances PATH means the node MAINTAINS its balances
+    // snapshot: a background thread rebuilds it (full-archive replay via the
+    // shared balances_build engine, atomic tmp+rename writes) when it is
+    // missing or its coverage fell behind the tip, and the native `richlist`
+    // verb serves it (mtime-keyed cache → a rebuild is visible without a
+    // restart). The replay touches NO daemon locks and runs on its own
+    // thread — explorer pressure stays separable from relay/staking flow.
+    if cfg.balances_build {
+        let b_blk = blocks_file.clone();
+        let b_out = cfg.balances_path.clone();
+        let b_utxos = cfg.wallet_utxos_path.clone();
+        let b_wallet = cfg.wallet_path.clone();
+        let b_st = Arc::clone(&st_shared);
+        let builder = std::thread::Builder::new().name("balances-build".into());
+        builder
+            .spawn(move || {
+                // ~1 day of PoS minting (≈15 s/block); stale by more than
+                // this → rebuild. Re-check cadence 6 h; missing blk file
+                // (fresh from-zero folder) retries in 10 min.
+                const REFRESH_BEHIND: u64 = 5_760;
+                const REFRESH_CHECK_SECS: u64 = 6 * 3600;
+                const NO_BLK_RETRY_SECS: u64 = 600;
+                let mut blk_missing_logged = false;
+                loop {
+                    let blk = match b_blk.as_ref() {
+                        Some(p) if p.exists() => p.clone(),
+                        _ => {
+                            if !blk_missing_logged {
+                                log(&format!(
+                                    "balances-build: no blk file yet ({} looked for {:?}) — will retry in {}s",
+                                    b_out.display(),
+                                    b_blk,
+                                    NO_BLK_RETRY_SECS
+                                ));
+                                blk_missing_logged = true;
+                            }
+                            std::thread::sleep(Duration::from_secs(NO_BLK_RETRY_SECS));
+                            continue;
+                        }
+                    };
+                    blk_missing_logged = false;
+                    // snapshot coverage height (missing/unparseable → 0)
+                    let snap_h = std::fs::read_to_string(&b_out)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|v| v["height"].as_u64())
+                        .unwrap_or(0);
+                    // chain tip (try_lock only — never block on the loop)
+                    let tip = b_st
+                        .try_lock()
+                        .map(|g| g.tip_height)
+                        .unwrap_or(snap_h.max(0));
+                    let stale = snap_h.saturating_add(REFRESH_BEHIND) < tip || snap_h == 0;
+                    if !stale {
+                        std::thread::sleep(Duration::from_secs(REFRESH_CHECK_SECS));
+                        continue;
+                    }
+                    log(&format!(
+                        "balances-build: start (snapshot h{}, chain tip h{}) — replaying {}",
+                        snap_h,
+                        tip,
+                        blk.display()
+                    ));
+                    let started = std::time::Instant::now();
+                    // coverage contract: accept whatever the walk reaches
+                    // (EOF at any height, or a stale-branch stop) — the
+                    // snapshot's own height + tip hash are served honestly
+                    // by the richlist verb so consumers can judge the lag.
+                    let opts = tri7_core::balances_build::BalancesBuildOpts {
+                        blk: &blk,
+                        out: &b_out,
+                        wallet: b_wallet.as_deref(),
+                        // pair the UTXO dump with the balances rebuild so the
+                        // listunspent coverage gate (height AND hash must
+                        // match across BOTH snapshots) stays green
+                        utxos_out: b_wallet.as_ref().map(|_| b_utxos.as_path()),
+                        end_height: 0,
+                        allow_stale: true,
+                    };
+                    let mut progress = |blocks: usize, live: usize| {
+                        log(&format!(
+                            "balances-build: ... {} blocks, {} live UTXOs",
+                            blocks, live
+                        ));
+                    };
+                    match tri7_core::balances_build::build_balances_snapshot(&opts, &mut progress)
+                    {
+                        Ok(rep) => log(&format!(
+                            "balances-build: done in {:.1}s — coverage h{} tip {} · supply {} sats · {} live UTXOs · wallet {} keys {} sats → {}",
+                            started.elapsed().as_secs_f64(),
+                            rep.covered_to,
+                            rep.tip_hash_display,
+                            rep.total_balance_sats,
+                            rep.live_utxos,
+                            rep.wallet_key_count,
+                            rep.wallet_balance_sats,
+                            rep.out_path.display()
+                        )),
+                        Err(e) => {
+                            // transient failure (torn read, disk full): retry
+                            // on the SHORT cycle, not the 6h one
+                            log(&format!(
+                                "balances-build: FAILED: {} — retrying in {}s",
+                                e, NO_BLK_RETRY_SECS
+                            ));
+                            std::thread::sleep(Duration::from_secs(NO_BLK_RETRY_SECS));
+                            continue;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(REFRESH_CHECK_SECS));
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| format!("spawn balances-build thread: {e}"))
+            .unwrap_or_else(|e| log(&format!("balances-build thread NOT started: {e}")));
+    }
     let last_write_shared = Arc::new(Mutex::new(Instant::now()));
     let peers_shared = Arc::new(AtomicU32::new(peers.len() as u32));
     // ---- phase 7 milestone 2: wallet live state / stake loop / txpool / smsg
@@ -7815,6 +7975,8 @@ fn main() {
                 wl: Arc::clone(&wl_shared),
                 st: Arc::clone(&st_shared),
                 state_dir: cfg.state_dir.clone(),
+                balances_path: cfg.balances_path.clone(),
+                rich_cache: Arc::new(Mutex::new(tri7_core::rpc::RichListCache::new())),
             }),
             blocks: Arc::new(StoreAdapter {
                 store: Arc::clone(&store),

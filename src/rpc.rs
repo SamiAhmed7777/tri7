@@ -91,6 +91,10 @@ pub const NATIVE_METHODS: &[&str] = &[
     "getlocalinfo",
     "listwalletaddresses",
     "getreceivedbyaddress",
+    // ---- explorer 2026-11-07: native rich list from the balances snapshot
+    // (every node IS an explorer; the snapshot is built/maintained by the
+    // daemon's --balances builder thread) ----
+    "richlist",
     "validateaddress",
     "validatepubkey",
     "makekeypair",
@@ -347,6 +351,12 @@ pub trait WalletProvider: Send + Sync {
     fn history(&self) -> Vec<crate::history::HistoryRec> {
         Vec::new()
     }
+    /// The `richlist` explorer verb: top addresses by balance from the
+    /// balances snapshot. Default = not configured in this provider (tests,
+    /// read-only tools); the daemon provider reads its state-dir snapshot.
+    fn rich_list(&self, _top: usize) -> Result<Value, String> {
+        Err("rich list source not configured in this provider".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +446,131 @@ pub fn load_balances_snap(path: &PathBuf) -> BalancesSnap {
         snap.received.len()
     );
     snap
+}
+
+// ---------------------------------------------------------------------------
+// Rich list (explorer verb: `richlist` — top addresses by balance, served
+// from the balances snapshot the daemon builds/maintains with --balances).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct RichListData {
+    /// snapshot coverage height (full-archive replay reached this block).
+    pub height: u64,
+    pub covered_tip_hash: String,
+    /// Σ of every live UTXO value (attributed + unattributed).
+    pub total_chain_sats: i64,
+    /// (address, balance_sats) sorted by balance DESC, address ASC tie-break
+    /// — deterministic ranking regardless of HashMap iteration order.
+    pub entries: Vec<(String, i64)>,
+}
+
+/// Parse the balances.json layout into rich-list data. Only positive
+/// balances rank (a 0-balance address is not on a rich list).
+pub fn rich_list_from_value(v: &Value) -> Result<RichListData, String> {
+    let height = v["height"].as_u64().ok_or("balances snapshot missing height")?;
+    let covered_tip_hash = v["covered_tip_hash"].as_str().unwrap_or("").to_string();
+    let total_chain_sats = v["totals"]["total_balance_sats"].as_i64().unwrap_or(0);
+    let map = v["balances"]
+        .as_object()
+        .ok_or("balances snapshot missing balances map")?;
+    let mut entries: Vec<(String, i64)> = map
+        .iter()
+        .filter_map(|(k, val)| val.as_i64().map(|s| (k.clone(), s)))
+        .filter(|(_, s)| *s > 0)
+        .collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(RichListData {
+        height,
+        covered_tip_hash,
+        total_chain_sats,
+        entries,
+    })
+}
+
+/// The `richlist` response: top `top` entries + honest coverage labeling
+/// (the snapshot height can lag the chain tip; the caller passes the current
+/// tip height so consumers can judge the lag themselves).
+pub fn rich_list_json(
+    data: &RichListData,
+    chain_tip_height: Option<u64>,
+    source: &str,
+    top: usize,
+) -> Value {
+    let entries: Vec<Value> = data
+        .entries
+        .iter()
+        .take(top)
+        .enumerate()
+        .map(|(i, (addr, sats))| {
+            json!({
+                "rank": i + 1,
+                "address": addr,
+                "balance_sats": sats,
+                "balance_tri": sats_to_tri(*sats),
+            })
+        })
+        .collect();
+    json!({
+        "requested": top,
+        "count": entries.len(),
+        "total_ranked": data.entries.len(),
+        "snapshot_height": data.height,
+        "covered_tip_hash": data.covered_tip_hash,
+        "chain_tip_height": chain_tip_height,
+        "total_chain_sats": data.total_chain_sats,
+        "entries": entries,
+        "source": source,
+    })
+}
+
+/// mtime+len keyed cache over the balances.json file. The daemon rebuilds the
+/// snapshot in the background (builder thread); re-parsing per richlist call
+/// would re-read a multi-MB file on every explorer refresh — instead a call
+/// stats the file and re-parses only when the signature changed, so a rebuilt
+/// snapshot is picked up without a daemon restart.
+#[derive(Default)]
+pub struct RichListCache {
+    sig: Option<(u64, u64)>,
+    data: Option<std::sync::Arc<RichListData>>,
+}
+
+impl RichListCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current parsed data for `path`, re-reading when the file changed.
+    pub fn get(&mut self, path: &std::path::Path) -> Result<std::sync::Arc<RichListData>, String> {
+        let meta = std::fs::metadata(path)
+            .map_err(|_| {
+                format!(
+                    "balances snapshot not available at {} — start the node with an explicit \
+                     --balances PATH (or run the balances bin) to build one",
+                    path.display()
+                )
+            })?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let sig = (meta.len(), mtime);
+        if self.sig == Some(sig) {
+            if let Some(d) = &self.data {
+                return Ok(std::sync::Arc::clone(d));
+            }
+        }
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+        let data = std::sync::Arc::new(rich_list_from_value(&v)?);
+        self.sig = Some(sig);
+        self.data = Some(std::sync::Arc::clone(&data));
+        Ok(data)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1323,6 +1458,19 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 0
             };
             NativeOutcome::Ok(json!(sats_to_tri(sats)))
+        }
+
+        "richlist" => {
+            // Explorer verb (2026-11-07): top addresses by balance from the
+            // balances snapshot. Passive by design — served even while the
+            // ops engine is warming up, so EVERY node is an explorer.
+            // params: [count] (default 100, capped at 1000).
+            let top = ptry!(p_u64(params, 0, "count")).unwrap_or(100);
+            let top = top.clamp(1, 1000) as usize;
+            match deps.wallet.rich_list(top) {
+                Ok(v) => NativeOutcome::Ok(v),
+                Err(e) => NativeOutcome::Err(-1, e),
+            }
         }
 
         "listreceivedbyaddress" => {
@@ -5032,5 +5180,162 @@ fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     let _ = (a2,);
 
     std::env::remove_var("TRI7_WALLET_PATH");
+}
+
+// ---- richlist explorer verb (balances snapshot → ranked top addresses) ----
+
+#[test]
+fn rich_list_parses_sorts_tiebreaks_and_filters() {
+    let v = json!({
+        "height": 2_207_108u64,
+        "covered_tip_hash": "eb5e471a",
+        "totals": {"total_balance_sats": 14i64},
+        "balances": {"Ta": 5, "Tb": 9, "Tc": 5, "Td": 0, "Te": -3}
+    });
+    let d = rich_list_from_value(&v).unwrap();
+    assert_eq!(d.height, 2_207_108);
+    assert_eq!(d.covered_tip_hash, "eb5e471a");
+    assert_eq!(d.total_chain_sats, 14);
+    assert_eq!(
+        d.entries,
+        vec![
+            ("Tb".to_string(), 9),
+            ("Ta".to_string(), 5),
+            ("Tc".to_string(), 5),
+        ],
+        "balance DESC; equal balances rank by address ASC (deterministic, not HashMap order); 0/negative never rank"
+    );
+    assert!(rich_list_from_value(&json!({"no_map": 1})).is_err());
+    assert!(rich_list_from_value(&json!({"balances": {}})).is_err(), "missing height");
+}
+
+#[test]
+fn rich_list_json_caps_ranks_and_converts_units() {
+    let data = RichListData {
+        height: 100,
+        covered_tip_hash: "ab".into(),
+        total_chain_sats: 30,
+        entries: vec![
+            ("T1".into(), 1_500_000),
+            ("T2".into(), 1_400_000),
+            ("T3".into(), 100),
+            ("T4".into(), 50),
+            ("T5".into(), 1),
+        ],
+    };
+    let r = rich_list_json(&data, Some(150), "test source", 3);
+    assert_eq!(r["count"], 3);
+    assert_eq!(r["requested"], 3);
+    assert_eq!(r["total_ranked"], 5, "honest: how many addresses the snapshot ranks");
+    assert_eq!(r["chain_tip_height"], 150);
+    assert_eq!(r["snapshot_height"], 100);
+    assert_eq!(r["entries"][0]["rank"], 1);
+    assert_eq!(r["entries"][0]["address"], "T1");
+    assert_eq!(r["entries"][0]["balance_sats"], 1_500_000);
+    // TRI is a SIX-decimal chain (COIN = 1_000_000)
+    assert_eq!(r["entries"][0]["balance_tri"], json!(1.5));
+    assert_eq!(r["entries"][2]["balance_tri"], json!(0.0001));
+    assert_eq!(r["entries"][2]["rank"], 3);
+    assert_eq!(r["source"], "test source");
+    let r_all = rich_list_json(&data, None, "s", 1000);
+    assert_eq!(r_all["count"], 5);
+    assert_eq!(r_all["chain_tip_height"], Value::Null, "tip unavailable under contention stays null, never a fake height");
+}
+
+/// A provider that HAS a snapshot-backed rich list (the daemon's shape).
+struct RichStubWallet(Mutex<Option<std::sync::Arc<RichListData>>>, String);
+impl WalletProvider for RichStubWallet {
+    fn balance(&self) -> Option<BalanceView> {
+        None
+    }
+    fn coverage(&self) -> Option<(u64, String)> {
+        None
+    }
+    fn address_entries(&self) -> Vec<AddressEntry> {
+        Vec::new()
+    }
+    fn received_regular(&self, _addr: &str) -> Option<i64> {
+        None
+    }
+    fn is_mine(&self, _addr: &str) -> bool {
+        false
+    }
+    fn utxos(&self) -> Vec<UtxoRow> {
+        Vec::new()
+    }
+    fn rich_list(&self, top: usize) -> Result<Value, String> {
+        let g = self.0.lock().unwrap();
+        match g.as_ref() {
+            Some(d) => Ok(rich_list_json(d, Some(2_207_110), &self.1, top)),
+            None => Err("balances snapshot not available".into()),
+        }
+    }
+}
+
+#[test]
+fn richlist_routes_passively_with_default_count_and_errors() {
+    let t = StubTip;
+    let b = StubBlocks { ready: true };
+    // routing: count param → take(top), default 100, and the passive verb
+    // answers with ops = None (explorer pressure never gates on the engine).
+    let w_ok = RichStubWallet(
+        Mutex::new(Some(std::sync::Arc::new(RichListData {
+            height: 1,
+            covered_tip_hash: "x".into(),
+            total_chain_sats: 9,
+            entries: (0..250).map(|i| (format!("T{i:03}"), 1000 - i)).collect(),
+        }))),
+        "snapshot (full-archive replay)".into(),
+    );
+    let d = Deps { tip: &t, wallet: &w_ok, blocks: &b, proxy: None, ops: None };
+    let v = call(&d, "richlist", json!([3]));
+    assert_eq!(v["result"]["count"], 3);
+    assert_eq!(v["result"]["entries"][0]["rank"], 1);
+    let v = call(&d, "richlist", json!([]));
+    assert_eq!(v["result"]["count"], 100, "default count 100");
+    let v = call(&d, "richlist", json!([99_999]));
+    assert_eq!(v["result"]["count"], 250, "capped at 1000, truncated to ranked total");
+    assert!(v["result"]["total_ranked"].as_u64().unwrap() >= v["result"]["count"].as_u64().unwrap());
+    // provider WITHOUT a snapshot → clear error, never a fake empty list
+    let w_no = RichStubWallet(Mutex::new(None), "src".into());
+    let d2 = Deps { tip: &t, wallet: &w_no, blocks: &b, proxy: None, ops: None };
+    let v = call(&d2, "richlist", json!([]));
+    assert_eq!(v["error"]["code"], -1);
+    assert!(v["error"]["message"].as_str().unwrap().contains("balances snapshot"));
+}
+
+#[test]
+fn rich_list_cache_re_reads_when_the_file_changes_and_errors_when_missing() {
+    let dir = std::env::temp_dir().join(format!("tri7_richcache_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("balances.json");
+    std::fs::write(
+        &p,
+        json!({"height": 10, "covered_tip_hash": "a", "totals": {"total_balance_sats": 3},
+               "balances": {"Ta": 2, "Tb": 1}})
+            .to_string(),
+    )
+    .unwrap();
+    let mut cache = RichListCache::new();
+    let d1 = cache.get(&p).unwrap();
+    assert_eq!(d1.entries.len(), 2);
+    // cache hit: same signature returns the SAME Arc without re-reading
+    let d1b = cache.get(&p).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&d1, &d1b), "unchanged file must not re-parse");
+    // rewrite with a different length → signature changes → re-parse
+    std::fs::write(
+        &p,
+        json!({"height": 11, "covered_tip_hash": "b", "totals": {"total_balance_sats": 1},
+               "balances": {"Tz": 1}})
+            .to_string(),
+    )
+    .unwrap();
+    let d2 = cache.get(&p).unwrap();
+    assert_eq!(d2.entries.len(), 1);
+    assert_eq!(d2.height, 11, "a rebuilt snapshot is picked up without a restart");
+    // missing file → operator-actionable error
+    let err = cache.get(&dir.join("nope.json")).unwrap_err();
+    assert!(err.contains("--balances"), "error must tell the operator how to build one: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 }

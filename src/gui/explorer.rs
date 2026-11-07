@@ -328,7 +328,7 @@ pub fn compute_fee(
 }
 
 // ===========================================================================
-// rich list (balances.json snapshot — the daemon has no rich-list method)
+// rich list — live daemon verb first, balances.json snapshot as fallback
 // ===========================================================================
 
 #[derive(Debug, Clone)]
@@ -339,7 +339,41 @@ pub struct RichListView {
     pub source: String,
 }
 
+/// The daemon's native `richlist` response (the live path — the GUI prefers
+/// this over any file): {snapshot_height, total_chain_sats, entries[{rank,
+/// address, balance_sats, balance_tri}], source}.
+pub fn parse_rich_list_rpc(v: &Value, top: usize) -> Result<RichListView, String> {
+    let height = v["snapshot_height"]
+        .as_u64()
+        .ok_or("richlist response missing snapshot_height")?;
+    let arr = v["entries"]
+        .as_array()
+        .ok_or("richlist response missing entries")?;
+    let entries: Vec<(String, i64)> = arr
+        .iter()
+        .take(top)
+        .filter_map(|e| {
+            let a = e["address"].as_str()?.to_string();
+            let s = e["balance_sats"].as_i64()?;
+            Some((a, s))
+        })
+        .collect();
+    if entries.is_empty() {
+        return Err("richlist response carried no entries".to_string());
+    }
+    let total = v["total_chain_sats"].as_i64().unwrap_or(0);
+    let daemon_src = v["source"].as_str().unwrap_or("daemon richlist verb");
+    Ok(RichListView {
+        height,
+        entries,
+        total_chain_sats: total,
+        source: format!("live daemon richlist · {}", daemon_src),
+    })
+}
+
 /// balances.json (phase-1e full-archive replay): {height, balances:{addr:sats}}.
+/// FALLBACK PATH ONLY — used when the live verb can't answer (daemon older
+/// than the verb, RPC down); the source string says so honestly.
 pub fn parse_rich_list(v: &Value, top: usize) -> Result<RichListView, String> {
     let height = u(v, "height").ok_or("balances.json missing height")?;
     let map = v
@@ -363,7 +397,7 @@ pub fn parse_rich_list(v: &Value, top: usize) -> Result<RichListView, String> {
         entries,
         total_chain_sats: total,
         source: format!(
-            "balances.json snapshot h{} (full-archive replay) — the daemon RPC has no rich-list method",
+            "snapshot fallback {} (full-archive replay) — live daemon richlist unavailable",
             height
         ),
     })
@@ -766,6 +800,15 @@ impl ExplorerState {
         self.view = ExplorerView::Rich;
         Ok(())
     }
+
+    /// LIVE path: parse the daemon's `richlist` response into the view.
+    /// The caller (explorer_rich_action) tries this FIRST and only falls back
+    /// to the snapshot file when the verb can't answer.
+    pub fn load_rich_list_rpc_action(&mut self, v: Value, top: usize) -> Result<(), String> {
+        self.rich = Some(parse_rich_list_rpc(&v, top)?);
+        self.view = ExplorerView::Rich;
+        Ok(())
+    }
 }
 
 // ===========================================================================
@@ -988,8 +1031,43 @@ mod tests {
         assert_eq!(rl.entries.len(), 2);
         assert_eq!(rl.entries[0].1, 999_999_999, "sorted desc");
         assert_eq!(rl.total_chain_sats, 222_507_326_452);
-        assert!(rl.source.contains("h2201090"));
-        assert!(rl.source.contains("no rich-list method"));
+        assert!(rl.source.contains("h2201090") || rl.source.contains("2201090"));
+        assert!(
+            rl.source.contains("fallback"),
+            "the file path is now the FALLBACK — label must say so: {}",
+            rl.source
+        );
+    }
+
+    #[test]
+    fn rich_list_parses_the_live_daemon_verb_response() {
+        let v: Value = serde_json::from_str(
+            r#"{"requested": 25, "count": 2, "total_ranked": 17769,
+                "snapshot_height": 2207108, "covered_tip_hash": "eb5e471a",
+                "chain_tip_height": 2207110,
+                "total_chain_sats": 222507326452,
+                "entries": [
+                  {"rank": 1, "address": "TAA", "balance_sats": 999999999, "balance_tri": 999.999999},
+                  {"rank": 2, "address": "T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY", "balance_sats": 33665763, "balance_tri": 33.665763}
+                ],
+                "source": "balances snapshot /state/balances.json (full-archive replay h2207108)"}"#,
+        )
+        .unwrap();
+        let rl = parse_rich_list_rpc(&v, 25).unwrap();
+        assert_eq!(rl.height, 2_207_108, "coverage comes from the daemon response");
+        assert_eq!(rl.entries.len(), 2);
+        assert_eq!(rl.entries[0], ("TAA".to_string(), 999_999_999));
+        assert_eq!(rl.total_chain_sats, 222_507_326_452);
+        assert!(
+            rl.source.contains("live daemon richlist"),
+            "the LIVE source must be labeled as live: {}",
+            rl.source
+        );
+        // top-N respected even if the daemon sent more rows than asked
+        let rl_top1 = parse_rich_list_rpc(&v, 1).unwrap();
+        assert_eq!(rl_top1.entries.len(), 1);
+        // malformed responses error instead of rendering an empty list
+        assert!(parse_rich_list_rpc(&json!({}), 25).is_err());
     }
 
     #[test]
