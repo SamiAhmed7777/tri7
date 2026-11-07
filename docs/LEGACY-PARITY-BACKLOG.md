@@ -97,7 +97,13 @@ encryption and the BDB importer.
 ### RPC
 - [ ] **`listreceivedbyaccount` / `getreceivedbyaccount`** — account model.
 - [ ] **`listaddressgroupings`** — grouping by address-book entry.
-- [ ] **`keypoolrefill`** — the legacy pool is imported but not topped up.
+- [x] **`keypoolrefill`** — DONE 2026-11-07: native verb tops the `pool`-row
+      reserve to its target (default 100, legacy cap 100000) by deriving fresh
+      HD keys (m/44'/2222'/0'/0/n, restorable from the phrase); `getnewaddress`
+      hands out pooled keys lowest-index-first (relabels the name row, keeps
+      the key row, skips import artifacts that have no key row), and a
+      background maintainer in follow_tip keeps the pool topped;
+      `getwalletinfo.keypoolsize`/`keypoololdest` now report the real census.
 - [ ] **`repairwallet` / `resendtx`** — self-repair verbs (`checkwallet` is
       native and the `consistency` tool covers history vs live).
 - [ ] **`getcheckpoint`** — the checkpoint the node is trusting.

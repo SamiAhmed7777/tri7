@@ -97,7 +97,7 @@ CompactSize: `< 0xFD` → 1 byte; `0xFD` → uint16 LE; `0xFE` → uint32 LE;
 | `mkey` | `04 "mkey"` + uint32 LE id | `CMasterKey` (version + vector params + vector salt + vector crypted key + nDerivationMethod + nDerivationIterations + vector other). Only needed to flag *encrypted* wallets. |
 | `keymeta` | `07 "keymeta"` + CompactSize + pubkey | int32 nVersion (observed `01 00 00 00`) + int64 nCreateTime LE. |
 | `name` | `04 "name"` + CompactSize + address string (34 bytes base58, ASCII `T…`) | string (account label; empty ⇒ single `00` byte, observed). |
-| `pool` | `04 "pool"` + int64 LE index | `CKeyPool`: int32 nVersion + int64 nTime + CompactSize + pubkey (observed `… 1F 1A 32 6A 00 00 00 00 21 02 55 CC …`). |
+| `pool` | `04 "pool"` + int64 LE index | `CKeyPool`: int32 nVersion + int64 nTime + CompactSize + pubkey (observed `… 1F 1A 32 6A 00 00 00 00 21 02 55 CC …`). tri7 WRITES these rows since the 2026-11-07 `keypoolrefill` verb: version constant `0x004DB174` byte-matched to the live rows, pubkey always compressed (46-byte values), pool index = the HD derivation index. |
 | `defaultkey` | `0A "defaultkey"` | CompactSize + pubkey (33 or 65 bytes). |
 | `minversion` | `0A "minversion"` | int32 LE (observed 60000). |
 | `orderposnext` | `0C "orderposnext"` | int64 LE (observed `95 71 01 00 …`). |

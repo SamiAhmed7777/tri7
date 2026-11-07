@@ -28,6 +28,11 @@ pub struct WalletKeys {
     pub hd_passphrase: Option<String>,
     /// `hdchain` row: next HD derivation index (legacy int64 counter).
     pub hd_chain_index: Option<i64>,
+    /// `pool` rows: the legacy keypool reserve (CKeyPool entries). Keys in
+    /// the pool are REAL wallet keys (their `key` rows exist); the pool row
+    /// only marks "pre-derived, not handed out yet". Imported legacy wallets
+    /// carry these from the qt's last TopUpKeyPool.
+    pub keypool: Vec<KeyPoolEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +42,30 @@ pub struct WalletKey {
     pub compressed: bool,
     pub address: String,
     pub created: Option<i64>,
+}
+
+/// One legacy keypool reservation (`pool` row → CKeyPool). `index` is the
+/// BerkeleyDB record key (the qt's mapKeyPool key); the key material itself
+/// lives in the wallet's normal `key` rows — pool membership only marks the
+/// key as "pre-derived, available to hand out".
+#[derive(Debug, Clone)]
+pub struct KeyPoolEntry {
+    pub index: i64,
+    /// CKeyPool nTime (seconds).
+    pub created: i64,
+    pub pubkey: Vec<u8>,
+    pub address: String,
+}
+
+/// Result of a refill: how many keys were newly derived + pooled, the
+/// resulting pool size, the oldest pooled nTime, and the HD counter the
+/// wallet carries after the refill.
+#[derive(Debug, Clone)]
+pub struct KeyPoolRefill {
+    pub derived: usize,
+    pub poolsize: usize,
+    pub oldest: Option<i64>,
+    pub next_index: i64,
 }
 
 fn decode_compact_size(buf: &[u8], pos: &mut usize) -> Result<u64, String> {
@@ -177,6 +206,7 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
         hd_mnemonic: None,
         hd_passphrase: None,
         hd_chain_index: None,
+        keypool: Vec::new(),
     };
     // Signing-capable context: used below to derive pubkeys from secrets.
     let secp = secp256k1::Secp256k1::signing_only();
@@ -309,6 +339,19 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
                     w.hd_chain_index = Some(i64::from_le_bytes(value[..8].try_into().unwrap()));
                 }
             }
+            "pool" => {
+                // Legacy keypool reservation (WriteKeyPool → CKeyPool).
+                // Ground truth byte layout, decoded from the live wallet's
+                // 116 imported rows (DNS2 2026-11-07):
+                //   key   = 04 "pool" + int64 LE record index (13 B)
+                //   value = int32 LE version + int64 LE nTime
+                //         + CS(pubkey len) + compressed pubkey (46 B)
+                // A malformed row is skipped, never fatal — pool membership
+                // is bookkeeping, not key material.
+                if let Some(entry) = parse_pool_row(&suffix, &value) {
+                    w.keypool.push(entry);
+                }
+            }
             "mkey" | "ckey" | "hdcmnemonic" | "hdcpassphrase" => {
                 w.encrypted = true;
             }
@@ -322,6 +365,8 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
             k.created = Some(*t);
         }
     }
+    // Pool entries serve lowest-index-first; row scan order never matters.
+    w.keypool.sort_by_key(|e| e.index);
     // Encrypted wallets: a reader without crypto support must stop (spec §5.9).
     if w.encrypted {
         return Err(
@@ -366,6 +411,42 @@ pub fn read_settings(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         }
     }
     Ok(out)
+}
+
+/// Cheap targeted keypool census (count + oldest nTime) — a SQL scan of the
+/// `pool` rows only, no full-file key parse. This is what getwalletinfo and
+/// the background top-up check read; a wallet with no pool rows answers
+/// (0, None). Never errors on row shapes (skipped, never fatal).
+///
+/// Census semantics (deliberate, qt-parity): EVERY pool row counts,
+/// including import artifacts whose `key` row is missing — the legacy
+/// GetKeyPoolSize counted mapKeyPool entries the same way, and the operator
+/// reading `keypoolsize` should see the pool as the FILE holds it. The
+/// artifact-skip lives in pop_keypool (issuance path) where an unspendable
+/// handout would actually matter; the two views are intentionally different
+/// lenses on the same rows.
+pub fn keypool_stats(path: &Path) -> Result<(usize, Option<i64>), String> {
+    let conn = rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open sqlite: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT value FROM main
+             WHERE hex(substr(key,1,1))='04' AND hex(substr(key,2,4))='706F6F6C'",
+        )
+        .map_err(|e| format!("select pool rows: {}", e))?;
+    let mut rows = stmt.query([]).map_err(|e| format!("query pool rows: {}", e))?;
+    let mut count = 0usize;
+    let mut oldest: Option<i64> = None;
+    while let Some(row) = rows.next().map_err(|e| format!("row iteration: {}", e))? {
+        let value: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+        if value.len() < 13 {
+            continue;
+        }
+        count += 1;
+        let created = i64::from_le_bytes(value[4..12].try_into().unwrap());
+        oldest = Some(oldest.map_or(created, |o| o.min(created)));
+    }
+    Ok((count, oldest))
 }
 
 /// Seed-migration completion flag: setting "seedmigrated" == int32 LE 1
@@ -501,6 +582,54 @@ pub fn encode_key_keyblob(pubkey: &[u8]) -> Vec<u8> {
     push_compact_size(&mut s, pubkey.len() as u64);
     s.extend_from_slice(pubkey);
     encode_key_blob("key", &s)
+}
+
+/// `pool` row key blob: 04 "pool" + int64 LE record index (13 bytes).
+/// Byte-matched to the live wallet's imported legacy rows (bdb_import keeps
+/// the BerkeleyDB suffix byte-exact: the raw 8-byte LE index, no inner CS).
+pub fn encode_pool_keyblob(index: i64) -> Vec<u8> {
+    encode_key_blob("pool", &index.to_le_bytes())
+}
+
+/// Version int the legacy qt wrote in its pool rows (0x004DB174, read off
+/// the live wallet's 116 imported rows — keep writing the same constant so
+/// the qt's pool loader sees its own shape).
+pub const KEYPOOL_ROW_VERSION: i32 = 0x004D_B174;
+
+/// `pool` row value: int32 LE version + int64 LE nTime + CS(len) + pubkey
+/// (46 bytes for a compressed key — the CKeyPool serialization).
+pub fn encode_pool_value(create_time: i64, pubkey: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(13 + pubkey.len());
+    v.extend_from_slice(&KEYPOOL_ROW_VERSION.to_le_bytes());
+    v.extend_from_slice(&create_time.to_le_bytes());
+    push_compact_size(&mut v, pubkey.len() as u64);
+    v.extend_from_slice(pubkey);
+    v
+}
+
+/// Decode one `pool` row. `suffix` is the key blob's bytes after "pool"
+/// (the 8-byte LE record index); `value` is the CKeyPool serialization.
+/// Returns None on any malformed input (skipped, never fatal — see the
+/// reader arm).
+fn parse_pool_row(suffix: &[u8], value: &[u8]) -> Option<KeyPoolEntry> {
+    if suffix.len() != 8 || value.len() < 13 {
+        return None;
+    }
+    let index = i64::from_le_bytes(suffix.try_into().ok()?);
+    let created = i64::from_le_bytes(value[4..12].try_into().ok()?);
+    let mut pos = 12usize;
+    let pk_len = decode_compact_size(value, &mut pos).ok()? as usize;
+    if value.len() != pos + pk_len || pk_len == 0 {
+        return None;
+    }
+    let pubkey = value[pos..pos + pk_len].to_vec();
+    let address = pubkey_to_address(&pubkey);
+    Some(KeyPoolEntry {
+        index,
+        created,
+        pubkey,
+        address,
+    })
 }
 
 /// `key` row value: CS(len) + DER.
@@ -1585,6 +1714,235 @@ impl WalletHandle {
         Ok(())
     }
 
+    // ==== legacy keypool (`pool` rows) — parity item KEYPOOLREFILL =========
+
+    /// Fresh ordered pool census through THIS handle (targeted SQL; never
+    /// stale, never a full-file key parse).
+    pub fn pool_entries(&self) -> Result<Vec<KeyPoolEntry>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, value FROM main
+                 WHERE hex(substr(key,1,1))='04' AND hex(substr(key,2,4))='706F6F6C'",
+            )
+            .map_err(|e| format!("pool_entries select: {}", e))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("pool_entries query: {}", e))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| format!("pool_entries iterate: {}", e))? {
+            let key: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+            let value: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+            // blob = CS(4) "pool" + 8-byte LE index → suffix at byte 5
+            if key.len() < 13 {
+                continue;
+            }
+            if let Some(entry) = parse_pool_row(&key[5..], &value) {
+                out.push(entry);
+            }
+        }
+        out.sort_by_key(|e| e.index);
+        Ok(out)
+    }
+
+    /// Register one key as pooled: the single-row atomic `pool` write with
+    /// post-commit verify. A pre-insert scan logs when the index already
+    /// carried a pool row (INSERT OR REPLACE would overwrite it) — under
+    /// normal operation that never happens (the counter never reuses an
+    /// index), so seeing the log means someone wrote pool rows by hand.
+    /// Returns the written byte size for logging.
+    fn register_pool_key(
+        &mut self,
+        index: i64,
+        created: i64,
+        pubkey: &[u8],
+    ) -> Result<usize, String> {
+        let kb = encode_pool_keyblob(index);
+        let existing: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![&kb],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| format!("register_pool_key scan: {}", e))?;
+        if existing.is_some() {
+            self.log(format!(
+                "register_pool_key: pool index {} ALREADY had a row — overwriting (manual pool rows?)",
+                index
+            ));
+        }
+        let row = (kb, encode_pool_value(created, pubkey));
+        let n = row.0.len() + row.1.len();
+        self.write_rows(&[row], "register_pool_key")?;
+        Ok(n)
+    }
+
+    /// Refill the keypool up to `target` entries by deriving NEW HD keys
+    /// (m/44'/2222'/0'/0/n through generate_hd_key, empty label — the
+    /// legacy default-account parity) and pooling each one right after.
+    /// Never shrinks an already-full pool; a pool at/above target is a
+    /// no-op. HD (seed) wallets only — imported random-key wallets cannot
+    /// be safely topped up, and that is stated, not papered over.
+    ///
+    /// Ordering: generate_hd_key commits its own verified 4-row transaction
+    /// (keymeta/key/name/hdchain), THEN the pool row commits separately. A
+    /// crash in between leaves the key owned but un-pooled — harmless by
+    /// construction (the phrase restores it; the next refill derives fresh
+    /// keys from the counter, never reusing an index).
+    pub fn refill_keypool(&mut self, target: usize) -> Result<KeyPoolRefill, String> {
+        if self.hd_mnemonic.is_none() {
+            return Err(format!(
+                "refill_keypool: {} has no HD seed — tri7 refills only seed wallets \
+                 (an imported random-key wallet cannot be topped up from a phrase)",
+                self.path.display()
+            ));
+        }
+        let mut report = KeyPoolRefill {
+            derived: 0,
+            poolsize: self.pool_entries()?.len(),
+            oldest: None,
+            next_index: self.hd_chain_index,
+        };
+        while report.poolsize < target {
+            let key = self.generate_hd_key("")?;
+            let created = key.created.unwrap_or_else(now_unix);
+            let index = self.hd_chain_index.saturating_sub(1);
+            self.register_pool_key(index, created, &key.pubkey)?;
+            report.derived += 1;
+            report.poolsize += 1;
+            report.next_index = self.hd_chain_index;
+            report.oldest = Some(report.oldest.map_or(created, |o| o.min(created)));
+        }
+        // One full reader verification at the end: every pooled key must be
+        // visible to the plain reader with its pool row in place.
+        let w = read_wallet(&self.path)?;
+        if w.keypool.len() != report.poolsize {
+            return Err(format!(
+                "refill_keypool verify: reader sees {} pool rows, expected {}",
+                w.keypool.len(),
+                report.poolsize
+            ));
+        }
+        self.log(format!(
+            "refill_keypool: +{} keys (poolsize={}, hdchain={} — m/44'/2222'/0'/0/n, empty label) wallet={}",
+            report.derived,
+            report.poolsize,
+            report.next_index,
+            self.path.display()
+        ));
+        Ok(report)
+    }
+
+    /// Hand out the lowest-index pooled entry whose `key` row exists:
+    /// delete its pool row and relabel its name row in ONE atomic
+    /// transaction, then verify both. Pool rows with no backing key are
+    /// skipped loudly (a legacy import artifact must never produce an
+    /// address the wallet cannot spend from). Returns None when the pool is
+    /// empty or every remaining entry is unusable.
+    pub fn pop_keypool(&mut self, label: &str) -> Result<Option<KeyPoolEntry>, String> {
+        let entries = self.pool_entries()?;
+        let mut usable: Vec<KeyPoolEntry> = Vec::new();
+        for e in entries {
+            let kb = encode_key_keyblob(&e.pubkey);
+            let present: Option<Vec<u8>> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM main WHERE key = ?1",
+                    rusqlite::params![&kb],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|err| match err {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| format!("pop_keypool key scan: {}", e))?;
+            if present.is_some() {
+                usable.push(e);
+            } else {
+                self.log(format!(
+                    "pop_keypool: pool index {} ({}) has NO key row — skipping \
+                     (legacy import artifact)",
+                    e.index, e.address
+                ));
+            }
+        }
+        let Some(entry) = usable.into_iter().next() else {
+            return Ok(None);
+        };
+        let pool_kb = encode_pool_keyblob(entry.index);
+        let name_kb = encode_legacy_name_keyblob(&entry.address);
+        let name_row = (name_kb.clone(), encode_name_value(label));
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| write_error("BEGIN IMMEDIATE", "pop_keypool", e))?;
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM main WHERE key = ?1",
+            rusqlite::params![&pool_kb],
+        ) {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(write_error("DELETE pool row", "pop_keypool", e));
+        }
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+            rusqlite::params![&name_row.0, &name_row.1],
+        ) {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(write_error("INSERT name row", "pop_keypool", e));
+        }
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(write_error("COMMIT", "pop_keypool", e));
+        }
+        // Post-commit proof: pool row gone, name row byte-exact.
+        let gone: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![&pool_kb],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| format!("pop_keypool verify: {}", e))?;
+        if gone.is_some() {
+            return Err("pop_keypool verify: pool row still present after COMMIT".into());
+        }
+        let back: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM main WHERE key = ?1",
+                rusqlite::params![&name_row.0],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| format!("pop_keypool verify: {}", e))?;
+        if back.as_deref() != Some(name_row.1.as_slice()) {
+            return Err("pop_keypool verify: name row not byte-exact after COMMIT".into());
+        }
+        self.log(format!(
+            "pop_keypool: {} (index={}) handed out with label=\"{}\" — key row kept, pool row erased wallet={}",
+            entry.address,
+            entry.index,
+            label,
+            self.path.display()
+        ));
+        Ok(Some(entry))
+    }
+
     /// Write the seed-migration completion marker: setting "seedmigrated" =
     /// int32 LE 1 (the live wallet's numeric-setting shape). Written ONLY
     /// after the sweep broadcast succeeds — a failed broadcast leaves the
@@ -2411,6 +2769,207 @@ mod tests {
         h.advance_hdchain_to(10).unwrap();
         assert_eq!(h.hd_chain_index, 10);
         h.close();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- legacy keypool (`pool` rows) — parity item KEYPOOLREFILL --------
+
+    fn kp_seed_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "tri7wallet_kp_{}_{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+    const KP_MN12: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// Byte ground truth: one of the live wallet's 116 imported legacy pool
+    /// rows (DNS2 wallet.dat, read 2026-11-07). The reader must decode it
+    /// and the writer must re-encode it byte-exactly — that pair of proofs
+    /// is what makes tri7-written pool rows loadable by the qt and
+    /// qt-written rows loadable by tri7.
+    #[test]
+    fn pool_row_bytes_decode_live_ground_truth() {
+        let key = crate::p2p::hex_decode("04706F6F6C1500000000000000").unwrap();
+        let value = crate::p2p::hex_decode(
+            "74B14D001F1A326A00000000210255CC3FAE56684BE18B63B1E02FD9BBBFF16569\
+             133103E8C066A02184DD38DC7B",
+        )
+        .unwrap();
+        assert_eq!(key.len(), 13); // 04 "pool" + int64 LE index
+        assert_eq!(value.len(), 46); // i32 version + i64 time + CS(33) + pubkey
+        let entry = parse_pool_row(&key[5..], &value).expect("live row parses");
+        assert_eq!(entry.index, 21);
+        assert_eq!(entry.created, 0x6A32_1A1F);
+        assert_eq!(entry.pubkey.len(), 33);
+        assert!(entry.address.starts_with('T'), "{}", entry.address);
+        assert_eq!(entry.address, pubkey_to_address(&entry.pubkey));
+        // re-encode is byte-exact
+        assert_eq!(encode_pool_keyblob(entry.index), key);
+        assert_eq!(encode_pool_value(entry.created, &entry.pubkey), value);
+        // malformed shapes are skipped (None), never a panic
+        assert!(parse_pool_row(&key[..4], &value).is_none(), "short index");
+        assert!(parse_pool_row(&key[5..], &value[..12]).is_none(), "truncated value");
+        let mut bad_len = value.clone();
+        bad_len[12] = 0x40; // CS claims 64 bytes, only 33 present
+        assert!(parse_pool_row(&key[5..], &bad_len).is_none(), "pubkey overruns");
+    }
+
+    /// Full keypool lifecycle on a seeded wallet: refill derives fresh
+    /// phrase-restorable keys and pools them; refills at/above target are
+    /// no-ops; pop hands out lowest-index-first, relabels, keeps the key
+    /// row and erases the pool row; the drained pool answers None; the HD
+    /// counter stays coherent through it all.
+    #[test]
+    fn keypool_refill_pop_and_census_lifecycle() {
+        let dir = kp_seed_dir("keypool");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, KP_MN12, "", 2).unwrap();
+        let w0 = read_wallet(&path).unwrap();
+        assert!(w0.keypool.is_empty(), "fresh seed wallet: no pool rows");
+        assert_eq!(keypool_stats(&path).unwrap(), (0, None));
+
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        assert_eq!(wh.hd_chain_index, 2);
+        let rep = wh.refill_keypool(5).unwrap();
+        assert_eq!(rep.derived, 5);
+        assert_eq!(rep.poolsize, 5);
+        assert_eq!(wh.hd_chain_index, 7);
+        let entries = wh.pool_entries().unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].index, 2, "pool starts at the free counter");
+        assert_eq!(entries[4].index, 6);
+        assert!(
+            entries.windows(2).all(|w| w[0].index < w[1].index),
+            "pool serves lowest-index-first"
+        );
+        wh.close();
+
+        let w1 = read_wallet(&path).unwrap();
+        assert_eq!(w1.keypool.len(), 5);
+        assert_eq!(w1.hd_chain_index, Some(7));
+        assert_eq!(w1.keys.len(), 7);
+        let (n, oldest) = keypool_stats(&path).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(oldest, Some(entries.iter().map(|e| e.created).min().unwrap()));
+        // every pooled key is the PURE phrase derivation at its index and
+        // carries its own key row (restorable AND spendable)
+        for e in &entries {
+            let expected =
+                crate::seed::derive_triangles(KP_MN12, "", 0, 0, e.index as u32).unwrap();
+            let k = w1
+                .keys
+                .iter()
+                .find(|k| k.pubkey == e.pubkey)
+                .expect("pooled key row present");
+            assert_eq!(k.secret, expected, "index {}", e.index);
+            assert_eq!(k.address, e.address);
+        }
+
+        // a refill at/above target is a no-op — never shrinks, never re-derives
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        let rep2 = wh.refill_keypool(5).unwrap();
+        assert_eq!(rep2.derived, 0);
+        let rep3 = wh.refill_keypool(4).unwrap();
+        assert_eq!(rep3.derived, 0);
+        assert_eq!(wh.pool_entries().unwrap().len(), 5);
+
+        // pop: lowest index first, relabels, keeps the key row, erases the
+        // pool row
+        let popped = wh.pop_keypool("operator").unwrap().expect("pool has entries");
+        assert_eq!(popped.index, entries[0].index);
+        wh.close();
+        let w2 = read_wallet(&path).unwrap();
+        assert_eq!(w2.keypool.len(), 4);
+        assert!(!w2.keypool.iter().any(|e| e.index == popped.index));
+        let k = w2
+            .keys
+            .iter()
+            .find(|k| k.pubkey == popped.pubkey)
+            .expect("key row kept after pop");
+        assert_eq!(k.address, popped.address);
+        assert!(
+            w2.names
+                .iter()
+                .any(|(a, l)| a == &popped.address && l == "operator"),
+            "pop relabels the handed-out key"
+        );
+
+        // drain the rest, then pop answers None; the HD counter continues
+        // from where the refills left it (no re-derivation of consumed
+        // indexes — those keys stay owned, just out of the pool)
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        for _ in 0..4 {
+            wh.pop_keypool("drain").unwrap().expect("entry");
+        }
+        assert!(wh.pop_keypool("x").unwrap().is_none());
+        let k = wh.generate_hd_key("post").unwrap();
+        let expected = crate::seed::derive_triangles(KP_MN12, "", 0, 0, 7).unwrap();
+        assert_eq!(k.secret, expected);
+        wh.close();
+        assert_eq!(keypool_stats(&path).unwrap().0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pool row with no backing key row (the shape a legacy import can
+    /// leave behind) must be skipped loudly, never handed out — an address
+    /// the wallet cannot spend from is worse than a live derivation.
+    #[test]
+    fn pop_skips_pool_rows_without_key_rows() {
+        let dir = kp_seed_dir("keypool_skip");
+        let path = dir.join("wallet.dat");
+        restore_wallet_from_seed(&path, KP_MN12, "", 1).unwrap();
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        wh.refill_keypool(4).unwrap(); // indices 1, 2, 3 (0 is the seed key)
+        wh.close();
+        // inject the artifact directly: pool index 0, no key row
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let bogus_pub = [0xABu8; 33];
+        conn.execute(
+            "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                encode_pool_keyblob(0),
+                encode_pool_value(1_234_567, &bogus_pub)
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        let popped = wh
+            .pop_keypool("x")
+            .unwrap()
+            .expect("skips the artifact, serves the lowest USABLE entry");
+        assert_eq!(popped.index, 1, "index 0 had no key row — skipped");
+        // repeated pops keep skipping; only-artifacts-left answers None
+        let p2 = wh.pop_keypool("y").unwrap().unwrap();
+        assert_eq!(p2.index, 2);
+        let p3 = wh.pop_keypool("w").unwrap().unwrap();
+        assert_eq!(p3.index, 3);
+        let p4 = wh.pop_keypool("v").unwrap().unwrap();
+        assert_eq!(p4.index, 4);
+        assert!(wh.pop_keypool("z").unwrap().is_none());
+        wh.close();
+        let w = read_wallet(&path).unwrap();
+        assert_eq!(w.keypool.len(), 1, "the artifact row is never consumed");
+        assert_eq!(w.keypool[0].index, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Imported random-key wallets have no seed to derive from — the refill
+    /// refuses honestly instead of inventing keys the phrase won't restore.
+    #[test]
+    fn refill_refuses_non_hd_wallet() {
+        let dir = test_dir("refill_nohd");
+        let path = synth_wallet(&dir, "refill_nohd");
+        let mut wh = WalletHandle::open_readwrite(&path).unwrap();
+        let err = wh.refill_keypool(5).unwrap_err();
+        assert!(err.contains("no HD seed"), "{}", err);
+        wh.close();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

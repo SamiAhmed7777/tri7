@@ -86,6 +86,105 @@ use tri7_core::rpc::{
 const WINDOW_ENTRIES: usize = 4600; // ≥ selection interval + stake-age cap + margin
 const WINDOW_BLOCKS: usize = 1500; // full-tx records for kernel prevout resolution
 const POLL_SECS: u64 = 30;
+
+// ---- keypool (legacy `pool` rows) — parity item KEYPOOLREFILL ------------
+/// Legacy default -keypool setting (bitcoin 0.8-era): 100 pre-derived keys.
+const DEFAULT_KEYPOOL_SIZE: usize = 100;
+/// Legacy MAX_KEYPOOL_SIZE — the qt refused sizes above 100000.
+const MAX_KEYPOOL_SIZE: i64 = 100_000;
+/// Background top-up cadence: a cheap SQL census every 15 min, refill only
+/// when the pool sits below the default target.
+const KEYPOOL_CHECK_SECS: u64 = 15 * 60;
+/// After an unreadable wallet (locked/missing), retry daily instead of
+/// spamming the log every check.
+const KEYPOOL_ERROR_RETRY_SECS: u64 = 24 * 3600;
+
+/// Legacy keypoolrefill [size] argument: absent or 0 = the default 100,
+/// otherwise clamped to the legacy 0..=100000 range (errors keep the -8
+/// code the qt used for invalid-parameter).
+fn parse_keypool_size(arg: Option<&serde_json::Value>) -> Result<usize, (i64, String)> {
+    match arg {
+        None | Some(serde_json::Value::Null) => Ok(DEFAULT_KEYPOOL_SIZE),
+        Some(v) => {
+            let n = v
+                .as_i64()
+                .ok_or_else(|| (-8, "keypool size must be an integer".to_string()))?;
+            if n < 0 || n > MAX_KEYPOOL_SIZE {
+                return Err((
+                    -8,
+                    format!("keypool size must be between 0 and {MAX_KEYPOOL_SIZE}"),
+                ));
+            }
+            Ok(if n == 0 {
+                DEFAULT_KEYPOOL_SIZE
+            } else {
+                n as usize
+            })
+        }
+    }
+}
+
+/// Background top-up maintainer: keeps the wallet's keypool at the legacy
+/// default (100) so getnewaddress hands out pre-derived keys instantly.
+/// Runs the full life of the daemon; every pass is a cheap SQL census first
+/// (publish it to getwalletinfo even when nothing needs refilling) and a
+/// real refill only when the pool sits below target. A wallet that cannot
+/// be opened for write (encrypted, missing) is logged and retried daily —
+/// never a crash, never a log storm.
+fn keypool_maintainer_loop(
+    wallet_path: std::path::PathBuf,
+    extras: Arc<std::sync::RwLock<tri7_core::rpc::WalletExtras>>,
+) {
+    let mut backoff = KEYPOOL_CHECK_SECS;
+    loop {
+        std::thread::sleep(Duration::from_secs(backoff));
+        backoff = KEYPOOL_CHECK_SECS;
+        let publish = |n: usize, oldest: Option<i64>, extras: &Arc<std::sync::RwLock<tri7_core::rpc::WalletExtras>>| {
+            if let Ok(mut g) = extras.write() {
+                g.keypool_size = Some(n);
+                g.keypool_oldest = oldest;
+            }
+        };
+        match tri7_core::wallet::keypool_stats(&wallet_path) {
+            Ok((n, oldest)) => {
+                publish(n, oldest, &extras);
+                if n < DEFAULT_KEYPOOL_SIZE {
+                    match tri7_core::wallet::WalletHandle::open_readwrite(&wallet_path) {
+                        Ok(mut wh) => match wh.refill_keypool(DEFAULT_KEYPOOL_SIZE) {
+                            Ok(rep) => {
+                                log(&format!(
+                                    "keypool: maintainer topped the pool to {} (+{} derived, hdchain={})",
+                                    rep.poolsize, rep.derived, rep.next_index
+                                ));
+                                if let Ok((n2, o2)) = tri7_core::wallet::keypool_stats(&wallet_path) {
+                                    publish(n2, o2, &extras);
+                                }
+                            }
+                            Err(e) => {
+                                log(&format!("keypool: maintainer refill failed: {e}"));
+                                backoff = KEYPOOL_ERROR_RETRY_SECS;
+                            }
+                        },
+                        Err(e) => {
+                            log(&format!(
+                                "keypool: maintainer cannot open the wallet for write ({e}) — retrying later"
+                            ));
+                            backoff = KEYPOOL_ERROR_RETRY_SECS;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log(&format!(
+                    "keypool: census failed ({e}) — retrying in {}s",
+                    backoff
+                ));
+                backoff = KEYPOOL_ERROR_RETRY_SECS;
+            }
+        }
+    }
+}
+
 const STALE_LINK_SECS: u64 = 90;
 const MAX_OUTSTANDING_GETDATA: usize = 64;
 const GETDATA_BATCH: usize = 32;
@@ -5943,26 +6042,104 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&path)
                     .map_err(|e| (-1, format!("open wallet: {e}")))?;
                 let hd = wh.hd_mnemonic.is_some();
-                let res: Result<String, (i64, String)> = if hd {
-                    wh.generate_hd_key(&label)
-                        .map(|k| k.address)
-                        .map_err(|e| (-1, format!("generate_hd_key: {e}")))
-                } else {
-                    let mut secret = [0u8; 32];
-                    getrandom::getrandom(&mut secret)
-                        .map_err(|e| (-1, format!("keygen entropy: {e}")))?;
-                    wh.add_key(&secret, &label)
-                        .map(|k| k.address)
-                        .map_err(|e| (-1, format!("add_key: {e}")))
+                // keypool first: a pooled key is ALREADY derived from the
+                // wallet seed (its key row exists) — handing it out is
+                // instant and the phrase restores it exactly like a fresh
+                // derivation. Only an empty/unusable pool derives live.
+                let mut from_pool: Option<(String, i64)> = None;
+                let res: Result<String, (i64, String)> = match wh.pop_keypool(&label) {
+                    Ok(Some(entry)) => {
+                        from_pool = Some((entry.address.clone(), entry.index));
+                        Ok(entry.address)
+                    }
+                    Ok(None) => {
+                        if hd {
+                            wh.generate_hd_key(&label)
+                                .map(|k| k.address)
+                                .map_err(|e| (-1, format!("generate_hd_key: {e}")))
+                        } else {
+                            let mut secret = [0u8; 32];
+                            getrandom::getrandom(&mut secret)
+                                .map_err(|e| (-1, format!("keygen entropy: {e}")))?;
+                            wh.add_key(&secret, &label)
+                                .map(|k| k.address)
+                                .map_err(|e| (-1, format!("add_key: {e}")))
+                        }
+                    }
+                    Err(e) => {
+                        // a pool READ failure must not block address
+                        // issuance — fall back to the live derivation and
+                        // say so loudly
+                        log(&format!("getnewaddress: keypool pop failed ({e}) — deriving live"));
+                        if hd {
+                            wh.generate_hd_key(&label)
+                                .map(|k| k.address)
+                                .map_err(|e| (-1, format!("generate_hd_key: {e}")))
+                        } else {
+                            let mut secret = [0u8; 32];
+                            getrandom::getrandom(&mut secret)
+                                .map_err(|e| (-1, format!("keygen entropy: {e}")))?;
+                            wh.add_key(&secret, &label)
+                                .map(|k| k.address)
+                                .map_err(|e| (-1, format!("add_key: {e}")))
+                        }
+                    }
                 };
                 wh.close();
                 let address = res?;
-                log(&format!(
-                    "getnewaddress: {} ({})",
-                    address,
-                    if hd { "derived from the wallet seed" } else { "fresh random key" }
-                ));
+                // keep getwalletinfo's census honest after every handout
+                if let Ok(mut g) = self.extras.write() {
+                    if let Ok((n, oldest)) = tri7_core::wallet::keypool_stats(&path) {
+                        g.keypool_size = Some(n);
+                        g.keypool_oldest = oldest;
+                    }
+                }
+                match from_pool {
+                    Some((addr, index)) => log(&format!(
+                        "getnewaddress: {addr} (keypool index {index} — pre-derived from the wallet seed)"
+                    )),
+                    None => log(&format!(
+                        "getnewaddress: {} ({})",
+                        address,
+                        if hd { "derived from the wallet seed (keypool empty)" } else { "fresh random key" }
+                    )),
+                }
                 Ok(serde_json::json!(address))
+            }
+            // keypoolrefill [size] — legacy rpcwallet: top the keypool up to
+            // `size` pre-derived HD keys (absent/0 = default 100, legacy cap
+            // 100000). Pooled keys are REAL phrase-derived keys with key
+            // rows; the `pool` row only marks "not handed out yet", so a
+            // refill is fully restorable from the mnemonic like any other
+            // derivation.
+            "keypoolrefill" => {
+                let path = self.wallet_path.clone().ok_or_else(|| {
+                    (-1, "no wallet loaded (start the node with --wallet)".to_string())
+                })?;
+                let target = parse_keypool_size(p(0))?;
+                let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&path)
+                    .map_err(|e| (-1, format!("open wallet: {e}")))?;
+                let rep = wh
+                    .refill_keypool(target)
+                    .map_err(|e| (-1, format!("keypoolrefill: {e}")))?;
+                wh.close();
+                if let Ok(mut g) = self.extras.write() {
+                    if let Ok((n, oldest)) = tri7_core::wallet::keypool_stats(&path) {
+                        g.keypool_size = Some(n);
+                        g.keypool_oldest = oldest;
+                    }
+                }
+                log(&format!(
+                    "keypoolrefill: +{} derived, poolsize={} (target {}), hdchain={}",
+                    rep.derived, rep.poolsize, target, rep.next_index
+                ));
+                Ok(serde_json::json!({
+                    "derived": rep.derived,
+                    "poolsize": rep.poolsize,
+                    "keypoololdest": rep.oldest,
+                    "hdchain_next_index": rep.next_index,
+                    "target": target,
+                }))
             }
             // ---- wallet encryption (legacy crypter.cpp port) -------------
             // These act on the SAME file the node stakes for. They are never
@@ -7715,6 +7892,7 @@ fn main() {
                                 hd_mnemonic: None,
                                 hd_passphrase: None,
                                 hd_chain_index: None,
+                                keypool: Vec::new(),
                             })
                         }
                         Err(e2) => {
@@ -7922,6 +8100,41 @@ fn main() {
         }
         Arc::new(std::sync::RwLock::new(e))
     };
+    // Immediate keypool census publish + the background top-up maintainer.
+    // The census lands on getwalletinfo within a second of start (the
+    // maintainer's first pass); the refill, when one is needed (fresh seed
+    // wallets carry an empty pool), derives in the background and never
+    // blocks node start.
+    if let Some(wp) = cfg.wallet_path.as_deref() {
+        match tri7_core::wallet::keypool_stats(wp) {
+            Ok((n, oldest)) => {
+                if let Ok(mut g) = wallet_extras.write() {
+                    g.keypool_size = Some(n);
+                    g.keypool_oldest = oldest;
+                }
+                log(&format!(
+                    "keypool: census {} entr{} (oldest epoch {})",
+                    n,
+                    if n == 1 { "y" } else { "ies" },
+                    oldest.map(|t| t.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                ));
+            }
+            Err(e) => log(&format!("keypool: initial census failed: {e}")),
+        }
+        let wp_buf = wp.to_path_buf();
+        let extras_for_thread = Arc::clone(&wallet_extras);
+        match std::thread::Builder::new()
+            .name("keypool-topup".into())
+            .spawn(move || keypool_maintainer_loop(wp_buf, extras_for_thread))
+        {
+            Ok(_) => log(&format!(
+                "keypool: top-up maintainer running (target {}, check every {}s)",
+                DEFAULT_KEYPOOL_SIZE, KEYPOOL_CHECK_SECS
+            )),
+            Err(e) => log(&format!("keypool: maintainer spawn failed: {e}")),
+        }
+    }
     let wallet_pubkeys: Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>> =
         Arc::new(std::sync::RwLock::new(
             wl_shared
@@ -9052,6 +9265,7 @@ mod tests {
                 hd_mnemonic: None,
                 hd_passphrase: None,
                 hd_chain_index: None,
+                keypool: Vec::new(),
             },
             base: 0,
             live: outs.into_iter().collect(),
@@ -9781,6 +9995,7 @@ addnode=host:notaport
                 hd_mnemonic: None,
                 hd_passphrase: None,
                 hd_chain_index: None,
+                keypool: Vec::new(),
             },
             base: 100,
             live: HashMap::new(),
@@ -9879,6 +10094,33 @@ addnode=host:notaport
         assert!(raw_bad.is_err());
         let raw = tri7_core::p2p::hex_decode("01000000").unwrap();
         assert!(raw.len() == 4 && raw[0] == 0x01);
+    }
+
+    #[test]
+    fn keypool_size_argument_legacy_semantics() {
+        // legacy keypoolrefill [size]: absent/0 = default 100, valid range
+        // 0..=100000, anything else is -8 invalid-parameter
+        assert_eq!(parse_keypool_size(None).unwrap(), DEFAULT_KEYPOOL_SIZE);
+        assert_eq!(
+            parse_keypool_size(Some(&serde_json::json!(null))).unwrap(),
+            DEFAULT_KEYPOOL_SIZE
+        );
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(0))).unwrap(), DEFAULT_KEYPOOL_SIZE);
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(1))).unwrap(), 1);
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(100))).unwrap(), 100);
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(100_000))).unwrap(), 100_000);
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(-1))).unwrap_err().0, -8);
+        assert_eq!(parse_keypool_size(Some(&serde_json::json!(100_001))).unwrap_err().0, -8);
+        assert_eq!(
+            parse_keypool_size(Some(&serde_json::json!("100"))).unwrap_err().0,
+            -8,
+            "strings are not sizes"
+        );
+        assert_eq!(
+            parse_keypool_size(Some(&serde_json::json!(1.5))).unwrap_err().0,
+            -8,
+            "floats are not sizes"
+        );
     }
 
     // ---- from-zero assume-valid envelope (deployed-client parity) ----

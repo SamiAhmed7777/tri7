@@ -123,6 +123,10 @@ pub const NATIVE_METHODS: &[&str] = &[
     "importwallet",
     "importprivkey",
     "checkwallet",
+    // ---- legacy parity 2026-11-07: keypoolrefill tops up the `pool`-row
+    // reserve (getnewaddress hands out pooled keys first, a background
+    // maintainer keeps the pool topped) ----
+    "keypoolrefill",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -199,6 +203,10 @@ pub const OPS_METHODS: &[&str] = &[
     "importwallet",
     "importprivkey",
     "checkwallet",
+    // ---- legacy parity 2026-11-07: keypoolrefill tops up the `pool`-row
+    // reserve (getnewaddress hands out pooled keys first, a background
+    // maintainer keeps the pool topped) ----
+    "keypoolrefill",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -654,6 +662,11 @@ pub struct WalletExtras {
     pub unlocked_until: Option<u64>,
     /// legacy `defaultkey` row (pubkey bytes).
     pub default_key: Option<Vec<u8>>,
+    /// Legacy keypool census (`pool` rows): entry count + oldest nTime.
+    /// None = unknown (no wallet file / not scanned); Some = real values
+    /// (0 = the wallet has an empty keypool — also a real value).
+    pub keypool_size: Option<usize>,
+    pub keypool_oldest: Option<i64>,
 }
 
 /// `unlocked_until` for getwalletinfo: the legacy uint64 max sentinel means
@@ -2061,20 +2074,22 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
 
         "getwalletinfo" => {
             // legacy rpcwallet getwalletinfo: tri7's wallet view is the
-            // replay snapshot (balance/coverage/addresses/utxos). Legacy
-            // keypool/txcount fields are emitted null — tri7 keeps no
-            // keypool and its snapshot carries no tx-count.
+            // replay snapshot (balance/coverage/addresses/utxos). The
+            // keypool fields report the REAL `pool`-row census the ops
+            // engine publishes (size/oldest; null = unknown, 0 = genuinely
+            // empty); txcount stays null — the snapshot carries no tx-count.
             let bal = deps.wallet.balance();
+            let ex = deps.wallet.extras();
             match bal {
                 Some(b) => NativeOutcome::Ok(json!({
                     "walletversion": 60000,
                     "balance": sats_to_tri(b.sats),
                     "balance_sats": b.sats,
                     "txcount": Value::Null,
-                    "keypoololdest": Value::Null,
-                    "keypoolsize": Value::Null,
+                    "keypoololdest": ex.keypool_oldest.map(|v| json!(v)).unwrap_or(Value::Null),
+                    "keypoolsize": ex.keypool_size.map(|v| json!(v)).unwrap_or(Value::Null),
                     "unlocked_until": unlocked_until(deps),
-                    "paytxfee": sats_to_tri(deps.wallet.extras().paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
+                    "paytxfee": sats_to_tri(ex.paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
                     "coverage_height": b.coverage_height,
                     "coverage_hash": b.coverage_hash,
                     "addresses": b.addresses,
@@ -3390,6 +3405,8 @@ mod tests {
         utxos: Vec<UtxoRow>,
         /// live fee setting (what settxfee publishes, what estimatefee reads)
         paytxfee: std::sync::RwLock<Option<i64>>,
+        /// live keypool census (what keypoolrefill/getnewaddress publish)
+        keypool: std::sync::RwLock<Option<(usize, Option<i64>)>>,
     }
     impl Default for StubWallet {
         fn default() -> Self {
@@ -3400,6 +3417,7 @@ mod tests {
             );
             StubWallet {
                 paytxfee: std::sync::RwLock::new(None),
+                keypool: std::sync::RwLock::new(None),
                 balance: Some(3_036_990_591),
                 received,
                 mine: vec!["T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY".to_string()],
@@ -3418,8 +3436,11 @@ mod tests {
     }
     impl WalletProvider for StubWallet {
         fn extras(&self) -> WalletExtras {
+            let kp = *self.keypool.read().unwrap();
             WalletExtras {
                 paytxfee_sats: self.paytxfee.read().ok().and_then(|g| *g),
+                keypool_size: kp.map(|(n, _)| n),
+                keypool_oldest: kp.and_then(|(_, o)| o),
                 ..Default::default()
             }
         }
@@ -4842,14 +4863,35 @@ fn getwalletinfo_serves_snapshot_and_errors_without_one() {
     assert_eq!(v["result"]["walletversion"], json!(60000));
     assert_eq!(v["result"]["coverage_height"], json!(2_201_090));
     assert_eq!(v["result"]["addresses"], json!(248));
-    // legacy keypool fields exist but are honestly null
+    // legacy keypool fields exist but are honestly null (no census published)
     assert!(v["result"]["keypoolsize"].is_null());
+    assert!(v["result"]["keypoololdest"].is_null());
     // missing snapshot → -1, not a fake zero balance
     let mut w2 = StubWallet::default();
     w2.balance = None;
     let d2 = deps(&t, &w2, &b, None);
     let v = call(&d2, "getwalletinfo", json!([]));
     assert_eq!(v["error"]["code"], -1);
+}
+
+#[test]
+fn getwalletinfo_reports_the_real_keypool_census() {
+    // the ops engine publishes the `pool`-row census → getwalletinfo carries
+    // the REAL numbers (size + oldest); zero is a real value, not unknown
+    let t = StubTip;
+    let b = StubBlocks { ready: true };
+    let mut w = StubWallet::default();
+    *w.keypool.write().unwrap() = Some((116, Some(1_781_668_383)));
+    let d = deps(&t, &w, &b, None);
+    let v = call(&d, "getwalletinfo", json!([]));
+    assert_eq!(v["result"]["keypoolsize"], json!(116));
+    assert_eq!(v["result"]["keypoololdest"], json!(1_781_668_383i64));
+    let mut w0 = StubWallet::default();
+    *w0.keypool.write().unwrap() = Some((0, None));
+    let d0 = deps(&t, &w0, &b, None);
+    let v = call(&d0, "getwalletinfo", json!([]));
+    assert_eq!(v["result"]["keypoolsize"], json!(0), "empty pool is real, not null");
+    assert!(v["result"]["keypoololdest"].is_null(), "no entries → no oldest");
 }
 
 #[test]
@@ -5073,6 +5115,10 @@ fn new_parity_verbs_are_in_native_and_routed() {
         assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
         assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
     }
+    // keypoolrefill: legacy parity 2026-11-07 — routed to the live ops
+    // engine (it writes the wallet file), served nowhere else
+    assert!(NATIVE_METHODS.contains(&"keypoolrefill"), "missing from NATIVE_METHODS");
+    assert!(OPS_METHODS.contains(&"keypoolrefill"), "missing from OPS_METHODS");
 }
 
 /// addmultisigaddress / addredeemscript end to end against a REAL wallet
