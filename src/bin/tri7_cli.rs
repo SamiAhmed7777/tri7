@@ -157,6 +157,9 @@ enum Commands {
         /// comma-separated addresses to leave untouched (e.g. pending-pool sources)
         #[arg(long)]
         exclude: Option<String>,
+        /// skip coins below this many sats (residue floor; default 5000 = 0.005 TRI, 0 sweeps everything)
+        #[arg(long, default_value_t = tri7_core::sweep::SWEEP_MIN_RESIDUE_SATS)]
+        min_sats: i64,
         /// build and print without broadcasting
         #[arg(long)]
         dry_run: bool,
@@ -286,8 +289,9 @@ fn run(cli: Cli) -> Result<(), String> {
             rpc,
             mnemonic_file,
             exclude,
+            min_sats,
             dry_run,
-        } => sweep_cmd(&wallet, &rpc, &mnemonic_file, exclude, dry_run),
+        } => sweep_cmd(&wallet, &rpc, &mnemonic_file, exclude, min_sats, dry_run),
         Commands::Send {
             wallet,
             rpc,
@@ -429,6 +433,7 @@ fn sweep_cmd(
     rpc: &str,
     mnemonic_file: &str,
     exclude: Option<String>,
+    min_sats: i64,
     dry: bool,
 ) -> Result<(), String> {
     let m = std::fs::read_to_string(mnemonic_file)
@@ -511,12 +516,27 @@ fn sweep_cmd(
         });
     }
     let sources = tri7_core::sweep::sweep_source_inputs(&inputs, &dests);
+    let dest_skipped = inputs.len() - sources.len();
+    let (sources, residue) = tri7_core::sweep::split_residue_skip(sources, min_sats);
+    if !residue.is_empty() {
+        let residue_total: i64 = residue.iter().map(|s| s.value).sum();
+        println!(
+            "residue: left {} coins ({} TRI) below the {}-sat floor on their addresses",
+            residue.len(),
+            fmt_tri(residue_total),
+            min_sats
+        );
+    }
+    if sources.is_empty() {
+        println!("nothing to sweep above the residue floor — no transaction built");
+        return Ok(());
+    }
     let total: i64 = sources.iter().map(|s| s.value).sum();
     println!(
         "sweep: {} coins, {} TRI (skipped: dest/excluded/immature/no-key = {}/{}/{}/{})",
         sources.len(),
         fmt_tri(total),
-        inputs.len() - sources.len(),
+        dest_skipped,
         sk_excl,
         sk_imm,
         sk_nokey

@@ -92,6 +92,30 @@ pub fn sweep_spendable(prev_kind: &str, containing_height: u32, spend_height: u3
     }
 }
 
+/// Residue floor for sweep passes (workqueue SWEEP-RESIDUE rule): coins
+/// below this many sats stay where they are — chasing them grows the fee
+/// and re-fragments the wallet for no value. 0.005 TRI = 5_000 sats.
+pub const SWEEP_MIN_RESIDUE_SATS: i64 = 5_000;
+
+/// Partition sweep sources at the residue floor: everything worth sweeping
+/// (value >= min_sats) and the residue left behind (value < min_sats).
+/// Stable order preserved in both halves; `min_sats <= 0` keeps everything.
+pub fn split_residue_skip(
+    inputs: Vec<SpendInput>,
+    min_sats: i64,
+) -> (Vec<SpendInput>, Vec<SpendInput>) {
+    let mut keep = Vec::new();
+    let mut residue = Vec::new();
+    for i in inputs {
+        if min_sats <= 0 || i.value >= min_sats {
+            keep.push(i);
+        } else {
+            residue.push(i);
+        }
+    }
+    (keep, residue)
+}
+
 /// The sweep source set: every input that is NOT one of the destination
 /// addresses (coins already on the seed-derived addresses stay there).
 /// Destination matching is payload-based (hash160 of the destination pubkey
@@ -471,6 +495,28 @@ mod tests {
         let src = sweep_source_inputs(&[u, other], &d);
         assert_eq!(src.len(), 1);
         assert_eq!(src[0].pubkey, other_pubkey);
+    }
+
+    #[test]
+    fn split_residue_skip_leaves_sub_floor_coins_behind() {
+        // floor 5000: 4999 stays, 5000/5001 go; stable order preserved
+        let inputs = vec![
+            p2pkh_utxo("a", 0, 5_001, 100, 1_400_000_000),
+            p2pkh_utxo("b", 1, 4_999, 101, 1_400_000_001),
+            p2pkh_utxo("c", 0, 5_000, 102, 1_400_000_002),
+            p2pkh_utxo("d", 2, 1, 103, 1_400_000_003),
+        ];
+        let (keep, residue) = split_residue_skip(inputs, SWEEP_MIN_RESIDUE_SATS);
+        assert_eq!(keep.iter().map(|i| i.value).collect::<Vec<_>>(), vec![5_001, 5_000]);
+        assert_eq!(residue.iter().map(|i| i.value).collect::<Vec<_>>(), vec![4_999, 1]);
+        // floor 0 (or negative) sweeps everything — nothing becomes unspendable
+        let inputs = vec![p2pkh_utxo("a", 0, 1, 100, 1_400_000_000)];
+        let (keep, residue) = split_residue_skip(inputs, 0);
+        assert_eq!(keep.len(), 1);
+        assert!(residue.is_empty());
+        // empty input set is a clean no-op
+        let (keep, residue) = split_residue_skip(Vec::new(), SWEEP_MIN_RESIDUE_SATS);
+        assert!(keep.is_empty() && residue.is_empty());
     }
 
     // ---- plan_sweep: the money path ------------------------------------------
