@@ -2045,6 +2045,15 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             // to 3036 while the node held 3382 and climbing — "why does the
             // wallet say that number"), so the daemon wins, always.
             if let Some(ds) = daemon_sats {
+                // FULL five-row layout, node-anchored: Spendable and Total come
+                // from the daemon's getbalance (authoritative, live); the
+                // Stake/Unconfirmed/Immature rows keep the local split's
+                // maturing-view figures (informational — the local coverage
+                // trails the node during heavy staking churn).
+                let (lstake, lunconf, limmature, _ltotal, _ltip) = {
+                    let (_sp, sk, uc, im, _tot, _tp) = st.balance_split();
+                    (sk, uc, im)
+                };
                 let tri = s::format_tri(ds);
                 let spend_tip = "Your current spendable balance (node getbalance — authoritative, live)";
                 egui::Grid::new("balance_grid_daemon")
@@ -2052,21 +2061,29 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     .spacing([16.0, 7.0])
                     .min_col_width(140.0)
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Spendable:").color(th::TEXT_SECONDARY))
-                            .on_hover_text(spend_tip);
-                        ui.horizontal(|ui| {
-                            if let Some(tex) = &marker_tex {
-                                ui.add(img(tex, Vec2::splat(14.0)));
-                            }
-                            ui.label(
-                                egui::RichText::new(format!("{} {}", tri, s::TICKER))
-                                    .monospace()
-                                    .size(16.0)
-                                    .color(th::TEXT_PRIMARY),
-                            )
-                            .on_hover_text(spend_tip);
-                        });
-                        ui.end_row();
+                        let row = |ui: &mut egui::Ui, label: &str, tip: &str, v: String, marker: bool, size: f32| {
+                            ui.label(egui::RichText::new(label).color(th::TEXT_SECONDARY))
+                                .on_hover_text(tip);
+                            ui.horizontal(|ui| {
+                                if marker {
+                                    if let Some(tex) = &marker_tex {
+                                        ui.add(img(tex, Vec2::splat(14.0)));
+                                    }
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{} {}", v, s::TICKER))
+                                        .monospace()
+                                        .size(size)
+                                        .color(th::TEXT_PRIMARY),
+                                )
+                                .on_hover_text(tip);
+                            });
+                            ui.end_row();
+                        };
+                        row(ui, "Spendable:", spend_tip, tri.clone(), true, 14.0);
+                        row(ui, "Stake:", "Total of coins that was staked, and do not yet count toward the current balance", s::format_tri(lstake), false, 14.0);
+                        row(ui, "Unconfirmed:", "Total of transactions that have yet to be confirmed, and do not yet count toward the current balance", s::format_tri(lunconf), false, 14.0);
+                        row(ui, "Immature:", "Mined balance that has not yet matured", s::format_tri(limmature), false, 14.0);
                     });
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -2082,7 +2099,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                 });
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new("authoritative: node getbalance — updates live as stakes mature")
+                    egui::RichText::new("Spendable and Total are the node's live getbalance; maturing rows are the local view")
                         .size(11.0)
                         .color(th::TEXT_SECONDARY),
                 );
