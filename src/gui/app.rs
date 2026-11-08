@@ -2039,6 +2039,55 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             //   Total       = all four added
             // Before this, every minted stake was silently lumped into
             // Spendable and the four rows were decorative.
+            // THE NODE IS THE SOURCE OF TRUTH (Sami): when the daemon answers
+            // getbalance, that number IS the balance. The local snapshot split
+            // lags the node's coverage during heavy staking churn (it drifted
+            // to 3036 while the node held 3382 and climbing — "why does the
+            // wallet say that number"), so the daemon wins, always.
+            if let Some(ds) = daemon_sats {
+                let tri = s::format_tri(ds);
+                let spend_tip = "Your current spendable balance (node getbalance — authoritative, live)";
+                egui::Grid::new("balance_grid_daemon")
+                    .num_columns(2)
+                    .spacing([16.0, 7.0])
+                    .min_col_width(140.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Spendable:").color(th::TEXT_SECONDARY))
+                            .on_hover_text(spend_tip);
+                        ui.horizontal(|ui| {
+                            if let Some(tex) = &marker_tex {
+                                ui.add(img(tex, Vec2::splat(14.0)));
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", tri, s::TICKER))
+                                    .monospace()
+                                    .size(16.0)
+                                    .color(th::TEXT_PRIMARY),
+                            )
+                            .on_hover_text(spend_tip);
+                        });
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Total:").color(th::TEXT_SECONDARY));
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} {}", tri, s::TICKER))
+                            .monospace()
+                            .size(20.0)
+                            .strong()
+                            .color(th::TEXT_PRIMARY),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("authoritative: node getbalance — updates live as stakes mature")
+                        .size(11.0)
+                        .color(th::TEXT_SECONDARY),
+                );
+                return;
+            }
             // legacy split comes from ONE place (AppState::balance_split) so the
             // page and the headless probe can never disagree again
             let (spendable, stake, unconfirmed, immature, total, tip_used) =
