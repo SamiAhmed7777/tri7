@@ -13,6 +13,258 @@ use crate::spend;
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
+// Options apply: the options must be chooseable. A node-side fee failure must
+// NOT block the apply, and a stale warning must not survive a successful retry.
+// ---------------------------------------------------------------------------
+
+/// An AppState wired to a temp profile dir and an UNREACHABLE node (rpc_addr
+/// points at a closed port): the fee push therefore always fails, which is
+/// exactly the operator's reported situation.
+fn options_state_with_unreachable_node(tag: &str) -> (crate::gui::app_state::AppState, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("tri7gui_opts_{}_{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = UiConfig {
+        profile_dir: dir.display().to_string(),
+        rpc_addr: Some("127.0.0.1:1".into()),
+        ..UiConfig::default()
+    };
+    (crate::gui::app_state::AppState::new(cfg), dir)
+}
+
+#[test]
+fn options_apply_persists_even_when_the_node_fee_push_fails() {
+    let (mut st, dir) = options_state_with_unreachable_node("persist");
+    st.options.pay_fee = "0.000200".into();
+    st.options.minimize_on_close = true;
+    // the node is unreachable -> the fee push fails -> the OLD code returned
+    // Err here and the dialog refused to complete ("Options not applied")
+    st.save_options_action()
+        .expect("the apply must SUCCEED even when the node fee push fails");
+    // the options ARE on disk
+    let path = st.cfg.options_path();
+    assert!(path.exists(), "options.json must be written");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("0.000200"), "fee persisted: {}", text);
+    assert!(text.contains("\"minimize_on_close\": true"), "{}", text);
+    // ...and the failure is reported as a NOTICE, not as a failed apply
+    assert!(st.options_save_error.is_none(), "no failed-apply error");
+    assert!(
+        st.options_fee_notice.is_some(),
+        "the node-side fee failure must be surfaced as a notice"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A loopback stand-in for the node that ACCEPTS settxfee and answers with the
+/// tri7d envelope. It keeps serving until the client goes quiet (an idle
+/// timeout, not a fixed count) - so the number of calls can differ per test
+/// and joining the thread still cannot block.
+fn accepting_fee_node() -> (String, std::thread::JoinHandle<usize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        // serve connections until the client goes quiet - the number of calls
+        // differs per test, so an idle timeout (not a fixed count) keeps
+        // join() from blocking forever
+        listener.set_nonblocking(true).expect("nonblocking");
+        let mut served = 0usize;
+        let mut idle = 0usize;
+        while idle < 80 {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    idle = 0;
+                    served += 1;
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // the stand-in must be answering a REAL settxfee request
+                    assert!(
+                        req.contains("\"method\":\"settxfee\""),
+                        "the GUI must call settxfee, got: {}",
+                        req.lines().last().unwrap_or("")
+                    );
+                    let body = r#"{"result":true,"error":null}"#;
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(http.as_bytes());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    idle += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        served
+    });
+    (format!("127.0.0.1:{}", port), handle)
+}
+
+#[test]
+fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
+    let (mut st, dir) = options_state_with_unreachable_node("stale");
+    // first apply: the node is unreachable -> the notice appears
+    st.save_options_action().expect("apply");
+    assert!(st.options_fee_notice.is_some(), "notice after the failed push");
+    let stale = st.options_fee_notice.clone().unwrap();
+    // the node refused the connection - the exact text differs by platform
+    // ("no node reachable" when no rpc_addr is set, a connect error when the
+    // address is set but nothing listens), so assert on the failure itself
+    assert!(
+        stale.contains("no node reachable") || stale.contains("settxfee:"),
+        "unexpected notice: {}",
+        stale
+    );
+
+    // point the GUI at a node that ACCEPTS settxfee, then apply again
+    let (addr, server) = accepting_fee_node();
+    st.cfg.rpc_addr = Some(addr);
+    st.save_options_action().expect("apply");
+    // the successful push must have CLEARED the stale notice
+    assert!(
+        st.options_fee_notice.is_none(),
+        "a successful push must clear the stale notice, got: {:?}",
+        st.options_fee_notice
+    );
+    // ...and the stale text must not survive anywhere
+    let again = st.options_fee_notice.clone().unwrap_or_default();
+    assert!(!again.contains("no node reachable"), "{}", again);
+    let served = server.join().unwrap();
+    assert!(served >= 1, "the mock node must have been called");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn saved_fee_is_pushed_when_the_node_appears() {
+    // The fee saved while the node was down must reach the node once it is
+    // reachable (the operator's fee must not stay local-only forever).
+    let (mut st, dir) = options_state_with_unreachable_node("startup");
+    st.options.pay_fee = "0.000300".into();
+    st.save_options_action().expect("apply");
+    assert!(st.options_fee_notice.is_some(), "no node -> notice");
+    assert!(!st.fee_pushed_to_node, "nothing pushed yet");
+
+    let (addr, server) = accepting_fee_node();
+    st.cfg.rpc_addr = Some(addr);
+    st.push_saved_fee_when_node_appears();
+    assert!(st.fee_pushed_to_node, "the saved fee must be pushed");
+    assert!(
+        st.options_fee_notice.is_none(),
+        "the notice must clear after the successful push: {:?}",
+        st.options_fee_notice
+    );
+    let _ = server.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
+    // after a successful push the "pushed" flag must not freeze a NEW fee
+    // value that fails - the new value stays eligible for the automatic retry.
+    let (mut st, dir) = options_state_with_unreachable_node("retry");
+    let (addr, server) = accepting_fee_node();
+    st.cfg.rpc_addr = Some(addr.clone());
+
+    // 1. a successful push of 0.000200
+    st.options.pay_fee = "0.000200".into();
+    st.save_options_action().expect("apply");
+    assert!(st.fee_pushed_to_node, "the fee reached the node");
+    assert_eq!(st.pushed_fee_microtri, Some(200)); // 0.000200 TRI in microTRI
+    assert!(st.options_fee_notice.is_none(), "no notice after a good push");
+
+    // 2. the operator changes the fee and the node is gone -> the push fails
+    st.cfg.rpc_addr = Some("127.0.0.1:1".into());
+    st.options.pay_fee = "0.000300".into();
+    st.save_options_action().expect("the apply still succeeds");
+    assert!(st.options_fee_notice.is_some(), "the failed push is reported");
+    assert!(
+        !st.fee_pushed_to_node,
+        "a FAILED push must leave the value eligible for retry"
+    );
+    assert_eq!(st.pushed_fee_microtri, None);
+
+    // 3. the node returns -> the NEW fee is pushed automatically
+    st.cfg.rpc_addr = Some(addr);
+    st.push_saved_fee_when_node_appears();
+    assert!(
+        st.fee_pushed_to_node,
+        "the new fee must be pushed when the node is reachable again"
+    );
+    assert_eq!(st.pushed_fee_microtri, Some(300)); // 0.000300 TRI in microTRI
+    assert!(st.options_fee_notice.is_none(), "the notice clears");
+    let _ = server.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_fee_notice_survives_the_ok_path_for_the_overview_banner() {
+    // The OK button closes the Options dialog when the apply SUCCEEDED. The
+    // fee push may still have failed - the operator must be told afterwards,
+    // so the notice has to survive in the state the Overview banner reads.
+    let (mut st, dir) = options_state_with_unreachable_node("okpath");
+    st.options.pay_fee = "0.000250".into();
+    // the apply succeeds (the options are persisted) ...
+    st.save_options_action().expect("the apply succeeds");
+    // ... and the fee notice is still there for the Overview banner
+    assert!(
+        st.options_fee_notice.is_some(),
+        "the notice must survive the dialog so the Overview banner can show it"
+    );
+    // the banner shows it and the user can dismiss it
+    st.options_fee_notice = None;
+    assert!(st.options_fee_notice.is_none(), "the banner can dismiss it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn close_behaviour_flags_cover_every_combination() {
+    // The close handler keeps the process alive when EITHER keep-running flag
+    // is set, and closes for real only when both are off. This drives the
+    // REAL decision helper the X button uses (AppState::close_decision), not
+    // a restatement of the boolean expression.
+    use crate::gui::app_state::CloseDecision;
+    let (mut st, dir) = options_state_with_unreachable_node("close");
+    for (minimize, tray, expected) in [
+        (true, false, CloseDecision::Minimize),
+        (false, true, CloseDecision::Minimize),
+        (true, true, CloseDecision::Minimize),
+        (false, false, CloseDecision::Quit),
+    ] {
+        st.options.minimize_on_close = minimize;
+        st.options.tray_on_close = tray;
+        assert_eq!(
+            st.close_decision(),
+            expected,
+            "flags (minimize={}, tray={}) -> {:?}",
+            minimize,
+            tray,
+            expected
+        );
+    }
+    // the DEFAULT must be "minimize on close" - the wallet must not die on
+    // the X button
+    let d = OptionsState::default();
+    assert!(d.minimize_on_close, "minimize_on_close must default to true");
+    assert!(!d.tray_on_close, "tray_on_close must default to false");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settxfee_is_on_the_gui_allow_list() {
+    // The GUI pushes the typed fee to the node with settxfee; without it on
+    // the allow list the call is refused client-side and the Options apply
+    // failed (the operator's screenshot).
+    assert!(
+        rpc_client::is_allowed("settxfee"),
+        "settxfee must be callable by the GUI (it moves no coins; the daemon validates the 0..0.25 TRI range)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // amounts
 // ---------------------------------------------------------------------------
 

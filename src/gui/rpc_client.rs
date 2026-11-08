@@ -62,6 +62,11 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "walletpassphrasechange",
     "walletlock",
     "decryptwallet",
+    // the fee the NODE charges (daemon-side validated to 0..0.25 TRI, moves
+    // no coins) — the Options panel pushes the typed fee there. Without it
+    // on the list the whole Options apply failed with "not on the GUI
+    // read-only allow list" and NO option could be applied.
+    "settxfee",
 ];
 
 pub fn is_allowed(method: &str) -> bool {

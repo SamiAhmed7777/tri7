@@ -113,7 +113,9 @@ impl Screen {
             Screen::SignMessage => "sign",
             Screen::VerifyMessage => "verify",
             Screen::Options => "options",
-            Screen::Explorer => "search",
+            // the compass symbol (its own asset - "search" was never in the
+            // asset map, so the Explorer row rendered with no icon at all)
+            Screen::Explorer => "explorer",
         }
     }
     pub const NAV_ORDER: [Screen; 11] = [

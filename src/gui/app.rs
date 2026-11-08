@@ -74,6 +74,11 @@ asset_map! {
     "menu_16/backup" => "menu_16/backup.png",
     "menu_16/exit" => "menu_16/exit.png",
     "menu_16/staking" => "menu_16/staking.png",
+    // the Block Explorer row had NO symbol: Screen::Explorer pointed at
+    // "menu_16/search", which was never in this map, so the texture silently
+    // failed to load and the row rendered iconless. It now gets its
+    // own compass.
+    "menu_16/explorer" => "menu_16/explorer.png",
     "icons/triangles" => "icons/triangles.png",
     "icons/triangles-16" => "icons/triangles-16.png",
     "icons/triangles-128" => "icons/triangles-128.png",
@@ -1674,18 +1679,18 @@ impl eframe::App for Tri7App {
         //   quit            -> let the window close for real
         // CancelClose is what actually stops the window from being destroyed.
         if ctx.input(|i| i.viewport().close_requested()) {
-            let o = &self.st.options;
-            if o.tray_on_close {
+            if self.st.close_decision() == crate::gui::app_state::CloseDecision::Minimize {
+                // Keep the WINDOW alive (CancelClose) and minimize it. The
+                // process - and the node it supervises - keep running, so the
+                // wallet stays reachable and staking continues.
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 self.st.status_log.push(
                     "Triangles is still running (node + staking). Reopen from the taskbar."
                         .into(),
                 );
-            } else if o.minimize_on_close {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
+            // both flags off -> the window closes for real (a real quit)
         }
         Self::apply_theme(ctx);
         self.header(ctx);
@@ -2008,6 +2013,28 @@ impl Tri7App {
     // -----------------------------------------------------------------------
 fn page_overview(&mut self, ui: &mut egui::Ui) {
         th::page_header(ui, "Overview", "Wallet balance and network status");
+        // The Options dialog can be closed with OK while the node-side fee
+        // push still failed. The options were applied, but the operator must
+        // still be told - the notice lives here because the dialog is gone.
+        if let Some(note) = self.st.options_fee_notice.clone() {
+            ui.add_space(4.0);
+            th::inline_notice(
+                ui,
+                th::Notice::Warning,
+                "Options saved - the node has not taken the fee yet",
+                &format!(
+                    "Every option was saved. The fee push to the node did not go \
+                     through: {note}. It is pushed automatically as soon as the \
+                     node is reachable.",
+                ),
+            );
+            ui.horizontal(|ui| {
+                if ui.small_button("Dismiss").clicked() {
+                    self.st.options_fee_notice = None;
+                }
+            });
+            ui.add_space(4.0);
+        }
         // stake/payment notification banner (Sami: alert like the old wallet,
         // user-controllable) — dismissible; the system toast already fired
         if let Some((title, text)) = self.st.notify_flash.clone() {
@@ -4952,40 +4979,41 @@ impl Tri7App {
                 );
                 // legacy optionsdialog.ui Window tab, in Sami's words: choose
                 // between closing to the tray, the taskbar, or quitting.
-                // Radio semantics: exactly one behaviour.
+                // Radio semantics: exactly one behaviour, and every choice
+                // offered here is REAL. "Minimize" is the default and keeps
+                // the node running. There is no separate "tray" choice: this build has
+                // no tray helper, so a tray option could only be a promise
+                // the wallet cannot keep - it would behave like minimize
+                // anyway. A legacy options.json may still carry tray_on_close;
+                // it is honoured (the window is minimized and the node keeps
+                // running) but it is no longer offered as a separate choice.
                 let mut quit = !self.st.options.minimize_on_close
                     && !self.st.options.tray_on_close;
-                let mut minimize = self.st.options.minimize_on_close
-                    && !self.st.options.tray_on_close;
-                let mut tray = self.st.options.tray_on_close;
+                let mut minimize = !quit;
                 if ui
-                    .radio(minimize, "Minimize to the taskbar (keep running)")
+                    .radio(minimize, "Minimize to the taskbar on close (keep running)")
+                    .on_hover_text(
+                        "The window minimizes instead of closing; Triangles and its \
+                         node keep running and staking. Reopen it from the taskbar.",
+                    )
                     .clicked()
                 {
                     minimize = true;
                     quit = false;
-                    tray = false;
                 }
                 if ui
-                    .radio(tray, "Close to the system tray (keep running)")
+                    .radio(quit, "Quit Triangles (stop the node)")
                     .on_hover_text(
-                        "Hides the window; the node keeps staking and receiving. \
-                         A tray icon needs the tray helper - until then this \
-                         behaves like minimizing.",
+                        "Closes the wallet for real. The node it supervises stops \
+                         with it.",
                     )
                     .clicked()
                 {
-                    tray = true;
-                    minimize = false;
-                    quit = false;
-                }
-                if ui.radio(quit, "Quit Triangles").clicked() {
                     quit = true;
                     minimize = false;
-                    tray = false;
                 }
-                self.st.options.tray_on_close = tray;
-                self.st.options.minimize_on_close = minimize || tray;
+                self.st.options.minimize_on_close = minimize;
+                self.st.options.tray_on_close = false;
                 let _ = quit;
 
                 let mut off = false;
@@ -4998,6 +5026,19 @@ impl Tri7App {
         });
         if let Some(err) = self.st.options_save_error.clone() {
             th::inline_notice(ui, th::Notice::Error, "Options not applied", &err);
+            ui.add_space(6.0);
+        }
+        if let Some(note) = self.st.options_fee_notice.clone() {
+            th::inline_notice(
+                ui,
+                th::Notice::Warning,
+                "Options saved - the node has not taken the fee yet",
+                &format!(
+                    "Every option on this screen was saved. Only the fee push to the \
+                     node did not go through: {note}. The node will pick it up on the \
+                     next launch, or as soon as it is reachable.",
+                ),
+            );
             ui.add_space(6.0);
         }
         // sticky footer: Cancel / Apply / OK
@@ -5015,9 +5056,10 @@ impl Tri7App {
                 }
             }
             if th::primary_button(ui, "OK").clicked() {
-                // OK must not hide a failed apply: if the node refused the fee
-                // (or is unreachable) the dialog STAYS OPEN with the reason,
-                // exactly like the legacy apply-then-close behaviour.
+                // A failed apply keeps the dialog OPEN with the reason; a
+                // saved apply closes it. When only the node-side fee push
+                // missed, the options are in effect but the fee is not yet
+                // active in the running node - the notice says exactly that.
                 match self.st.save_options_action() {
                     Ok(()) => {
                         self.st.status_log.push("options saved".into());

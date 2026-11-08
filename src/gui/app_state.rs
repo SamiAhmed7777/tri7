@@ -44,6 +44,15 @@ pub struct VerifyForm {
     pub result: Option<Result<bool, String>>,
 }
 
+/// What the window's close button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseDecision {
+    /// keep the process (and the node) alive, minimize the window
+    Minimize,
+    /// close the window for real
+    Quit,
+}
+
 /// Options dialog state (optionsdialog.ui tabs). Values the engine can honor
 /// in THIS build are real inputs (pay-transaction-fee feeds Send); the rest
 /// are session preferences with an honest "requires daemon integration" note.
@@ -347,6 +356,17 @@ pub struct AppState {
     pub fee_live_sats: Option<i64>,
     /// last Options apply failure (shown in the dialog until it succeeds)
     pub options_save_error: Option<String>,
+    /// the options were saved, but the node-side fee push did not take —
+    /// a notice, NOT a failed apply
+    pub options_fee_notice: Option<String>,
+    /// the saved fee has been pushed to the node at least once this session
+    pub fee_pushed_to_node: bool,
+    /// the fee value (microTRI) the node last ACCEPTED this session. A
+    /// changed value is pushed again even if the flag is set, and a FAILED
+    /// push clears the flag so the value stays eligible for automatic retry.
+    /// Integer microTRI (the chain's own unit) so the comparison is exact -
+    /// a float fee would compare unreliably.
+    pub pushed_fee_microtri: Option<i64>,
     pub receive: ReceiveForm,
     pub addressbook: Vec<AbEntry>,
     pub keystore: Vec<AbEntry>,
@@ -435,6 +455,9 @@ impl AppState {
             send: SendFormState::default(),
             fee_live_sats: None,
             options_save_error: None,
+            options_fee_notice: None,
+            fee_pushed_to_node: false,
+            pushed_fee_microtri: None,
             send_result: None,
             receive: ReceiveForm::default(),
             addressbook,
@@ -2360,6 +2383,16 @@ impl AppState {
             self.notify_last_balance_sats = Some(bal);
         }
         self.debug_info = Some(info);
+        // the node just answered: push the SAVED fee to it once per session,
+        // so a fee saved while the node was down is not local-only forever
+        if self
+            .debug_info
+            .as_ref()
+            .map(|d| d.reachable)
+            .unwrap_or(false)
+        {
+            self.push_saved_fee_when_node_appears();
+        }
     }
 
     /// Legacy "Backup Wallet...": byte-copy of wallet.dat to the chosen path,
@@ -2544,6 +2577,46 @@ impl AppState {
         Ok(format!("{}: {}", dlg.mode.title(), reply))
     }
 
+    /// What the X button must do (the Options -> Display choice).
+    /// Extracted as a pure function so the real close path is testable.
+    pub fn close_decision(&self) -> CloseDecision {
+        let o = &self.options;
+        if o.minimize_on_close || o.tray_on_close {
+            CloseDecision::Minimize
+        } else {
+            CloseDecision::Quit
+        }
+    }
+
+    /// Push the SAVED fee to the node once, when the node first becomes
+    /// reachable in this session. Without this the typed fee only reached the
+    /// node when the operator happened to press Apply while it was up; a fee
+    /// saved while the node was down stayed local forever.
+    pub fn push_saved_fee_when_node_appears(&mut self) {
+        if self.live_rpc_addr().is_none() {
+            return;
+        }
+        // nothing to do when the node already holds THIS value
+        let current = parse_tri(&self.options.pay_fee).ok();
+        if self.fee_pushed_to_node && self.pushed_fee_microtri == current {
+            return;
+        }
+        match self.push_paytxfee_to_node() {
+            Ok(()) => {
+                self.fee_pushed_to_node = true;
+                self.pushed_fee_microtri = current;
+                self.options_fee_notice = None;
+                self.status_log
+                    .push(format!("fee: node paytxfee set to {}", self.options.pay_fee));
+            }
+            Err(e) => {
+                // the node is not up yet (or refused): keep the value local and
+                // try again on the next poll
+                self.options_fee_notice = Some(e);
+            }
+        }
+    }
+
     /// Push the Options "Pay transaction fee" value to the node (settxfee).
     /// The dialog is the operator's control; the node owns the wallet, so the
     /// setting must land there to affect anything — saving the text box alone
@@ -2569,23 +2642,41 @@ impl AppState {
         // validate the fee is a real amount before persisting
         parse_tri(&self.options.pay_fee)
             .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
+        // PERSIST EVERYTHING FIRST. The node-side fee push is a best-effort
+        // sync, NOT a gate: it used to abort the whole apply, so a node that
+        // refused the fee (or was unreachable) left the operator unable to
+        // change ANY option ("Options not applied"). The typed fee
+        // stays on disk and the node picks it up on the next launch.
+        persist_options(&self.cfg.options_path(), &self.options)?;
+        self.options_save_error = None;
+        // a stale warning from an earlier failed push must not survive a
+        // successful retry: clear it BEFORE the push and set it again only
+        // if THIS push fails.
+        self.options_fee_notice = None;
         // the node charges the fee, not the text box: apply it there too and
         // report a failure instead of silently diverging
         match self.push_paytxfee_to_node() {
             Ok(()) => {
-                self.options_save_error = None;
+                // the node has the fee now: the startup push has nothing left
+                // to do for THIS value
+                self.fee_pushed_to_node = true;
+                self.pushed_fee_microtri = parse_tri(&self.options.pay_fee).ok();
                 self.status_log
                     .push(format!("fee: node paytxfee set to {}", self.options.pay_fee));
-                persist_options(&self.cfg.options_path(), &self.options)
             }
             Err(e) => {
-                // keep the operator's typed value on disk so the next launch
-                // retries it, but tell the caller the node did NOT take it
-                let _ = persist_options(&self.cfg.options_path(), &self.options);
-                self.status_log.push(format!("fee: {e}"));
-                Err(e)
+                // the options ARE saved; only the node-side fee did not take.
+                // This is a notice, not a failed apply. The value stays
+                // ELIGIBLE for the automatic retry (the flag is cleared), so
+                // a fee that failed while the node was down is pushed as soon
+                // as the node is reachable again.
+                self.fee_pushed_to_node = false;
+                self.pushed_fee_microtri = None;
+                self.status_log.push(format!("fee (saved locally, node not yet): {e}"));
+                self.options_fee_notice = Some(e);
             }
         }
+        Ok(())
     }
 
     /// Explorer: the search box action (classify + jump).
