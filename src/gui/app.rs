@@ -103,7 +103,7 @@ asset_map! {
     "icons/tx_zero" => "icons/tx_zero.png",
     "icons/tx_conflicted" => "icons/tx_conflicted.png",
     "icons/refresh" => "icons/refresh.png",
-    "brand/header" => "brand/brand_header_new@2x.png",
+    "brand/header" => "brand/brand_header_white.png",
     "brand/mark" => "brand/brand_mark_32.png",
     "brand/mark64" => "brand/brand_mark_64.png",
     "brand/mark16" => "brand/brand_mark_16.png",
