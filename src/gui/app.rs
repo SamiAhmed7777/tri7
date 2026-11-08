@@ -2185,7 +2185,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                             .to_string(),
                     };
                     ui.add_space(2.0);
-                    th::inline_notice(ui, th::Notice::Warn, "Partial balance", &msg);
+                    th::inline_notice(ui, th::Notice::Warning, "Partial balance", &msg);
                 }
                 return;
             }
