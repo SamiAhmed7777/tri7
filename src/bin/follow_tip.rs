@@ -4297,6 +4297,39 @@ impl RepairDiff {
     }
 }
 
+/// resendtx mine-gate decision (pure, unit-tested). Runs BEFORE pool.accept
+/// so a mined recorded tx can never reach accept again: the pool's
+/// WalletThenStoreUtxoView deep-coin fallback resolves prevouts from the
+/// block store WITHOUT spent-tracking, so a mined tx's inputs still "exist"
+/// to the view and the tx re-validates — live-caught on DNS2 2026-11-08:
+/// a resend pass of a mined send re-accepted it into the pool of the
+/// fleet's heavy staker as a double-spend candidate.
+///
+/// The gate is FAIL-CLOSED on store trouble: when the store ERRORS we
+/// cannot know whether the tx mined, so the entry is skipped this pass
+/// (kept for the next one) rather than accepted. Only a definitive
+/// "store answered: not mined" reaches the accept path. No store at all
+/// is also Unknown: with a wallet-only view a mined tx's parent outputs
+/// were removed by apply_block, so accept fails on its own (transient
+/// keep) — there is no deep fallback to fool it.
+enum ResendGate {
+    /// mined → prune from the record, never accept
+    Mined,
+    /// store answered "not mined" (or no deep fallback exists) → accept path
+    Unknown,
+    /// store error → cannot prove unmined; skip accept this pass
+    CantProve,
+}
+
+fn resend_mine_gate(store_hit: Option<Result<Option<()>, String>>) -> ResendGate {
+    match store_hit {
+        Some(Ok(Some(_))) => ResendGate::Mined,
+        Some(Ok(None)) => ResendGate::Unknown,
+        Some(Err(_)) => ResendGate::CantProve,
+        None => ResendGate::Unknown,
+    }
+}
+
 fn repair_diff(
     old: &HashMap<(Hash, u32), LiveOut>,
     fresh: &HashMap<(Hash, u32), LiveOut>,
@@ -5682,6 +5715,34 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     };
                     let txid_internal =
                         tri7_core::p2p::display_to_internal(&e.txid).unwrap_or([0u8; 32]);
+                    // MINE-GATE (before accept — see ResendGate): mined →
+                    // prune, never accept; store error → cannot prove
+                    // unmined, skip this pass (fail-closed); only a
+                    // definitive "not mined" reaches pool.accept.
+                    match resend_mine_gate(
+                        self.store
+                            .as_deref()
+                            .map(|s| s.tx_by_id(&txid_internal).map(|hit| hit.map(|_| ()))),
+                    ) {
+                        ResendGate::Mined => {
+                            log(&format!(
+                                "resendtx: {} already mined — pruned from the record",
+                                &e.txid[..e.txid.len().min(10)]
+                            ));
+                            pruned += 1;
+                            continue;
+                        }
+                        ResendGate::CantProve => {
+                            log(&format!(
+                                "resendtx: {} store error — cannot prove unmined, skipped this pass",
+                                &e.txid[..e.txid.len().min(10)]
+                            ));
+                            kept += 1;
+                            survivors.push(e.clone());
+                            continue;
+                        }
+                        ResendGate::Unknown => {}
+                    }
                     match pool.accept(&raw, &view, now) {
                         Ok(rep) => {
                             if let Ok(mut q) = self.announce.lock() {
@@ -5697,30 +5758,15 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                             survivors.push(e.clone());
                         }
                         Err(err) => {
-                            // classify the rejection: mined (confirm/done →
-                            // prune) or transient (keep). The store lookup
-                            // happens ONLY here — a successful accept never
-                            // pays for it.
-                            let mined = matches!(
-                                self.store
-                                    .as_deref()
-                                    .map(|s| s.tx_by_id(&txid_internal)),
-                                Some(Ok(Some(_)))
-                            );
-                            if mined {
-                                log(&format!(
-                                    "resendtx: {} already mined — pruned from the record",
-                                    &e.txid[..e.txid.len().min(10)]
-                                ));
-                                pruned += 1;
-                            } else {
-                                log(&format!(
-                                    "resendtx: {} kept for the next pass (pool: {err})",
-                                    &e.txid[..e.txid.len().min(10)]
-                                ));
-                                kept += 1;
-                                survivors.push(e.clone());
-                            }
+                            // NOT mined (the gate above ran): a rejection here
+                            // is transient (prevouts outside the window, a
+                            // peer-lag) — keep the entry for the next pass.
+                            log(&format!(
+                                "resendtx: {} kept for the next pass (pool: {err})",
+                                &e.txid[..e.txid.len().min(10)]
+                            ));
+                            kept += 1;
+                            survivors.push(e.clone());
                         }
                     }
                 }
@@ -10630,6 +10676,21 @@ addnode=host:notaport
         w.live = fresh.live;
         assert_eq!(w.balance(), 3_000_000);
         assert_eq!((n, amt), (1, 3_000_000));
+    }
+
+    #[test]
+    fn resend_mine_gate_prunes_before_reaccept() {
+        // regression pin (live-caught on DNS2 2026-11-08): a recorded tx that
+        // already mined MUST map to Mined (prune, never accept) — the store
+        // deep-coin fallback resolves its spent prevouts without
+        // spent-tracking, so an accept would re-validate the double-spend.
+        // FAIL-CLOSED: a store error cannot prove "unmined", so it must NOT
+        // reach the accept path (CantProve = skip this pass, keep entry).
+        use ResendGate::{CantProve, Mined, Unknown};
+        assert!(matches!(resend_mine_gate(Some(Ok(Some(())))), Mined));
+        assert!(matches!(resend_mine_gate(Some(Ok(None))), Unknown));
+        assert!(matches!(resend_mine_gate(Some(Err("store hiccup".into()))), CantProve));
+        assert!(matches!(resend_mine_gate(None), Unknown));
     }
 
     // ---- from-zero assume-valid envelope (deployed-client parity) ----

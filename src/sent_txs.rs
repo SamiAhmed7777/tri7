@@ -104,15 +104,19 @@ pub fn load(path: &Path) -> Result<Vec<SentTxEntry>, String> {
     Ok(f.entries)
 }
 
-/// Atomic write (tmp + rename, unique tmp name so concurrent sends in one
-/// process cannot collide on the tmp path). Public: the `resendtx` verb
-/// rewrites the record after pruning mined entries.
+/// Atomic write (tmp + rename). The tmp name carries the pid AND a
+/// nanosecond stamp: record_lock serializes the threads of ONE process,
+/// but a second daemon process sharing the wallet dir (a misconfiguration,
+/// but belt-and-braces) then still cannot collide on the tmp path.
+/// Public: the `resendtx` verb rewrites the record after pruning mined
+/// entries.
 pub fn save(path: &Path, entries: &[SentTxEntry]) -> Result<(), String> {
     use std::io::Write;
-    let tmp = path.with_extension(format!(
-        "json.tmp.{}",
-        std::process::id()
-    ));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nanos));
     {
         let mut f = std::fs::File::create(&tmp)
             .map_err(|e| format!("create {}: {}", tmp.display(), e))?;
