@@ -322,28 +322,144 @@ impl LiveIndex {
                 .collect();
             txs.push((txid, outs, ins));
         }
-        self.conn
-            .execute_batch("BEGIN")
+        // One transaction, held by rusqlite's RAII guard: ANY error after
+        // this point - a failed output insert, a failed meta write, a failed
+        // height update - rolls the whole block back. The index never keeps
+        // half of a block.
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| format!("begin: {e}"))?;
-        match insert_block(&self.conn, height, &txs) {
-            Ok(_) => {
-                finish(&self.conn, height)?;
-                self.conn
-                    .execute_batch("COMMIT")
-                    .map_err(|e| format!("commit: {e}"))?;
-                self.next_height = height + 1;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        insert_block(&tx, height, &txs)?;
+        // Record the hash of the block this index has applied: the height
+        // alone does not prove the index is on the SAME chain the node is
+        // serving. The hash does.
+        let block_hash = crate::legacy::hash9(&block_header_bytes(block));
+        tx.execute(
+            "INSERT INTO meta(k,v) VALUES('tip_hash',?1) \
+             ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [hex32(&block_hash)],
+        )
+        .map_err(|e| format!("tip_hash: {e}"))?;
+        finish(&tx, height)?;
+        tx.commit().map_err(|e| format!("commit: {e}"))?;
+        self.next_height = height + 1;
+        Ok(())
     }
 }
 
 /// Legacy failure text when the index is absent.
 pub const NOT_ENABLED: &str = "Address index not enabled. Start with -addressindex=1";
+
+/// Whether the live address index may be served as the wallet's whole
+/// spendable set.
+///
+/// It may be when ALL of these hold:
+///  - the index is FINISHED (`complete`) - a partial build does not know
+///    every coin;
+///  - the index has applied exactly the chain the node serves: its applied
+///    height equals the chain height AND the hash it recorded for that block
+///    equals the chain's hash at that height. The height alone would not
+///    prove the index is on the same chain; the hash does;
+///  - the caller knows that hash (an unknown chain hash means we cannot
+///    prove anything).
+///
+/// The facts (height, hash, complete) come from the index itself; the
+/// verdict is computed here so every caller - the daemon and the tests -
+/// uses the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Authority {
+    /// the index may be served as the whole spendable set
+    pub authoritative: bool,
+    /// the height the index has applied (its coverage height)
+    pub coverage_height: u64,
+    /// the hash the index recorded for that height
+    pub index_tip_hash: Option<[u8; 32]>,
+    /// the index is a finished index
+    pub complete: bool,
+}
+
+/// The facts the verdict is computed from.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexFacts {
+    pub coverage_height: u64,
+    pub index_tip_hash: Option<[u8; 32]>,
+    pub complete: bool,
+}
+
+/// Read the facts from an open index.
+pub fn facts(c: &Connection) -> IndexFacts {
+    IndexFacts {
+        coverage_height: index_height(c),
+        index_tip_hash: index_tip_hash(c),
+        complete: is_complete(c),
+    }
+}
+
+/// The single rule for "may the live index be served as the whole set".
+pub fn authority(facts: IndexFacts, chain_height: u64, chain_hash: Option<[u8; 32]>) -> Authority {
+    let same_chain = match (facts.index_tip_hash, chain_hash) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    Authority {
+        authoritative: facts.complete && same_chain && facts.coverage_height == chain_height,
+        coverage_height: facts.coverage_height,
+        index_tip_hash: facts.index_tip_hash,
+        complete: facts.complete,
+    }
+}
+
+/// The wallet's spendable set and the index's facts, read under ONE
+/// transaction: a block applied while we read must not tear the answer
+/// (the utxos from one height and the height/hash of another).
+pub fn wallet_view(
+    c: &mut Connection,
+    addrs: &[String],
+) -> Result<(IndexFacts, Vec<UtxoRowOut>), String> {
+    // rusqlite's RAII transaction: the read snapshot is held until it is
+    // committed, and a failure rolls it back.
+    let tx = c.transaction().map_err(|e| format!("begin: {e}"))?;
+    let facts = facts(&tx);
+    let rows = utxos(&tx, addrs)?;
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok((facts, rows))
+}
+
+/// The hash the index recorded for the last block it applied.
+pub fn index_tip_hash(c: &Connection) -> Option<[u8; 32]> {
+    let hex: String = c
+        .query_row(
+            "SELECT v FROM meta WHERE k='tip_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let bytes = crate::p2p::hex_decode(&hex).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+fn hex32(h: &[u8; 32]) -> String {
+    h.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// The 80-byte header of a block - the bytes the block hash is taken over.
+fn block_header_bytes(block: &crate::legacy::Block) -> Vec<u8> {
+    let mut w: Vec<u8> = Vec::with_capacity(80);
+    w.extend_from_slice(&block.version.to_le_bytes());
+    w.extend_from_slice(&block.prev_hash);
+    w.extend_from_slice(&block.merkle_root);
+    w.extend_from_slice(&block.time.to_le_bytes());
+    w.extend_from_slice(&block.bits.to_le_bytes());
+    w.extend_from_slice(&block.nonce.to_le_bytes());
+    w.truncate(80);
+    w
+}
 
 pub fn index_height(c: &Connection) -> u64 {
     c.query_row(

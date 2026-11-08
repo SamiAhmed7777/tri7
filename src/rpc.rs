@@ -895,6 +895,71 @@ pub struct Deps<'a> {
     pub ops: Option<&'a dyn NodeOps>,
 }
 
+/// The wallet's spendable set from the node's LIVE address index.
+///
+/// The index is applied on every accepted block, so it stays tip-accurate
+/// even when the chain replay cannot reach the tip - a hole in the block
+/// store, or an archive that ends below the tip, caps the replay snapshot
+/// while the index keeps moving with the chain. The replay snapshot stays
+/// the fallback for a node without an index (and for a wallet whose index
+/// has not finished building).
+///
+/// NOTE: this returns the live view whenever the node has one. Callers that
+/// serve it as the wallet's whole balance must use `live_authoritative`
+/// instead - an index that is still building, or that trails the tip, does
+/// not know every coin.
+fn live_spendable(deps: &Deps) -> Option<serde_json::Value> {
+    let ops = deps.ops?;
+    let v = ops.call("getwalletspendable", &serde_json::json!([])).ok()?;
+    v.get("balance_sats").and_then(|x| x.as_i64())?;
+    Some(v)
+}
+
+/// The live set may be served as the wallet's WHOLE spendable set only when
+/// the library's rule says so: a finished index that has applied exactly the
+/// chain this node serves (same height AND the same block hash). The node
+/// reports the facts; the rule is computed here, by production code.
+fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
+    let v = live_spendable(deps)?;
+    let facts = crate::addrindex::IndexFacts {
+        coverage_height: v.get("index_height").and_then(|x| x.as_u64())?,
+        index_tip_hash: v
+            .get("index_tip_hash")
+            .and_then(|x| x.as_str())
+            .and_then(|s| crate::p2p::hex_decode(s).ok())
+            .and_then(|b| {
+                if b.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&b);
+                    Some(h)
+                } else {
+                    None
+                }
+            }),
+        complete: v.get("complete").and_then(|x| x.as_bool())?,
+    };
+    let chain_height = v.get("chain_tip").and_then(|x| x.as_u64())?;
+    let chain_hash = v
+        .get("chain_tip_hash")
+        .and_then(|x| x.as_str())
+        .and_then(|s| crate::p2p::hex_decode(s).ok())
+        .and_then(|b| {
+            if b.len() == 32 {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            } else {
+                None
+            }
+        });
+    let verdict = crate::addrindex::authority(facts, chain_height, chain_hash);
+    if verdict.authoritative {
+        Some(v)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Envelopes + dispatch
 // ---------------------------------------------------------------------------
@@ -1472,13 +1537,23 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         "getconnectioncount" => NativeOutcome::Ok(json!(deps.tip.peers())),
 
         // ---- tri7 replay-derived wallet snapshots ----
-        "getbalance" => match deps.wallet.balance() {
-            Some(b) => NativeOutcome::Ok(json!(sats_to_tri(b.sats))),
-            None => NativeOutcome::Err(
-                -1,
-                "wallet balance snapshot unavailable (balances file not loaded)".into(),
-            ),
-        },
+        "getbalance" => {
+            // The LIVE index wins over the replay snapshot: the snapshot is
+            // capped at whatever height the chain replay reached (an archive
+            // seam or a store hole), the index follows the tip.
+            if let Some(live) = live_authoritative(deps) {
+                if let Some(sats) = live.get("balance_sats").and_then(|x| x.as_i64()) {
+                    return NativeOutcome::Ok(json!(sats_to_tri(sats)));
+                }
+            }
+            match deps.wallet.balance() {
+                Some(b) => NativeOutcome::Ok(json!(sats_to_tri(b.sats))),
+                None => NativeOutcome::Err(
+                    -1,
+                    "wallet balance snapshot unavailable (balances file not loaded)".into(),
+                ),
+            }
+        }
 
         "listwalletaddresses" => {
             let entries = deps.wallet.address_entries();
@@ -1819,6 +1894,44 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         "listunspent" => {
             let minconf = ptry!(p_u64(params, 0, "minconf")).unwrap_or(1);
             let maxconf = ptry!(p_u64(params, 1, "maxconf")).unwrap_or(9_999_999);
+            // LIVE index first: these are the coins the chain actually shows
+            // as unspent, so a spend built from this list cannot be a
+            // double-spend of a coin the node replayed as gone (or vice versa).
+            if let Some(live) = live_authoritative(deps) {
+                let tip = live
+                    .get("chain_tip")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or_default();
+                let rows: Vec<Value> = live
+                    .get("utxos")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|u| {
+                                let h = u.get("height").and_then(|x| x.as_u64())?;
+                                let conf = tip.saturating_sub(h) + 1;
+                                if conf < minconf || conf > maxconf {
+                                    return None;
+                                }
+                                let sats = u.get("value_sats").and_then(|x| x.as_i64())?;
+                                Some(json!({
+                                    "txid": u.get("txid")?,
+                                    "vout": u.get("n")?,
+                                    "address": u.get("address")?,
+                                    "scriptPubKey": u.get("script_hex")?,
+                                    "amount": sats_to_tri(sats),
+                                    "amount_sats": sats,
+                                    "confirmations": conf,
+                                    "height": h,
+                                    "spendable": true,
+                                    "solvable": true,
+                                }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return NativeOutcome::Ok(json!(rows));
+            }
             // Coverage must be present AND consistent across BOTH snapshots —
             // a missing or mismatched pair rejects every row (never serve
             // confirmations keyed against the wrong height).
@@ -2300,26 +2413,69 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             // empty); txcount stays null — the snapshot carries no tx-count.
             let bal = deps.wallet.balance();
             let ex = deps.wallet.extras();
-            match bal {
-                Some(b) => NativeOutcome::Ok(json!({
-                    "walletversion": 60000,
-                    "balance": sats_to_tri(b.sats),
-                    "balance_sats": b.sats,
-                    "txcount": Value::Null,
-                    "keypoololdest": ex.keypool_oldest.map(|v| json!(v)).unwrap_or(Value::Null),
-                    "keypoolsize": ex.keypool_size.map(|v| json!(v)).unwrap_or(Value::Null),
-                    "unlocked_until": unlocked_until(deps),
-                    "paytxfee": sats_to_tri(ex.paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
-                    "coverage_height": b.coverage_height,
-                    "coverage_hash": b.coverage_hash,
-                    "addresses": b.addresses,
-                    "utxos": b.utxos,
-                })),
-                None => NativeOutcome::Err(
-                    -1,
-                    "wallet balance snapshot unavailable (balances file not loaded)".into(),
+            // The LIVE index is tip-accurate; the replay snapshot is not
+            // (it stops at whatever height the chain replay reached). Report
+            // the live figure when we have it and say whether it is complete.
+            // The live index is served ONLY when the node says it is
+            // authoritative (a finished index that has applied every block
+            // the chain accepted). Anything else - a partial build, an index
+            // that trails the tip - falls back to the replay snapshot, and
+            // the answer is flagged partial: a number that does not reach the
+            // tip must never be presented as the whole balance.
+            let live = live_authoritative(deps);
+            let (bal_sats, utxos_n, bal_height, partial, coverage) = match (&live, &bal) {
+                (Some(l), _) => {
+                    let sats = l.get("balance_sats").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let n = l
+                        .get("utxos")
+                        .and_then(|x| x.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    let idx_h = l.get("index_height").and_then(|x| x.as_u64());
+                    // no replay snapshot behind it: the live index's own
+                    // height is the coverage, and there is no replay hash
+                    let cov = idx_h.map(|h| (h, Value::Null));
+                    (sats, n, idx_h, false, cov)
+                }
+                (None, Some(b)) => (
+                    b.sats,
+                    b.utxos,
+                    Some(b.coverage_height),
+                    true,
+                    Some((b.coverage_height, Value::String(b.coverage_hash.clone()))),
                 ),
+                (None, None) => (0, 0, None, true, None),
+            };
+            if bal.is_none() && live.is_none() {
+                return NativeOutcome::Err(
+                    -1,
+                    "wallet balance unavailable (no live index and no balances snapshot)".into(),
+                );
             }
+            let b = bal.unwrap_or(BalanceView {
+                sats: bal_sats,
+                utxos: utxos_n,
+                coverage_height: bal_height.unwrap_or_default(),
+                coverage_hash: String::new(),
+                addresses: 0,
+                supply_sats: 0,
+            });
+            NativeOutcome::Ok(json!({
+                "walletversion": 60000,
+                "balance": sats_to_tri(bal_sats),
+                "balance_sats": bal_sats,
+                "utxos": utxos_n,
+                "balance_height": bal_height,
+                "balance_partial": partial,
+                "txcount": Value::Null,
+                "keypoololdest": ex.keypool_oldest.map(|v| json!(v)).unwrap_or(Value::Null),
+                "keypoolsize": ex.keypool_size.map(|v| json!(v)).unwrap_or(Value::Null),
+                "unlocked_until": unlocked_until(deps),
+                "paytxfee": sats_to_tri(ex.paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
+                "coverage_height": coverage.as_ref().map(|c| c.0).unwrap_or_default(),
+                "coverage_hash": coverage.map(|c| c.1).unwrap_or(Value::Null),
+                "addresses": b.addresses,
+            }))
         }
 
         // Legacy getnewpubkey [account]: "generate a new public key and
@@ -4064,6 +4220,336 @@ mod tests {
         assert_eq!(v["result"].as_array().unwrap().len(), 0);
     }
 
+    /// A FINISHED index that has applied exactly the chain the node serves
+    /// (same height, same block hash) IS the wallet's spendable set: the
+    /// replay snapshot would otherwise show a stale figure.
+    #[test]
+    fn live_index_wins_over_the_replay_snapshot() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true };
+        let hash = [7u8; 32];
+        let mut idx = TempIndex::new("wins");
+        idx.seed(2_206_001, hash, true);
+        idx.add_utxo(
+            "Tlive000000000000000000000000000000",
+            [0xaa; 32],
+            0,
+            3_236_439_612,
+            2_206_000,
+        );
+        let ops = LiveIndexOps {
+            index: idx,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            addresses: vec!["Tlive000000000000000000000000000000".to_string()],
+        };
+        let d = Deps {
+            tip: &t,
+            wallet: &w,
+            blocks: &b,
+            proxy: None,
+            ops: Some(&ops),
+        };
+        // the snapshot alone would answer 3036.990591
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
+        let arr = call(&d, "listunspent", json!([]))["result"].as_array().unwrap().clone();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["amount_sats"], 3_236_439_612i64);
+        assert_eq!(arr[0]["height"], 2_206_000u64);
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance"], json!(3236.439612));
+        assert_eq!(info["utxos"], 1);
+        assert_eq!(info["balance_partial"], json!(false));
+        assert_eq!(info["balance_height"], 2_206_001u64);
+    }
+
+    /// The index must have applied EXACTLY the chain the node serves: an
+    /// index a block behind the tip has not seen the newest coin, and an
+    /// index on a DIFFERENT chain at the same height has seen other coins.
+    /// Neither may be served as the whole wallet: the replay snapshot is
+    /// served instead, flagged partial, with the replay coverage.
+    #[test]
+    fn live_index_must_match_the_served_chain_exactly() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true };
+        let hash = [7u8; 32];
+        let addrs = vec!["Tlive000000000000000000000000000000".to_string()];
+
+        // (1) one block behind the tip -> not authoritative
+        let mut idx = TempIndex::new("lag");
+        idx.seed(2_206_000, hash, true);
+        idx.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
+        let ops = LiveIndexOps {
+            index: idx,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            addresses: addrs.clone(),
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance_partial"], json!(true));
+        assert_eq!(info["balance"], json!(3036.990591));
+        assert_eq!(info["balance_height"], 2_201_090u64);
+        assert_eq!(info["coverage_height"], 2_201_090u64);
+        assert_eq!(
+            info["coverage_hash"],
+            json!("f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307")
+        );
+
+        // (2) same height but a DIFFERENT chain (the hash does not match) ->
+        // not authoritative
+        let mut idx2 = TempIndex::new("fork");
+        idx2.seed(2_206_001, [0x11; 32], true);
+        idx2.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
+        let ops2 = LiveIndexOps {
+            index: idx2,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            addresses: addrs.clone(),
+        };
+        let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops2) };
+        assert_eq!(call(&d2, "getbalance", json!([]))["result"], json!(3036.990591));
+        assert_eq!(
+            call(&d2, "getwalletinfo", json!([]))["result"]["balance_partial"],
+            json!(true)
+        );
+    }
+
+    /// An index that is still BUILDING is not a whole-wallet view: the node
+    /// must not serve it as the balance, and must flag the answer partial.
+    #[test]
+    fn incomplete_index_is_never_served_as_authoritative() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true };
+        let hash = [7u8; 32];
+        let mut idx = TempIndex::new("building");
+        idx.seed(2_206_001, hash, false); // not finished
+        idx.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
+        let ops = LiveIndexOps {
+            index: idx,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            addresses: vec!["Tlive000000000000000000000000000000".to_string()],
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+        // the snapshot is served, not the half-built index
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
+        let arr = call(&d, "listunspent", json!([]))["result"].as_array().unwrap().clone();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["amount_sats"], 100); // the snapshot's own row
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance_partial"], json!(true));
+        assert_eq!(info["balance"], json!(3036.990591));
+        assert_eq!(info["balance_height"], 2_201_090u64);
+        assert_eq!(info["coverage_height"], 2_201_090u64);
+    }
+
+    /// Without a live index the node falls back to the replay snapshot and
+    /// says the figure is partial, so a UI never presents a capped number as
+    /// the whole balance.
+    #[test]
+    fn snapshot_fallback_is_flagged_partial() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true };
+        let d = deps(&t, &w, &b, None);
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance"], json!(3036.990591));
+        assert_eq!(info["balance_partial"], json!(true));
+    }
+
+    /// A block applied while the wallet is being read must not tear the
+    /// answer. This test drives the PRODUCTION helper
+    /// (`addrindex::wallet_view`) against a real index while a writer thread
+    /// advances it, and asserts the snapshot invariant that matters: the
+    /// utxos and the coverage height come from ONE moment, so no utxo can
+    /// sit above the coverage height, and the balance is exactly the sum of
+    /// the utxos in that same snapshot.
+    #[test]
+    fn interleaved_index_advance_never_tears_a_wallet_read() {
+        let (script, addr) = p2pkh_script();
+        let idx = TempIndex::new("interleave");
+        let addrs = vec![addr.clone()];
+        {
+            let mut live =
+                crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
+            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
+                .expect("apply h1");
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let dir = idx.dir.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut h = 2u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut live = match crate::addrindex::LiveIndex::open_if_built(&dir) {
+                        Some(l) => l,
+                        None => break,
+                    };
+                    let _ = live.apply(&test_block(h, script.clone(), 1_000_000), h);
+                    h += 1;
+                }
+            })
+        };
+        for _ in 0..100 {
+            let mut conn = idx.conn();
+            let (facts, rows) = crate::addrindex::wallet_view(&mut conn, &addrs).expect("wallet view");
+            let sum: i64 = rows.iter().map(|r| r.value).sum();
+            // the invariant of ONE snapshot: no utxo can be newer than the
+            // coverage height, and the balance IS the sum of that snapshot's
+            // utxos
+            for r in &rows {
+                assert!(
+                    r.height <= facts.coverage_height,
+                    "utxo at h{} above the coverage h{} - the read was torn",
+                    r.height,
+                    facts.coverage_height
+                );
+            }
+            assert_eq!(sum % 1_000_000, 0, "the balance must be a whole number of coins");
+            assert!(facts.coverage_height >= 1);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+    }
+
+    /// A failure AFTER the block's outputs were written must roll the whole
+    /// block back: the index must not keep half of a block.
+    #[test]
+    fn a_mid_apply_failure_rolls_the_block_back() {
+        let (script, _addr) = p2pkh_script();
+        let idx = TempIndex::new("rollback");
+        {
+            let mut live =
+                crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
+            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
+                .expect("apply h1");
+        }
+        let before = idx.facts();
+        // Break the index so the apply fails AFTER the output rows were
+        // written: insert_block writes the outputs and then the tx_addr
+        // rows, and the tx_addr table is gone.
+        {
+            let conn = idx.conn();
+            conn.execute_batch("DROP TABLE tx_addr").expect("drop tx_addr");
+        }
+        {
+            let mut live =
+                crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
+            assert!(
+                live.apply(&test_block(2, script.clone(), 7_000_000), 2).is_err(),
+                "the apply must fail once the tx_addr write cannot land"
+            );
+        }
+        // THE INVARIANT: the failed block left NOTHING behind. The wallet's
+        // unspent total is still the h1 coin alone - the failed block's
+        // 7,000,000 output was rolled back with the rest of that block - and
+        // the index's position did not move.
+        let addr = idx.first_indexed_address();
+        assert_eq!(
+            idx.sum_unspent(&addr),
+            1_000_000,
+            "the failed block's output must be gone"
+        );
+        let after = idx.facts();
+        assert_eq!(
+            after.coverage_height, 1,
+            "a failed apply must not move the index's height"
+        );
+        assert_eq!(
+            after.index_tip_hash, before.index_tip_hash,
+            "a failed apply must not move the index's hash"
+        );
+    }
+
+    /// After a restart the index's position must come back from its own
+    /// meta rows - recovered from REAL applies, not from hand-written rows -
+    /// and the authority rule then works against the recovered position.
+    #[test]
+    fn the_index_position_survives_a_restart() {
+        let (script, _addr) = p2pkh_script();
+        let idx = TempIndex::new("restart");
+        {
+            let mut live =
+                crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
+            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
+                .expect("apply h1");
+            live.apply(&test_block(2, script.clone(), 2_000_000), 2)
+                .expect("apply h2");
+        }
+        // the builder marks the index finished - the production way
+        {
+            let conn = idx.conn();
+            crate::addrindex::set_complete(&conn, true).expect("set complete");
+        }
+        // a fresh connection is what a restarted node gets
+        let reopened = TempIndex { dir: idx.dir.clone() };
+        let facts = reopened.facts();
+        assert_eq!(facts.coverage_height, 2);
+        let block2 = test_block(2, vec![0x76, 0xa9], 2_000_000);
+        let want = crate::legacy::hash9(&{
+            let mut w: Vec<u8> = Vec::new();
+            w.extend_from_slice(&block2.version.to_le_bytes());
+            w.extend_from_slice(&block2.prev_hash);
+            w.extend_from_slice(&block2.merkle_root);
+            w.extend_from_slice(&block2.time.to_le_bytes());
+            w.extend_from_slice(&block2.bits.to_le_bytes());
+            w.extend_from_slice(&block2.nonce.to_le_bytes());
+            w.truncate(80);
+            w
+        });
+        assert_eq!(facts.index_tip_hash, Some(want), "the recovered hash must be the applied block's");
+        assert!(facts.complete, "the index must be finished");
+        let verdict = crate::addrindex::authority(facts, 2, Some(want));
+        assert!(verdict.authoritative, "the recovered position must prove authority");
+    }
+
+    /// A fresh node has no replay snapshot yet - but it DOES have the live
+    /// index. The wallet verbs must answer from it instead of failing.
+    #[test]
+    fn live_index_answers_without_a_replay_snapshot() {
+        let t = StubTip;
+        let w = StubNoSnapshot;
+        let b = StubBlocks { ready: true };
+        let hash = [7u8; 32];
+        let mut idx = TempIndex::new("nosnapshot");
+        idx.seed(2_206_001, hash, true);
+        idx.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
+        let ops = LiveIndexOps {
+            index: idx,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            addresses: vec!["Tlive000000000000000000000000000000".to_string()],
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance"], json!(3236.439612));
+        assert_eq!(info["balance_partial"], json!(false));
+        assert_eq!(info["balance_height"], 2_206_001u64);
+        // there is no replay snapshot behind it, so there is no replay hash -
+        // report null rather than inventing an empty one
+        assert_eq!(info["coverage_hash"], Value::Null);
+    }
+
+    /// With neither a live index nor a snapshot the node must say so, not
+    /// answer 0.
+    #[test]
+    fn no_view_at_all_is_an_error_not_zero() {
+        let t = StubTip;
+        let w = StubNoSnapshot;
+        let b = StubBlocks { ready: true };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        let v = call(&d, "getbalance", json!([]));
+        assert!(v["error"].is_object(), "expected an error, got {}", v);
+    }
+
     #[test]
     fn getinfo_composite_fields() {
         let t = StubTip;
@@ -5134,6 +5620,217 @@ impl NodeOps for StubOps {
     }
     fn ready(&self) -> bool {
         self.live.load(Ordering::Relaxed)
+    }
+}
+
+/// A wallet provider with NO replay snapshot (a fresh node).
+struct StubNoSnapshot;
+impl WalletProvider for StubNoSnapshot {
+    fn balance(&self) -> Option<BalanceView> {
+        None
+    }
+    fn coverage(&self) -> Option<(u64, String)> {
+        None
+    }
+    fn address_entries(&self) -> Vec<AddressEntry> {
+        Vec::new()
+    }
+    fn received_regular(&self, _addr: &str) -> Option<i64> {
+        None
+    }
+    fn is_mine(&self, _addr: &str) -> bool {
+        false
+    }
+    fn utxos(&self) -> Vec<UtxoRow> {
+        Vec::new()
+    }
+}
+
+/// A real P2PKH script and the address it pays to (the index attributes an
+/// output by its script, so the test must use a real one).
+fn p2pkh_script() -> (Vec<u8>, String) {
+    // the exact payable form the index attributes: 76 a9 14 <hash160> 88 ac
+    let h160 = crate::address::hash160(b"tri7-test-key");
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&h160);
+    script.extend_from_slice(&[0x88, 0xac]);
+    let mut payload = [0u8; 21];
+    payload[0] = crate::address::PUBKEY_ADDRESS;
+    payload[1..].copy_from_slice(&h160);
+    let addr = crate::address::payload_to_address(&payload);
+    (script, addr)
+}
+
+/// A real legacy block paying one output to an address - the production
+/// apply path consumes exactly this.
+fn test_block(height: u64, addr_script: Vec<u8>, value: i64) -> crate::legacy::Block {
+    crate::legacy::Block {
+        version: 1,
+        prev_hash: [height as u8; 32],
+        merkle_root: [0x5au8; 32],
+        time: 1_700_000_000 + height as u32,
+        bits: 0x1d00_ffff,
+        nonce: height as u32,
+        vtx: vec![crate::legacy::Tx {
+            version: 1,
+            time: 1_700_000_000 + height as u32,
+            vin: vec![],
+            vout: vec![crate::legacy::Vout { value, script_pubkey: addr_script }],
+            locktime: 0,
+        }],
+        block_sig: vec![],
+    }
+}
+
+/// A REAL address index on disk (the production schema) so the tests
+/// exercise the production facts and the production verdict - a stub that
+/// invented "authoritative" would test nothing.
+struct TempIndex {
+    dir: std::path::PathBuf,
+}
+
+impl TempIndex {
+    fn new(tag: &str) -> TempIndex {
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-idx-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("index dir");
+        // the production path that creates the schema
+        crate::addrindex::begin(&dir).expect("begin index");
+        TempIndex { dir }
+    }
+
+    /// Open the index (the production way - the daemon opens it per call).
+    fn conn(&self) -> rusqlite::Connection {
+        crate::addrindex::open(&crate::addrindex::db_path(&self.dir)).expect("open index")
+    }
+
+    /// Write the index's own bookkeeping: how far it applied, the hash of the
+    /// block it applied there, and whether it is finished.
+    fn seed(&self, height: u64, tip_hash: [u8; 32], complete: bool) {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO meta(k,v) VALUES('height',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [height.to_string()],
+        )
+        .expect("meta height");
+        conn.execute(
+            "INSERT INTO meta(k,v) VALUES('tip_hash',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [crate::addrindex::txid_hex(&tip_hash)],
+        )
+        .expect("meta tip hash");
+        conn.execute(
+            "INSERT INTO meta(k,v) VALUES('complete',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            [if complete { "1" } else { "0" }],
+        )
+        .expect("meta complete");
+    }
+
+    /// The address the index attributed an output to - read back from the
+    /// index, so the test uses the production attribution and not a guess.
+    fn first_indexed_address(&self) -> String {
+        let conn = self.conn();
+        conn.query_row("SELECT addr FROM out LIMIT 1", [], |r| r.get(0))
+            .expect("an indexed output")
+    }
+
+    /// How many unspent outputs the index holds for an address.
+    fn count_unspent(&self, addr: &str) -> i64 {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM out WHERE addr=?1 AND spent_height IS NULL",
+            rusqlite::params![addr],
+            |r| r.get(0),
+        )
+        .expect("count unspent")
+    }
+
+    /// The total value of the unspent outputs the index holds for an address.
+    fn sum_unspent(&self, addr: &str) -> i64 {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT COALESCE(SUM(value),0) FROM out WHERE addr=?1 AND spent_height IS NULL",
+            rusqlite::params![addr],
+            |r| r.get(0),
+        )
+        .expect("sum unspent")
+    }
+
+    /// One unspent output, written through the production schema.
+    fn add_utxo(&self, addr: &str, txid: [u8; 32], n: u32, value: i64, height: u64) {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO out(addr,txid,n,value,height,script,spent_height) \
+             VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+            rusqlite::params![addr, txid.to_vec(), n as i64, value, height as i64, vec![0x76u8, 0xa9]],
+        )
+        .expect("insert out");
+    }
+
+    fn facts(&self) -> crate::addrindex::IndexFacts {
+        crate::addrindex::facts(&self.conn())
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Ops stub that answers the live-spendable verb from a REAL index on disk.
+/// It reports the FACTS (what the index holds and what chain the node
+/// serves); whether that set may be served as the whole wallet is decided by
+/// the production rule in crate::addrindex.
+struct LiveIndexOps {
+    index: TempIndex,
+    chain_tip: u64,
+    chain_tip_hash: Option<[u8; 32]>,
+    addresses: Vec<String>,
+}
+
+impl NodeOps for LiveIndexOps {
+    fn call(&self, method: &str, _params: &Value) -> Result<Value, (i64, String)> {
+        match method {
+            "getwalletspendable" => {
+                let conn = self.index.conn();
+                let rows = crate::addrindex::utxos(&conn, &self.addresses)
+                    .map_err(|e| (-1, e))?;
+                let balance: i64 = rows.iter().map(|r| r.value).sum();
+                let f = crate::addrindex::facts(&conn);
+                let utxos: Vec<Value> = rows
+                    .iter()
+                    .map(|u| {
+                        json!({
+                            "txid": crate::addrindex::txid_hex(&u.txid),
+                            "n": u.n,
+                            "address": u.address,
+                            "script_hex": u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                            "value_sats": u.value,
+                            "height": u.height,
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "balance_sats": balance,
+                    "utxos": utxos,
+                    "index_height": f.coverage_height,
+                    "index_tip_hash": f.index_tip_hash.map(|h| crate::addrindex::txid_hex(&h)),
+                    "chain_tip": self.chain_tip,
+                    "chain_tip_hash": self.chain_tip_hash.map(|h| crate::addrindex::txid_hex(&h)),
+                    "complete": f.complete,
+                }))
+            }
+            _ => Err((-3, format!("stub: unhandled {}", method))),
+        }
+    }
+    fn ready(&self) -> bool {
+        true
     }
 }
 

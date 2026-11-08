@@ -5812,6 +5812,74 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     .map_err(|e| (-1, e))?;
                 Ok(serde_json::json!(sig))
             }
+            // The wallet's SPENDABLE set from the live address index.
+            //
+            // The index is applied on every accepted block, so it follows the
+            // tip; the replay snapshot stops at whatever height the chain
+            // replay reached (an archive seam, or a hole in the block store).
+            // This is the wallet-scoped view of the index: the same unspent
+            // coins the chain shows, so a spend built from it can never be a
+            // double-spend of a coin the replay thinks is gone.
+            "getwalletspendable" => {
+                let wl = self.wl.lock().unwrap();
+                let Some(wl) = wl.as_ref() else {
+                    return Err((-1, "wallet live UTXO view not ready yet".into()));
+                };
+                let addrs: Vec<String> =
+                    wl.wallet.keys.iter().map(|k| k.address.clone()).collect();
+                let path = tri7_core::addrindex::db_path(&self.state_dir);
+                if !path.exists() {
+                    return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
+                }
+                let mut c = tri7_core::addrindex::open(&path).map_err(|e| (-1, e))?;
+                // ONE transaction: the utxos and the index's facts come from
+                // the same snapshot, so a block applied mid-read cannot tear
+                // the answer.
+                let (facts, rows) =
+                    tri7_core::addrindex::wallet_view(&mut c, &addrs).map_err(|e| (-1, e))?;
+                let balance: i64 = rows.iter().map(|r| r.value).sum();
+                let utxos: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "txid": tri7_core::addrindex::txid_hex(&u.txid),
+                            "n": u.n,
+                            "address": u.address,
+                            "script_hex": u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                            "value_sats": u.value,
+                            "height": u.height,
+                        })
+                    })
+                    .collect();
+                // The index is applied on every accepted block, so it tracks
+                // the tip - but it is only AUTHORITATIVE when the library
+                // rule says so: a FINISHED index (`complete`) that has
+                // applied EXACTLY the chain this node serves (the same
+                // height AND the same block hash the index recorded). A
+                // partial build, an index that trails the tip, or an index
+                // on another chain does not know every coin: its set must
+                // not be served as the whole wallet.
+                // The FACTS, not a verdict: the chain this node serves (its
+                // tip height and hash) next to the index's own facts (the
+                // height it applied and the hash it recorded for that block).
+                // The rule that turns facts into "may be served as the whole
+                // spendable set" lives in the library
+                // (addrindex::authority), so the daemon and the tests cannot
+                // disagree about it.
+                let (tip_h, tip_entry) = self.tip();
+                let chain_hash: Option<[u8; 32]> = tip_entry
+                    .as_ref()
+                    .map(|e| <[u8; 32]>::from(e.hash));
+                Ok(serde_json::json!({
+                    "balance_sats": balance,
+                    "utxos": utxos,
+                    "index_height": facts.coverage_height,
+                    "index_tip_hash": facts.index_tip_hash.map(|h| tri7_core::addrindex::txid_hex(&h)),
+                    "chain_tip": tip_h,
+                    "chain_tip_hash": chain_hash.map(|h| tri7_core::addrindex::txid_hex(&h)),
+                    "complete": facts.complete,
+                }))
+            }
             // Chain-wide address index (legacy -addressindex=1 parity). Absent
             // index -> the exact legacy failure text, never a wallet-scoped
             // shortcut that would answer differently.
@@ -7045,7 +7113,13 @@ fn handle_message(
                         live: true,
                     },
                 )?;
+                // The chain advances FIRST: the index may only be applied
+                // once the block is part of the chain this node serves. The
+                // index records the hash of the block it applied, so the
+                // wallet is served from it only when that hash matches the
+                // chain's own tip hash.
                 advance_with_block(st, rpc, stats, &b, &paths)?;
+                addrindex_apply(&b, height_abs);
                 stats.blocks_validated_live += 1;
                 outstanding.remove(&hash);
                 // DURABILITY: append the accepted block to the store so the
@@ -7059,7 +7133,6 @@ fn handle_message(
                         height_abs, e
                     ));
                 }
-                addrindex_apply(&b, height_abs);
                 let file = st.to_file();
                 // The block is already applied in memory and in the store; a
                 // failed checkpoint write only means the on-disk resume point
