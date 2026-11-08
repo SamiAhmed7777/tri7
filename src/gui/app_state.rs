@@ -2328,6 +2328,7 @@ impl AppState {
                                 legacy_kind: String::new(),
                                 coinstake: r.get("kind").and_then(|x| x.as_str()) == Some("coinstake"),
                                 stake_principal: 0,
+                                input_addresses: Vec::new(),
                                 stake_net: r.get("stake_net").and_then(|x| x.as_i64()),
                             };
                             out.push(rec);

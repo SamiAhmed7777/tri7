@@ -55,6 +55,13 @@ pub struct HistoryRec {
     /// row needs principal + reward, not the reward alone.
     #[serde(default)]
     pub stake_principal: i64,
+    /// OUR INPUT ADDRESSES when this tx spent our coins (the txids whose
+    /// prevouts the generator resolved from its own rows map). Empty = the tx
+    /// did not spend our coins, OR the row predates this field (older
+    /// history.json files — listaddressgroupings then contributes output
+    /// singletons only for that tx; a rescan completes the input side).
+    #[serde(default)]
+    pub input_addresses: Vec<String>,
     /// legacy transactionrecord.cpp decomposition for a stake:
     /// credit = nNet = GetCredit() - GetDebit() — the REWARD only, not the
     /// whole stake output (one row per coinstake, subsequent our-outputs
@@ -331,12 +338,19 @@ fn apply_block(
 
         // spends of our coins
         let mut spent_total: i64 = 0;
+        // addresses our inputs paid FROM (resolved from the rows map — the
+        // prevouts of an ours-vin are by definition outputs we received).
+        // Consumed by listaddressgroupings' spend branch.
+        let mut spent_from: Vec<String> = Vec::new();
         for vin in &tx.vin {
             if vin.prev_n == u32::MAX {
                 continue;
             }
             if let Some(idx) = owned.get(&(vin.prev_hash, vin.prev_n)).copied() {
                 if let Some(row) = rows.get_mut(idx) {
+                    if !spent_from.contains(&row.address) {
+                        spent_from.push(row.address.clone());
+                    }
                     if !row.spent {
                         row.spent = true;
                         spent_total += row.value_sats;
@@ -394,6 +408,9 @@ fn apply_block(
                     } else {
                         0
                     },
+                    // our inputs' addresses (empty when this tx spent nothing
+                    // of ours)
+                    input_addresses: spent_from.clone(),
                     // filled after the outputs loop (needs recv_total +
                     // spent_total); None keeps old files loadable
                     stake_net: None,
@@ -433,6 +450,7 @@ fn apply_block(
                 legacy_kind: "send".into(),
                 coinstake: false,
                 stake_principal: 0,
+                input_addresses: spent_from.clone(),
                 stake_net: None,
             });
         }
@@ -530,6 +548,7 @@ mod tests {
                 legacy_kind: "recv_with".into(),
                 coinstake: false,
                 stake_principal: 0,
+                input_addresses: Vec::new(),
                 stake_net: None,
             }],
         };
@@ -695,6 +714,160 @@ mod tests {
         assert_eq!(s2[1].value_sats, 13_373_003);
         assert_eq!(s2[0].stake_net, Some(80));
         assert_eq!(s2[1].stake_net, Some(80));
+    }
+
+    /// listaddressgroupings' spend branch feeds on HistoryRec.input_addresses:
+    /// every row of a tx that spent our coins carries the addresses those
+    /// inputs paid FROM (resolved from the rows map), rows of receive-only
+    /// txs carry none.
+    #[test]
+    fn spend_rows_carry_the_input_addresses() {
+        use crate::legacy::{Block, Tx, Vin, Vout};
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[12u8; 32]).unwrap();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec();
+        let payload = crate::address::pubkey_payload(&pubkey);
+        let addr = crate::address::payload_to_address(&payload);
+        let mut by_payload = HashMap::new();
+        by_payload.insert(payload.clone(), addr.clone());
+        let mut by_pubkey = HashMap::new();
+        by_pubkey.insert(pubkey.clone(), addr.clone());
+        let p2pkh = {
+            let mut s = vec![0x76, 0xa9, 0x14];
+            s.extend_from_slice(&payload[1..21]);
+            s.extend_from_slice(&[0x88, 0xac]);
+            s
+        };
+
+        let mut rows: Vec<HistoryRec> = Vec::new();
+        let mut owned: HashMap<([u8; 32], u32), usize> = HashMap::new();
+
+        // h100: coinbase paying us 10 TRI
+        let coinbase = Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout {
+                value: 10_000_000,
+                script_pubkey: p2pkh.clone(),
+            }],
+            locktime: 0,
+        };
+        let cb_block = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_000,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![coinbase],
+            block_sig: Vec::new(),
+        };
+        apply_block(&cb_block, 100, &by_payload, &by_pubkey, &mut rows, &mut owned);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].input_addresses.is_empty(), "receive-only tx has no input side");
+
+        // h101: we spend that coin — pay a FOREIGN address 4 TRI, change 6
+        // back to us (recv < spent => the debit "send" row is emitted)
+        let spend = Tx {
+            version: 1,
+            time: 1_700_000_100,
+            vin: vec![Vin {
+                prev_hash: cb_block.vtx[0].hash(),
+                prev_n: 0,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 6_000_000,
+                    script_pubkey: p2pkh.clone(),
+                },
+                Vout {
+                    value: 4_000_000,
+                    script_pubkey: {
+                        // foreign payload (nobody's key)
+                        let mut s = vec![0x76, 0xa9, 0x14];
+                        s.extend_from_slice(&[0xAB; 20]);
+                        s.extend_from_slice(&[0x88, 0xac]);
+                        s
+                    },
+                },
+            ],
+            locktime: 0,
+        };
+        let spend_block = Block {
+            version: 1,
+            prev_hash: [2u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_100,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![empty_tx(), spend],
+            block_sig: Vec::new(),
+        };
+        apply_block(
+            &spend_block,
+            101,
+            &by_payload,
+            &by_pubkey,
+            &mut rows,
+            &mut owned,
+        );
+        assert_eq!(rows.len(), 3, "change row + foreign-free send row appended");
+        let send = rows.iter().find(|r| r.direction == "out").unwrap();
+        assert_eq!(
+            send.input_addresses,
+            vec![addr.clone()],
+            "the send row carries the address the spent coin came from"
+        );
+        let change = rows
+            .iter()
+            .find(|r| r.direction == "in" && r.height == 101)
+            .unwrap();
+        assert_eq!(
+            change.input_addresses,
+            vec![addr],
+            "the change row of the spend tx carries the same input side"
+        );
+        assert_eq!(
+            rows[0].input_addresses,
+            Vec::<String>::new(),
+            "the earlier receive row is untouched"
+        );
+    }
+
+    /// old history.json files predate input_addresses: serde(default) must
+    /// load them (empty vec), and the field roundtrips on new files.
+    #[test]
+    fn history_rows_without_input_addresses_still_load() {
+        let old = serde_json::json!({
+            "txid": "ab".repeat(32),
+            "height": 100,
+            "time": 1_700_000_000u32,
+            "value_sats": 500,
+            "address": "T",
+            "direction": "in",
+            "kind": "regular",
+            "spent": false,
+            "idx": 0,
+            "legacy_kind": "recv_with",
+            "coinstake": false,
+            "stake_principal": 0,
+            "stake_net": null,
+        });
+        let rec: HistoryRec = serde_json::from_value(old).unwrap();
+        assert!(rec.input_addresses.is_empty());
+        let back = serde_json::to_value(&rec).unwrap();
+        let re: HistoryRec = serde_json::from_value(back).unwrap();
+        assert_eq!(re.input_addresses, rec.input_addresses);
     }
 
     /// minimal non-coinbase filler for vtx[0] of test blocks (produces no

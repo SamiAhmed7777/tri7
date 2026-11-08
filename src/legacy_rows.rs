@@ -683,6 +683,7 @@ mod csv_tests {
             legacy_kind: String::new(),
             coinstake: false,
             stake_principal: 0,
+            input_addresses: Vec::new(),
             stake_net: None,
         };
         let r = row_from_history(&u, 110);

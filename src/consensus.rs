@@ -32,6 +32,17 @@ pub const COIN: i64 = 1_000_000;
 /// boundary and block-signature requirement boundary.
 pub const LAST_HARDCODED_CHECKPOINT: usize = 9001;
 
+/// The compiled trust anchor of everything below it: the HIGHEST entry of the
+/// legacy hardcoded checkpoint map (checkpoints.cpp:82, "canonical tip
+/// (snapshot anchor)") — Checkpoints::GetTotalBlocksEstimate() on the deployed
+/// v6 client. Canonical home so the follower (follow_tip) and the RPC
+/// getcheckpoint verb cannot drift. h2203924 hash daemon-verified 2026-11-03.
+pub const CHECKPOINT_HORIZON: u64 = 2_203_924;
+/// getblockhash(CHECKPOINT_HORIZON) — the block every fetch/backfill path must
+/// hash to before trusting the history below it (strict checkpoint policy).
+pub const CHECKPOINT_ANCHOR_DISPLAY: &str =
+    "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14";
+
 // ---------------------------------------------------------------------------
 // Classification (spec §1)
 // ---------------------------------------------------------------------------

@@ -2005,6 +2005,7 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
         legacy_kind: if coinstake { "mined" } else { "recv_with" }.into(),
         coinstake,
         stake_principal: 0,
+        input_addresses: Vec::new(),
         stake_net: Some(net),
     };
     let cache = HistoryCache {
