@@ -62,6 +62,7 @@ fn options_apply_persists_even_when_the_node_fee_push_fails() {
 fn accepting_fee_node() -> (
     String,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::Mutex<String>>,
     std::thread::JoinHandle<usize>,
 ) {
     use std::io::{Read, Write};
@@ -72,6 +73,9 @@ fn accepting_fee_node() -> (
     // loaded CI runner (the second call arrived after the server had exited)
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
+    // what the stand-in saw - the test asserts on it
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen_flag = seen.clone();
     let handle = std::thread::spawn(move || {
         listener.set_nonblocking(true).expect("nonblocking");
         let mut served = 0usize;
@@ -81,6 +85,10 @@ fn accepting_fee_node() -> (
                 Ok((mut s, _)) => {
                     idle = 0;
                     served += 1;
+                    // On BSD/macOS an accepted socket INHERITS the listener's
+                    // O_NONBLOCK (Linux does not) - without this the read
+                    // below returns immediately with no data.
+                    s.set_nonblocking(false).expect("blocking socket");
                     // Read the request properly: a single read() can return
                     // a partial body (it happened on the macOS runner).
                     // Each read is bounded by the socket read timeout (5s) and
@@ -118,17 +126,15 @@ fn accepting_fee_node() -> (
                         }
                     };
                     let acc = String::from_utf8_lossy(&raw).to_string();
-                    let body = acc.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-                    // the stand-in must be answering a REAL settxfee request
-                    let method = serde_json::from_str::<serde_json::Value>(body)
-                        .ok()
-                        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()));
-                    assert!(
-                        complete && method.as_deref() == Some("settxfee"),
-                        "the GUI must call settxfee, got method {:?}; body: {}",
-                        method,
-                        body.chars().take(200).collect::<String>()
-                    );
+                    // record what the stand-in saw; the TEST asserts on it, so
+                    // a problem can never panic this thread and leave the
+                    // client hanging
+                    if let Ok(mut slot) = seen_flag.lock() {
+                        *slot = acc.clone();
+                    }
+                    // `complete` says whether the body was fully parsed; the
+                    // test asserts on the recorded request itself
+                    debug_assert!(complete || !acc.is_empty());
                     let body = r#"{"result":true,"error":null}"#;
                     let http = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -147,7 +153,7 @@ fn accepting_fee_node() -> (
         }
         served
     });
-    (format!("127.0.0.1:{}", port), stop, handle)
+    (format!("127.0.0.1:{}", port), stop, seen, handle)
 }
 
 #[test]
@@ -167,7 +173,7 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
     );
 
     // point the GUI at a node that ACCEPTS settxfee, then apply again
-    let (addr, stop, server) = accepting_fee_node();
+    let (addr, stop, seen, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr);
     st.save_options_action().expect("apply");
     // the successful push must have CLEARED the stale notice
@@ -182,6 +188,19 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let served = server.join().unwrap();
     assert!(served >= 1, "the mock node must have been called");
+    // the stand-in must have been answering a REAL settxfee request
+    let req = seen.lock().unwrap().clone();
+    let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    let method = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()));
+    assert_eq!(
+        method.as_deref(),
+        Some("settxfee"),
+        "the GUI must call settxfee, got {:?}; body: {}",
+        method,
+        body.chars().take(200).collect::<String>()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -195,7 +214,7 @@ fn saved_fee_is_pushed_when_the_node_appears() {
     assert!(st.options_fee_notice.is_some(), "no node -> notice");
     assert!(!st.fee_pushed_to_node, "nothing pushed yet");
 
-    let (addr, stop, server) = accepting_fee_node();
+    let (addr, stop, _seen, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr);
     st.push_saved_fee_when_node_appears();
     assert!(st.fee_pushed_to_node, "the saved fee must be pushed");
@@ -214,7 +233,7 @@ fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
     // after a successful push the "pushed" flag must not freeze a NEW fee
     // value that fails - the new value stays eligible for the automatic retry.
     let (mut st, dir) = options_state_with_unreachable_node("retry");
-    let (addr, stop, server) = accepting_fee_node();
+    let (addr, stop, _seen, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr.clone());
 
     // 1. a successful push of 0.000200
