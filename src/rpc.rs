@@ -166,6 +166,10 @@ pub const NATIVE_METHODS: &[&str] = &[
     // report (rpcblockchain.cpp:665, served from the compiled-in anchor) ----
     "listaddressgroupings",
     "getcheckpoint",
+    // ---- legacy parity 2026-11-08 (workqueue item 9 RPC-P1b): wallet repair
+    // + unconfirmed-send resend, both routed to the LIVE ops engine ----
+    "repairwallet",
+    "resendtx",
     "stop",
 ];
 
@@ -228,6 +232,11 @@ pub const OPS_METHODS: &[&str] = &[
     "getnewpubkey",
     "addmultisigaddress",
     "addredeemscript",
+    // ---- legacy parity 2026-11-08 (workqueue item 9 RPC-P1b): repairwallet
+    // rebuilds the live view against the store; resendtx re-announces the
+    // wallet's recorded unconfirmed sends. Live-engine verbs, never early. ----
+    "repairwallet",
+    "resendtx",
     "stop",
 ];
 
@@ -2956,6 +2965,21 @@ pub fn sats_to_tri(sats: i64) -> f64 {
     sats as f64 / 1_000_000.0
 }
 
+/// Legacy `ValueFromAmount` (FormatMoney, util.cpp) parity: sign + integer
+/// part + ALWAYS six decimals — a STRING, never a JSON number (the legacy
+/// RPC answered repairwallet/checkwallet with formatted strings like
+/// "0.039590"). Used by repairwallet's "amount affected by repair".
+pub fn legacy_format_money(sats: i64) -> String {
+    let neg = sats < 0;
+    let abs = sats.unsigned_abs();
+    format!(
+        "{}{}.{:06}",
+        if neg { "-" } else { "" },
+        abs / 1_000_000,
+        abs % 1_000_000
+    )
+}
+
 /// Legacy DateTimeStrFormat (util.h:425-428): "%Y-%m-%d %H:%M:%S UTC" over
 /// gmtime — the format `getcheckpoint.timestamp` reports. Hand-rolled
 /// civil-from-days (Hinnant's algorithm) because the repo carries no chrono
@@ -4519,6 +4543,33 @@ mod tests {
         assert_eq!(fmt_utc_timestamp(1_700_000_000), "2023-11-14 22:13:20 UTC");
         // leap-year day: 2024-02-29 13:20:00 UTC
         assert_eq!(fmt_utc_timestamp(1_709_212_800), "2024-02-29 13:20:00 UTC");
+    }
+
+    // ---- repairwallet / resendtx (workqueue item 9 RPC-P1b) ----
+
+    #[test]
+    fn legacy_format_money_matches_legacy_formatmoney() {
+        // ValueFromAmount vectors: always six decimals, "-" only for negatives
+        assert_eq!(legacy_format_money(0), "0.000000");
+        assert_eq!(legacy_format_money(39_590), "0.039590");
+        assert_eq!(legacy_format_money(-100), "-0.000100");
+        assert_eq!(legacy_format_money(12_345_600), "12.345600");
+        assert_eq!(legacy_format_money(-12_345_600), "-12.345600");
+        assert_eq!(legacy_format_money(3_381_763_635), "3381.763635");
+        assert_eq!(legacy_format_money(1_000_000), "1.000000");
+        assert_eq!(legacy_format_money(999_999), "0.999999");
+    }
+
+    #[test]
+    fn repairwallet_and_resendtx_are_native_and_ops_routed() {
+        // item 9 RPC-P1b: both verbs live ONLY in the live ops engine
+        // (repairwallet rewrites the in-memory live view, resendtx re-accepts
+        // into the pool) — never passive, never early.
+        for m in ["repairwallet", "resendtx"] {
+            assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+            assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+            assert!(!OPS_EARLY.contains(&m), "{m} must not answer before the live view is ready");
+        }
     }
 
     #[test]

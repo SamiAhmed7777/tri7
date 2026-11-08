@@ -4234,6 +4234,98 @@ fn tx_is_coinbase(block: &Block) -> bool {
         .unwrap_or(false)
 }
 
+/// Walk back from `hint` to the highest height a block BODY actually exists
+/// for (cap 5_000). Returns (replay_tip, walked_back). Shared by the wallet
+/// seed thread and the repairwallet rebuild: the tip block arrives as a
+/// HEADER first and its body lands a beat later, and the store's newest body
+/// can sit far below the tip when recent blocks exist only in the live
+/// tip/body cache (mined here, appended in memory).
+fn newest_replayable_tip(has_body: &dyn Fn(u64) -> bool, base: u64, hint: u64) -> (u64, u64) {
+    let mut tip = hint;
+    let mut back = 0u64;
+    while back < 5_000 && tip > base {
+        if has_body(tip) {
+            break;
+        }
+        tip -= 1;
+        back += 1;
+    }
+    (tip, back)
+}
+
+/// repairwallet arity (rpcwallet.cpp:1804 parity): the legacy verb throws on
+/// ANY parameter, so tri7 refuses with -8.
+fn repairwallet_params_ok(params: &serde_json::Value) -> Result<(), (i64, String)> {
+    if params.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+        return Err((-8, "repairwallet takes no parameters".into()));
+    }
+    Ok(())
+}
+
+/// resendtx arity (rpcwallet.cpp:1826 parity): the legacy verb accepted one
+/// (ignored) parameter and threw on more.
+fn resendtx_params_ok(params: &serde_json::Value) -> Result<(), (i64, String)> {
+    if params.as_array().map(|a| a.len() > 1).unwrap_or(false) {
+        return Err((-8, "resendtx takes at most one (ignored) parameter".into()));
+    }
+    Ok(())
+}
+
+/// What repairwallet found by diffing the wallet's live view against the
+/// authoritative store replay (wallet-owned outputs only). Mirrors the two
+/// FixSpentCoins directions: a coin the wallet view still lists but the
+/// chain no longer holds is the legacy "spent coin"; a coin the replay
+/// holds but the view had lost is the legacy "lost coin".
+struct RepairDiff {
+    /// view said unspent, chain says spent/absent: (outpoint, value)
+    phantom: Vec<((Hash, u32), i64)>,
+    /// chain says unspent, view had missed it: (outpoint, value)
+    lost: Vec<((Hash, u32), i64)>,
+}
+
+impl RepairDiff {
+    fn count(&self) -> usize {
+        self.phantom.len() + self.lost.len()
+    }
+    /// legacy nBalanceInQuestion: the sum of the mismatched output values
+    fn amount(&self) -> i64 {
+        self.phantom
+            .iter()
+            .chain(self.lost.iter())
+            .map(|(_, v)| *v)
+            .sum()
+    }
+}
+
+fn repair_diff(
+    old: &HashMap<(Hash, u32), LiveOut>,
+    fresh: &HashMap<(Hash, u32), LiveOut>,
+    owns: &dyn Fn(&LiveOut) -> bool,
+) -> RepairDiff {
+    let mut d = RepairDiff {
+        phantom: Vec::new(),
+        lost: Vec::new(),
+    };
+    // deterministic order (the report is for humans and tests)
+    let mut keys: Vec<&(Hash, u32)> = old.keys().collect();
+    keys.sort();
+    for k in keys {
+        let o = &old[k];
+        if owns(o) && !fresh.contains_key(k) {
+            d.phantom.push((*k, o.value));
+        }
+    }
+    let mut keys: Vec<&(Hash, u32)> = fresh.keys().collect();
+    keys.sort();
+    for k in keys {
+        let o = &fresh[k];
+        if owns(o) && !old.contains_key(k) {
+            d.lost.push((*k, o.value));
+        }
+    }
+    d
+}
+
 impl WalletLive {
     /// Scan the disk store from `base` to `tip` and build the exact live
     /// set. Requires the store index ready (heights_ok).
@@ -5279,7 +5371,12 @@ impl OpsAdapter {
 
     /// Accept into the pool and announce — the same path as
     /// sendrawtransaction, so a built spend cannot bypass pool validation.
+    /// Lock order: record_lock is lock #1 (before pool/wl) — the same order
+    /// resendtx uses, so the record's read-modify-write can never deadlock
+    /// against pool/wl, and a send concurrent with a resend pass cannot be
+    /// dropped from the record by the survivors rewrite.
     fn relay_built(&self, build: &SpendBuilt) -> Result<serde_json::Value, (i64, String)> {
+        let record_guard = tri7_core::sent_txs::record_lock();
         let raw = tri7_core::p2p::hex_decode(&build.hex)
             .map_err(|e| (-1, format!("built tx hex: {e}")))?;
         let mut pool = self.pool.lock().unwrap();
@@ -5303,6 +5400,29 @@ impl OpsAdapter {
             "BROADCAST: {} ({} bytes, fee {} sats) — inv to {} peer(s)",
             rep.txid, rep.n_bytes, rep.fee_sats, peers_n
         ));
+        // Record the send for `resendtx` (the pool is in-memory; without this
+        // a restart forgets every unconfirmed wallet send). BEST-EFFORT: the
+        // tx is already relayed, so a record failure must not fail the send.
+        // Runs under record_guard (taken first) so a concurrent resend pass
+        // rewriting the record cannot drop this entry.
+        if let Some(wp) = &self.wallet_path {
+            let rec = tri7_core::sent_txs::path_for(wp);
+            drop(pool);
+            drop(wl);
+            match tri7_core::sent_txs::record(&rec, &build.txid, &build.hex) {
+                Ok(n) => log(&format!(
+                    "sent-tx record: {} (record now {} entry(s) at {})",
+                    build.txid,
+                    n,
+                    rec.display()
+                )),
+                Err(e) => log(&format!(
+                    "sent-tx record FAILED for {} (send unaffected): {e}",
+                    build.txid
+                )),
+            }
+        }
+        drop(record_guard);
         Ok(serde_json::json!(rep.txid))
     }
 
@@ -5424,6 +5544,196 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     return Ok(dryrun_json(&build));
                 }
                 self.relay_built(&build)
+            }
+            // Legacy repairwallet (rpcwallet.cpp:1804): FixSpentCoins with
+            // repair enabled, replying {"wallet check passed": true} or
+            // {"mismatched spent coins": N, "amount affected by repair":
+            // FormatMoney}. tri7 keeps no persisted per-output spent flags —
+            // its wallet belief IS the in-memory live view — so the repair
+            // REBUILDS that view from the block store (the authoritative
+            // replay over the same window the seed used) and diffs the
+            // wallet-owned sets. This heals the documented "fast catch-up
+            // leaves the wallet live view wrong; a restart heals it" class
+            // without the restart. The wl lock is held across seed+diff+swap
+            // so block acceptance cannot interleave; one ~4600-entry window
+            // replays in well under a second.
+            "repairwallet" => {
+                repairwallet_params_ok(&params)?;
+                let Some(store) = self.store.as_deref() else {
+                    return Err((
+                        -1,
+                        "repairwallet needs the block store (node started without a blocks file)"
+                            .into(),
+                    ));
+                };
+                let mut wl = self
+                    .wl
+                    .lock()
+                    .map_err(|_| (-1, "wallet live view mutex poisoned".to_string()))?;
+                let w = wl
+                    .as_mut()
+                    .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+                // replay from the EARLIEST claimed base (a forkchoice
+                // rollback can walk the chain-state base back below the
+                // view's seed base; replaying only from the view's base
+                // would then miss the restored branch)
+                let (base, tip_hint) = match self.st.try_lock() {
+                    Ok(g) => (w.base.min(g.base), g.tip_height),
+                    Err(_) => (w.base, self.mirror.height()),
+                };
+                let has_body = |h: u64| store.block_by_height(h).ok().flatten().is_some();
+                let (replay_tip, back) = newest_replayable_tip(&has_body, base, tip_hint);
+                if replay_tip <= base {
+                    return Err((
+                        -1,
+                        format!(
+                            "repairwallet: no stored bodies in h{}..h{} — store behind the tip, retry when bodies land",
+                            base, tip_hint
+                        ),
+                    ));
+                }
+                let fresh = WalletLive::seed(store, w.wallet.clone(), base, replay_tip)
+                    .map_err(|e| (-1, format!("repairwallet replay: {e}")))?;
+                let diff = {
+                    let owns = |o: &LiveOut| w.owns(o);
+                    repair_diff(&w.live, &fresh.live, &owns)
+                };
+                let n = diff.count();
+                let amt = diff.amount();
+                log(&format!(
+                    "repairwallet: rebuilt live view h{}..h{} (walked back {} from tip h{}) — {} owned-output mismatch(es) totalling {} sats ({} phantom, {} lost){}",
+                    base,
+                    replay_tip,
+                    back,
+                    tip_hint,
+                    n,
+                    amt,
+                    diff.phantom.len(),
+                    diff.lost.len(),
+                    if n == 0 { " — wallet check passed" } else { " — repaired" },
+                ));
+                w.live = fresh.live;
+                // the map now covers [base, replay_tip]: keep the view's
+                // claimed base consistent with what was actually replayed
+                // (base is the min of the view's seed base and the
+                // chain-state base — a rollback can push it lower)
+                w.base = base;
+                if n == 0 {
+                    Ok(serde_json::json!({ "wallet check passed": true }))
+                } else {
+                    Ok(serde_json::json!({
+                        "mismatched spent coins": n,
+                        "amount affected by repair":
+                            tri7_core::rpc::legacy_format_money(amt),
+                    }))
+                }
+            }
+            // Legacy resendtx (rpcwallet.cpp:1826): ResendWalletTransactions(true),
+            // replying null. tri7's pool is in-memory, so unconfirmed wallet
+            // sends would otherwise be forgotten on every restart — relay_built
+            // records each send beside the wallet (sent_txs.json) and this
+            // pass re-accepts every recorded tx into the pool (duplicate
+            // accept = idempotent success) and re-announces it to peers. A
+            // recorded tx that has since MINED is pruned from the record; a
+            // transient pool rejection keeps its entry for the next pass.
+            "resendtx" => {
+                resendtx_params_ok(&params)?;
+                let Some(wp) = &self.wallet_path else {
+                    return Err((-1, "resendtx: no wallet wired".into()));
+                };
+                let rec_path = tri7_core::sent_txs::path_for(wp);
+                // record_lock is lock #1 and spans load→save: a send relayed
+                // concurrently by relay_built (same order) appends under the
+                // same lock and the survivors rewrite cannot drop it.
+                let record_guard = tri7_core::sent_txs::record_lock();
+                let entries = tri7_core::sent_txs::load(&rec_path)
+                    .map_err(|e| (-1, format!("resendtx: {e}")))?;
+                if entries.is_empty() {
+                    log("resendtx: no recorded unconfirmed wallet sends — nothing to do");
+                    return Ok(serde_json::Value::Null);
+                }
+                let mut pool = self
+                    .pool
+                    .lock()
+                    .map_err(|_| (-1, "pool mutex poisoned".to_string()))?;
+                let wl = self
+                    .wl
+                    .lock()
+                    .map_err(|_| (-1, "wallet live view mutex poisoned".to_string()))?;
+                let w = wl
+                    .as_ref()
+                    .ok_or_else(|| (-1, "wallet live UTXO view not ready yet".to_string()))?;
+                let view = WalletThenStoreUtxoView {
+                    live: &w.live,
+                    store: self.store.as_deref(),
+                };
+                let now = now_secs() as i64;
+                let (mut resent, mut pruned, mut kept) = (0usize, 0usize, 0usize);
+                let mut survivors: Vec<tri7_core::sent_txs::SentTxEntry> =
+                    Vec::with_capacity(entries.len());
+                for e in &entries {
+                    let raw = match tri7_core::p2p::hex_decode(&e.hex) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            log(&format!("resendtx: {} corrupt hex ({err}) — pruned", e.txid));
+                            pruned += 1;
+                            continue;
+                        }
+                    };
+                    let txid_internal =
+                        tri7_core::p2p::display_to_internal(&e.txid).unwrap_or([0u8; 32]);
+                    match pool.accept(&raw, &view, now) {
+                        Ok(rep) => {
+                            if let Ok(mut q) = self.announce.lock() {
+                                q.push_back(txid_internal);
+                            }
+                            log(&format!(
+                                "resendtx: relaying wtx {} ({} bytes, fee {} sats)",
+                                &rep.txid[..rep.txid.len().min(10)],
+                                rep.n_bytes,
+                                rep.fee_sats
+                            ));
+                            resent += 1;
+                            survivors.push(e.clone());
+                        }
+                        Err(err) => {
+                            // classify the rejection: mined (confirm/done →
+                            // prune) or transient (keep). The store lookup
+                            // happens ONLY here — a successful accept never
+                            // pays for it.
+                            let mined = matches!(
+                                self.store
+                                    .as_deref()
+                                    .map(|s| s.tx_by_id(&txid_internal)),
+                                Some(Ok(Some(_)))
+                            );
+                            if mined {
+                                log(&format!(
+                                    "resendtx: {} already mined — pruned from the record",
+                                    &e.txid[..e.txid.len().min(10)]
+                                ));
+                                pruned += 1;
+                            } else {
+                                log(&format!(
+                                    "resendtx: {} kept for the next pass (pool: {err})",
+                                    &e.txid[..e.txid.len().min(10)]
+                                ));
+                                kept += 1;
+                                survivors.push(e.clone());
+                            }
+                        }
+                    }
+                }
+                drop(pool);
+                drop(wl);
+                tri7_core::sent_txs::save(&rec_path, &survivors)
+                    .map_err(|e| (-1, format!("resendtx: rewrite record: {e}")))?;
+                drop(record_guard);
+                log(&format!(
+                    "resendtx: {resent} resent, {kept} kept (transient), {pruned} pruned (mined/corrupt); record now {} entry(s)",
+                    survivors.len()
+                ));
+                Ok(serde_json::Value::Null)
             }
             // Legacy signmessage <address> <message>: the same implementation
             // the GUI Sign page uses.
@@ -8001,26 +8311,10 @@ fn main() {
                 // tip moving). Seeding base..tip hard-failed on that missing
                 // tail body and retried forever (sami-pc: "store missing block
                 // body at h<tip>"). Walk back to the highest height the store
-                // actually holds a body for.
-                let mut seed_tip = tip;
-                let mut back = 0u64;
-                // walk back until a body is actually present: the store's last
-                // body can be far below the tip when recent blocks exist only
-                // in the live tip/body cache (mined here, appended in memory).
-                // A 64-block window was not enough and made the wallet show a
-                // zero balance forever ("all my transactions rejected").
-                while back < 5_000 && seed_tip > base {
-                    if store2
-                        .block_by_height(seed_tip)
-                        .ok()
-                        .flatten()
-                        .is_some()
-                    {
-                        break;
-                    }
-                    seed_tip -= 1;
-                    back += 1;
-                }
+                // actually holds a body for — the same clamp repairwallet's
+                // rebuild uses (newest_replayable_tip).
+                let has_body = |h: u64| store2.block_by_height(h).ok().flatten().is_some();
+                let (seed_tip, _back) = newest_replayable_tip(&has_body, base, tip);
                 if seed_tip <= base {
                     log(&format!(
                         "wallet-seed: no stored bodies in h{}..h{} - store behind the tip, \
@@ -10150,6 +10444,192 @@ addnode=host:notaport
             -8,
             "floats are not sizes"
         );
+    }
+
+    // ---- repairwallet / resendtx (workqueue item 9 RPC-P1b) ----
+
+    #[test]
+    fn newest_replayable_tip_walks_back_only_over_missing_bodies() {
+        // bodies exist 100..=200; the tip hint is 5 higher (headers-only tail)
+        let present = |h: u64| (100..=200).contains(&h);
+        let (tip, back) = newest_replayable_tip(&present, 100, 205);
+        assert_eq!((tip, back), (200, 5));
+        // everything present → no walk
+        let (tip, back) = newest_replayable_tip(&|_| true, 100, 200);
+        assert_eq!((tip, back), (200, 0));
+        // nothing present → clamps at base, honest (every height 101..=205
+        // was checked and failed, so back = hint - base)
+        let (tip, back) = newest_replayable_tip(&|_| false, 100, 205);
+        assert_eq!((tip, back), (100, 105));
+        // the 5_000 cap: never walks below hint-5000
+        let (tip, back) = newest_replayable_tip(&|_| false, 0, 10_000);
+        assert_eq!((tip, back), (5_000, 5_000));
+    }
+
+    #[test]
+    fn repairwallet_and_resendtx_arity_matches_legacy() {
+        // legacy repairwallet throws on ANY parameter (runtime_error);
+        // resendtx accepts at most one (ignored) parameter.
+        assert!(repairwallet_params_ok(&serde_json::json!([])).is_ok());
+        assert!(repairwallet_params_ok(&serde_json::Value::Null).is_ok());
+        let e = repairwallet_params_ok(&serde_json::json!(["extra"])).unwrap_err();
+        assert_eq!(e.0, -8);
+        assert!(resendtx_params_ok(&serde_json::json!([])).is_ok());
+        assert!(resendtx_params_ok(&serde_json::json!(["ignored-account"])).is_ok());
+        let e = resendtx_params_ok(&serde_json::json!(["a", "b"])).unwrap_err();
+        assert_eq!(e.0, -8);
+    }
+
+    // LiveOut ownership marker for the diff tests: production passes
+    // WalletLive::owns (a script/key check); the diff itself only consumes
+    // the predicate, so the tests mark ownership via a dedicated field.
+    fn live_out(value: i64, ours: bool) -> LiveOut {
+        LiveOut {
+            height: 500,
+            block_time: 1_700_000_000,
+            tx_time: 1_700_000_000,
+            tx_offset: if ours { 9_000 } else { 1 },
+            value,
+            script: vec![0x51],
+            created_epoch: 1_700_000_000,
+            coinstake: false,
+            coinbase: false,
+        }
+    }
+
+    #[test]
+    fn repair_diff_counts_only_wallet_owned_mismatches() {
+        let mut old = HashMap::new();
+        let mut fresh = HashMap::new();
+        // h1: ours in both → no mismatch
+        let h1: Hash = [1u8; 32];
+        old.insert((h1, 0), live_out(1_000, true));
+        fresh.insert((h1, 0), live_out(1_000, true));
+        // h2: ours in the VIEW ONLY → phantom (chain spent it)
+        let h2: Hash = [2u8; 32];
+        old.insert((h2, 1), live_out(2_000, true));
+        // h3: ours in the REPLAY ONLY → lost (view had dropped it)
+        let h3: Hash = [3u8; 32];
+        fresh.insert((h3, 0), live_out(3_000, true));
+        // h4/h5: NOT ours, missing on either side → must be ignored
+        let h4: Hash = [4u8; 32];
+        old.insert((h4, 0), live_out(4_000, false));
+        let h5: Hash = [5u8; 32];
+        fresh.insert((h5, 0), live_out(5_000, false));
+        let owns = |o: &LiveOut| o.tx_offset == 9_000;
+        let d = repair_diff(&old, &fresh, &owns);
+        assert_eq!(d.count(), 2);
+        assert_eq!(d.phantom, vec![((h2, 1), 2_000)]);
+        assert_eq!(d.lost, vec![((h3, 0), 3_000)]);
+        assert_eq!(d.amount(), 5_000);
+        // identical maps → wallet check passed shape
+        let d0 = repair_diff(&old, &old, &owns);
+        assert_eq!(d0.count(), 0);
+        assert_eq!(d0.amount(), 0);
+    }
+
+    #[test]
+    fn repair_swap_replaces_the_live_map_atomically() {
+        // the repairwallet flow on a real WalletLive: drift the map (drop an
+        // owned coin the chain still holds), rebuild the map by replaying the
+        // same blocks, diff reports the lost coin, swap heals the balance.
+        use tri7_core::wallet::WalletKey;
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[43u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let key = WalletKey {
+            pubkey: pk.serialize().to_vec(),
+            secret: sk.secret_bytes(),
+            compressed: true,
+            address: tri7_core::wallet::pubkey_to_address(&pk.serialize()),
+            created: None,
+        };
+        let mk_wl = || WalletLive {
+            wallet: tri7_core::wallet::WalletKeys {
+                keys: vec![key.clone()],
+                default_key: None,
+                best_block: None,
+                version: None,
+                names: Vec::new(),
+                scripts: Vec::new(),
+                encrypted: false,
+                hd_mnemonic: None,
+                hd_passphrase: None,
+                hd_chain_index: None,
+                keypool: Vec::new(),
+            },
+            base: 100,
+            live: HashMap::new(),
+            locked: false,
+            unlock_until: None,
+        };
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let fund_tx = Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![tri7_core::legacy::Vin {
+                prev_hash: tri7_core::legacy::sha256d(b"repair fund"),
+                prev_n: 0,
+                script_sig: vec![],
+                sequence: u32::MAX,
+            }],
+            vout: vec![tri7_core::legacy::Vout {
+                value: 3_000_000,
+                script_pubkey: script,
+            }],
+            locktime: 0,
+        };
+        let block = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [2u8; 32],
+            time: 1_700_000_100,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![fund_tx],
+            block_sig: Vec::new(),
+        };
+        // the (drifted) wallet view: it MISSES the block (lost coin)
+        let mut w = mk_wl();
+        assert_eq!(w.balance(), 0);
+        // the authoritative replay sees the block
+        let mut fresh = mk_wl();
+        fresh.apply_block(&block, 101);
+        assert_eq!(fresh.balance(), 3_000_000);
+        let owns = |o: &LiveOut| w.owns(o);
+        let d = repair_diff(&w.live, &fresh.live, &owns);
+        assert_eq!(d.count(), 1);
+        assert_eq!(d.lost.len(), 1);
+        assert_eq!(d.amount(), 3_000_000);
+        // the reverse direction: the view claims a coin the replay lacks
+        // (the ghost carries the wallet's REAL script so owns() recognizes it)
+        let mut phantom_view = mk_wl();
+        phantom_view.apply_block(&block, 101);
+        let ghost: Hash = [9u8; 32];
+        let ghost_script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        phantom_view.live.insert(
+            (ghost, 0),
+            LiveOut {
+                height: 101,
+                block_time: 1_700_000_100,
+                tx_time: 1_700_000_000,
+                tx_offset: 5,
+                value: 777,
+                script: ghost_script,
+                created_epoch: 1_700_000_000,
+                coinstake: false,
+                coinbase: false,
+            },
+        );
+        let d2 = repair_diff(&phantom_view.live, &fresh.live, &owns);
+        assert_eq!(d2.phantom.len(), 1);
+        assert_eq!(d2.amount(), 777);
+        // swap heals
+        let n = d.count();
+        let amt = d.amount();
+        w.live = fresh.live;
+        assert_eq!(w.balance(), 3_000_000);
+        assert_eq!((n, amt), (1, 3_000_000));
     }
 
     // ---- from-zero assume-valid envelope (deployed-client parity) ----

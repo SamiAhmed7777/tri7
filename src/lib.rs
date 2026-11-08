@@ -23,6 +23,7 @@ pub mod rawtx;
 pub mod replay;
 pub mod rpc;
 pub mod seed;
+pub mod sent_txs;
 pub mod shutdown;
 pub mod smsg;
 pub mod sync_progress;
