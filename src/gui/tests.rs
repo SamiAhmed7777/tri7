@@ -81,14 +81,53 @@ fn accepting_fee_node() -> (
                 Ok((mut s, _)) => {
                     idle = 0;
                     served += 1;
-                    let mut buf = [0u8; 4096];
-                    let n = s.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // Read the request properly: a single read() can return
+                    // a partial body (it happened on the macOS runner).
+                    // Each read is bounded by the socket read timeout (5s) and
+                    // the loop stops after 10s of wall clock, so it can neither
+                    // block indefinitely nor spin.
+                    let mut raw: Vec<u8> = Vec::new();
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(10);
+                    let complete = loop {
+                        // bound EVERY read by the time that is left, so the
+                        // 10s ceiling is really enforced
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
+                            break false;
+                        }
+                        s.set_read_timeout(Some(left.min(std::time::Duration::from_secs(5))))
+                            .expect("socket read timeout");
+                        let mut chunk = [0u8; 4096];
+                        match s.read(&mut chunk) {
+                            Ok(0) => break false,
+                            Ok(n) => {
+                                // the raw bytes are preserved across reads and
+                                // decoded for parsing - the buffer is never
+                                // mutated in place
+                                raw.extend_from_slice(&chunk[..n]);
+                                let text = String::from_utf8_lossy(&raw);
+                                let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                                if !body.is_empty()
+                                    && serde_json::from_str::<serde_json::Value>(body).is_ok()
+                                {
+                                    break true;
+                                }
+                            }
+                            Err(_) => break false,
+                        }
+                    };
+                    let acc = String::from_utf8_lossy(&raw).to_string();
+                    let body = acc.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
                     // the stand-in must be answering a REAL settxfee request
+                    let method = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()));
                     assert!(
-                        req.contains("\"method\":\"settxfee\""),
-                        "the GUI must call settxfee, got: {}",
-                        req.lines().last().unwrap_or("")
+                        complete && method.as_deref() == Some("settxfee"),
+                        "the GUI must call settxfee, got method {:?}; body: {}",
+                        method,
+                        body.chars().take(200).collect::<String>()
                     );
                     let body = r#"{"result":true,"error":null}"#;
                     let http = format!(
