@@ -59,18 +59,24 @@ fn options_apply_persists_even_when_the_node_fee_push_fails() {
 /// tri7d envelope. It keeps serving until the client goes quiet (an idle
 /// timeout, not a fixed count) - so the number of calls can differ per test
 /// and joining the thread still cannot block.
-fn accepting_fee_node() -> (String, std::thread::JoinHandle<usize>) {
+fn accepting_fee_node() -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<usize>,
+) {
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    // the server runs until the test stops it - an idle TIMEOUT was flaky on a
+    // loaded CI runner (the second call arrived after the server had exited)
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
     let handle = std::thread::spawn(move || {
-        // serve connections until the client goes quiet - the number of calls
-        // differs per test, so an idle timeout (not a fixed count) keeps
-        // join() from blocking forever
         listener.set_nonblocking(true).expect("nonblocking");
         let mut served = 0usize;
         let mut idle = 0usize;
-        while idle < 80 {
+        while !stop_flag.load(Ordering::Relaxed) && idle < 2000 {
             match listener.accept() {
                 Ok((mut s, _)) => {
                     idle = 0;
@@ -91,6 +97,7 @@ fn accepting_fee_node() -> (String, std::thread::JoinHandle<usize>) {
                         body
                     );
                     let _ = s.write_all(http.as_bytes());
+                    idle = 0;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     idle += 1;
@@ -101,7 +108,7 @@ fn accepting_fee_node() -> (String, std::thread::JoinHandle<usize>) {
         }
         served
     });
-    (format!("127.0.0.1:{}", port), handle)
+    (format!("127.0.0.1:{}", port), stop, handle)
 }
 
 #[test]
@@ -121,7 +128,7 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
     );
 
     // point the GUI at a node that ACCEPTS settxfee, then apply again
-    let (addr, server) = accepting_fee_node();
+    let (addr, stop, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr);
     st.save_options_action().expect("apply");
     // the successful push must have CLEARED the stale notice
@@ -133,6 +140,7 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
     // ...and the stale text must not survive anywhere
     let again = st.options_fee_notice.clone().unwrap_or_default();
     assert!(!again.contains("no node reachable"), "{}", again);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let served = server.join().unwrap();
     assert!(served >= 1, "the mock node must have been called");
     let _ = std::fs::remove_dir_all(&dir);
@@ -148,7 +156,7 @@ fn saved_fee_is_pushed_when_the_node_appears() {
     assert!(st.options_fee_notice.is_some(), "no node -> notice");
     assert!(!st.fee_pushed_to_node, "nothing pushed yet");
 
-    let (addr, server) = accepting_fee_node();
+    let (addr, stop, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr);
     st.push_saved_fee_when_node_appears();
     assert!(st.fee_pushed_to_node, "the saved fee must be pushed");
@@ -157,6 +165,7 @@ fn saved_fee_is_pushed_when_the_node_appears() {
         "the notice must clear after the successful push: {:?}",
         st.options_fee_notice
     );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = server.join();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -166,7 +175,7 @@ fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
     // after a successful push the "pushed" flag must not freeze a NEW fee
     // value that fails - the new value stays eligible for the automatic retry.
     let (mut st, dir) = options_state_with_unreachable_node("retry");
-    let (addr, server) = accepting_fee_node();
+    let (addr, stop, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr.clone());
 
     // 1. a successful push of 0.000200
@@ -196,6 +205,7 @@ fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
     );
     assert_eq!(st.pushed_fee_microtri, Some(300)); // 0.000300 TRI in microTRI
     assert!(st.options_fee_notice.is_none(), "the notice clears");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = server.join();
     let _ = std::fs::remove_dir_all(&dir);
 }
