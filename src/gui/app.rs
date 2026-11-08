@@ -1509,6 +1509,35 @@ impl Tri7App {
                     });
                 }
             }
+            Step::PhraseAdded { keys_inserted, keys_already_present } => {
+                ui.vertical_centered(|ui| {
+                    th::inline_notice(
+                        ui,
+                        th::Notice::Success,
+                        "Seed phrase added to this wallet",
+                        &format!(
+                            "This wallet had no spendable balance to migrate, so nothing \
+                             was swept. The phrase's own addresses (m/44'/2222'/0'/0/i) are \
+                             now part of wallet.dat: {} keys added, {} already present. Every \
+                             coin this wallet receives from now on is recoverable with the \
+                             phrase — keep those 24 words safe.",
+                            keys_inserted, keys_already_present
+                        ),
+                    );
+                    th::text_meta(
+                        ui,
+                        "back up by storing the 24 words (and this wallet.dat) — the phrase \
+                         alone restores every address this wallet will ever derive",
+                    );
+                    ui.add_space(8.0);
+                    if th::primary_button(ui, "Back to wallet").clicked() {
+                        consumed = true;
+                        if let Err(e) = self.st.refresh_chain_action() {
+                            self.st.status_log.push(format!("refresh after phrase add: {}", e));
+                        }
+                    }
+                });
+            }
             Step::Done { txid } => {
                 ui.vertical_centered(|ui| {
                     th::inline_notice(

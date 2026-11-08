@@ -63,6 +63,9 @@ pub enum SweepStep {
     PlanReview,
     /// Broadcast confirmed by tri7d; marker written. Carries the txid.
     Done { txid: String },
+    /// Zero-balance wallet: the phrase + derived keys were ADDED to
+    /// wallet.dat, but there was no balance to sweep — no tx, no marker.
+    PhraseAdded { keys_inserted: usize, keys_already_present: usize },
 }
 
 /// The exact-amounts review payload (everything the pre-flight screen and
@@ -261,13 +264,6 @@ impl SweepFlow {
             .as_ref()
             .map(|s| s.0.clone())
             .ok_or_else(|| "no validated phrase in flight".to_string())?;
-        if inputs.is_empty() {
-            return Err(
-                "no spendable UTXOs found for this wallet — nothing to migrate (zero \
-                 balance, immature coinbase/coinstake, or an empty/missing UTXO snapshot)"
-                    .into(),
-            );
-        }
 
         // (1) destinations, straight from the phrase
         let dests = sweep::derive_sweep_destinations(&mnemonic, &self.passphrase)?;
@@ -314,6 +310,20 @@ impl SweepFlow {
         // GenerateNewKey (qt or tri7) re-derives an existing row
         wallet.advance_hdchain_to(sweep::SWEEP_ADDR_COUNT as i64)?;
         wallet.write_defaultkey(&dests[0].pubkey)?;
+
+        // (3b) PHRASE-ONLY completion (Sami: "people will need it"): a
+        // zero-balance wallet still gets the phrase — it IS the backup for
+        // every coin this wallet receives from now on. No transaction, no
+        // 'seedmigrated' marker: if coins later arrive on the old random
+        // keys, re-running the wizard locks to the stored phrase and CAN
+        // sweep them.
+        if inputs.is_empty() {
+            self.dests = dests;
+            self.addresses = self.dests.iter().map(|d| d.address.clone()).collect();
+            self.error = None;
+            self.step = SweepStep::PhraseAdded { keys_inserted, keys_already_present };
+            return Ok(());
+        }
 
         // (4) the ONE consolidation transaction, signed in memory. The source
         // set excludes the destination addresses (coins already on seed
@@ -701,16 +711,20 @@ mod tests {
         let path = random_key_wallet(&dir, "zeropaths", 1);
         let mut h = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
 
-        // zero inputs at all — refused BEFORE anything is written
+        // zero inputs at all → PHRASE-ONLY completion (Sami: "people will
+        // need it"): the phrase + derived keys ARE written, no tx, no marker
         let mut f = flow();
         f.begin_restore();
         f.words_input = MN12.into();
         f.submit_restore();
-        let err = f.prepare(&mut h, &[], 150, 1_500_000_000).unwrap_err();
-        assert!(err.contains("no spendable UTXOs"), "{}", err);
+        f.prepare(&mut h, &[], 150, 1_500_000_000).unwrap();
+        assert_eq!(
+            f.step,
+            SweepStep::PhraseAdded { keys_inserted: 10, keys_already_present: 0 }
+        );
         let w = crate::wallet::read_wallet(&path).unwrap();
-        assert_eq!(w.keys.len(), 1);
-        assert!(w.hd_mnemonic.is_none());
+        assert_eq!(w.keys.len(), 1 + 10);
+        assert!(w.hd_mnemonic.is_some());
 
         // inputs that pay TO the destination addresses → nothing left to
         // sweep. The seed + derived keys ARE already in wallet.dat by then
@@ -734,9 +748,14 @@ mod tests {
             secret: d0,
             pubkey: pk.serialize().to_vec(),
         };
-        let err = f.prepare(&mut h, &[dest_input], 150, 1_500_000_000).unwrap_err();
+        // fresh flow: the first prepare() completed this one as PhraseAdded
+        let mut f2 = flow();
+        f2.begin_restore();
+        f2.words_input = MN12.into();
+        f2.submit_restore();
+        let err = f2.prepare(&mut h, &[dest_input], 150, 1_500_000_000).unwrap_err();
         assert!(err.contains("already sits on the seed-derived addresses"), "{}", err);
-        assert_eq!(f.step, SweepStep::SeedVerified);
+        assert_eq!(f2.step, SweepStep::SeedVerified);
         assert!(f.plan.is_none());
         let w = crate::wallet::read_wallet(&path).unwrap();
         assert_eq!(w.keys.len(), 1 + 10); // seed-derived keys written (harmless)

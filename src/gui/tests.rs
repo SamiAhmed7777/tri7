@@ -1677,13 +1677,14 @@ fn seed_migration_entry_guards_refuse_before_any_value_moves() {
     let err = st.begin_seed_migration_action().unwrap_err();
     assert!(err.contains("not writable"), "{}", err);
 
-    // 2. writable but zero spendable UTXOs → refuse (an immature coinbase
-    // at a tip below maturity is filtered at SELECTION, never at consensus)
+    // 2. writable but zero spendable UTXOs → the wizard NOW OPENS (Sami:
+    // "people will need it") — phrase-only completion happens in prepare().
     st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap());
     st.derived.as_mut().unwrap().utxos[0].prev_kind = "coinbase".into();
     st.tip.as_mut().unwrap().height = 100; // depth 0 for the h100 coin
-    let err = st.begin_seed_migration_action().unwrap_err();
-    assert!(err.contains("no spendable UTXOs"), "{}", err);
+    st.begin_seed_migration_action().unwrap();
+    assert!(st.sweep_flow.is_some(), "zero-balance wallet must open the seed wizard");
+    st.sweep_flow = None;
 
     // 3. already-migrated marker → refuse before anything else
     st.tip.as_mut().unwrap().height = 150; // depth 51 → the coin IS mature

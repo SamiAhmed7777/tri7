@@ -722,26 +722,10 @@ impl AppState {
                     .into(),
             );
         }
-        // entry pre-check: at least one spendable UTXO must exist. The exact
-        // source set (minus the destination addresses) is computed in
-        // prepare() once the phrase — and its addresses — are known.
-        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
-        let any_spendable = self
-            .derived
-            .as_ref()
-            .map(|d| {
-                d.utxos
-                    .iter()
-                    .any(|u| crate::sweep::sweep_spendable(&u.prev_kind, u.height, tip_height + 1))
-            })
-            .unwrap_or(false);
-        if !any_spendable {
-            return Err(
-                "no spendable UTXOs found for this wallet — nothing to migrate (zero \
-                 balance, immature coinbase/coinstake, or an empty/missing UTXO snapshot)"
-                    .into(),
-            );
-        }
+        // NOTE: no balance pre-check here (Sami: "people will need it"). A
+        // zero-balance wallet STILL gets the phrase: prepare() completes in
+        // phrase-only mode (keys written, nothing swept, no marker) instead
+        // of refusing.
         let mut flow = crate::gui::sweep_flow::SweepFlow::new();
         if let Some(m) = &w.hd_mnemonic {
             // a stored seed exists (mid-migration retry, or a phrase
