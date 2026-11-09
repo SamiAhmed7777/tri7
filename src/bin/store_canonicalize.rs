@@ -181,7 +181,8 @@ fn scan_frames(path: &Path) -> Result<(HashMap<[u8; 32], Frame>, u64, u64), Stri
             // A repeated header hash is only harmless if the frame is
             // byte-identical. The same header with a DIFFERENT body is
             // ambiguity the repair must not resolve silently: abort.
-            let a = read_frame_at(path, existing.off)?;
+            let mut src_file = File::open(path).map_err(|e| format!("open blocks file: {e}"))?;
+            let a = read_frame_at(&mut src_file, existing.off)?;
             let mut b = Vec::with_capacity(FRAME_HDR + body.len());
             b.extend_from_slice(&hdr);
             b.extend_from_slice(&body);
@@ -212,13 +213,12 @@ fn scan_frames(path: &Path) -> Result<(HashMap<[u8; 32], Frame>, u64, u64), Stri
 }
 
 /// Read a whole frame (8-byte header + body) at a byte offset.
-fn read_frame_at(path: &Path, off: u64) -> Result<Vec<u8>, String> {
-    let f = File::open(path).map_err(|e| format!("open blocks file: {e}"))?;
+fn read_frame_at(f: &mut File, off: u64) -> Result<Vec<u8>, String> {
     let mut hdr = [0u8; FRAME_HDR];
-    read_at(&f, &mut hdr, off).map_err(|e| format!("read frame header at {off}: {e}"))?;
+    read_at(f, &mut hdr, off).map_err(|e| format!("read frame header at {off}: {e}"))?;
     let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
     let mut body = vec![0u8; len];
-    read_at(&f, &mut body, off + FRAME_HDR as u64)
+    read_at(f, &mut body, off + FRAME_HDR as u64)
         .map_err(|e| format!("read frame body at {off}: {e}"))?;
     let mut out = Vec::with_capacity(FRAME_HDR + len);
     out.extend_from_slice(&hdr);
@@ -226,9 +226,13 @@ fn read_frame_at(path: &Path, off: u64) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn read_at(f: &File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    f.read_exact_at(buf, off)
+/// Read exactly buf.len() bytes at a byte offset. Portable: seek +
+/// read_exact, no platform-specific file extensions (the Windows CI build
+/// must compile this tool).
+fn read_at(f: &mut File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek};
+    f.seek(std::io::SeekFrom::Start(off))?;
+    f.read_exact(buf)
 }
 
 /// Establish the canonical chain: every height from genesis to the window
@@ -425,13 +429,21 @@ fn write_canonical(
 /// frame must be the window tip.
 fn verify_output(
     out: &Path,
-    src: &Path,
+    src: &mut File,
     by_hash: &HashMap<[u8; 32], Frame>,
     kept: &[[u8; 32]],
     window_tip: [u8; 32],
 ) -> Result<(u64, u64), String> {
+    // TWO independent handles on the output: one for the sequential re-read
+    // (the BufReader) and one for the random-access frame comparison. They
+    // must be separate opens, because a cloned handle shares the file
+    // offset with its twin.
     let outfile = File::open(out).map_err(|e| format!("reopen output: {e}"))?;
-    let mut or = BufReader::with_capacity(1 << 20, outfile);
+    let mut out_handle = outfile
+        .try_clone()
+        .map_err(|e| format!("clone output handle: {e}"))?;
+    let out_seq = File::open(out).map_err(|e| format!("reopen output: {e}"))?;
+    let mut or = BufReader::with_capacity(1 << 20, out_seq);
     let mut hdr = [0u8; FRAME_HDR];
     let mut body: Vec<u8> = Vec::new();
     let mut n = 0u64;
@@ -495,7 +507,7 @@ fn verify_output(
             .get(&h)
             .ok_or_else(|| format!("output frame {n} is not a scanned frame"))?;
         let src_frame = read_frame_at(src, f.off)?;
-        let out_frame = read_frame_at(out, this_offset)?;
+        let out_frame = read_frame_at(&mut out_handle, this_offset)?;
         if src_frame != out_frame {
             return Err(format!(
                 "output frame {n} differs from the source frame it was copied from"
@@ -596,8 +608,11 @@ trait ReadAt {
 
 impl ReadAt for std::io::BufReader<File> {
     fn read_exact_at(&mut self, buf: &mut [u8], off: u64) -> std::io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.get_mut().read_exact_at(buf, off)
+        use std::io::{Read, Seek};
+        // read straight from the file: the BufReader's own buffer is never
+        // used for these random-access reads, so it cannot go stale
+        self.get_mut().seek(std::io::SeekFrom::Start(off))?;
+        self.get_mut().read_exact(buf)
     }
 }
 
@@ -684,7 +699,8 @@ fn run(blk: &Path, tipstate: &Path, out: Option<&Path>) -> Result<(), String> {
     // the source must STILL be the same file we scanned
     assert_source_unchanged(blk, identity_before)?;
 
-    let (n, linked) = verify_output(out, blk, &by_hash, &ordered, window_tip)?;
+    let mut src_file = File::open(blk).map_err(|e| format!("reopen blocks file: {e}"))?;
+    let (n, linked) = verify_output(out, &mut src_file, &by_hash, &ordered, window_tip)?;
     println!("output verified: {n} frames, {linked} links checked, 0 breaks");
     println!("output tip hash: {}", internal_to_display(&window_tip));
     // the source must not have moved during the final verification
