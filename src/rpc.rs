@@ -134,6 +134,11 @@ pub const NATIVE_METHODS: &[&str] = &[
     // v5 ParseMoney-validated) ----
     "reservebalance",
     "smsgsend",
+    // ---- legacy parity 2026-11-09 (SMSG-SENDPATH lane): the anon variant
+    // (rpcsmessage.cpp:540 — forced addrFrom = "anon") + the all-known-
+    // pubkeys broadcast (rpcsmessage.cpp:899 — snapshot-attestation carrier) ----
+    "smsgsendanon",
+    "smsgbroadcast",
     "smsginbox",
     "smsgoutbox",
     "smsgscandir",
@@ -239,6 +244,11 @@ pub const OPS_METHODS: &[&str] = &[
     // live engine (read/set the v5 -reservebalance staking reserve) ----
     "reservebalance",
     "smsgsend",
+    // ---- legacy parity 2026-11-09 (SMSG-SENDPATH lane): the anon variant
+    // (rpcsmessage.cpp:540 — forced addrFrom = "anon") + the all-known-
+    // pubkeys broadcast (rpcsmessage.cpp:899 — snapshot-attestation carrier) ----
+    "smsgsendanon",
+    "smsgbroadcast",
     "smsginbox",
     "smsgoutbox",
     "smsgscandir",
@@ -6883,6 +6893,19 @@ fn new_parity_verbs_are_in_native_and_routed() {
     // engine (it writes the wallet file), served nowhere else
     assert!(NATIVE_METHODS.contains(&"keypoolrefill"), "missing from NATIVE_METHODS");
     assert!(OPS_METHODS.contains(&"keypoolrefill"), "missing from OPS_METHODS");
+}
+
+#[test]
+fn smsg_sendpath_verbs_are_native_and_ops_routed() {
+    // SMSG-SENDPATH lane: smsgsend (shipped, phase 7 milestone 2) plus
+    // the new smsgsendanon / smsgbroadcast must sit in BOTH routing
+    // lists — cargo check does NOT prove routing, the gate IS these
+    // lists (a missing entry answers -32601 before dispatch).
+    for m in ["smsgsend", "smsgsendanon", "smsgbroadcast"] {
+        assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+        assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+        assert!(!OPS_EARLY.contains(&m), "{m} needs the live engine, never early");
+    }
 }
 
 /// addmultisigaddress / addredeemscript end to end against a REAL wallet

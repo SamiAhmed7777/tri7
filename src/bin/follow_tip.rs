@@ -7501,6 +7501,11 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 if !engine.enabled() {
                     return Err((-1, "Secure messaging is disabled.".into()));
                 }
+                // [<feeRate>] (SMSG-SENDPATH lane spec): legacy pins exactly
+                // 3 params (rpcsmessage.cpp:514 `params.size() != 3`) and the
+                // smsg wire carries NO fee field, so an optional 4th argument
+                // is accepted and ignored — uniform send-verb call sites work.
+                let _fee_rate_ignored = ps(3);
                 let (Some(from), Some(to), Some(msg)) = (ps(0), ps(1), ps(2)) else {
                     return Err((-8, "smsgsend expects [from, to, message]".into()));
                 };
@@ -7514,6 +7519,66 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "sample": hex_upper(&sample),
                     "note": "bucket inventory reaches peers within the send-data cadence",
                 }))
+            }
+            // ---- legacy parity 2026-11-09 (SMSG-SENDPATH lane):
+            // smsgsendanon + smsgbroadcast (rpcsmessage.cpp:540 / :899) ----
+            "smsgsendanon" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                // legacy takes exactly <addrTo> <message> and FORCES
+                // addrFrom = "anon" (rpcsmessage.cpp:542,550) — the anon
+                // variant has no from address; the envelope then carries the
+                // [250][4 unused][len] header with no sender signature
+                // (smessage.cpp:3862-3864).
+                let (Some(to), Some(msg)) = (ps(0), ps(1)) else {
+                    return Err((-8, "smsgsendanon expects [to, message]".into()));
+                };
+                let now = now_secs() as i64;
+                // legacy reports send failures as a normal result object, not
+                // an RPC error (rpcsmessage.cpp:557-562)
+                match engine.send_local_anon(&to, &msg, now) {
+                    Ok(_) => Ok(serde_json::json!({ "result": "Sent." })),
+                    Err(e) => Ok(serde_json::json!({ "result": "Send failed.", "error": e })),
+                }
+            }
+            "smsgbroadcast" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                let (Some(addr), Some(msg)) = (ps(0), ps(1)) else {
+                    return Err((-8, "smsgbroadcast expects [address, message]".into()));
+                };
+                // legacy validates the SENDER's address format up front and
+                // throws (rpcsmessage.cpp:916-919 "Invalid from address.")
+                match tri7_core::address::address_to_payload(&addr) {
+                    Ok(p) if p[0] == tri7_core::address::PUBKEY_ADDRESS => {}
+                    _ => return Err((-8, "Invalid from address.".into())),
+                }
+                let now = now_secs() as i64;
+                let (sent, failed, failures) = engine
+                    .broadcast_local(&addr, &msg, now)
+                    .map_err(|e| (-1, e))?;
+                // legacy result shape (rpcsmessage.cpp:977-983): a rendered
+                // sentence plus counts; the failures array is present ONLY
+                // when something failed
+                let result = format!("Broadcast sent to {} recipients, {} failed.", sent, failed);
+                let mut out = serde_json::json!({ "result": result, "sent": sent, "failed": failed });
+                if failed > 0 {
+                    out["failures"] = serde_json::Value::Array(
+                        failures
+                            .into_iter()
+                            .map(|(a, e)| serde_json::json!({ "address": a, "error": e }))
+                            .collect(),
+                    );
+                }
+                Ok(out)
             }
             "smsginbox" | "smsgoutbox" => {
                 let Some(engine) = &self.smsg else {

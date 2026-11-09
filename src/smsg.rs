@@ -1264,6 +1264,31 @@ impl MessageStore {
         }
     }
 
+    /// Every addrbook pubkey row (hash160, pubkey) — the legacy "pk"-prefix
+    /// scan the smsgbroadcast verb walks (rpcsmessage.cpp:934-936 iterates
+    /// the whole pubkey db). Order follows insertion then hash160; legacy
+    /// iterated RocksDB key order, which only affects failure-report order.
+    pub fn list_pubkeys(&self) -> Result<Vec<([u8; 20], Vec<u8>)>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT hash160, pubkey FROM pubkeys ORDER BY added, hash160")
+            .map_err(|e| format!("smsg list_pubkeys: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                let h: Vec<u8> = r.get(0)?;
+                let p: Vec<u8> = r.get(1)?;
+                let mut ha = [0u8; 20];
+                ha.copy_from_slice(&h);
+                Ok((ha, p))
+            })
+            .map_err(|e| format!("smsg list_pubkeys: {}", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("smsg row: {}", e))?);
+        }
+        Ok(out)
+    }
+
     /// Rebuild the bucket map from every stored message
     /// (SecureMsgBuildBucketSet parity).
     pub fn build_buckets(&self, now: i64) -> Result<HashMap<i64, Bucket>, String> {

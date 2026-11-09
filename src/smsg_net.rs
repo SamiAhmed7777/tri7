@@ -798,6 +798,34 @@ impl SmsgEngine {
             .find(|k| k.address == from_address)
             .ok_or_else(|| format!("sending address {} is not a wallet key", from_address))?
             .clone();
+        self.send_local_inner(Some(&from), from_address, to_address, text, now)
+    }
+
+    /// Anonymous variant (smsgsendanon path): legacy forces addrFrom = "anon"
+    /// (rpcsmessage.cpp:550), so the envelope payload header is
+    /// `[250][4 unused][len u32]` with NO sender hash160 and NO compact
+    /// signature (smessage.cpp:3851-3864 — the 4 unused bytes are "there to
+    /// ensure encrypted payload always > 8 bytes"). The recipient cannot
+    /// reply: that is the point of the variant.
+    pub fn send_local_anon(
+        &self,
+        to_address: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<(i64, [u8; 8]), String> {
+        self.send_local_inner(None, "anon", to_address, text, now)
+    }
+
+    /// Shared store/bucket path for both send variants. `from_label` names
+    /// the outbox row's sender slot ("anon" for anonymous sends).
+    fn send_local_inner(
+        &self,
+        from: Option<&SmsgKey>,
+        from_label: &str,
+        to_address: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<(i64, [u8; 8]), String> {
         // recipient pubkey: learned addrbook first, own wallet second
         let h160 = address_to_hash160(to_address)?;
         let to_pubkey = match self.store.lookup_pubkey(&h160)? {
@@ -814,7 +842,7 @@ impl SmsgEngine {
                     )
                 })?,
         };
-        let wire = smsg_encrypt(Some(&from), &to_pubkey, text, now)?;
+        let wire = smsg_encrypt(from, &to_pubkey, text, now)?;
         let t = token_of(&wire)?;
         let mut st = self.st.lock().unwrap();
         // outbox + relay mirror
@@ -824,7 +852,7 @@ impl SmsgEngine {
             time_received: now,
             status: 0,
             addr_to: to_address.to_string(),
-            addr_outbox: from_address.to_string(),
+            addr_outbox: from_label.to_string(),
             data: wire.clone(),
         };
         self.store.insert(FOLDER_OUTBOX, &om)?;
@@ -844,6 +872,43 @@ impl SmsgEngine {
         st.sent += 1;
         st.last_sent = Some((t.timestamp, t.sample));
         Ok((t.timestamp, t.sample))
+    }
+
+    /// smsgbroadcast (rpcsmessage.cpp:899-986): one SecureMsgSend-shaped
+    /// envelope PER addrbook pubkey row, skipping only the sender address
+    /// itself (rpcsmessage.cpp:957-959 — other OWNED wallet addresses still
+    /// receive a copy). Every copy is signed by the sender inside the
+    /// encrypted payload (compact recoverable signature over the plaintext,
+    /// smessage.cpp:3874-3884), which is what makes the snapshot-attestation
+    /// pattern `smsgbroadcast <addr> "<height>:<hash>:<iso8601>"` verifiable
+    /// by each recipient. Per-recipient failures NEVER abort the loop — they
+    /// are counted and reported (rpcsmessage.cpp:961-972). Returns
+    /// (sent, failed, [(address, error)]).
+    pub fn broadcast_local(
+        &self,
+        from_address: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<(u32, u32, Vec<(String, String)>), String> {
+        let mut sent = 0u32;
+        let mut failed = 0u32;
+        let mut failures = Vec::new();
+        for (_h160, pubkey) in self.store.list_pubkeys()? {
+            // the row's address — all tri7 write paths keep hash160(pubkey)
+            // == row key, so the address derives from the pubkey itself
+            let to_address = crate::wallet::pubkey_to_address(&pubkey);
+            if to_address == from_address {
+                continue; // legacy "Skip sending to self" rpcsmessage.cpp:957-959
+            }
+            match self.send_local(from_address, &to_address, text, now) {
+                Ok(_) => sent += 1,
+                Err(e) => {
+                    failed += 1;
+                    failures.push((to_address, e));
+                }
+            }
+        }
+        Ok((sent, failed, failures))
     }
 
     /// Manual addrbook insert (smsgaddaddress): address + 33-byte pubkey hex.
@@ -1424,6 +1489,121 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["from"], "anon");
         assert_eq!(rows[0]["text"], "anon hello");
+    }
+
+    #[test]
+    fn smsgsendanon_envelope_roundtrip_and_layout() {
+        // the smsgsendanon path: envelope build → wire parse → validate →
+        // decrypt, plus the legacy anonymous payload byte layout
+        // (smessage.cpp:3851-3864): [250][4 unused][len u32][data] — no
+        // sender hash160, no signature.
+        let k = make_keys();
+        let a = engine("anon-send-a", vec![k.a.clone()]);
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+
+        let (ts, sample) = a.send_local_anon(&k.b.address, "anon hello", now).unwrap();
+        assert_eq!(ts, now); // envelope timestamp = compose time
+
+        // relay mirror carries a VALID envelope (build→parse roundtrip)
+        let relay = a.store.list(FOLDER_RELAY).unwrap();
+        assert_eq!(relay.len(), 1);
+        let m = SecureMessage::from_wire(&relay[0].data).unwrap();
+        assert_eq!(smsg_validate(&m), SMSG_OK);
+        let t = token_of(&relay[0].data).unwrap();
+        assert_eq!(t.timestamp, ts);
+        assert_eq!(t.sample, sample);
+
+        // raw plaintext layout pins the legacy anon header byte-for-byte
+        use sha2::Digest as _;
+        let sk = secp256k1::SecretKey::from_slice(&k.b.secret).unwrap();
+        let r_pk = secp256k1::PublicKey::from_slice(&m.cpk_r).unwrap();
+        let p = secp256k1::ecdh::shared_secret_point(&r_pk, &sk);
+        let h = sha2::Sha512::digest(&p[0..32]);
+        let mut key_e = [0u8; 32];
+        key_e.copy_from_slice(&h[0..32]);
+        let plain = crate::smsg::aes256_cbc_decrypt(&key_e, &m.iv, &m.payload).unwrap();
+        assert_eq!(plain[0], SMSG_ANON_VERSION);
+        assert_eq!(&plain[1..5], &[0u8; 4], "legacy leaves 4 unused bytes");
+        assert_eq!(
+            &plain[5..9],
+            &10u32.to_le_bytes(),
+            "u32 LE uncompressed length of 'anon hello'"
+        );
+        assert_eq!(&plain[9..], b"anon hello");
+
+        // decrypts for the recipient with NO sender identity
+        let dm = crate::smsg::smsg_decrypt(&relay[0].data, &k.b).unwrap();
+        assert_eq!(dm.from_address, "anon");
+        assert_eq!(dm.from_pubkey, None, "anon carries no recoverable sender");
+        assert_eq!(dm.plaintext, "anon hello");
+
+        // outbox row: recipient slot + the "anon" sender label
+        let outbox = a.store.list(FOLDER_OUTBOX).unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].addr_to, k.b.address);
+        assert_eq!(outbox[0].addr_outbox, "anon");
+    }
+
+    #[test]
+    fn broadcast_signs_each_copy_and_verifies_with_store_keys() {
+        // smsgbroadcast: one signed envelope per addrbook pubkey, self
+        // skipped, per-recipient failures counted. The snapshot-attestation
+        // payload grammar rides the text unchanged.
+        let k = make_keys();
+        let c = key_for([13u8; 32], "");
+        let d = key_for([17u8; 32], ""); // valid address, NOT owned by the engine
+        let a = engine("bcast-a", vec![k.a.clone()]);
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+        a.add_address(&c.address, &c.pubkey_bytes()).unwrap();
+
+        let attestation = "520000:0000000000000000abc123:2026-11-09T00:00:00Z";
+        let (sent, failed, failures) =
+            a.broadcast_local(&k.a.address, attestation, now).unwrap();
+        assert_eq!(sent, 2, "one envelope per addrbook pubkey");
+        assert_eq!(failed, 0);
+        assert!(failures.is_empty());
+
+        // self-skip: exactly 2 relay rows / 2 outbox rows — nothing addressed
+        // back to the sender
+        let relay = a.store.list(FOLDER_RELAY).unwrap();
+        assert_eq!(relay.len(), 2);
+        let outbox = a.store.list(FOLDER_OUTBOX).unwrap();
+        assert_eq!(outbox.len(), 2);
+
+        // each copy decrypts for exactly its recipient and the compact
+        // signature recovers the SENDER key from the store (from_pubkey ==
+        // a's pubkey, from_address == a's address)
+        let mut seen_recipients = Vec::new();
+        for row in &relay {
+            let mut got = None;
+            for holder in [&k.b, &c] {
+                if let Ok(dm) = crate::smsg::smsg_decrypt(&row.data, holder) {
+                    got = Some((holder.address.clone(), dm));
+                    break;
+                }
+            }
+            let (holder_addr, dm) = got.expect("each broadcast copy has one recipient here");
+            seen_recipients.push(holder_addr);
+            assert_eq!(dm.from_address, k.a.address);
+            assert_eq!(dm.from_pubkey.as_deref(), Some(k.a.pubkey.as_slice()));
+            assert_eq!(dm.plaintext, attestation);
+        }
+        seen_recipients.sort();
+        let mut expect = vec![k.b.address.clone(), c.address.clone()];
+        expect.sort();
+        assert_eq!(seen_recipients, expect);
+
+        // a broadcast from a VALID but unowned address fails per recipient —
+        // legacy counts failures, never aborts (rpcsmessage.cpp:961-972)
+        let (sent, failed, failures) = a.broadcast_local(&d.address, "x", now).unwrap();
+        assert_eq!(sent, 0);
+        assert_eq!(failed, 2);
+        assert_eq!(failures.len(), 2);
+        for (addr, err) in &failures {
+            assert!(err.contains("not a wallet key"), "failures[{}]: {}", addr, err);
+        }
     }
 
     #[test]
