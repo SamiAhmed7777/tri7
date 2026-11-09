@@ -129,6 +129,10 @@ pub const NATIVE_METHODS: &[&str] = &[
     // reserve (getnewaddress hands out pooled keys first, a background
     // maintainer keeps the pool topped) ----
     "keypoolrefill",
+    // ---- legacy parity 2026-11-09 (GUI-POLISH): the v5 -reservebalance
+    // staking reserve as a live verb (bare = read; amount = set + persist,
+    // v5 ParseMoney-validated) ----
+    "reservebalance",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -227,6 +231,9 @@ pub const OPS_METHODS: &[&str] = &[
     // reserve (getnewaddress hands out pooled keys first, a background
     // maintainer keeps the pool topped) ----
     "keypoolrefill",
+    // ---- legacy parity 2026-11-09 (GUI-POLISH): reservebalance rides the
+    // live engine (read/set the v5 -reservebalance staking reserve) ----
+    "reservebalance",
     "smsgsend",
     "smsginbox",
     "smsgoutbox",
@@ -3288,6 +3295,65 @@ pub fn legacy_format_money(sats: i64) -> String {
     )
 }
 
+/// Legacy `ParseMoney` (util.cpp) parity: NO sign (a leading '-' is a
+/// rejection, not a negative amount), optional single '.', at most six
+/// decimals, digits only, i64-safe total. v5 rejected reserve amounts with
+/// exactly this parser (init.cpp:904-908); the RPC `reservebalance` verb
+/// reuses it so the GUI and the conf file cannot feed the staker a value
+/// the legacy client would have refused. Errors carry the v5 init string.
+/// NO TRIM on purpose (mapArgs parity) — judge polish note: the GUI's push
+/// path trims its field BEFORE sending (app_state push_reserve_to_node),
+/// so keep that trim there if this parser ever serves a rawer surface.
+pub fn legacy_parse_money(s: &str) -> Result<i64, String> {
+    const COIN: i64 = 1_000_000;
+    if s.is_empty() {
+        return Err("empty".into());
+    }
+    if s.starts_with('-') {
+        return Err("negative".into());
+    }
+    let p = s.find('.').unwrap_or(s.len());
+    let whole_s = &s[..p];
+    // atoi64 parity: an empty or non-numeric integer part fails (v5's
+    // atoi64 returned 0 for junk, but its nWhole<0 check never fired; the
+    // frac loop below is what rejected junk digits — we reject up front so
+    // "" and "1x.5" never parse).
+    let whole: i64 = if whole_s.is_empty() {
+        0
+    } else {
+        whole_s
+            .parse()
+            .map_err(|_| format!("invalid digits in {:?}", whole_s))?
+    };
+    if p != s.len() {
+        let frac_s = &s[p + 1..];
+        if frac_s.len() > 6 {
+            return Err(format!("more than 6 decimals in {:?}", s));
+        }
+        // v5 accepts "1." (an empty frac adds 0) and ".5" (atoi64("") == 0)
+        let mut frac: i64 = 0;
+        for c in frac_s.bytes() {
+            if !c.is_ascii_digit() {
+                return Err(format!("invalid digits in {:?}", frac_s));
+            }
+            frac = frac * 10 + (c - b'0') as i64;
+        }
+        // v5's value is nWhole*COIN + nFrac*COIN/10^nExponent — the frac is
+        // SCALED BY POSITION (".5" == 0.5, not 0.000005). len ≤ 6 keeps
+        // scale ≤ 1e6, so COIN/scale is exact and frac*(COIN/scale) fits i64.
+        let whole_v = whole
+            .checked_mul(COIN)
+            .ok_or_else(|| format!("amount overflow in {:?}", s))?;
+        let scale = 10i64.pow(frac_s.len() as u32);
+        Ok(whole_v + frac * (COIN / scale))
+    } else {
+        let whole_v = whole
+            .checked_mul(COIN)
+            .ok_or_else(|| format!("amount overflow in {:?}", s))?;
+        Ok(whole_v)
+    }
+}
+
 /// Legacy DateTimeStrFormat (util.h:425-428): "%Y-%m-%d %H:%M:%S UTC" over
 /// gmtime — the format `getcheckpoint.timestamp` reports. Hand-rolled
 /// civil-from-days (Hinnant's algorithm) because the repo carries no chrono
@@ -5344,6 +5410,47 @@ mod tests {
         assert_eq!(legacy_format_money(3_381_763_635), "3381.763635");
         assert_eq!(legacy_format_money(1_000_000), "1.000000");
         assert_eq!(legacy_format_money(999_999), "0.999999");
+    }
+
+    #[test]
+    fn legacy_parse_money_matches_v5_parsemoney() {
+        // accepts (v5 vectors + the loose shapes its parser allows)
+        assert_eq!(legacy_parse_money("0").unwrap(), 0);
+        assert_eq!(legacy_parse_money("0.5").unwrap(), 500_000);
+        assert_eq!(legacy_parse_money("1.000000").unwrap(), 1_000_000);
+        assert_eq!(legacy_parse_money("2.5").unwrap(), 2_500_000);
+        assert_eq!(legacy_parse_money("3381.763635").unwrap(), 3_381_763_635);
+        // "1." — an empty frac adds 0 (v5's frac loop iterates zero times)
+        assert_eq!(legacy_parse_money("1.").unwrap(), 1_000_000);
+        // ".5" — atoi64("") == 0 (v5 accepted this shape)
+        assert_eq!(legacy_parse_money(".5").unwrap(), 500_000);
+        // exactly 6 decimals is the cap
+        assert!(legacy_parse_money("1.1234567").is_err(), ">6 decimals");
+        // negatives are REJECTIONS, not negative amounts (v5 checks '-'
+        // up front)
+        assert!(legacy_parse_money("-1").is_err());
+        assert!(legacy_parse_money("-0.000001").is_err());
+        // junk digits anywhere fail (tri7 discloses the deviation from v5's
+        // atoi64 silent truncation of the whole part: "1x2" becomes 1 TRI in
+        // the legacy parser — that is a footgun, not parity worth keeping)
+        assert!(legacy_parse_money("1x2").is_err());
+        assert!(legacy_parse_money("1.2x").is_err());
+        assert!(legacy_parse_money("").is_err());
+        assert!(legacy_parse_money(" 1.0").is_err(), "no trimming: v5 mapArgs");
+        // overflow is rejected in i64-safe arithmetic
+        assert!(legacy_parse_money("99999999999999999999").is_err());
+        // roundtrip with the formatter
+        for sats in [0i64, 1, 500_000, 1_000_000, 3_381_763_635, 5_000_000_000] {
+            assert_eq!(legacy_parse_money(&legacy_format_money(sats)).unwrap(), sats);
+        }
+    }
+
+    #[test]
+    fn reservebalance_is_native_and_ops_routed() {
+        for m in ["reservebalance"] {
+            assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+            assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+        }
     }
 
     #[test]

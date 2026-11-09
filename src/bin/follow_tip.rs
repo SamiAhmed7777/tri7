@@ -1048,6 +1048,10 @@ struct Config {
     // ---- phase 7 milestone 2: staking / wallet / smsg / i2p ----
     /// integrated staking loop (conf `stake=1` or --stake; --no-stake wins)
     stake: Option<bool>,
+    /// staking reserve in microTRI (v5 -reservebalance; conf
+    /// `reservebalance=<tri>` is the deployment default, the CLI flag
+    /// overrides). Coins above balance - reserve sit out of staking.
+    reserve_sats: i64,
     /// kernel-search cadence seconds
     stake_tick_secs: u64,
     /// wallet file (SQLite TRIw) — REQUIRED for staking + smsg
@@ -1197,6 +1201,7 @@ fn parse_args() -> Config {
         wallet_utxos_path: PathBuf::new(),
         index_dir: PathBuf::new(),
         stake: None,
+        reserve_sats: 0,
         stake_tick_secs: 15,
         wallet_path: None,
         i2p_socks: ("127.0.0.1".into(), 4447),
@@ -1277,6 +1282,12 @@ fn parse_args() -> Config {
             "--i2psocks" => cfg.i2p_socks = parse_sock_addr(&need(&mut i, &args)),
             "--stake" => cfg.stake = Some(true),
             "--no-stake" => cfg.stake = Some(false),
+            "--reservebalance" => {
+                let v = need(&mut i, &args);
+                cfg.reserve_sats = tri7_core::rpc::legacy_parse_money(&v).unwrap_or_else(|_| {
+                    die(EXIT_USAGE, "Invalid amount for -reservebalance=<amount>")
+                });
+            }
             "--stake-tick" => {
                 cfg.stake_tick_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
             }
@@ -1352,6 +1363,31 @@ fn parse_args() -> Config {
                 if let Some(v) = line.trim().strip_prefix("stake=") {
                     cfg.stake = Some(v.trim() != "0");
                 }
+            }
+        }
+    }
+    // conf-file `reservebalance=<tri>` (v5 -reservebalance) is the deployment
+    // default; the CLI flag overrides. An INVALID conf amount refuses to
+    // boot exactly like v5 init (InitError + return false), so a typo can
+    // never silently enable staking with a 0 reserve.
+    {
+        let mut conf_reserve: Option<Result<i64, ()>> = None;
+        if let Ok(text) = std::fs::read_to_string(&cfg.conf_path) {
+            for line in text.lines() {
+                if let Some(v) = line.trim().strip_prefix("reservebalance=") {
+                    conf_reserve = Some(
+                        tri7_core::rpc::legacy_parse_money(v.trim()).map_err(|_| ()),
+                    );
+                }
+            }
+        }
+        if let Some(parsed) = conf_reserve {
+            match parsed {
+                Ok(sats) => cfg.reserve_sats = sats,
+                Err(()) => die(
+                    EXIT_USAGE,
+                    "Invalid amount for -reservebalance=<amount>",
+                ),
             }
         }
     }
@@ -1435,6 +1471,37 @@ fn is_host_port_shape(spec: &str) -> bool {
         Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
         None => false,
     }
+}
+
+/// The `reservebalance <amount>` verb's set path, factored out so the
+/// contract is testable without a live OpsAdapter: v5 ParseMoney parity on
+/// the raw string (NO trim — a leading space is a rejection, as in
+/// mapArgs), the -8 InitError string byte-exact from v5 init.cpp:907 (the
+/// legacy message never substituted <amount>), the global applied live, and
+/// the conf line persisted for the next boot.
+fn reservebalance_apply(conf_path: &Path, raw: &str) -> Result<serde_json::Value, (i64, String)> {
+    let parsed = tri7_core::rpc::legacy_parse_money(raw).map_err(|_e| {
+        (-8, "Invalid amount for -reservebalance=<amount>".to_string())
+    })?;
+    // judge polish note: the conf line stores the NORMALIZED money string
+    // ("2.5" → "2.500000") — same value, canonical shape, and the boot-time
+    // conf re-parse accepts both shapes anyway (ParseMoney parity).
+    tri7_core::stake::set_reserve_balance(parsed);
+    conf_set_flag(
+        conf_path,
+        "reservebalance",
+        &tri7_core::rpc::legacy_format_money(parsed),
+    )
+    .map_err(|e| (-1, e))?;
+    log(&format!(
+        "RESERVE BALANCE {} TRI (persisted reservebalance= to {})",
+        tri7_core::rpc::legacy_format_money(parsed),
+        conf_path.display()
+    ));
+    Ok(serde_json::json!({
+        "reservebalance": tri7_core::rpc::legacy_format_money(parsed),
+        "persisted_to": conf_path.display().to_string(),
+    }))
 }
 
 /// Persist `key=value` into the conf file (staking on|off). Replaces an
@@ -5137,7 +5204,7 @@ fn stake_tick(
     let (candidates, _no_key, _unloc, _nonstd) = wl.candidates();
     stake_st.coins_considered = candidates.len() as u64;
     let balance = wl.balance();
-    if balance <= tri7_core::stake::RESERVE_BALANCE {
+    if balance <= tri7_core::stake::reserve_balance() {
         stake_st.searches += 1;
         return Ok(false);
     }
@@ -6671,6 +6738,11 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                         Some(w) => { let (_, nk, _u, _ns) = w.candidates(); nk }
                         None => 0,
                     },
+                    // tri7 extension (GUI-POLISH 2026-11-09): the live staking
+                    // reserve — the same nReserveBalance the staker applies
+                    // (coins above balance - reserve sit out of staking)
+                    "reservebalance": tri7_core::rpc::legacy_format_money(
+                        tri7_core::stake::reserve_balance()),
                     "in_window_only": true,
                     "tip_height": tip_height,
                 }))
@@ -6709,6 +6781,26 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                             "persisted_to": self.conf_path.display().to_string(),
                         }))
                     }
+                }
+            }
+            "reservebalance" => {
+                // v5 -reservebalance (init.cpp:904 → main.cpp:451
+                // nReserveBalance): the staking reserve — coins above
+                // balance - reserve are held OUT of staking
+                // (wallet.cpp:1845/1934/2052/2074). v5 had NO RPC verb (the
+                // amount arrived via conf/CLI at init only); this tri7-native
+                // verb moves the SAME global live and persists it to the
+                // conf so the GUI's Options field can drive it without a
+                // restart. The raw string is parsed by v5 ParseMoney parity —
+                // NO trimming, exactly like mapArgs (a leading space is a
+                // rejection, as in the legacy client).
+                match ps(0) {
+                    None => Ok(serde_json::json!({
+                        "reservebalance": tri7_core::rpc::legacy_format_money(
+                            tri7_core::stake::reserve_balance()),
+                        "conf": self.conf_path.display().to_string(),
+                    })),
+                    Some(raw) => reservebalance_apply(&self.conf_path, &raw),
                 }
             }
             "getpeerinfo" => Ok(peer_table_json(&self.peers_table)),
@@ -8869,6 +8961,16 @@ fn main() {
         enabled: stake_enabled,
         ..Default::default()
     }));
+    // v5 init.cpp:904 — the -reservebalance global is applied at boot; a
+    // nonzero amount is announced so the log explains why staking skips the
+    // reserved tail of the balance.
+    tri7_core::stake::set_reserve_balance(cfg.reserve_sats);
+    if cfg.reserve_sats != 0 {
+        log(&format!(
+            "stake: reserve balance {} TRI — coins above balance minus reserve are held out of staking",
+            tri7_core::rpc::legacy_format_money(cfg.reserve_sats)
+        ));
+    }
     let wl_shared: SharedWalletLive = Arc::new(Mutex::new(None));
     let pool_shared: SharedPool = Arc::new(Mutex::new(tri7_core::txpool::TxPool::default()));
     let announce_shared: TxAnnounce = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -11600,6 +11702,49 @@ addnode=host:notaport
     }
 
     // ---- smsgenable / smsgdisable / smsgoptions / scans (workqueue item 11) ----
+
+    #[test]
+    fn reservebalance_verb_set_contract() {
+        // the reservebalance verb's write path (GUI-POLISH 2026-11-09):
+        // global applied live + conf line persisted + the byte-exact v5
+        // init error on any un-parseable amount. (This test binary has no
+        // other stake-global users, so the process-global set here is safe.)
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-reserve-verb-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("triangles.conf");
+        std::fs::write(&conf, "stake=1\n").unwrap();
+        // set: response shape + live global + persisted conf line
+        let v = reservebalance_apply(&conf, "2.5").unwrap();
+        assert_eq!(v["reservebalance"], "2.500000");
+        assert_eq!(tri7_core::stake::reserve_balance(), 2_500_000);
+        let text = std::fs::read_to_string(&conf).unwrap();
+        assert!(
+            text.contains("reservebalance=2.500000"),
+            "conf line persisted, got: {text}"
+        );
+        // an existing line is REPLACED, not appended twice
+        let v = reservebalance_apply(&conf, "0.000001").unwrap();
+        assert_eq!(v["reservebalance"], "0.000001");
+        let text = std::fs::read_to_string(&conf).unwrap();
+        assert_eq!(text.lines().filter(|l| l.starts_with("reservebalance=")).count(), 1);
+        // the exact v5 init.cpp:907 string (never substituted <amount>)
+        assert_eq!(
+            reservebalance_apply(&conf, "zz-not-money").unwrap_err(),
+            (-8, "Invalid amount for -reservebalance=<amount>".to_string())
+        );
+        // negatives are ParseMoney rejections in v5
+        assert_eq!(
+            reservebalance_apply(&conf, "-1").unwrap_err().0,
+            -8
+        );
+        // restore the pristine global for any later test
+        tri7_core::stake::set_reserve_balance(0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 
     #[test]
     fn smsg_options_cmd_matches_legacy_shapes() {

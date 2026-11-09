@@ -14,6 +14,9 @@ winresource = "0.1"
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
 tray-icon = { version = "0.26.1", optional = true }
+# Start-on-login (src/gui/autostart.rs): the HKCU ...\Run registration
+# (the v5 GUIUtil startup-shortcut mechanism, user scope, sans COM).
+winreg = "0.55"
 
 [[bin]]
 name = "tri7"

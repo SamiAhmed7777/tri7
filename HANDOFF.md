@@ -358,3 +358,55 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
   static 25 (KB) vs ~18 MB real payload — cosmetic, fix opportunistically
   in item 16. A live silent-install exercise (/S + /D) on sami-pc is item
   16's bar (installer refresh + auto-updater), NOT this item's.
+
+## 2026-11-09 GUI-POLISH: tray hidden-window repaint fix + start-on-login + staking reserve (workqueue item 15, TICK)
+- THREE SURFACES, one commit. (1) TRAY: adopted the sibling lane's disclosed
+  9-line hunk in src/gui/app.rs — THE HIDDEN-WINDOW TRAP: a hidden window
+  produces no input events, so egui stops repainting, update() never runs,
+  and tray clicks sit in the event channel forever (the wallet could never be
+  reopened from the tray). While tray_hidden, the loop now requests a repaint
+  every 400 ms so the tray poll runs. (2) START-ON-LOGIN (v5 StartAtStartup):
+  new src/gui/autostart.rs — Windows writes the standard HKCU\Software\
+  Microsoft\Windows\CurrentVersion\Run value `Triangles` = "<exe>" -min
+  (DISCLOSED DEVIATION: v5 authored a Startup-folder .lnk through COM
+  IShellLink; the Run key is the same user-scope mechanism without the COM
+  dependency — winreg 0.55 added as a cfg(windows) dep). Linux keeps the v5
+  XDG autostart shape byte-for-byte ($XDG_CONFIG_HOME|~/.config)/autostart/
+  triangles.desktop, Hidden=true = disabled, remove-on-disable); macOS keeps
+  the v5 LaunchAgents plist (RunAtLoad + -min). Every launch carries `-min`
+  (start minimized), exactly like v5: the GUI accepts -min/--min and applies
+  ViewportCommand::Minimized on the first frame. The Options checkbox mirrors
+  the OS registration at load (never a stale lie) and Apply registers/
+  unregisters; failure = a notice, never a failed apply. A headless roundtrip
+  lives at `tri7_wallet_gui --autostart-check` (enable → read → disable →
+  read; leaves the OS entry CLEAN — the live PC proof ran this).
+  (3) STAKING RESERVE (v5 -reservebalance, main.cpp:451 nReserveBalance):
+  stake.rs's const became a runtime global (set_reserve_balance/
+  reserve_balance, default 0) read at the same three CreateCoinStake parity
+  sites; the follow_tip daemon parses conf `reservebalance=` at boot (last
+  line wins; --reservebalance CLI overrides; an INVALID conf amount refuses
+  to boot exactly like v5 init) and applies the global at startup. New RPC
+  verb `reservebalance [amount]` (NATIVE + OPS routed): bare = read
+  (legacy money string), amount = v5 ParseMoney parity (negatives are
+  rejections; "1." and ".5" accepted like v5; >6 decimals rejected; DISCLOSED
+  DEVIATION: junk digits like "1x2" are rejected instead of v5's atoi64
+  silent truncation to "1") + live global + conf persist; errors carry the
+  byte-exact v5 init.cpp:907 string "Invalid amount for
+  -reservebalance=<amount>" (the legacy message never substituted the
+  amount). getstakinginfo carries "reservebalance" as a tri7 extension. GUI:
+  the Options Reserve field is REAL (parse-validated before persist; pushes
+  to the node on Apply via the verb with the fee's save-first/
+  push-best-effort shape; loads the node's current value once on first
+  contact, never clobbering session edits), the Staking page Reserve metric
+  shows the live node value, and the field's durable store is the daemon
+  conf — deliberately BETTER than v5, whose QSettings value did not survive
+  restart into the staker global (v5 quirk documented here).
+- SELFHECK SURFACE: `--selfcheck`'s report now carries gui_polish
+  {tray_supported, autostart_supported, autostart_enabled (REAL OS read),
+  reservebalance (live RPC probe)} — the deployed-GUI verification reads the
+  machine's truth without touching it.
+- TESTS: 530 lib (+9: reserve gating serialized behind a test mutex with the
+  solver tests, v5 ParseMoney vectors incl. the loose shapes, verb routing)
+  + 64 follow_tip (+1: verb set-contract — live global, conf line replace,
+  byte-exact error strings) + gui-feature suite 539; windows-gnu all-bins
+  release build green (winreg path compiles for the gnu target).

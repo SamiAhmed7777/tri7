@@ -82,6 +82,11 @@ pub struct OptionsState {
     pub tray_on_close: bool,
     #[serde(default)]
     pub tray_icon_only: bool,
+    /// "Start Triangles on login" (optionsdialog Main tab; v5
+    /// StartAtStartup). The CHECKED state mirrors the OS registration
+    /// (src/gui/autostart.rs) at load and is applied to the OS on Apply.
+    #[serde(default)]
+    pub start_on_login: bool,
 }
 
 fn default_true() -> bool {
@@ -99,6 +104,7 @@ impl Default for OptionsState {
             minimize_on_close: true,
             tray_on_close: false,
             tray_icon_only: false,
+            start_on_login: false,
         }
     }
 }
@@ -363,6 +369,22 @@ pub struct AppState {
     /// the options were saved, but the node-side fee push did not take —
     /// a notice, NOT a failed apply
     pub options_fee_notice: Option<String>,
+    /// the options were saved, but the node-side reserve push or the OS
+    /// start-on-login registration did not take — a notice, NOT a failed
+    /// apply (GUI-POLISH 2026-11-09)
+    pub options_reserve_notice: Option<String>,
+    pub options_autostart_notice: Option<String>,
+    /// the saved reserve has been pushed to the node at least once this
+    /// session (mirrors fee_pushed_to_node)
+    pub reserve_pushed_to_node: bool,
+    /// the reserve sats the node currently holds (dedupes the push)
+    pub pushed_reserve_sats: Option<i64>,
+    /// the node's CURRENT reserve was loaded into the Options field once
+    /// (the daemon conf is the durable store; the field starts honest)
+    pub reserve_loaded_from_node: bool,
+    /// the operator edited the reserve field this session — the node-side
+    /// load must never clobber unsaved typing
+    pub reserve_field_edited: bool,
     /// true while the window is hidden in the system tray (the wallet and
     /// the node keep running; the tray icon brings the window back)
     pub tray_hidden: bool,
@@ -436,7 +458,14 @@ impl AppState {
     pub fn new(cfg: UiConfig) -> Self {
         let keystore: Vec<AbEntry> = load_side_entries(&cfg.keystore_path(), true);
         let addressbook: Vec<AbEntry> = load_side_entries(&cfg.addressbook_path(), false);
-        let options = load_options(&cfg.options_path());
+        let mut options = load_options(&cfg.options_path());
+        // "Start Triangles on login" mirrors the OS registration, not the
+        // last-saved checkbox: whatever wrote the Run key / desktop entry
+        // outside this dialog is the truth (and an entry removed by hand
+        // unchecks the box honestly).
+        if super::autostart::supported() {
+            options.start_on_login = super::autostart::is_enabled();
+        }
         // explorer endpoints: config rpc_addr first (if set), then the
         // standard native ports
         let mut endpoints = cfg.explorer_endpoints.clone();
@@ -467,6 +496,12 @@ impl AppState {
             fee_live_sats: None,
             options_save_error: None,
             options_fee_notice: None,
+            options_reserve_notice: None,
+            options_autostart_notice: None,
+            reserve_pushed_to_node: false,
+            pushed_reserve_sats: None,
+            reserve_loaded_from_node: false,
+            reserve_field_edited: false,
             tray_hidden: false,
             force_quit: false,
             fee_pushed_to_node: false,
@@ -2614,6 +2649,61 @@ impl AppState {
         }
     }
 
+    /// Push the Options "Reserve" value to the node (reservebalance). The
+    /// daemon owns the staking loop, so the setting must land THERE to gate
+    /// coin selection — the v5 GUI wrote its own process's global; tri7's
+    /// node is a separate process (the GUI supervises it), so the same
+    /// intent travels by RPC and persists to the daemon conf.
+    fn push_reserve_to_node(&mut self) -> Result<(), String> {
+        let reserve = parse_tri(&self.options.reserve)
+            .map_err(|e| format!("Reserve is not valid: {e}"))?;
+        if reserve < 0 {
+            return Err("Reserve must not be negative".into());
+        }
+        let Some(addr) = self.live_rpc_addr() else {
+            // offline GUI: the stored value applies the next time a node is
+            // reachable (the conf keeps the node's own copy meanwhile)
+            return Err("no node reachable — the reserve is saved locally but not applied".into());
+        };
+        let v = crate::gui::rpc_client::rpc_call(
+            &addr,
+            "reservebalance",
+            &[serde_json::json!(self.options.reserve.trim())],
+        )
+        .map_err(|e| format!("reservebalance: {e}"))?;
+        // trust the node's echo (legacy money string) over the raw field
+        if let Some(s) = v.get("reservebalance").and_then(|s| s.as_str()) {
+            self.options.reserve = s.to_string();
+        }
+        self.reserve_pushed_to_node = true;
+        self.pushed_reserve_sats = parse_tri(&self.options.reserve).ok();
+        Ok(())
+    }
+
+    /// Read the node's CURRENT reserve into the Options field, once, the
+    /// first time the node answers. The daemon conf (`reservebalance=`) is
+    /// the durable store, so the field starts honest instead of assuming 0.
+    /// Never fires after the operator edited the field this session.
+    pub fn load_reserve_from_node_once(&mut self) {
+        if self.reserve_loaded_from_node || self.reserve_field_edited {
+            return;
+        }
+        let Some(addr) = self.live_rpc_addr() else {
+            return;
+        };
+        if let Ok(v) = crate::gui::rpc_client::rpc_call(&addr, "reservebalance", &[]) {
+            if let Some(s) = v.get("reservebalance").and_then(|s| s.as_str()) {
+                self.options.reserve = s.to_string();
+                self.reserve_loaded_from_node = true;
+                // the node already holds exactly this value
+                self.reserve_pushed_to_node = true;
+                self.pushed_reserve_sats = parse_tri(s).ok();
+                self.status_log
+                    .push(format!("staking reserve: node reports {} TRI", s));
+            }
+        }
+    }
+
     /// Push the SAVED fee to the node once, when the node first becomes
     /// reachable in this session. Without this the typed fee only reached the
     /// node when the operator happened to press Apply while it was up; a fee
@@ -2622,9 +2712,11 @@ impl AppState {
         if self.live_rpc_addr().is_none() {
             return;
         }
+        self.load_reserve_from_node_once();
         // nothing to do when the node already holds THIS value
         let current = parse_tri(&self.options.pay_fee).ok();
         if self.fee_pushed_to_node && self.pushed_fee_microtri == current {
+            self.push_saved_reserve_when_node_appears();
             return;
         }
         match self.push_paytxfee_to_node() {
@@ -2639,6 +2731,32 @@ impl AppState {
                 // the node is not up yet (or refused): keep the value local and
                 // try again on the next poll
                 self.options_fee_notice = Some(e);
+            }
+        }
+        self.push_saved_reserve_when_node_appears();
+    }
+
+    /// The reserve twin of the fee retry: a reserve saved while the node was
+    /// down reaches the node as soon as it is reachable. Skip when the node
+    /// already holds THIS value (loaded or pushed earlier).
+    pub fn push_saved_reserve_when_node_appears(&mut self) {
+        if self.live_rpc_addr().is_none() {
+            return;
+        }
+        let current = parse_tri(&self.options.reserve).ok();
+        if self.reserve_pushed_to_node && self.pushed_reserve_sats == current {
+            return;
+        }
+        match self.push_reserve_to_node() {
+            Ok(()) => {
+                self.options_reserve_notice = None;
+                self.status_log.push(format!(
+                    "staking reserve: node reservebalance set to {} TRI",
+                    self.options.reserve
+                ));
+            }
+            Err(e) => {
+                self.options_reserve_notice = Some(e);
             }
         }
     }
@@ -2668,6 +2786,9 @@ impl AppState {
         // validate the fee is a real amount before persisting
         parse_tri(&self.options.pay_fee)
             .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
+        // the reserve is validated the same way BEFORE anything persists
+        let _reserve_sats = parse_tri(&self.options.reserve)
+            .map_err(|e| format!("Reserve invalid: {}", e))?;
         // PERSIST EVERYTHING FIRST. The node-side fee push is a best-effort
         // sync, NOT a gate: it used to abort the whole apply, so a node that
         // refused the fee (or was unreachable) left the operator unable to
@@ -2700,6 +2821,47 @@ impl AppState {
                 self.pushed_fee_microtri = None;
                 self.status_log.push(format!("fee (saved locally, node not yet): {e}"));
                 self.options_fee_notice = Some(e);
+            }
+        }
+        // the staking reserve twin: same save-first, push-best-effort shape
+        self.options_reserve_notice = None;
+        match self.push_reserve_to_node() {
+            Ok(()) => {
+                self.reserve_pushed_to_node = true;
+                self.reserve_field_edited = false;
+                self.status_log.push(format!(
+                    "staking reserve: node reservebalance set to {} TRI",
+                    self.options.reserve
+                ));
+            }
+            Err(e) => {
+                self.reserve_pushed_to_node = false;
+                self.pushed_reserve_sats = None;
+                self.status_log
+                    .push(format!("reserve (saved locally, node not yet): {e}"));
+                self.options_reserve_notice = Some(e);
+            }
+        }
+        // "Start Triangles on login": the OS registration is applied here,
+        // AFTER the options persist, and a failure is a notice — the saved
+        // state stays on disk and the checkbox keeps the operator's intent.
+        if super::autostart::supported() {
+            let want = self.options.start_on_login;
+            let have = super::autostart::is_enabled();
+            self.options_autostart_notice = None;
+            if want != have {
+                match super::autostart::set_enabled(want) {
+                    Ok(()) => {
+                        self.status_log.push(format!(
+                            "start on login: {}",
+                            if want { "registered" } else { "removed" }
+                        ));
+                    }
+                    Err(e) => {
+                        self.options_autostart_notice =
+                            Some(format!("start-on-login not registered: {e}"));
+                    }
+                }
             }
         }
         Ok(())
@@ -3212,6 +3374,29 @@ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
             "reachable": st.debug_info.as_ref().map(|d| d.reachable),
             "connections": st.debug_info.as_ref().and_then(|d| d.connections),
             "error": st.debug_info.as_ref().and_then(|d| d.error.clone()),
+        }),
+    );
+
+    // --- GUI-POLISH surfaces: tray / start-on-login / staking reserve -------
+    // READ-ONLY: a selfcheck must never create a tray icon (a tray icon in a
+    // process that exits immediately leaves a ghost icon) and never writes
+    // the OS autostart registration — `--autostart-check` is the explicit
+    // opt-in roundtrip for the write path.
+    let reserve_probe = match st.live_rpc_addr() {
+        Some(a) => match crate::gui::rpc_client::rpc_call(&a, "reservebalance", &[]) {
+            Ok(v) => json!({ "value": v.get("reservebalance"), "node": a }),
+            Err(e) => json!({ "error": e, "node": a }),
+        },
+        None => json!({ "error": "no rpc addr configured" }),
+    };
+    report.insert(
+        "gui_polish".into(),
+        json!({
+            "tray_supported": cfg!(windows),
+            "autostart_supported": super::autostart::supported(),
+            "autostart_enabled": super::autostart::supported()
+                && super::autostart::is_enabled(),
+            "reservebalance": reserve_probe,
         }),
     );
 

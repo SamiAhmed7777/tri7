@@ -18,6 +18,8 @@ fn usage() -> ! {
          \x20                      [--wallet PATH] [--state-dir PATH] [--dump PATH]\n\
          \x20                      [--tipstate PATH] [--archive PATH] [--index-dir PATH]\n\
          \x20                      [--stake-dryrun PATH] [--rpc ADDR|none] [--profile-dir PATH]\n\
+         \x20                      [-min | --min]  start minimized (the login-autostart flag)\n\
+         \x20                      --autostart-check  roundtrip the login registration (headless)\n\
          defaults: wallet /root/.triangles/wallet.dat, state-dir /var/lib/tri7,\n\
          \x20         rpc 127.0.0.1:19114"
     );
@@ -28,6 +30,42 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let selfcheck = args.iter().any(|a| a == "--selfcheck");
     let history_probe = args.iter().any(|a| a == "--history-probe");
+    // v5 -min: start MINIMIZED (the start-on-login registration launches
+    // with -min; guiutil.cpp passes SW_SHOWMINNOACTIVE/-min the same way)
+    let start_minimized = args.iter().any(|a| a == "-min" || a == "--min");
+    // --autostart-check: headless roundtrip of the start-on-login
+    // registration (enable → read → disable → read; the OS entry is left
+    // CLEAN). Explicit opt-in because it writes the user's Run key /
+    // autostart dir — never run as a side effect of anything else.
+    if args.iter().any(|a| a == "--autostart-check") {
+        let supported = tri7_core::gui::autostart::supported();
+        println!("autostart: supported={supported}");
+        if !supported {
+            eprintln!("autostart roundtrip: unsupported platform");
+            std::process::exit(2);
+        }
+        let outcome = (|| -> Result<bool, String> {
+            tri7_core::gui::autostart::set_enabled(true)?;
+            let on = tri7_core::gui::autostart::is_enabled();
+            tri7_core::gui::autostart::set_enabled(false)?;
+            let off = tri7_core::gui::autostart::is_enabled();
+            Ok(on && !off)
+        })();
+        match outcome {
+            Ok(true) => {
+                println!("autostart roundtrip: PASS (registered, read back, removed cleanly)");
+                std::process::exit(0);
+            }
+            Ok(false) => {
+                println!("autostart roundtrip: FAIL (readback mismatch)");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                println!("autostart roundtrip: ERROR {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let mut cfg = tri7_core::gui::state::UiConfig::default();
     let mut report: Option<String> = None;
     let get = |flag: &str, args: &[String]| -> Option<String> {
@@ -178,6 +216,7 @@ fn main() {
                         | "--stake-dryrun"
                         | "--rpc"
                         | "--profile-dir"
+                        | "--min"
                 )
         }) {
             eprintln!("unknown flag {}", bad);
@@ -187,7 +226,7 @@ fn main() {
 
     #[cfg(feature = "gui")]
     {
-        app::run(cfg);
+        app::run(cfg, start_minimized);
     }
     #[cfg(not(feature = "gui"))]
     {

@@ -83,6 +83,41 @@ fn the_window_tab_choices_persist_and_survive_a_reload() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// GUI-POLISH 2026-11-09: the Options reserve field is a REAL amount — an
+/// unparseable value fails the apply BEFORE anything persists, a good value
+/// saves and (with an unreachable node) stays eligible for the node retry,
+/// and the start-on-login checkbox persists in the options file. The OS
+/// registration itself is never touched here: the checkbox is left at the
+/// machine's ACTUAL registration, so Apply has nothing to change (the
+/// registration roundtrip is the autostart module's tests + the explicit
+/// `--autostart-check` flag, never a test side effect).
+#[test]
+fn reserve_field_validates_before_persisting_and_persists() {
+    let (mut st, _dir) = options_state_with_unreachable_node("reserve");
+    st.options.reserve = "not-money".into();
+    let err = st.save_options_action().unwrap_err();
+    assert!(err.contains("Reserve invalid"), "got: {err}");
+    // nothing persisted — the rejected text never reaches the options file
+    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap_or_default();
+    assert!(!text.contains("not-money"), "{}", text);
+    // a good value SAVES; the node push failure is a notice, not an error
+    st.options.reserve = "1.500000".into();
+    st.save_options_action().expect("apply");
+    assert!(
+        st.options_reserve_notice.is_some(),
+        "an unreachable node must produce the reserve notice"
+    );
+    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
+    assert!(text.contains("\"reserve\": \"1.500000\""), "{}", text);
+    // the checkbox persists with the machine's actual registration (no OS
+    // write from a test)
+    st.options.start_on_login = crate::gui::autostart::is_enabled();
+    st.options_reserve_notice = None;
+    st.save_options_action().expect("apply");
+    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
+    assert!(text.contains("\"start_on_login\""), "{}", text);
+}
+
 /// The tray's "Exit" item asks for a REAL quit. The close button's
 /// keep-running behaviour must not swallow it: the force-quit flag is what
 /// the close handler checks first.

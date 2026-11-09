@@ -234,6 +234,10 @@ pub struct Tri7App {
     /// AND the operator asked for "minimize to the tray"; the wallet can
     /// then be closed to the tray and reopened from it.
     tray: Option<crate::gui::tray::TrayIcon>,
+    /// v5 -min: a `-min`/`--min` launch (the start-on-login registration
+    /// passes it) starts the window MINIMIZED; cleared after the first frame
+    /// applies it.
+    pending_minimize: bool,
 
     // ---- view-only state (spec §10/§12.3; no engine logic) ----
     send_step: SendStep,
@@ -1716,6 +1720,12 @@ impl eframe::App for Tri7App {
         //                     running
         //   quit            -> let the window close for real
         // CancelClose is what actually stops the window from being destroyed.
+        // v5 -min: apply the startup minimize once (the start-on-login
+        // registration launches with -min, exactly like the legacy client)
+        if self.pending_minimize {
+            self.pending_minimize = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             // A real quit request (the tray's "Exit" item) must NOT be
             // swallowed by the keep-running behaviour: the user asked for
@@ -1772,6 +1782,15 @@ impl eframe::App for Tri7App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 None => {}
+            }
+            // THE HIDDEN-WINDOW TRAP: a hidden window produces no input
+            // events, so egui stops repainting and update() is never
+            // called - which means tray clicks would sit in the event
+            // channel forever and the wallet could never be reopened from
+            // the tray. Keep the loop ticking while the wallet is in the
+            // tray so the poll above actually runs.
+            if self.st.tray_hidden {
+                ctx.request_repaint_after(std::time::Duration::from_millis(400));
             }
         }
         Self::apply_theme(ctx);
@@ -4152,7 +4171,18 @@ impl Tri7App {
                     s::TICKER
                 ),
             );
-            metric(ui, "Reserve", "—");
+            // the live staking reserve from the node (GUI-POLISH): the
+            // getstakinginfo tri7 extension carries "reservebalance"; an
+            // older node answers without it and the metric stays honest (—)
+            let reserve_txt = st
+                .staking_live
+                .info
+                .as_ref()
+                .and_then(|v| v.get("reservebalance"))
+                .and_then(|s| s.as_str())
+                .map(|s| format!("{} {}", s, s::TICKER))
+                .unwrap_or_else(|| "—".into());
+            metric(ui, "Reserve", &reserve_txt);
             let _ = (spendable, utxo_n);
         });
         ui.add_space(8.0);
@@ -4935,29 +4965,47 @@ impl Tri7App {
                         });
                         ui.end_row();
                         ui.label(egui::RichText::new("Reserve:").color(th::TEXT_SECONDARY));
-                        th::disabled_input(
-                            ui,
-                            140.0,
-                            &self.st.options.reserve,
-                            "Requires daemon integration (staking reserve)",
-                        );
+                        // staking reserve (v5 reserveBalance): REAL — edits
+                        // reach the daemon via the reservebalance RPC on
+                        // Apply, and the daemon persists them to its conf
+                        let resp = th::text_input(ui, 140.0, &mut self.st.options.reserve);
+                        if resp.changed() {
+                            self.st.reserve_field_edited = true;
+                        }
+                        ui.label(egui::RichText::new(s::TICKER).color(th::TEXT_MUTED));
                         ui.end_row();
                         ui.label(
                             egui::RichText::new("Start Triangles on login:")
                                 .color(th::TEXT_SECONDARY),
                         );
-                        th::disabled_input(
-                            ui,
-                            140.0,
-                            "—",
-                            "Requires daemon integration",
-                        );
+                        // v5 StartAtStartup: a real checkbox where the OS
+                        // supports the registration; an honest stub where it
+                        // does not (never a checkbox that does nothing).
+                        if super::autostart::supported() {
+                            ui.checkbox(
+                                &mut self.st.options.start_on_login,
+                                "yes",
+                            )
+                            .on_hover_text(
+                                "Registers the wallet to start (minimized) when you log in",
+                            );
+                        } else {
+                            th::disabled_input(
+                                ui,
+                                140.0,
+                                "—",
+                                "Start-on-login is not supported on this platform",
+                            );
+                        }
                         ui.end_row();
                         ui.label(egui::RichText::new("Detach databases:").color(th::TEXT_SECONDARY));
                         th::disabled_input(ui, 140.0, "—", "Requires daemon integration");
                         ui.end_row();
                     });
-                th::text_meta(ui, "Staking reserve belongs here (daemon integration pending).");
+                th::text_meta(
+                    ui,
+                    "Reserve and start-on-login apply on Apply: the reserve reaches the node (reservebalance RPC) and persists in its config; start-on-login registers the OS entry.",
+                );
                 ui.add_space(8.0);
                 ui.separator();
                 // ---- Software updates (src/updater.rs) ----
@@ -5172,6 +5220,28 @@ impl Tri7App {
                      node did not go through: {note}. The node will pick it up on the \
                      next launch, or as soon as it is reachable.",
                 ),
+            );
+            ui.add_space(6.0);
+        }
+        if let Some(note) = self.st.options_reserve_notice.clone() {
+            th::inline_notice(
+                ui,
+                th::Notice::Warning,
+                "Options saved - the node has not taken the reserve yet",
+                &format!(
+                    "Every option on this screen was saved. Only the reserve push to the \
+                     node did not go through: {note}. The node will pick it up as soon \
+                     as it is reachable.",
+                ),
+            );
+            ui.add_space(6.0);
+        }
+        if let Some(note) = self.st.options_autostart_notice.clone() {
+            th::inline_notice(
+                ui,
+                th::Notice::Warning,
+                "Options saved - start-on-login was not registered",
+                &note,
             );
             ui.add_space(6.0);
         }
@@ -6304,7 +6374,7 @@ impl Tri7App {
 // entry point (spec §5: preferred initial 1180×780, minimum 1040×700)
 // ---------------------------------------------------------------------------
 
-pub fn run(cfg: UiConfig) {
+pub fn run(cfg: UiConfig, start_minimized: bool) {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 780.0])
@@ -6361,6 +6431,8 @@ pub fn run(cfg: UiConfig) {
             node_bootstrapped: false,
             first_run_checked: false,
             tray,
+            // v5 -min (guiutil.cpp): the autostart launch starts MINIMIZED
+            pending_minimize: start_minimized,
         }))
     });
     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {

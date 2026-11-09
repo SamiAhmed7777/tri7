@@ -57,8 +57,24 @@ use crate::spend::{sign_input, sign_msg, solver_type, SpendType, SIGHASH_ALL};
 pub const STAKE_SPLIT_AGE: i64 = 3 * 60 * 60;
 /// wallet.cpp:30 — `int64_t nStakeCombineThreshold = 20 * COIN;`
 pub const STAKE_COMBINE_THRESHOLD: i64 = 20 * COIN;
-/// main.cpp:451 — `int64_t nReserveBalance = 0;` (default)
-pub const RESERVE_BALANCE: i64 = 0;
+/// main.cpp:451 — `int64_t nReserveBalance = 0;` (default). v5 makes this a
+/// runtime GLOBAL set from `-reservebalance` (init.cpp:904) and read by
+/// CreateCoinStake (wallet.cpp:1845/1934/2052/2074); tri7 mirrors it with an
+/// atomic so the RPC verb can move it live without restarting the staker.
+pub const RESERVE_BALANCE_DEFAULT: i64 = 0;
+static RESERVE_BALANCE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(RESERVE_BALANCE_DEFAULT);
+
+/// Set the staking reserve (microTRI). Coins above `balance - reserve` are
+/// held out of staking exactly like v5's `nReserveBalance`.
+pub fn set_reserve_balance(sats: i64) {
+    RESERVE_BALANCE.store(sats, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The live staking reserve (microTRI).
+pub fn reserve_balance() -> i64 {
+    RESERVE_BALANCE.load(std::sync::atomic::Ordering::Relaxed)
+}
 /// wallet.cpp:2281 — `static int nMaxStakeSearchInterval = 60;`
 pub const MAX_STAKE_SEARCH_INTERVAL: i64 = 60;
 /// main.h:40 / wallet.cpp:2436 — coinstake size cap (MAX_BLOCK_SIZE_GEN/5).
@@ -210,7 +226,8 @@ pub fn create_coinstake(
     next_height: usize,
 ) -> Result<(Option<CoinstakePlan>, SearchReport), String> {
     let mut rep = SearchReport::default();
-    if balance <= RESERVE_BALANCE {
+    let reserve = reserve_balance();
+    if balance <= reserve {
         return Ok((None, rep)); // wallet.cpp:2246-2247
     }
     let interval = search_interval.min(MAX_STAKE_SEARCH_INTERVAL);
@@ -356,7 +373,7 @@ pub fn create_coinstake(
             if credit >= STAKE_COMBINE_THRESHOLD {
                 break;
             }
-            if credit + other.value > balance - RESERVE_BALANCE {
+            if credit + other.value > balance - reserve {
                 break; // reached the reserve limit
             }
             if other.value >= STAKE_COMBINE_THRESHOLD {
@@ -372,7 +389,7 @@ pub fn create_coinstake(
         // wallet.cpp:2366-2370 — nCredit == 0 or above balance fails the call
         // (checked on the input-value credit, before the reward is added).
         let input_credit: i64 = inputs.iter().map(|i| i.value).sum();
-        if input_credit == 0 || input_credit > balance - RESERVE_BALANCE {
+        if input_credit == 0 || input_credit > balance - reserve {
             rep.credit_over_balance_aborts += 1;
             return Ok((None, rep));
         }
@@ -889,8 +906,15 @@ mod tests {
         times[5]
     }
 
+    /// Tests share the process-global reserve (an AtomicI64) with the staking
+    /// path: tests that (a) mutate it or (b) need it 0 while solving take
+    /// this lock, so parallel test threads never interleave a nonzero
+    /// reserve into an unrelated solve.
+    static RESERVE_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn kernel_solve_loop_finds_solution_on_easy_target() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("staker");
         let coin = make_coin("staker", 0xAA, 50 * COIN, secret, &pubkey);
@@ -943,6 +967,7 @@ mod tests {
 
     #[test]
     fn kernel_search_exhausts_on_impossible_target() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("exhaust");
         let coin = make_coin("exhaust", 0xBB, 50 * COIN, secret, &pubkey);
@@ -967,6 +992,7 @@ mod tests {
 
     #[test]
     fn min_age_filter_skips_young_coins() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("young");
         // containing block 10 s old: below the worst-case min-age filter
@@ -1144,6 +1170,7 @@ mod tests {
 
     #[test]
     fn split_stake_rule_three_outputs_when_weight_young() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("splitter");
         let script = crate::spend::script_pubkey_p2pk(&pubkey).unwrap();
@@ -1194,6 +1221,7 @@ mod tests {
 
     #[test]
     fn combine_pass_adds_same_key_inputs_under_threshold() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("combiner");
         let script = crate::spend::script_pubkey_p2pk(&pubkey).unwrap();
@@ -1240,6 +1268,7 @@ mod tests {
 
     #[test]
     fn block_signature_roundtrip_and_tamper() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("signer");
         let coin = make_coin("signer", 0x31, 10 * COIN, secret, &pubkey);
@@ -1284,6 +1313,7 @@ mod tests {
 
     #[test]
     fn timestamp_protocol_rejects_stale_coinstake() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("stale");
         let coin = make_coin("stale", 0x41, 10 * COIN, secret, &pubkey);
@@ -1309,6 +1339,63 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("timestamp floor"), "got: {}", err);
+    }
+
+    #[test]
+    fn reserve_balance_gates_staking_like_nreservebalance() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = synthetic_index();
+        let (secret, pubkey) = synth_key("reserved");
+        let coin = make_coin("reserved", 0x51, 10 * COIN, secret, &pubkey);
+        let tx_time = BLOCK_TIME + 12 * 3600;
+        // the default (0) reserve: the 10 TRI coin solves at an easy target
+        set_reserve_balance(0);
+        let (res, _) = create_coinstake(
+            &idx,
+            &[coin.clone()],
+            EASY_BITS,
+            0,
+            tx_time,
+            1,
+            11 * COIN,
+            41,
+        )
+        .expect("search");
+        assert!(res.is_some(), "reserve 0 must not block the solve");
+        // wallet.cpp:2246-2247 — balance <= nReserveBalance aborts BEFORE
+        // any kernel work: reserve = balance means no pass at all
+        set_reserve_balance(11 * COIN);
+        let (res, _) = create_coinstake(
+            &idx,
+            &[coin.clone()],
+            EASY_BITS,
+            0,
+            tx_time,
+            1,
+            11 * COIN,
+            41,
+        )
+        .expect("search");
+        assert!(res.is_none(), "balance <= reserve must produce no plan");
+        // wallet.cpp:2052 — nCredit == 0 or above balance - reserve fails:
+        // reserve 5 TRI leaves a 6 TRI ceiling; the 10 TRI coin's credit
+        // exceeds it, so the call aborts
+        set_reserve_balance(5 * COIN);
+        let (res, _) = create_coinstake(
+            &idx,
+            &[coin.clone()],
+            EASY_BITS,
+            0,
+            tx_time,
+            1,
+            11 * COIN,
+            41,
+        )
+        .expect("search");
+        assert!(res.is_none(), "credit above balance - reserve must abort");
+        // restore the default so the rest of the suite sees the pristine
+        // global (the guard above keeps this test serialized with solvers)
+        set_reserve_balance(0);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! traffic is read-only JSON-RPC to the local tri7d (127.0.0.1:19114).
 
 pub mod app_state;
+pub mod autostart;
 pub mod explorer;
 pub mod node_supervisor;
 pub mod notify;
