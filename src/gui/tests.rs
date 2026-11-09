@@ -333,8 +333,11 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
     assert!(!again.contains("no node reachable"), "{}", again);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let served = server.join().unwrap();
-    assert!(served >= 1, "the mock node must have been called");
-    // the stand-in must have been answering a REAL settxfee request
+    // the apply pushes the fee AND the reserve (GUI-POLISH 2026-11-09):
+    // two real requests must have hit the stand-in
+    assert!(served >= 2, "the mock node must have seen both pushes, got {served}");
+    // the LAST request is the reserve push (fee first, reserve second —
+    // save_options_action's order); the cell is last-wins
     let req = seen.lock().unwrap().clone();
     let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
     let method = serde_json::from_str::<serde_json::Value>(body)
@@ -342,10 +345,17 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
         .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()));
     assert_eq!(
         method.as_deref(),
-        Some("settxfee"),
-        "the GUI must call settxfee, got {:?}; body: {}",
+        Some("reservebalance"),
+        "the apply's final push must be reservebalance, got {:?}; body: {}",
         method,
         body.chars().take(200).collect::<String>()
+    );
+    // the reserve push must have left the node-side state behind: the daemon
+    // echo lands in the field and the reserve notice stays clear
+    assert!(
+        st.options_reserve_notice.is_none(),
+        "a successful reserve push must not leave a notice, got: {:?}",
+        st.options_reserve_notice
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
