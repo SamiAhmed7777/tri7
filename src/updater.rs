@@ -1472,20 +1472,20 @@ mod tests {
     fn sample_release() -> Release {
         let js: Value = serde_json::from_str(
             r###"{
-            "tag_name": "v7.0.2",
-            "name": "Cryptographic Triangles 7.0.2",
-            "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.2",
+            "tag_name": "v7.0.3",
+            "name": "Cryptographic Triangles 7.0.3",
+            "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.3",
             "draft": false,
             "prerelease": false,
-            "body": "## Downloads\n- CryptographicTriangles-7.0.2-win64-setup.exe\n\n## SHA256\nsha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  CryptographicTriangles-7.0.2-win64-setup.exe\n",
+            "body": "## Downloads\n- CryptographicTriangles-7.0.3-win64-setup.exe\n\n## SHA256\nsha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  CryptographicTriangles-7.0.3-win64-setup.exe\n",
             "assets": [
-                {"name": "CryptographicTriangles-7.0.2-win64-setup.exe", "size": 12345678,
-                 "browser_download_url": "https://github.com/SamiAhmed7777/tri7/releases/download/v7.0.2/CryptographicTriangles-7.0.2-win64-setup.exe"},
-                {"name": "CryptographicTriangles-7.0.2-win64-gui-portable.exe", "size": 9000000,
+                {"name": "CryptographicTriangles-7.0.3-win64-setup.exe", "size": 12345678,
+                 "browser_download_url": "https://github.com/SamiAhmed7777/tri7/releases/download/v7.0.3/CryptographicTriangles-7.0.3-win64-setup.exe"},
+                {"name": "CryptographicTriangles-7.0.3-win64-gui-portable.exe", "size": 9000000,
                  "browser_download_url": "https://example.com/portable.exe"},
-                {"name": "CryptographicTriangles-7.0.2-linux-x64.tar.gz", "size": 8000000,
+                {"name": "CryptographicTriangles-7.0.3-linux-x64.tar.gz", "size": 8000000,
                  "browser_download_url": "https://example.com/linux.tar.gz"},
-                {"name": "CryptographicTriangles-7.0.2-macos-arm64.tar.gz", "size": 8500000,
+                {"name": "CryptographicTriangles-7.0.3-macos-arm64.tar.gz", "size": 8500000,
                  "browser_download_url": "https://example.com/macos.tar.gz"}
             ]
         }"###,
@@ -1497,8 +1497,8 @@ mod tests {
     #[test]
     fn parse_release_json_reads_live_shape() {
         let rel = sample_release();
-        assert_eq!(rel.version, v("7.0.2"));
-        assert_eq!(rel.tag, "v7.0.2");
+        assert_eq!(rel.version, v("7.0.3"));
+        assert_eq!(rel.tag, "v7.0.3");
         assert_eq!(rel.assets.len(), 4);
         assert_eq!(rel.assets[0].size, 12345678);
     }
@@ -1515,19 +1515,19 @@ mod tests {
         let rel = sample_release();
         assert_eq!(
             pick_asset(&rel, UpdateFlavor::WindowsInstaller).unwrap().name,
-            "CryptographicTriangles-7.0.2-win64-setup.exe"
+            "CryptographicTriangles-7.0.3-win64-setup.exe"
         );
         assert_eq!(
             pick_asset(&rel, UpdateFlavor::WindowsPortable).unwrap().name,
-            "CryptographicTriangles-7.0.2-win64-gui-portable.exe"
+            "CryptographicTriangles-7.0.3-win64-gui-portable.exe"
         );
         assert_eq!(
             pick_asset(&rel, UpdateFlavor::LinuxTarball).unwrap().name,
-            "CryptographicTriangles-7.0.2-linux-x64.tar.gz"
+            "CryptographicTriangles-7.0.3-linux-x64.tar.gz"
         );
         assert_eq!(
             pick_asset(&rel, UpdateFlavor::MacOsTarball).unwrap().name,
-            "CryptographicTriangles-7.0.2-macos-arm64.tar.gz"
+            "CryptographicTriangles-7.0.3-macos-arm64.tar.gz"
         );
         // an ABSENT platform asset → None (updater reports, never guesses)
         let mut rel_no_mac = sample_release();
@@ -1538,16 +1538,16 @@ mod tests {
     #[test]
     fn pick_asset_tolerant_fallback_on_renamed_asset() {
         let mut rel = sample_release();
-        rel.assets[0].name = "CryptographicTriangles-7.0.2-win64-setup.exe (1).exe".into();
+        rel.assets[0].name = "CryptographicTriangles-7.0.3-win64-setup.exe (1).exe".into();
         let a = pick_asset(&rel, UpdateFlavor::WindowsInstaller).expect("fallback match");
-        assert!(a.name.starts_with("CryptographicTriangles-7.0.2-win64-setup"));
+        assert!(a.name.starts_with("CryptographicTriangles-7.0.3-win64-setup"));
     }
 
     // ---- digest verification path ----
 
     #[test]
     fn extract_digest_from_all_documented_shapes() {
-        let name = "CryptographicTriangles-7.0.2-win64-setup.exe";
+        let name = "CryptographicTriangles-7.0.3-win64-setup.exe";
         let h = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let shapes = [
             format!("## SHA256\nsha256 {h}  {name}\n"),
@@ -1641,7 +1641,7 @@ mod tests {
     // ---- banner state machine ----
 
     fn newer_release() -> Release {
-        sample_release() // 7.0.2 > 7.0.0
+        sample_release() // 7.0.3 > 7.0.2 (current)
     }
 
     #[test]
@@ -1674,15 +1674,15 @@ mod tests {
         assert_eq!(st.phase, UpdatePhase::Available);
         st.skip_version();
         assert_eq!(st.phase, UpdatePhase::Idle);
-        assert_eq!(st.skipped_version(), Some(&v("7.0.2")));
+        assert_eq!(st.skipped_version(), Some(&v("7.0.3")));
         // re-check: same version → suppressed
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
         assert_eq!(st.phase, UpdatePhase::Idle);
         // a FURTHER new version un-suppresses (strictly newer than the
-        // skipped 7.0.2)
+        // skipped 7.0.3)
         let mut newer = newer_release();
-        newer.version = v("7.0.3");
+        newer.version = v("7.0.4");
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer)));
         assert_eq!(st.phase, UpdatePhase::Available);
@@ -1708,7 +1708,7 @@ mod tests {
         // destination + pinned digest resolved for the worker thread
         let (dest, flavor, pinned) = st.download_started_meta();
         assert_eq!(flavor, UpdateFlavor::WindowsInstaller);
-        assert!(dest.ends_with("CryptographicTriangles-7.0.2-win64-setup.exe"));
+        assert!(dest.ends_with("CryptographicTriangles-7.0.3-win64-setup.exe"));
         assert_eq!(
             pinned.as_deref(),
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -1720,7 +1720,7 @@ mod tests {
         );
         st.handle_event(UpdateEvent::DownloadDone(Ok(DownloadedUpdate {
             flavor: UpdateFlavor::WindowsInstaller,
-            version: v("7.0.2"),
+            version: v("7.0.3"),
             path: payload.clone(),
             size: 12345678,
             pinned_digest: None,
@@ -1801,7 +1801,7 @@ mod tests {
         st.skip_version();
         st.save_persist();
         let st2 = UpdateState::new(&dir);
-        assert_eq!(st2.skipped_version(), Some(&v("7.0.2")));
+        assert_eq!(st2.skipped_version(), Some(&v("7.0.3")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

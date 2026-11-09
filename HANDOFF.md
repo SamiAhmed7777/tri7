@@ -410,3 +410,36 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
   + 64 follow_tip (+1: verb set-contract — live global, conf line replace,
   byte-exact error strings) + gui-feature suite 539; windows-gnu all-bins
   release build green (winreg path compiles for the gnu target).
+
+## 2026-11-09 INSTALLER refresh + auto-updater exercise (workqueue item 16, TICK)
+- VERSION 7.0.1 → 7.0.2 (Cargo.toml; BUILDING.md updated) — the refresh ships
+  as a NEW release so the in-app updater genuinely resolves it.
+- tri7-wallet.nsi: (1) `txhistory.exe` now ships in the payload (item-14
+  remainder — the call was this tick's: yes, it completes the installed
+  toolset; File line + uninstall Delete added). (2) `EstimatedSize` is no
+  longer the stale `25` (KB): FileFunc `${GetSize} "$INSTDIR" "/S=0K"` now
+  measures what the run ACTUALLY installed right before the registry write,
+  so Add/Remove Programs shows the real ~18 MB instead of 25 KB.
+  Local `makensis -DVERSION=…` syntax check green before push (stand-in
+  payloads, artifact discarded). (3) ci.yml Copy-Item line gained
+  txhistory.exe so the installer build step has all four exes.
+- TEST FIXTURES for the bump: updater fixtures that modeled "the newer
+  release" as 7.0.2 became stale the moment current == 7.0.2 → fixtures
+  bumped to 7.0.3 (sample_release + banner test + skip/persist asserts;
+  further-new case 7.0.4). Semver-mechanics tests unchanged. 530 lib + 64
+  follow_tip green locally before push.
+- DIGEST-PINNING FIX (release body shape): v7.0.1's body quoted the digest
+  as `SHA256 (win64-setup.exe): <hex>` — the updater's
+  extract_digest_from_body requires the FULL asset name on the line, so
+  pinning silently degraded to None (size floor + PE sanity only, the
+  documented fallback). v7.0.2's body quotes the exact CI SHA256SUMS lines
+  (`<hex>  CryptographicTriangles-7.0.2-win64-setup.exe`, shape A) so
+  digest pinning BINDS for the first time since v7.0.0.
+- LIVE EXERCISE (tick close, post-push): v7.0.2 published on GitHub Releases
+  (setup + gui-portable + tri7d + SHA256SUMS assets); the updater engine's
+  live ignored test ran on DNS2 (fetch /releases/latest → resolve win64-setup
+  → download → size floor + PE sanity + pinned-digest verify); the NSIS /S
+  /D= silent install ran on sami-pc (the exact command the updater's
+  tri7-update.bat wrapper executes) — registry EstimatedSize/DisplayVersion,
+  bin payload hashes vs the CI artifacts, and the tri7gui-run relaunch all
+  verified; see the workqueue PROGRESS line for the evidence.

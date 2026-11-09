@@ -1,5 +1,5 @@
 ; tri7 Wallet — Cryptographic Triangles (TRI) NSIS installer
-; ONE file installs the GUI wallet + the node + the CLI.
+; ONE file installs the GUI wallet + the node + the CLI + the history tool.
 ; VERSION: overridable from CI (makensis -DVERSION=<ver>) so the installer
 ; metadata AND the output filename carry the Cargo.toml version — the in-app
 ; auto-updater (src/updater.rs) resolves release assets as
@@ -8,7 +8,7 @@
 !define APPNAME "Cryptographic Triangles"
 !define COMPANY "Triangles"
 !ifndef VERSION
-!define VERSION "7.0.0"
+!define VERSION "7.0.2"
 !endif
 !define EXEDIR "."
 
@@ -20,6 +20,7 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 !define MUI_ICON "assets\triangles.ico"
 !define MUI_ABORTWARNING
 
@@ -75,6 +76,7 @@ Section "Install"
   File "${EXEDIR}\tri7_wallet_gui.exe"
   File "${EXEDIR}\follow_tip.exe"
   File "${EXEDIR}\tri7.exe"
+  File "${EXEDIR}\txhistory.exe"
 
   ; the chain store + config live beside the wallet: the GUI's node
   ; supervisor uses <wallet folder>\node\state and
@@ -95,8 +97,6 @@ Section "Install"
     "UninstallString" "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
     "Publisher" "${COMPANY}"
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
-    "EstimatedSize" 25
 
   ; shortcuts
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
@@ -122,6 +122,17 @@ Section "Install"
     "$INSTDIR\bin\tri7_wallet_gui.exe" 0
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  ; EstimatedSize (KB, the unit Add/Remove Programs expects) measured from
+  ; what this run ACTUALLY installed — not a stale constant. $0=size,
+  ; $1=files, $2=dirs (FileFunc GetSize; recursion covers bin\ + node\).
+  ; Runs after WriteUninstaller so the uninstaller itself is counted too.
+  ; NOTE: on an upgrade over an existing folder this also counts
+  ; pre-existing content (wallet.dat, chain store) — that IS ARP
+  ; EstimatedSize semantics ("approximate size of the installed folder").
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
+    "EstimatedSize" "$0"
 SectionEnd
 
 Section "Uninstall"
@@ -132,6 +143,7 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\tri7_wallet_gui.exe"
   Delete "$INSTDIR\bin\follow_tip.exe"
   Delete "$INSTDIR\bin\tri7.exe"
+  Delete "$INSTDIR\bin\txhistory.exe"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR\bin"
   RMDir /r "$INSTDIR\node\state"

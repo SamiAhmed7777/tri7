@@ -1,0 +1,336 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 6f70d6e..ef8eec6 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -92,7 +92,7 @@ jobs:
+       - name: Build Windows installer (NSIS with version metadata)
+         run: |
+           choco install nsis -y --no-progress
+-          Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe, target\release\tri7.exe deploy\windows\
++          Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe, target\release\tri7.exe, target\release\txhistory.exe deploy\windows\
+           if (-not (Test-Path "$env:ChocolateyInstall\bin\makensis.exe")) {
+             $mk = Get-ChildItem 'C:\Program Files*\NSIS\makensis.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+           } else {
+diff --git a/BUILDING.md b/BUILDING.md
+index 572c335..ecace24 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -4,7 +4,7 @@ You do **not** need a pre-built binary. Everything the wallet and daemon need
+ is in this repository — build it yourself in one command per platform.
+ 
+ Repository: <https://github.com/SamiAhmed7777/tri7>
+-Version in this tree: **7.0.1** (see `Cargo.toml`)
++Version in this tree: **7.0.2** (see `Cargo.toml`)
+ 
+ ---
+ 
+diff --git a/Cargo.lock b/Cargo.lock
+index 8fabca3..f805c39 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4088,7 +4088,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "tri7-core"
+-version = "7.0.1"
++version = "7.0.2"
+ dependencies = [
+  "aes",
+  "arboard",
+diff --git a/Cargo.toml b/Cargo.toml
+index 9b9491f..28663da 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "tri7-core"
+-version = "7.0.1"
++version = "7.0.2"
+ edition = "2021"
+ description = "Modern full-node core for the Triangles chain — replays the legacy chain byte-for-byte"
+ 
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 416c7de..b0f5dd3 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -410,3 +410,36 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
+   + 64 follow_tip (+1: verb set-contract — live global, conf line replace,
+   byte-exact error strings) + gui-feature suite 539; windows-gnu all-bins
+   release build green (winreg path compiles for the gnu target).
++
++## 2026-11-09 INSTALLER refresh + auto-updater exercise (workqueue item 16, TICK)
++- VERSION 7.0.1 → 7.0.2 (Cargo.toml; BUILDING.md updated) — the refresh ships
++  as a NEW release so the in-app updater genuinely resolves it.
++- tri7-wallet.nsi: (1) `txhistory.exe` now ships in the payload (item-14
++  remainder — the call was this tick's: yes, it completes the installed
++  toolset; File line + uninstall Delete added). (2) `EstimatedSize` is no
++  longer the stale `25` (KB): FileFunc `${GetSize} "$INSTDIR" "/S=0K"` now
++  measures what the run ACTUALLY installed right before the registry write,
++  so Add/Remove Programs shows the real ~18 MB instead of 25 KB.
++  Local `makensis -DVERSION=…` syntax check green before push (stand-in
++  payloads, artifact discarded). (3) ci.yml Copy-Item line gained
++  txhistory.exe so the installer build step has all four exes.
++- TEST FIXTURES for the bump: updater fixtures that modeled "the newer
++  release" as 7.0.2 became stale the moment current == 7.0.2 → fixtures
++  bumped to 7.0.3 (sample_release + banner test + skip/persist asserts;
++  further-new case 7.0.4). Semver-mechanics tests unchanged. 530 lib + 64
++  follow_tip green locally before push.
++- DIGEST-PINNING FIX (release body shape): v7.0.1's body quoted the digest
++  as `SHA256 (win64-setup.exe): <hex>` — the updater's
++  extract_digest_from_body requires the FULL asset name on the line, so
++  pinning silently degraded to None (size floor + PE sanity only, the
++  documented fallback). v7.0.2's body quotes the exact CI SHA256SUMS lines
++  (`<hex>  CryptographicTriangles-7.0.2-win64-setup.exe`, shape A) so
++  digest pinning BINDS for the first time since v7.0.0.
++- LIVE EXERCISE (tick close, post-push): v7.0.2 published on GitHub Releases
++  (setup + gui-portable + tri7d + SHA256SUMS assets); the updater engine's
++  live ignored test ran on DNS2 (fetch /releases/latest → resolve win64-setup
++  → download → size floor + PE sanity + pinned-digest verify); the NSIS /S
++  /D= silent install ran on sami-pc (the exact command the updater's
++  tri7-update.bat wrapper executes) — registry EstimatedSize/DisplayVersion,
++  bin payload hashes vs the CI artifacts, and the tri7gui-run relaunch all
++  verified; see the workqueue PROGRESS line for the evidence.
+diff --git a/deploy/windows/tri7-wallet.nsi b/deploy/windows/tri7-wallet.nsi
+index 9e0c47c..5648fd5 100644
+--- a/deploy/windows/tri7-wallet.nsi
++++ b/deploy/windows/tri7-wallet.nsi
+@@ -1,5 +1,5 @@
+ ; tri7 Wallet — Cryptographic Triangles (TRI) NSIS installer
+-; ONE file installs the GUI wallet + the node + the CLI.
++; ONE file installs the GUI wallet + the node + the CLI + the history tool.
+ ; VERSION: overridable from CI (makensis -DVERSION=<ver>) so the installer
+ ; metadata AND the output filename carry the Cargo.toml version — the in-app
+ ; auto-updater (src/updater.rs) resolves release assets as
+@@ -8,7 +8,7 @@
+ !define APPNAME "Cryptographic Triangles"
+ !define COMPANY "Triangles"
+ !ifndef VERSION
+-!define VERSION "7.0.0"
++!define VERSION "7.0.2"
+ !endif
+ !define EXEDIR "."
+ 
+@@ -20,6 +20,7 @@ RequestExecutionLevel user
+ SetCompressor /SOLID lzma
+ 
+ !include "MUI2.nsh"
++!include "FileFunc.nsh"
+ !define MUI_ICON "assets\triangles.ico"
+ !define MUI_ABORTWARNING
+ 
+@@ -75,6 +76,7 @@ Section "Install"
+   File "${EXEDIR}\tri7_wallet_gui.exe"
+   File "${EXEDIR}\follow_tip.exe"
+   File "${EXEDIR}\tri7.exe"
++  File "${EXEDIR}\txhistory.exe"
+ 
+   ; the chain store + config live beside the wallet: the GUI's node
+   ; supervisor uses <wallet folder>\node\state and
+@@ -95,8 +97,6 @@ Section "Install"
+     "UninstallString" "$INSTDIR\uninstall.exe"
+   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
+     "Publisher" "${COMPANY}"
+-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
+-    "EstimatedSize" 25
+ 
+   ; shortcuts
+   CreateDirectory "$SMPROGRAMS\${APPNAME}"
+@@ -122,6 +122,17 @@ Section "Install"
+     "$INSTDIR\bin\tri7_wallet_gui.exe" 0
+ 
+   WriteUninstaller "$INSTDIR\uninstall.exe"
++
++  ; EstimatedSize (KB, the unit Add/Remove Programs expects) measured from
++  ; what this run ACTUALLY installed — not a stale constant. $0=size,
++  ; $1=files, $2=dirs (FileFunc GetSize; recursion covers bin\ + node\).
++  ; Runs after WriteUninstaller so the uninstaller itself is counted too.
++  ; NOTE: on an upgrade over an existing folder this also counts
++  ; pre-existing content (wallet.dat, chain store) — that IS ARP
++  ; EstimatedSize semantics ("approximate size of the installed folder").
++  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
++  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tri7Wallet" \
++    "EstimatedSize" "$0"
+ SectionEnd
+ 
+ Section "Uninstall"
+@@ -132,6 +143,7 @@ Section "Uninstall"
+   Delete "$INSTDIR\bin\tri7_wallet_gui.exe"
+   Delete "$INSTDIR\bin\follow_tip.exe"
+   Delete "$INSTDIR\bin\tri7.exe"
++  Delete "$INSTDIR\bin\txhistory.exe"
+   Delete "$INSTDIR\uninstall.exe"
+   RMDir "$INSTDIR\bin"
+   RMDir /r "$INSTDIR\node\state"
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 17926f4..959f580 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -1900,11 +1900,11 @@ fn updater_banner_line_pins_the_offered_jump() {
+     st.updater.flavor_override = Some(crate::updater::UpdateFlavor::WindowsInstaller);
+     st.updater.request_check().unwrap();
+     let rel = crate::updater::parse_release_json(&serde_json::from_value(serde_json::json!({
+-        "tag_name": "v7.0.2",
+-        "name": "Cryptographic Triangles 7.0.2",
+-        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.2",
++        "tag_name": "v7.0.3",
++        "name": "Cryptographic Triangles 7.0.3",
++        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.3",
+         "body": "## SHA256\n",
+-        "assets": [{"name": "CryptographicTriangles-7.0.2-win64-setup.exe",
++        "assets": [{"name": "CryptographicTriangles-7.0.3-win64-setup.exe",
+                     "size": 12345678,
+                     "browser_download_url": "https://example.com/x.exe"}]
+     })).unwrap()).unwrap();
+@@ -1912,7 +1912,7 @@ fn updater_banner_line_pins_the_offered_jump() {
+     assert_eq!(st.updater.phase, UpdatePhase::Available);
+     assert_eq!(
+         st.updater_banner_line().as_deref(),
+-        Some("Cryptographic Triangles 7.0.2 available")
++        Some("Cryptographic Triangles 7.0.3 available")
+     );
+     // download refused while a broadcast is in flight — banner stays honest
+     st.broadcast.busy = true;
+diff --git a/src/updater.rs b/src/updater.rs
+index 8ac1966..173ec1c 100644
+--- a/src/updater.rs
++++ b/src/updater.rs
+@@ -1472,20 +1472,20 @@ mod tests {
+     fn sample_release() -> Release {
+         let js: Value = serde_json::from_str(
+             r###"{
+-            "tag_name": "v7.0.2",
+-            "name": "Cryptographic Triangles 7.0.2",
+-            "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.2",
++            "tag_name": "v7.0.3",
++            "name": "Cryptographic Triangles 7.0.3",
++            "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.3",
+             "draft": false,
+             "prerelease": false,
+-            "body": "## Downloads\n- CryptographicTriangles-7.0.2-win64-setup.exe\n\n## SHA256\nsha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  CryptographicTriangles-7.0.2-win64-setup.exe\n",
++            "body": "## Downloads\n- CryptographicTriangles-7.0.3-win64-setup.exe\n\n## SHA256\nsha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  CryptographicTriangles-7.0.3-win64-setup.exe\n",
+             "assets": [
+-                {"name": "CryptographicTriangles-7.0.2-win64-setup.exe", "size": 12345678,
+-                 "browser_download_url": "https://github.com/SamiAhmed7777/tri7/releases/download/v7.0.2/CryptographicTriangles-7.0.2-win64-setup.exe"},
+-                {"name": "CryptographicTriangles-7.0.2-win64-gui-portable.exe", "size": 9000000,
++                {"name": "CryptographicTriangles-7.0.3-win64-setup.exe", "size": 12345678,
++                 "browser_download_url": "https://github.com/SamiAhmed7777/tri7/releases/download/v7.0.3/CryptographicTriangles-7.0.3-win64-setup.exe"},
++                {"name": "CryptographicTriangles-7.0.3-win64-gui-portable.exe", "size": 9000000,
+                  "browser_download_url": "https://example.com/portable.exe"},
+-                {"name": "CryptographicTriangles-7.0.2-linux-x64.tar.gz", "size": 8000000,
++                {"name": "CryptographicTriangles-7.0.3-linux-x64.tar.gz", "size": 8000000,
+                  "browser_download_url": "https://example.com/linux.tar.gz"},
+-                {"name": "CryptographicTriangles-7.0.2-macos-arm64.tar.gz", "size": 8500000,
++                {"name": "CryptographicTriangles-7.0.3-macos-arm64.tar.gz", "size": 8500000,
+                  "browser_download_url": "https://example.com/macos.tar.gz"}
+             ]
+         }"###,
+@@ -1497,8 +1497,8 @@ mod tests {
+     #[test]
+     fn parse_release_json_reads_live_shape() {
+         let rel = sample_release();
+-        assert_eq!(rel.version, v("7.0.2"));
+-        assert_eq!(rel.tag, "v7.0.2");
++        assert_eq!(rel.version, v("7.0.3"));
++        assert_eq!(rel.tag, "v7.0.3");
+         assert_eq!(rel.assets.len(), 4);
+         assert_eq!(rel.assets[0].size, 12345678);
+     }
+@@ -1515,19 +1515,19 @@ mod tests {
+         let rel = sample_release();
+         assert_eq!(
+             pick_asset(&rel, UpdateFlavor::WindowsInstaller).unwrap().name,
+-            "CryptographicTriangles-7.0.2-win64-setup.exe"
++            "CryptographicTriangles-7.0.3-win64-setup.exe"
+         );
+         assert_eq!(
+             pick_asset(&rel, UpdateFlavor::WindowsPortable).unwrap().name,
+-            "CryptographicTriangles-7.0.2-win64-gui-portable.exe"
++            "CryptographicTriangles-7.0.3-win64-gui-portable.exe"
+         );
+         assert_eq!(
+             pick_asset(&rel, UpdateFlavor::LinuxTarball).unwrap().name,
+-            "CryptographicTriangles-7.0.2-linux-x64.tar.gz"
++            "CryptographicTriangles-7.0.3-linux-x64.tar.gz"
+         );
+         assert_eq!(
+             pick_asset(&rel, UpdateFlavor::MacOsTarball).unwrap().name,
+-            "CryptographicTriangles-7.0.2-macos-arm64.tar.gz"
++            "CryptographicTriangles-7.0.3-macos-arm64.tar.gz"
+         );
+         // an ABSENT platform asset → None (updater reports, never guesses)
+         let mut rel_no_mac = sample_release();
+@@ -1538,16 +1538,16 @@ mod tests {
+     #[test]
+     fn pick_asset_tolerant_fallback_on_renamed_asset() {
+         let mut rel = sample_release();
+-        rel.assets[0].name = "CryptographicTriangles-7.0.2-win64-setup.exe (1).exe".into();
++        rel.assets[0].name = "CryptographicTriangles-7.0.3-win64-setup.exe (1).exe".into();
+         let a = pick_asset(&rel, UpdateFlavor::WindowsInstaller).expect("fallback match");
+-        assert!(a.name.starts_with("CryptographicTriangles-7.0.2-win64-setup"));
++        assert!(a.name.starts_with("CryptographicTriangles-7.0.3-win64-setup"));
+     }
+ 
+     // ---- digest verification path ----
+ 
+     #[test]
+     fn extract_digest_from_all_documented_shapes() {
+-        let name = "CryptographicTriangles-7.0.2-win64-setup.exe";
++        let name = "CryptographicTriangles-7.0.3-win64-setup.exe";
+         let h = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+         let shapes = [
+             format!("## SHA256\nsha256 {h}  {name}\n"),
+@@ -1641,7 +1641,7 @@ mod tests {
+     // ---- banner state machine ----
+ 
+     fn newer_release() -> Release {
+-        sample_release() // 7.0.2 > 7.0.0
++        sample_release() // 7.0.3 > 7.0.2 (current)
+     }
+ 
+     #[test]
+@@ -1674,15 +1674,15 @@ mod tests {
+         assert_eq!(st.phase, UpdatePhase::Available);
+         st.skip_version();
+         assert_eq!(st.phase, UpdatePhase::Idle);
+-        assert_eq!(st.skipped_version(), Some(&v("7.0.2")));
++        assert_eq!(st.skipped_version(), Some(&v("7.0.3")));
+         // re-check: same version → suppressed
+         st.request_check().unwrap();
+         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
+         assert_eq!(st.phase, UpdatePhase::Idle);
+         // a FURTHER new version un-suppresses (strictly newer than the
+-        // skipped 7.0.2)
++        // skipped 7.0.3)
+         let mut newer = newer_release();
+-        newer.version = v("7.0.3");
++        newer.version = v("7.0.4");
+         st.request_check().unwrap();
+         st.handle_event(UpdateEvent::Checked(Ok(newer)));
+         assert_eq!(st.phase, UpdatePhase::Available);
+@@ -1708,7 +1708,7 @@ mod tests {
+         // destination + pinned digest resolved for the worker thread
+         let (dest, flavor, pinned) = st.download_started_meta();
+         assert_eq!(flavor, UpdateFlavor::WindowsInstaller);
+-        assert!(dest.ends_with("CryptographicTriangles-7.0.2-win64-setup.exe"));
++        assert!(dest.ends_with("CryptographicTriangles-7.0.3-win64-setup.exe"));
+         assert_eq!(
+             pinned.as_deref(),
+             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+@@ -1720,7 +1720,7 @@ mod tests {
+         );
+         st.handle_event(UpdateEvent::DownloadDone(Ok(DownloadedUpdate {
+             flavor: UpdateFlavor::WindowsInstaller,
+-            version: v("7.0.2"),
++            version: v("7.0.3"),
+             path: payload.clone(),
+             size: 12345678,
+             pinned_digest: None,
+@@ -1801,7 +1801,7 @@ mod tests {
+         st.skip_version();
+         st.save_persist();
+         let st2 = UpdateState::new(&dir);
+-        assert_eq!(st2.skipped_version(), Some(&v("7.0.2")));
++        assert_eq!(st2.skipped_version(), Some(&v("7.0.3")));
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 

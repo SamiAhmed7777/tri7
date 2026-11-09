@@ -1900,11 +1900,11 @@ fn updater_banner_line_pins_the_offered_jump() {
     st.updater.flavor_override = Some(crate::updater::UpdateFlavor::WindowsInstaller);
     st.updater.request_check().unwrap();
     let rel = crate::updater::parse_release_json(&serde_json::from_value(serde_json::json!({
-        "tag_name": "v7.0.2",
-        "name": "Cryptographic Triangles 7.0.2",
-        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.2",
+        "tag_name": "v7.0.3",
+        "name": "Cryptographic Triangles 7.0.3",
+        "html_url": "https://github.com/SamiAhmed7777/tri7/releases/tag/v7.0.3",
         "body": "## SHA256\n",
-        "assets": [{"name": "CryptographicTriangles-7.0.2-win64-setup.exe",
+        "assets": [{"name": "CryptographicTriangles-7.0.3-win64-setup.exe",
                     "size": 12345678,
                     "browser_download_url": "https://example.com/x.exe"}]
     })).unwrap()).unwrap();
@@ -1912,7 +1912,7 @@ fn updater_banner_line_pins_the_offered_jump() {
     assert_eq!(st.updater.phase, UpdatePhase::Available);
     assert_eq!(
         st.updater_banner_line().as_deref(),
-        Some("Cryptographic Triangles 7.0.2 available")
+        Some("Cryptographic Triangles 7.0.3 available")
     );
     // download refused while a broadcast is in flight — banner stays honest
     st.broadcast.busy = true;
