@@ -4619,6 +4619,61 @@ struct LiveWalletProvider {
 }
 
 
+
+/// The balances-rebuild scheduler.
+///
+/// A walk that stopped short of the tip it CHASED (blocks landed while it
+/// was walking) is retried on a doubling backoff — 30s, 60s, 120s … capped
+/// at 1800s — so the snapshot converges to the whole chain and stays
+/// periodically eligible for rebuilding FOREVER: a short walk never makes
+/// the snapshot permanently ineligible.
+struct RebuildSchedule {
+    /// consecutive walks that stopped short of the chased tip
+    streak: u32,
+}
+
+impl RebuildSchedule {
+    fn new() -> Self {
+        Self { streak: 0 }
+    }
+
+    /// seconds to wait after attempt number `streak` (1-based). The FIRST
+    /// retry waits 30s, the second 60s, and so on, capped.
+    fn backoff_secs(&self) -> u64 {
+        const BASE: u64 = 30;
+        const MAX: u64 = 1_800;
+        if self.streak == 0 {
+            return 0;
+        }
+        let shifts = (self.streak - 1).min(6);
+        BASE.saturating_mul(1u64 << shifts).min(MAX)
+    }
+
+    /// whether a rebuild should run now.
+    ///
+    /// `stale` is the ordinary staleness (the snapshot is more than
+    /// REFRESH_BEHIND behind the tip, or missing entirely). `secs_since`
+    /// is how long ago the last attempt finished.
+    fn due(&self, stale: bool, secs_since: u64) -> bool {
+        if stale {
+            return true;
+        }
+        if self.streak == 0 {
+            return false;
+        }
+        secs_since >= self.backoff_secs()
+    }
+
+    /// record an attempt's outcome: did the walk reach the tip it chased?
+    fn record(&mut self, reached_tip: bool) {
+        if reached_tip {
+            self.streak = 0;
+        } else {
+            self.streak = self.streak.saturating_add(1);
+        }
+    }
+}
+
 /// The wallet's own outputs as the LIVE view knows them (the ones it
 /// replayed in its window). A pure function of the live view so the merge
 /// below can be tested without a live node.
@@ -8355,6 +8410,8 @@ fn main() {
                 const REFRESH_CHECK_SECS: u64 = 6 * 3600;
                 const NO_BLK_RETRY_SECS: u64 = 600;
                 let mut blk_missing_logged = false;
+                let mut sched = RebuildSchedule::new();
+                let mut last_attempt: Option<std::time::Instant> = None;
                 loop {
                     let blk = match b_blk.as_ref() {
                         Some(p) if p.exists() => p.clone(),
@@ -8385,8 +8442,21 @@ fn main() {
                         .map(|g| g.tip_height)
                         .unwrap_or(snap_h.max(0));
                     let stale = snap_h.saturating_add(REFRESH_BEHIND) < tip || snap_h == 0;
-                    if !stale {
-                        std::thread::sleep(Duration::from_secs(REFRESH_CHECK_SECS));
+                    let elapsed = last_attempt
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(u64::MAX);
+                    if !sched.due(stale, elapsed) {
+                        // sleep only the REMAINING wait: the scheduler owns
+                        // the pacing, so there is never a second sleep after
+                        // the build
+                        let remain = if sched.streak > 0 {
+                            sched.backoff_secs().saturating_sub(elapsed).max(1)
+                        } else {
+                            REFRESH_CHECK_SECS
+                        };
+                        std::thread::sleep(Duration::from_secs(remain.min(
+                            REFRESH_CHECK_SECS,
+                        )));
                         continue;
                     }
                     log(&format!(
@@ -8423,17 +8493,34 @@ fn main() {
                     };
                     match tri7_core::balances_build::build_balances_snapshot(&opts, &mut progress)
                     {
-                        Ok(rep) => log(&format!(
-                            "balances-build: done in {:.1}s — coverage h{} tip {} · supply {} sats · {} live UTXOs · wallet {} keys {} sats → {}",
-                            started.elapsed().as_secs_f64(),
-                            rep.covered_to,
-                            rep.tip_hash_display,
-                            rep.total_balance_sats,
-                            rep.live_utxos,
-                            rep.wallet_key_count,
-                            rep.wallet_balance_sats,
-                            rep.out_path.display()
-                        )),
+                        Ok(rep) => {
+                            log(&format!(
+                                "balances-build: done in {:.1}s — coverage h{} tip {} · supply {} sats · {} live UTXOs · wallet {} keys {} sats → {}",
+                                started.elapsed().as_secs_f64(),
+                                rep.covered_to,
+                                rep.tip_hash_display,
+                                rep.total_balance_sats,
+                                rep.live_utxos,
+                                rep.wallet_key_count,
+                                rep.wallet_balance_sats,
+                                rep.out_path.display()
+                            ));
+                            // did the walk reach the tip it chased? if not,
+                            // blocks were landing while it walked - record it
+                            // and loop: the scheduler paces the retry, so the
+                            // snapshot converges to the whole chain.
+                            last_attempt = Some(std::time::Instant::now());
+                            sched.record((rep.covered_to as u64) >= tip);
+                            if sched.streak > 0 {
+                                log(&format!(
+                                    "balances-build: coverage h{} short of the chased tip h{} — retrying in {}s",
+                                    rep.covered_to,
+                                    tip,
+                                    sched.backoff_secs()
+                                ));
+                            }
+                            // NO sleep here: the loop top owns the pacing
+                        }
                         Err(e) => {
                             // transient failure (torn read, disk full): retry
                             // on the SHORT cycle, not the 6h one
@@ -9967,6 +10054,92 @@ mod tests {
         let spends = vec![("aa".to_string(), 0u32, 150u64)];
         let merged = merge_whole_wallet_utxos(snapshot, Vec::new(), spends, 200, 100, true);
         assert_eq!(merged.len(), 1, "the snapshot is the authority below coverage");
+    }
+
+    /// THE REBUILD SCHEDULER.
+    ///
+    /// A walk that stops short of the tip it chased must be retried on a
+    /// doubling backoff (30s, 60s, 120s … capped at 30min) that is due
+    /// even when the snapshot is otherwise NOT stale, and must reset when a
+    /// walk finally reaches the tip. The backoff is capped, so the rebuilds
+    /// stay periodically eligible FOREVER - a short walk never makes the
+    /// snapshot permanently ineligible.
+    #[test]
+    fn the_rebuild_scheduler_backs_off_and_converges() {
+        let mut sched = RebuildSchedule::new();
+
+        // the first retry waits 30s
+        sched.record(false); // walk 1 stopped short
+        assert_eq!(sched.streak, 1);
+        assert_eq!(sched.backoff_secs(), 30);
+        // not yet due (0s since the attempt), even though the snapshot is
+        // otherwise not stale
+        assert!(!sched.due(false, 0), "the backoff must be honoured");
+        assert!(!sched.due(false, 29));
+        // due at 30s
+        assert!(sched.due(false, 30), "due once the backoff has elapsed");
+
+        // the second retry waits 60s, the third 120s …
+        sched.record(false);
+        assert_eq!(sched.backoff_secs(), 60);
+        sched.record(false);
+        assert_eq!(sched.backoff_secs(), 120);
+    }
+
+    #[test]
+    fn the_backoff_is_capped_so_the_rebuilds_stay_periodic() {
+        let mut sched = RebuildSchedule::new();
+        for _ in 0..12 {
+            sched.record(false);
+        }
+        // 30 * 2^11 would be way past the cap: the delay stops at 1800s
+        assert_eq!(sched.backoff_secs(), 1_800);
+        // and it STAYS due periodically - eligibility never expires
+        for i in 0..50 {
+            assert!(
+                sched.due(false, 1_800 + i as u64),
+                "iteration {i}: the scheduler must remain due"
+            );
+            sched.record(false); // every walk keeps coming up short
+        }
+        assert_eq!(sched.backoff_secs(), 1_800);
+    }
+
+    /// Retry while the snapshot is otherwise NOT stale: the short walk is
+    /// the reason to rebuild, and the ordinary 6h cadence must not suppress
+    /// it.
+    #[test]
+    fn a_short_walk_is_retried_even_when_normally_not_stale() {
+        let mut sched = RebuildSchedule::new();
+        sched.record(false); // stopped short
+        // snapshot hN, tip hN+14: NOT stale (14 < 5760) - but the short
+        // walk is still due once its backoff elapses
+        assert!(sched.due(false, 30));
+    }
+
+    /// A walk that reaches the tip resets the backoff: the scheduler goes
+    /// back to its ordinary long cadence.
+    #[test]
+    fn reaching_the_tip_resets_the_streak() {
+        let mut sched = RebuildSchedule::new();
+        sched.record(false);
+        sched.record(false);
+        assert_eq!(sched.streak, 2);
+        sched.record(true); // this walk reached the tip
+        assert_eq!(sched.streak, 0);
+        // and with no short walk outstanding, a non-stale snapshot is not
+        // due - the ordinary long cadence applies
+        assert!(!sched.due(false, 0));
+        assert!(!sched.due(false, u64::MAX / 2));
+    }
+
+    /// Ordinary staleness always builds immediately, whatever the streak.
+    #[test]
+    fn ordinary_staleness_builds_immediately() {
+        let mut sched = RebuildSchedule::new();
+        sched.record(false);
+        sched.record(false);
+        assert!(sched.due(true, 0), "stale -> build now");
     }
 
     /// With no snapshot at all (a fresh wallet folder) the live view is the
