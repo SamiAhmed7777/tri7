@@ -331,3 +331,30 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
   scratch ~1-3G/event (auto-pruned at 7d now). (5) /root/.hermes/state.db
   3.8G conversation store — slow background driver, FTS rebuild needs a
   gateway-stopped window, NOT touched (cheap reclaims reached target).
+
+## 2026-11-09 windows CLI in CI artifact + installer payload CONFIRMED (workqueue item 14, TICK)
+- CONFIRMATION TICK — no code change: tri7.exe (the CLI) was already wired
+  into BOTH distribution surfaces by commit 71bfc9a (2026-11-08, graded B
+  urn:ump:2f1bk8rq2m3k4qvn7x0p9rj5c1sd8vg6hqw4nt2mzl7rk0dp): ci.yml ships
+  target/release/tri7.exe in the tri7-windows artifact list and the NSIS
+  step Copy-Items it into deploy/windows/ before makensis; tri7-wallet.nsi
+  Files it to bin/tri7.exe (uninstall deletes it). The item's remaining bar
+  was proof on a GREEN run — landed:
+- EVIDENCE (run 42649739291, commit 9cb337e, all 4 jobs green; run URL
+  github.com/SamiAhmed7777/tri7/actions/runs/42649739291; bundle
+  .gate/ci-artifact-2026-11-09/): (1) tri7-windows artifact downloaded —
+  follow_tip/tri7_wallet_gui/tri7/txhistory all present, tri7.exe 4,147,200 B
+  sha256 1df8713c8f12d317aba761c162fcde121e9833d5b38574bd41dd1247983ddd6d.
+  (2) CryptographicTriangles-7.0.1-win64-setup.exe artifact (7,384,576 B)
+  7z-listed: Type Nsis, NSIS-3 Unicode, LZMA solid — payload bin/tri7_wallet_gui.exe
+  (12,121,088) + bin/follow_tip.exe (6,685,696) + bin/tri7.exe, matching the
+  nsi File lines exactly. (3) Extracted bin/tri7.exe from the setup.exe —
+  extracts at the full 4,147,200 B (closes the solid-archive size column),
+  cmp clean BYTE-IDENTICAL to the artifact exe (same sha256) — the installer
+  ships the same CLI binary CI builds.
+- HONEST REMAINDERS: the installer payload is 3 exes — txhistory.exe is
+  artifact-only (nsi has no File line); adding it is item 16's call during
+  the installer refresh. The Uninstall EstimatedSize registry value is a
+  static 25 (KB) vs ~18 MB real payload — cosmetic, fix opportunistically
+  in item 16. A live silent-install exercise (/S + /D) on sami-pc is item
+  16's bar (installer refresh + auto-updater), NOT this item's.
