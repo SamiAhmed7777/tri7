@@ -1,0 +1,1255 @@
+//! store_canonicalize — rewrite a block store in pure canonical order.
+//!
+//! THE INCIDENT (2026-11-09). A fork surgery left a node's blocks file with
+//! two interleaved chains: the canonical one, and the debris of the branch
+//! the surgery abandoned. The bodies were ALL present — a byte-level walk of
+//! the file's own prev links reached genesis without a break — but the index
+//! threads heights by FILE POSITION. The first debris frame therefore stole
+//! a height and every canonical frame after it was rejected, so the height
+//! map lost ~1,600 heights (h2201750..h2203320 on DNS2) even though their
+//! bodies sat on disk. Everything downstream inherited the hole: the balances
+//! replay stopped at h2201090, the wallet live view could not seed, and the
+//! explorer showed a gap in the middle of the chain.
+//!
+//! THE FIX. Rebuild the file so it contains ONLY the canonical chain, in
+//! ascending height order, with no debris and no out-of-order frames. Then
+//! positional threading succeeds for every height and the height map is
+//! whole again — no data is fetched, because no data was ever missing.
+//!
+//! HOW IT STAYS HONEST.
+//!   - The canonical chain is discovered from the FILE'S OWN prev links,
+//!     anchored at the tipstate window base (a height we already trust).
+//!   - Every frame is re-verified: its prev link must equal the HASH of the
+//!     frame before it. A frame that fails, or that is missing, or whose
+//!     header is malformed, ABORTS THE RUN. Nothing is silently dropped and
+//!     nothing is silently re-anchored: a partial chain is a failed repair,
+//!     not a repair with a caveat.
+//!   - The FIRST canonical frame must always have an all-zero prev link —
+//!     that is the genesis anchor, and it is checked in every case,
+//!     including a window that begins at genesis.
+//!   - The tipstate window must be strictly contiguous and ascending; a
+//!     malformed window aborts the run.
+//!   - A truncated frame header or body aborts the run (it is NOT treated as
+//!     a clean end of file).
+//!   - The source file is never modified and the output is never overwritten:
+//!     the output is created with create_new, and it must not be the input.
+//!   - A SOURCE THAT CHANGES UNDER THE TOOL IS DETECTED, WITHIN THE
+//!     INTERVALS THIS REPAIR COVERS. Precisely:
+//!       * the source's LENGTH and MODIFICATION TIME are recorded before
+//!         the scan and re-checked (a) at the start of the copy, (b) after
+//!         the copy, and (c) after the final verification — and before a
+//!         successful --verify-only return. An append or a replacement
+//!         inside those intervals aborts the run;
+//!       * the scan records a sha256d digest of every CANONICAL frame body;
+//!         the copy re-computes it and the final verification re-computes
+//!         it against the output on disk, so a mutation of a frame the
+//!         repair copies aborts the run;
+//!       * the output is compared byte for byte with the source frame it
+//!         came from, as the source exists at verification time.
+//!     NOT covered: a same-size in-place mutation of an EXCLUDED frame, and
+//!     a change to the source that happens AFTER the final check but
+//!     before the operator swaps the file in. Excluded frames are never
+//!     copied and the output does not depend on them.
+//!   - The output is re-walked from disk before the tool exits: every frame's
+//!     hash is compared against the frame the tool intended to write, and
+//!     the final hash must equal the window tip.
+//!   - The counts are reported precisely, because "dropped" can mean three
+//!     different things: physical frames in the file, distinct header
+//!     hashes, and canonical frames kept are each stated separately, along
+//!     with the excluded distinct hashes (the fork debris) and the excluded
+//!     physical frames (debris plus byte-identical duplicates).
+//!
+//! Usage:
+//!   store_canonicalize <blk.dat> <tipstate.json> <out.dat>
+//!   store_canonicalize <blk.dat> <tipstate.json> --verify-only
+//!
+//! Exit codes: 0 ok, 2 usage, 3+ a failed repair (see the message).
+//!
+//! A FAILED run may leave a PARTIAL output file behind: the output is
+//! created before the frames are written, so an I/O error or a failed
+//! verification can leave it on disk incomplete. The tool never reuses or
+//! overwrites it (create_new refuses), so a retry needs the partial file
+//! REMOVED first — otherwise the retry refuses to start.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use tri7_core::legacy::hash9;
+use tri7_core::p2p::{display_to_internal, internal_to_display};
+
+const FRAME_MAGIC: u32 = 0x0522_3570;
+const FRAME_HDR: usize = 8;
+const HEADER_LEN: usize = 80;
+
+#[derive(Clone)]
+struct Frame {
+    off: u64,
+    len: u32,
+    prev: [u8; 32],
+    /// sha256d over the frame body, captured during the scan. The copy and
+    /// the final verification both re-compute it, so a source that changed
+    /// under the tool is DETECTED rather than copied silently.
+    digest: [u8; 32],
+}
+
+/// The tipstate window: strictly ascending, contiguous heights with hashes.
+fn load_window(path: &Path) -> Result<Vec<(u64, [u8; 32])>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read tipstate: {e}"))?;
+    let st: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("tipstate json: {e}"))?;
+    let entries = st["entries"].as_array().cloned().unwrap_or_default();
+    if entries.is_empty() {
+        return Err("tipstate has no window entries".into());
+    }
+    let mut window: Vec<(u64, [u8; 32])> = Vec::with_capacity(entries.len());
+    for e in entries.iter() {
+        let h = e["height"]
+            .as_u64()
+            .ok_or_else(|| "tipstate window entry has no height".to_string())?;
+        let hex = e["hash"]
+            .as_str()
+            .ok_or_else(|| "tipstate window entry has no hash".to_string())?;
+        let hash = display_to_internal(hex).map_err(|e| format!("window hash {hex}: {e}"))?;
+        window.push((h, hash));
+    }
+    for i in 1..window.len() {
+        let next = window[i - 1]
+            .0
+            .checked_add(1)
+            .ok_or_else(|| "tipstate window height overflows u64".to_string())?;
+        if window[i].0 != next {
+            return Err(format!(
+                "tipstate window is not contiguous: h{} is followed by h{}",
+                window[i - 1].0, window[i].0
+            ));
+        }
+    }
+    // the window's height RANGE must not overflow u64 either
+    window[0]
+        .0
+        .checked_add((window.len() - 1) as u64)
+        .ok_or_else(|| {
+            format!(
+                "tipstate window height range overflows u64 (base h{} + {} entries)",
+                window[0].0,
+                window.len() - 1
+            )
+        })?;
+    Ok(window)
+}
+
+/// Index every frame in the file by its header hash.
+fn scan_frames(path: &Path) -> Result<(HashMap<[u8; 32], Frame>, u64, u64), String> {
+    let file = File::open(path).map_err(|e| format!("open blocks file: {e}"))?;
+    let mut r = BufReader::with_capacity(1 << 20, file);
+    let mut hdr = [0u8; FRAME_HDR];
+    let mut body: Vec<u8> = Vec::new();
+    let mut off: u64 = 0;
+    let mut frames_total = 0u64;
+    let mut duplicate_frames = 0u64;
+    let mut by_hash: HashMap<[u8; 32], Frame> = HashMap::new();
+    loop {
+        match read_frame_header(&mut r, &mut hdr) {
+            Ok(false) => break, // clean EOF
+            Ok(true) => {}
+            Err(e) => return Err(format!("frame header at offset {off}: {e}")),
+        }
+        let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+        if magic == 0 {
+            off += FRAME_HDR as u64;
+            continue; // NUL padding between files
+        }
+        if magic != FRAME_MAGIC {
+            return Err(format!("bad frame magic {magic:08x} at offset {off}"));
+        }
+        if len < HEADER_LEN as u32 || len > (8 << 20) {
+            return Err(format!(
+                "implausible frame length {len} at offset {off}"
+            ));
+        }
+        body.clear();
+        body.resize(len as usize, 0);
+        read_frame_body(&mut r, &mut body)
+            .map_err(|e| format!("frame body at offset {off}: {e}"))?;
+        let h = hash9(&body[..HEADER_LEN]);
+        let mut prev = [0u8; 32];
+        prev.copy_from_slice(&body[4..36]);
+        let digest = tri7_core::legacy::sha256d(&body);
+        if let Some(existing) = by_hash.get(&h) {
+            // A repeated header hash is only harmless if the frame is
+            // byte-identical. The same header with a DIFFERENT body is
+            // ambiguity the repair must not resolve silently: abort.
+            let a = read_frame_at(path, existing.off)?;
+            let mut b = Vec::with_capacity(FRAME_HDR + body.len());
+            b.extend_from_slice(&hdr);
+            b.extend_from_slice(&body);
+            if a != b {
+                return Err(format!(
+                    "two different frames share the header hash {} (offsets {} and {off}) — \
+                     the store is ambiguous, refusing to repair",
+                    internal_to_display(&h),
+                    existing.off
+                ));
+            }
+            duplicate_frames += 1;
+        } else {
+            by_hash.insert(
+                h,
+                Frame {
+                    off,
+                    len,
+                    prev,
+                    digest,
+                },
+            );
+        }
+        frames_total += 1;
+        off += (FRAME_HDR + len as usize) as u64;
+    }
+    Ok((by_hash, frames_total, duplicate_frames))
+}
+
+/// Read a whole frame (8-byte header + body) at a byte offset.
+fn read_frame_at(path: &Path, off: u64) -> Result<Vec<u8>, String> {
+    let f = File::open(path).map_err(|e| format!("open blocks file: {e}"))?;
+    let mut hdr = [0u8; FRAME_HDR];
+    read_at(&f, &mut hdr, off).map_err(|e| format!("read frame header at {off}: {e}"))?;
+    let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+    let mut body = vec![0u8; len];
+    read_at(&f, &mut body, off + FRAME_HDR as u64)
+        .map_err(|e| format!("read frame body at {off}: {e}"))?;
+    let mut out = Vec::with_capacity(FRAME_HDR + len);
+    out.extend_from_slice(&hdr);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+fn read_at(f: &File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.read_exact_at(buf, off)
+}
+
+/// Establish the canonical chain: every height from genesis to the window
+/// tip, in order, verified link by link.
+fn canonical_order(
+    by_hash: &HashMap<[u8; 32], Frame>,
+    window: &[(u64, [u8; 32])],
+) -> Result<Vec<[u8; 32]>, String> {
+    let window_base = window[0].0;
+    let anchor = window[0].1;
+    let anchor_frame = by_hash.get(&anchor).ok_or_else(|| {
+        format!(
+            "window base {} is not in the file",
+            internal_to_display(&anchor)
+        )
+    })?;
+
+    // walk the file's own prev links backward from the window base
+    let mut below: Vec<[u8; 32]> = Vec::new();
+    let mut cur = anchor_frame.prev;
+    while by_hash.contains_key(&cur) {
+        below.push(cur);
+        let f = &by_hash[&cur];
+        if f.prev == [0u8; 32] {
+            break; // genesis
+        }
+        cur = f.prev;
+        if below.len() > 10_000_000 {
+            return Err("the backward walk did not terminate".into());
+        }
+    }
+    below.reverse(); // ascending: genesis .. window_base-1
+
+    // the chain must cover EVERY height below the window base
+    let expected_below = window_base as usize; // heights 0 .. window_base-1
+    if below.len() != expected_below {
+        return Err(format!(
+            "the chain below the window covers {} heights but {expected_below} are needed \
+             (genesis..h{}) — the history is incomplete",
+            below.len(),
+            window_base.saturating_sub(1)
+        ));
+    }
+
+    // the ordered canonical list: below the window, then the window
+    let mut ordered: Vec<[u8; 32]> = below.clone();
+    ordered.extend(window.iter().map(|(_, h)| *h));
+
+    // verify every link. A missing frame or a broken link ABORTS: a
+    // partially rewritten store is worse than an unrepaired one.
+    let mut expect_prev: Option<[u8; 32]> = None; // HASH of the last kept frame
+    for (i, h) in ordered.iter().enumerate() {
+        let f = by_hash.get(h).ok_or_else(|| {
+            format!(
+                "canonical frame {} ({}) is missing from the file",
+                i,
+                internal_to_display(h)
+            )
+        })?;
+        if let Some(want) = expect_prev {
+            if f.prev != want {
+                return Err(format!(
+                    "link break at canonical frame {} ({}): its prev {} does not match the \
+                     previous frame's hash {}",
+                    i,
+                    internal_to_display(h),
+                    internal_to_display(&f.prev),
+                    internal_to_display(&want)
+                ));
+            }
+        }
+        expect_prev = Some(*h);
+    }
+
+    // THE GENESIS ANCHOR, in every case. The first canonical frame must have
+    // an all-zero prev link. This holds whether the window begins at genesis
+    // (the first frame IS the window base) or above it (the first frame is
+    // the block below the window base, reached by the walk).
+    let first = ordered
+        .first()
+        .ok_or_else(|| "the canonical chain is empty".to_string())?;
+    let first_prev = by_hash[first].prev;
+    if first_prev != [0u8; 32] {
+        return Err(format!(
+            "the canonical chain does not start at genesis: its first frame ({}) has a \
+             non-zero prev link {}",
+            internal_to_display(first),
+            internal_to_display(&first_prev)
+        ));
+    }
+    if window_base == 0 && !below.is_empty() {
+        return Err(format!(
+            "the window starts at genesis but {} blocks were found below it",
+            below.len()
+        ));
+    }
+
+    Ok(ordered)
+}
+
+/// Write the canonical frames, in order, to a NEW file.
+fn write_canonical(
+    blk: &Path,
+    out: &Path,
+    by_hash: &HashMap<[u8; 32], Frame>,
+    kept: &[[u8; 32]],
+    identity_before: (u64, std::time::SystemTime),
+) -> Result<u64, String> {
+    // the source must still be the file that was scanned
+    assert_source_unchanged(blk, identity_before)?;
+    // the output must not already exist: create_new refuses to clobber
+    if out.exists() {
+        return Err(format!(
+            "the output file already exists ({}) — refusing to overwrite it",
+            out.display()
+        ));
+    }
+    let src = File::open(blk).map_err(|e| format!("reopen blocks file: {e}"))?;
+    let mut rd = std::io::BufReader::with_capacity(1 << 20, src);
+    let mut w = BufWriter::with_capacity(
+        1 << 20,
+        File::options()
+            .write(true)
+            .create_new(true)
+            .open(out)
+            .map_err(|e| format!("create output {}: {e}", out.display()))?,
+    );
+    let mut hdr = [0u8; FRAME_HDR];
+    let mut buf = vec![0u8; 1 << 20];
+    let mut written = 0u64;
+    for h in kept.iter() {
+        let f = &by_hash[h];
+        // re-read the header and CHECK it against what the scan recorded:
+        // never trust a freshly read length without validating it
+        rd.read_exact_at(&mut hdr, f.off)
+            .map_err(|e| format!("read frame header: {e}"))?;
+        let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+        if magic != FRAME_MAGIC {
+            return Err(format!(
+                "frame at offset {} has magic {magic:08x}, expected {FRAME_MAGIC:08x} \
+                 — the source changed under us",
+                f.off
+            ));
+        }
+        if len != f.len {
+            return Err(format!(
+                "frame at offset {} has length {len}, but the scan recorded {} \
+                 — the source changed under us",
+                f.off, f.len
+            ));
+        }
+        w.write_all(&hdr).map_err(|e| format!("write frame header: {e}"))?;
+        let mut left = len as usize;
+        let mut copied: Vec<u8> = Vec::with_capacity(len as usize);
+        while left > 0 {
+            let n = left.min(buf.len());
+            rd.read_exact_at(
+                &mut buf[..n],
+                f.off + FRAME_HDR as u64 + (len as usize - left) as u64,
+            )
+            .map_err(|e| format!("read frame body: {e}"))?;
+            w.write_all(&buf[..n]).map_err(|e| format!("write frame body: {e}"))?;
+            copied.extend_from_slice(&buf[..n]);
+            left -= n;
+        }
+        // the bytes just copied must digest to what the scan recorded:
+        // this is what makes "the source changed under us" a DETECTED
+        // condition rather than a claim
+        if tri7_core::legacy::sha256d(&copied) != f.digest {
+            return Err(format!(
+                "the source frame at offset {} changed while the repair was running \
+                 (its digest no longer matches the scan) — aborting",
+                f.off
+            ));
+        }
+        written += 1;
+    }
+    w.flush().map_err(|e| format!("flush output: {e}"))?;
+    // durability: syncing the file makes its CONTENTS durable, so a later
+    // power loss cannot leave a half-written store. (A newly created
+    // pathname also needs the parent directory synced for the NAME itself
+    // to survive a crash; the operator's swap step covers that.)
+    w.into_inner()
+        .map_err(|e| format!("finish output: {e}"))?
+        .sync_all()
+        .map_err(|e| format!("fsync output: {e}"))?;
+    Ok(written)
+}
+
+/// Re-walk the OUTPUT from disk and cross-check it against what we intended
+/// to write: every frame's hash must equal the kept frame at that index, the
+/// links must hold, the first frame must be the genesis anchor, and the last
+/// frame must be the window tip.
+fn verify_output(
+    out: &Path,
+    src: &Path,
+    by_hash: &HashMap<[u8; 32], Frame>,
+    kept: &[[u8; 32]],
+    window_tip: [u8; 32],
+) -> Result<(u64, u64), String> {
+    let outfile = File::open(out).map_err(|e| format!("reopen output: {e}"))?;
+    let mut or = BufReader::with_capacity(1 << 20, outfile);
+    let mut hdr = [0u8; FRAME_HDR];
+    let mut body: Vec<u8> = Vec::new();
+    let mut n = 0u64;
+    let mut prev_expect: Option<[u8; 32]> = None;
+    let mut linked = 0u64;
+    let mut first_prev = [0u8; 32];
+    let mut have_first = false;
+    let mut frame_offset: u64 = 0;
+    loop {
+        match read_frame_header(&mut or, &mut hdr) {
+            Ok(false) => break,
+            Ok(true) => {}
+            Err(e) => return Err(format!("output frame header {n}: {e}")),
+        }
+        let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+        if magic == 0 {
+            continue;
+        }
+        if magic != FRAME_MAGIC {
+            return Err(format!("output frame {n}: bad magic {magic:08x}"));
+        }
+        // validate the length BEFORE slicing the header out of it
+        if len < HEADER_LEN as u32 || len > (8 << 20) {
+            return Err(format!("output frame {n}: implausible frame length {len}"));
+        }
+        body.clear();
+        body.resize(len as usize, 0);
+        read_frame_body(&mut or, &mut body)
+            .map_err(|e| format!("output frame body {n}: {e}"))?;
+        let h = hash9(&body[..HEADER_LEN]);
+        let this_offset = frame_offset;
+        frame_offset += (FRAME_HDR + len as usize) as u64;
+        let mut p = [0u8; 32];
+        p.copy_from_slice(&body[4..36]);
+        if !have_first {
+            first_prev = p;
+            have_first = true;
+        }
+        // cross-check against the frame we intended to write
+        match kept.get(n as usize) {
+            Some(want) if *want == h => {}
+            Some(want) => {
+                return Err(format!(
+                    "output frame {n} is {}, but the canonical frame there is {}",
+                    internal_to_display(&h),
+                    internal_to_display(want)
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "output holds more frames than were written (frame {n})"
+                ))
+            }
+        }
+        // BYTE-FOR-BYTE against the source frame: the header hash already
+        // matched, but the header alone does not cover the transactions.
+        // This proves the copied frame is exactly the frame that was
+        // scanned — no source mutation, no truncation, no silent rewrite.
+        let f = by_hash
+            .get(&h)
+            .ok_or_else(|| format!("output frame {n} is not a scanned frame"))?;
+        let src_frame = read_frame_at(src, f.off)?;
+        let out_frame = read_frame_at(out, this_offset)?;
+        if src_frame != out_frame {
+            return Err(format!(
+                "output frame {n} differs from the source frame it was copied from"
+            ));
+        }
+        // and the copied frame must still digest to what the scan recorded
+        if tri7_core::legacy::sha256d(&out_frame[FRAME_HDR..]) != f.digest {
+            return Err(format!(
+                "output frame {n} does not match the digest recorded during the scan"
+            ));
+        }
+        if let Some(want) = prev_expect {
+            if p != want {
+                return Err(format!("output link break at frame {n}"));
+            }
+            linked += 1;
+        }
+        prev_expect = Some(h);
+        n += 1;
+    }
+    if n as usize != kept.len() {
+        return Err(format!(
+            "output holds {n} frames but {} were written",
+            kept.len()
+        ));
+    }
+    // the genesis anchor, re-checked on the OUTPUT itself
+    if !have_first {
+        return Err("the output is empty".into());
+    }
+    if first_prev != [0u8; 32] {
+        let first = kept
+            .first()
+            .ok_or_else(|| "the canonical chain is empty".to_string())?;
+        return Err(format!(
+            "the output's first frame ({}) does not have an all-zero prev link",
+            internal_to_display(first)
+        ));
+    }
+    // the tip must be the window tip
+    let last = prev_expect.ok_or_else(|| "the output is empty".to_string())?;
+    if last != window_tip {
+        return Err(format!(
+            "the output's tip is {}, but the window tip is {}",
+            internal_to_display(&last),
+            internal_to_display(&window_tip)
+        ));
+    }
+    Ok((n, linked))
+}
+
+/// Read exactly `buf.len()` bytes, distinguishing a clean EOF (nothing read
+/// at all) from a TRUNCATED frame (some bytes read). A truncated frame is a
+/// corrupt store and must fail the repair, not look like the end of file.
+fn read_frame_header<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<bool> {
+    let mut got = 0usize;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    if got == 0 {
+        Ok(false) // clean EOF
+    } else if got < buf.len() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("truncated frame header ({got} of {} bytes)", buf.len()),
+        ))
+    } else {
+        Ok(true)
+    }
+}
+
+fn read_frame_body<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut got = 0usize;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("truncated frame body ({got} of {} bytes)", buf.len()),
+                ))
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+trait ReadAt {
+    fn read_exact_at(&mut self, buf: &mut [u8], off: u64) -> std::io::Result<()>;
+}
+
+impl ReadAt for std::io::BufReader<File> {
+    fn read_exact_at(&mut self, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.get_mut().read_exact_at(buf, off)
+    }
+}
+
+/// The identity of the source file at a point in time: its length and its
+/// modification time. A source that grew (an append) or was replaced while
+/// the repair ran is detected by comparing this.
+fn source_identity(path: &Path) -> Result<(u64, std::time::SystemTime), String> {
+    let m = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    Ok((m.len(), m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)))
+}
+
+/// Refuse to continue when the source file is no longer the file that was
+/// scanned: its length or its modification time moved.
+fn assert_source_unchanged(
+    path: &Path,
+    identity_before: (u64, std::time::SystemTime),
+) -> Result<(), String> {
+    let now = source_identity(path)?;
+    if now != identity_before {
+        return Err(
+            "the source file changed while the repair was running (its length or modification \
+             time moved) — aborting"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn run(blk: &Path, tipstate: &Path, out: Option<&Path>) -> Result<(), String> {
+    let window = load_window(tipstate)?;
+    let window_base = window[0].0;
+    let window_tip = window[window.len() - 1].1;
+    println!(
+        "tipstate window: h{window_base}..h{} ({} entries)",
+        window[window.len() - 1].0,
+        window.len()
+    );
+
+    let identity_before = source_identity(blk)?;
+    let (by_hash, frames_total, duplicate_frames) = scan_frames(blk)?;
+    let distinct = by_hash.len() as u64;
+
+    let ordered = canonical_order(&by_hash, &window)?;
+    // The counts are stated precisely, because "dropped" can mean three
+    // different things and the reader must not have to guess:
+    //   physical frames  — every frame in the file, duplicates included
+    //   distinct hashes  — frames with a unique header hash
+    //   canonical frames — the frames that belong to the chain, kept
+    //   excluded distinct — distinct-hash frames that are NOT canonical
+    //     (the fork debris) — these are the ones the repair leaves out
+    //   excluded physical — physical frames left out, which includes the
+    //     excluded distinct hashes AND every byte-identical duplicate
+    println!("physical frames in the source file: {frames_total}");
+    println!("distinct header hashes in the source file: {distinct}");
+    println!("byte-identical duplicate frames: {duplicate_frames}");
+    println!(
+        "canonical frames kept: {} (genesis..h{window_base}..tip)",
+        ordered.len()
+    );
+    println!(
+        "excluded distinct hashes (non-canonical, i.e. the fork debris): {}",
+        distinct - ordered.len() as u64
+    );
+    println!(
+        "excluded physical frames (debris + byte-identical duplicates): {}",
+        frames_total - ordered.len() as u64
+    );
+
+    let out = match out {
+        Some(o) => o,
+        None => {
+            // the source must not have moved during the verification either
+            assert_source_unchanged(blk, identity_before)?;
+            println!("verify-only: nothing written");
+            return Ok(());
+        }
+    };
+
+    // the source must not have grown or been replaced while we worked
+    assert_source_unchanged(blk, identity_before)?;
+    let written = write_canonical(blk, out, &by_hash, &ordered, identity_before)?;
+    println!("wrote {written} canonical frames to {}", out.display());
+
+    // the source must STILL be the same file we scanned
+    assert_source_unchanged(blk, identity_before)?;
+
+    let (n, linked) = verify_output(out, blk, &by_hash, &ordered, window_tip)?;
+    println!("output verified: {n} frames, {linked} links checked, 0 breaks");
+    println!("output tip hash: {}", internal_to_display(&window_tip));
+    // the source must not have moved during the final verification
+    assert_source_unchanged(blk, identity_before)?;
+    Ok(())
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: store_canonicalize <blk.dat> <tipstate.json> <out.dat>\n\
+         \x20      store_canonicalize <blk.dat> <tipstate.json> --verify-only"
+    );
+    std::process::exit(2);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let verify_only = args.iter().any(|a| a == "--verify-only");
+    for a in args.iter().skip(1) {
+        if a.starts_with("--") && a != "--verify-only" {
+            eprintln!("store_canonicalize: unknown flag {a}");
+            usage();
+        }
+    }
+    let positional: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+    // exactly the expected number of positional arguments: an extra one, or
+    // an output path alongside --verify-only, is a usage error
+    let want = if verify_only { 2 } else { 3 };
+    if positional.len() != want {
+        eprintln!(
+            "store_canonicalize: expected {want} positional argument(s), got {}",
+            positional.len()
+        );
+        usage();
+    }
+    let blk = PathBuf::from(positional[0]);
+    let tipstate = PathBuf::from(positional[1]);
+    let out: Option<PathBuf> = if verify_only {
+        None
+    } else {
+        Some(PathBuf::from(positional[2]))
+    };
+
+    // ---- the output must not be the input (same file, or same path)
+    if let Some(o) = &out {
+        let a = std::fs::canonicalize(&blk).unwrap_or_else(|_| blk.clone());
+        let b = std::fs::canonicalize(o).unwrap_or_else(|_| o.clone());
+        if a == b {
+            eprintln!(
+                "store_canonicalize: the output path is the same file as the input — refusing"
+            );
+            std::process::exit(2);
+        }
+        // the output must not already exist: create_new refuses to clobber
+        if o.exists() {
+            eprintln!(
+                "store_canonicalize: the output file already exists ({}) — refusing to overwrite it",
+                o.display()
+            );
+            std::process::exit(2);
+        }
+    }
+
+    if let Err(e) = run(&blk, &tipstate, out.as_deref()) {
+        eprintln!("store_canonicalize: {e}");
+        std::process::exit(3);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic 80-byte body whose prev link is `prev`.
+    fn body(prev: [u8; 32]) -> Vec<u8> {
+        let mut b = vec![0u8; HEADER_LEN];
+        b[0..4].copy_from_slice(&1u32.to_le_bytes()); // version
+        b[4..36].copy_from_slice(&prev);
+        b
+    }
+
+    /// A body with a payload AFTER the 80-byte header: two such frames can
+    /// share a header hash while differing in the bytes that follow it.
+    fn body_with_tail(prev: [u8; 32], tail: u8) -> Vec<u8> {
+        let mut b = body(prev);
+        b.push(tail);
+        b.push(tail);
+        b.push(tail);
+        b.push(tail);
+        b
+    }
+
+    fn frame(b: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+        f.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        f.extend_from_slice(b);
+        f
+    }
+
+    /// Build a store: a canonical chain of `n` blocks plus optional debris.
+    fn build_store(path: &Path, n: u64, debris: bool) -> Vec<[u8; 32]> {
+        let mut hashes = Vec::new();
+        let mut prev = [0u8; 32];
+        let mut bytes = Vec::new();
+        for _ in 0..n {
+            let b = body(prev);
+            let h = hash9(&b);
+            bytes.extend_from_slice(&frame(&b));
+            hashes.push(h);
+            prev = h;
+        }
+        if debris {
+            // a frame on an abandoned branch: it chains from genesis but is
+            // NOT the canonical successor
+            let b = body([0u8; 32]);
+            bytes.extend_from_slice(&frame(&b));
+        }
+        std::fs::write(path, &bytes).unwrap();
+        hashes
+    }
+
+    fn write_tipstate(path: &Path, hashes: &[[u8; 32]], base: u64) {
+        let entries: Vec<String> = hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                format!(
+                    r#"{{"height":{},"hash":"{}"}}"#,
+                    base + i as u64,
+                    internal_to_display(h)
+                )
+            })
+            .collect();
+        let js = format!(
+            r#"{{"window_base":{},"entries":[{}]}}"#,
+            base,
+            entries.join(",")
+        );
+        std::fs::write(path, js).unwrap();
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "store_canon_test_{name}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn genesis_window_anchor_with_nonzero_prev_is_refused() {
+        // A window that begins at genesis, but whose genesis frame has a
+        // non-zero prev link: the anchor must still be enforced.
+        let d = tmp("gen_anchor");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let b = body([7u8; 32]);
+        let h = hash9(&b);
+        std::fs::write(&blk, frame(&b)).unwrap();
+        write_tipstate(&ts, &[h], 0);
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("does not start at genesis"),
+            "expected a genesis-anchor refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_begins_at_genesis_is_accepted() {
+        let d = tmp("gen_window");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 3, false);
+        write_tipstate(&ts, &hashes, 0);
+        run(&blk, &ts, None).expect("a genesis-rooted window is valid");
+    }
+
+    #[test]
+    fn a_truncated_header_is_not_a_clean_eof() {
+        let d = tmp("trunc_hdr");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 2, false);
+        write_tipstate(&ts, &hashes, 0);
+        // append a partial frame header (5 of the 8 bytes)
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&[0x70, 0x35, 0x22, 0x05, 0x00]);
+        std::fs::write(&blk, &bytes).unwrap();
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("truncated frame header"),
+            "expected a truncated-header refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_body_is_not_a_clean_eof() {
+        let d = tmp("trunc_body");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 2, false);
+        write_tipstate(&ts, &hashes, 0);
+        // cut the last frame's body in half
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.truncate(bytes.len() - 20);
+        std::fs::write(&blk, &bytes).unwrap();
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("truncated frame body"),
+            "expected a truncated-body refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_window_frame_aborts() {
+        let d = tmp("missing_frame");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 4, false);
+        // the window names a hash that is not in the file
+        let mut fake = hashes[1..].to_vec();
+        fake[1] = [9u8; 32];
+        write_tipstate(&ts, &fake, 1);
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("missing from the file"),
+            "expected a missing-frame refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_broken_window_link_aborts() {
+        let d = tmp("broken_link");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 5, false);
+        // a window whose SECOND entry is not the successor of the first
+        // a window at height 1 whose second entry skips two heights
+        let window = vec![hashes[1], hashes[4]];
+        write_tipstate(&ts, &window, 1);
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("link break"),
+            "expected a link-break refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_non_contiguous_window_aborts() {
+        let d = tmp("noncontig");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 5, false);
+        let js = format!(
+            r#"{{"window_base":1,"entries":[{{"height":1,"hash":"{}"}},{{"height":3,"hash":"{}"}}]}}"#,
+            internal_to_display(&hashes[1]),
+            internal_to_display(&hashes[3])
+        );
+        std::fs::write(&ts, js).unwrap();
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("not contiguous"),
+            "expected a non-contiguous-window refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_history_aborts() {
+        let d = tmp("incomplete");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 3, false);
+        // the window claims to start at height 5, but the file only holds
+        // three blocks — the history below the window is genuinely short
+        write_tipstate(&ts, &hashes[2..], 5);
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("incomplete"),
+            "expected an incomplete-history refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn debris_is_dropped_and_the_canonical_chain_survives() {
+        let d = tmp("debris");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 4, true);
+        write_tipstate(&ts, &hashes[1..], 1);
+        run(&blk, &ts, Some(&out)).expect("the canonical chain is recoverable");
+        // the output must hold exactly the canonical frames
+        let (out_hashes, _, _) = scan_frames(&out).unwrap();
+        assert_eq!(out_hashes.len(), 4);
+        for h in hashes.iter() {
+            assert!(out_hashes.contains_key(h), "a canonical frame was lost");
+        }
+        // and it must re-walk to genesis
+        let mut cur = out_hashes.get(&hashes[3]).map(|f| f.prev).unwrap();
+        let mut n = 0;
+        while out_hashes.contains_key(&cur) {
+            n += 1;
+            if out_hashes[&cur].prev == [0u8; 32] {
+                break;
+            }
+            cur = out_hashes[&cur].prev;
+        }
+        assert_eq!(n, 3, "the output must chain back to genesis");
+    }
+
+    /// A frame on an abandoned branch: it builds on a CANONICAL block (so
+    /// it is a real fork, not noise) but its header hash differs from every
+    /// canonical frame, because its header fields differ.
+    fn debris_frame(prev: [u8; 32]) -> Vec<u8> {
+        let mut b = body(prev);
+        b[0..4].copy_from_slice(&2u32.to_le_bytes()); // a different version
+        b
+    }
+
+    #[test]
+    fn genuine_fork_debris_is_excluded_and_the_chain_stays_intact() {
+        let d = tmp("fork_debris");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 5, false);
+        // a real fork off the canonical block at height 2
+        let debris = debris_frame(hashes[2]);
+        let debris_hash = hash9(&debris);
+        assert!(
+            !hashes.contains(&debris_hash),
+            "the debris frame must not collide with a canonical frame"
+        );
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&frame(&debris));
+        std::fs::write(&blk, &bytes).unwrap();
+        write_tipstate(&ts, &hashes[1..], 1);
+
+        run(&blk, &ts, Some(&out)).expect("the canonical chain is recoverable");
+
+        // the output holds the canonical frames ONLY: no debris
+        let (out_hashes, physical, _) = scan_frames(&out).unwrap();
+        assert_eq!(physical, 5, "the output must hold exactly the canonical frames");
+        assert!(
+            !out_hashes.contains_key(&debris_hash),
+            "the fork debris must be excluded from the output"
+        );
+        for h in hashes.iter() {
+            assert!(out_hashes.contains_key(h), "a canonical frame was lost");
+        }
+        // and the output still chains back to genesis
+        let mut cur = out_hashes.get(&hashes[4]).map(|f| f.prev).unwrap();
+        let mut n = 0;
+        while out_hashes.contains_key(&cur) {
+            n += 1;
+            if out_hashes[&cur].prev == [0u8; 32] {
+                break;
+            }
+            cur = out_hashes[&cur].prev;
+        }
+        assert_eq!(n, 4, "the output must chain back to genesis");
+    }
+
+    #[test]
+    fn a_source_append_during_processing_is_detected() {
+        let d = tmp("append");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 4, false);
+        write_tipstate(&ts, &hashes[1..], 1);
+        // the source grows between the scan and the copy
+        let before = source_identity(&blk).unwrap();
+        let _scan = scan_frames(&blk).unwrap();
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&frame(&body([5u8; 32])));
+        std::fs::write(&blk, &bytes).unwrap();
+        let after = source_identity(&blk).unwrap();
+        assert_ne!(before, after, "the append must change the file identity");
+        // and the REAL copy path must REJECT it: the identity recorded
+        // before the scan no longer matches the file
+        let (by_hash, _t, _d) = scan_frames(&blk).unwrap();
+        let err = write_canonical(&blk, &out, &by_hash, &hashes[1..], before).unwrap_err();
+        assert!(
+            err.contains("changed while the repair was running"),
+            "expected the copy to reject the append, got: {err}"
+        );
+        // an unchanged source still passes the same check
+        let (by_hash2, _t2, _d2) = scan_frames(&blk).unwrap();
+        write_canonical(&blk, &out, &by_hash2, &hashes[1..], after)
+            .expect("an unchanged source passes the identity check");
+    }
+
+    #[test]
+    fn a_mutation_of_an_excluded_frame_does_not_affect_the_output() {
+        // the documented semantics: excluded frames are never copied, so a
+        // mutation of one does not change the repair's output
+        let d = tmp("excluded_mut");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 5, false);
+        let mut debris = debris_frame(hashes[2]);
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&frame(&debris));
+        std::fs::write(&blk, &bytes).unwrap();
+        write_tipstate(&ts, &hashes[1..], 1);
+        let (by_hash, _t, _d) = scan_frames(&blk).unwrap();
+        // mutate the debris frame in place (same length)
+        debris[75] ^= 0xFF;
+        let mut bytes = std::fs::read(&blk).unwrap();
+        let start = bytes.len() - (FRAME_HDR + debris.len());
+        bytes[start + FRAME_HDR + 75] ^= 0xFF;
+        std::fs::write(&blk, &bytes).unwrap();
+        // the copy of the CANONICAL frames is unaffected
+        write_canonical(&blk, &out, &by_hash, &hashes[1..], source_identity(&blk).unwrap())
+            .expect("a mutation of an excluded frame must not disturb the copy");
+    }
+
+    #[test]
+    fn an_append_during_verify_only_is_detected() {
+        // verify-only must also refuse to report success if the source
+        // moved while it was being verified
+        let d = tmp("append_verify");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 4, false);
+        write_tipstate(&ts, &hashes[1..], 1);
+        let before = source_identity(&blk).unwrap();
+        let _scan = scan_frames(&blk).unwrap();
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&frame(&body([7u8; 32])));
+        std::fs::write(&blk, &bytes).unwrap();
+        let err = assert_source_unchanged(&blk, before).unwrap_err();
+        assert!(
+            err.contains("changed while the repair was running"),
+            "expected the verify-only identity check to reject the append, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_source_is_never_modified() {
+        let d = tmp("no_mutate");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 4, true);
+        write_tipstate(&ts, &hashes[1..], 1);
+        let before = std::fs::read(&blk).unwrap();
+        run(&blk, &ts, Some(&out)).unwrap();
+        let after = std::fs::read(&blk).unwrap();
+        assert_eq!(before, after, "the source file must not be modified");
+    }
+
+    #[test]
+    fn an_identical_duplicate_frame_is_accepted() {
+        // the same block appended twice: identical bytes, so harmless
+        let d = tmp("dup_same");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 3, false);
+        let mut bytes = std::fs::read(&blk).unwrap();
+        // an EXACT copy of the genesis frame: same bytes, so same hash
+        let one = frame(&body([0u8; 32]));
+        bytes.extend_from_slice(&one);
+        std::fs::write(&blk, &bytes).unwrap();
+        write_tipstate(&ts, &hashes, 0);
+        run(&blk, &ts, None).expect("an identical duplicate frame is harmless");
+    }
+
+    #[test]
+    fn a_duplicate_hash_with_a_different_body_aborts() {
+        // the same HEADER but a different body: ambiguity the repair must
+        // not resolve silently
+        let d = tmp("dup_diff");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 3, false);
+        // same HEADER as genesis (so the same header hash) but a different
+        // body after it
+        let b = body_with_tail([0u8; 32], 0xAB);
+        let mut bytes = std::fs::read(&blk).unwrap();
+        bytes.extend_from_slice(&frame(&b));
+        std::fs::write(&blk, &bytes).unwrap();
+        write_tipstate(&ts, &hashes, 0);
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("share the header hash"),
+            "expected an ambiguous-duplicate refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_window_height_that_overflows_u64_aborts() {
+        let d = tmp("overflow");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let hashes = build_store(&blk, 2, false);
+        // h(u64::MAX) followed by a height that cannot be u64::MAX + 1
+        let max = u64::MAX;
+        let js = format!(
+            r#"{{"window_base":{},"entries":[{{"height":{},"hash":"{}"}},{{"height":{},"hash":"{}"}}]}}"#,
+            max,
+            max,
+            internal_to_display(&hashes[0]),
+            max,
+            internal_to_display(&hashes[1])
+        );
+        std::fs::write(&ts, js).unwrap();
+        let err = run(&blk, &ts, None).unwrap_err();
+        assert!(
+            err.contains("overflow") || err.contains("not contiguous"),
+            "expected an overflow refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_source_mutation_between_scan_and_copy_is_detected() {
+        // The scan records a digest of every frame; the copy re-computes it.
+        // A frame that changes in between must ABORT, not be copied.
+        let d = tmp("mutation");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 4, false);
+        write_tipstate(&ts, &hashes[1..], 1);
+        // scan first, exactly as the tool does
+        let (by_hash, _total, _dups) = scan_frames(&blk).unwrap();
+        // now mutate the source: rewrite the file with different bytes in
+        // the middle of the chain (the same header, a different body)
+        let mut bytes = std::fs::read(&blk).unwrap();
+        let last = bytes.len();
+        bytes[last - 10] ^= 0xFF;
+        std::fs::write(&blk, &bytes).unwrap();
+        let err =
+            write_canonical(&blk, &out, &by_hash, &hashes[1..], source_identity(&blk).unwrap())
+                .unwrap_err();
+        assert!(
+            err.contains("changed while the repair was running")
+                || err.contains("does not match the digest"),
+            "expected a source-mutation refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_output_is_never_overwritten() {
+        let d = tmp("no_clobber");
+        let blk = d.join("blk.dat");
+        let ts = d.join("tip.json");
+        let out = d.join("out.dat");
+        let hashes = build_store(&blk, 4, false);
+        write_tipstate(&ts, &hashes[1..], 1);
+        std::fs::write(&out, b"existing").unwrap();
+        let err = run(&blk, &ts, Some(&out)).unwrap_err();
+        assert!(
+            err.contains("already exists"),
+            "expected a refusal to overwrite, got: {err}"
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing");
+    }
+}
