@@ -49,6 +49,68 @@ pub const FOLDER_RELAY: u16 = 3;
 /// Bucket lock parity: 3 × SMSG_THREAD_DELAY seconds, unset on smsgMsg.
 pub const BUCKET_LOCK_TICKS: u32 = 3;
 
+/// Legacy SecMsgOptions parity (smessage.h:220 — defaults both true).
+/// `newAddressRecv`/`newAddressAnon` gate which flags NEWLY-learned wallet
+/// addresses carry; tri7 loads its receive keys once at engine open, so
+/// today these govern any future post-boot key-addition path (none yet) —
+/// the persisted store + list/set verb shapes are the parity surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecMsgOptions {
+    pub new_address_recv: bool,
+    pub new_address_anon: bool,
+}
+
+impl Default for SecMsgOptions {
+    fn default() -> Self {
+        SecMsgOptions {
+            new_address_recv: true,
+            new_address_anon: true,
+        }
+    }
+}
+
+impl SecMsgOptions {
+    pub const OPT_RECV: &'static str = "newAddressRecv";
+    pub const OPT_ANON: &'static str = "newAddressAnon";
+    /// Settings-table storage keys (the smsg.ini line names).
+    pub const OPT_RECV_KEY: &'static str = "newAddressRecv";
+    pub const OPT_ANON_KEY: &'static str = "newAddressAnon";
+
+    pub fn applies_to(&self, name: &str) -> bool {
+        name == Self::OPT_RECV || name == Self::OPT_ANON
+    }
+
+    pub fn assign(&mut self, name: &str, v: bool) {
+        if name == Self::OPT_RECV {
+            self.new_address_recv = v;
+        } else if name == Self::OPT_ANON {
+            self.new_address_anon = v;
+        }
+    }
+
+    /// Legacy value tokens (rpcsmessage.cpp smsgoptions set): "+"/"on"/
+    /// "true"/"1" and "-"/"off"/"false"/"0". Anything else is "Unknown value."
+    pub fn parse_value(s: &str) -> Option<bool> {
+        match s {
+            "+" | "on" | "true" | "1" => Some(true),
+            "-" | "off" | "false" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Legacy list/set rendering: "newAddressRecv = true".
+    pub fn render(name: &str, v: bool) -> String {
+        format!("{} = {}", name, v)
+    }
+
+    pub fn as_json(&self) -> Value {
+        json!({
+            "newAddressRecv": self.new_address_recv,
+            "newAddressAnon": self.new_address_anon,
+        })
+    }
+}
+
 pub struct SmsgNetMsg {
     pub command: &'static str,
     pub payload: Vec<u8>,
@@ -189,6 +251,16 @@ struct EngineState {
     sent: u64,
     /// (timestamp, sample) of the last locally composed message
     last_sent: Option<(i64, [u8; 8])>,
+    /// runtime toggle (smsgenable/smsgdisable): the engine boots ENABLED —
+    /// legacy starts secure messaging unless -nosmsg is passed, and its
+    /// enable/disable verbs are runtime-only (never persisted).
+    enabled: bool,
+    /// smsgoptions (persisted in the store's settings table, smsg.ini parity)
+    options: SecMsgOptions,
+    /// peers owed one final smsgDisabled after a runtime disable (legacy
+    /// SecureMsgDisable pushes it to every enabled peer; the tick loop is
+    /// tri7's only outbound path, so the notices ride send_data_tick)
+    disable_notices: Vec<String>,
 }
 
 pub struct SmsgEngine {
@@ -202,10 +274,27 @@ impl SmsgEngine {
     /// Open (or create) the store under `dir` and rebuild the bucket map.
     pub fn open(dir: &Path, owned: Vec<SmsgKey>) -> Result<Arc<SmsgEngine>, String> {
         let store = Arc::new(MessageStore::open(dir)?);
+        // persisted options (smsg.ini parity): absent/unknown values fall
+        // back to the legacy defaults (both true)
+        let mut options = SecMsgOptions::default();
+        for (key, slot) in [
+            (SecMsgOptions::OPT_RECV_KEY, &mut options.new_address_recv),
+            (SecMsgOptions::OPT_ANON_KEY, &mut options.new_address_anon),
+        ] {
+            if let Some(v) = store.get_setting(key)? {
+                if let Some(b) = SecMsgOptions::parse_value(&v) {
+                    *slot = b;
+                }
+            }
+        }
         let engine = SmsgEngine {
             store,
             owned,
-            st: Mutex::new(EngineState::default()),
+            st: Mutex::new(EngineState {
+                enabled: true,
+                options,
+                ..Default::default()
+            }),
         };
         let now = now_i64();
         let buckets = engine.rebuild_buckets(now);
@@ -314,6 +403,19 @@ impl SmsgEngine {
     /// tick. First contact → smsgPing; then cadence-gated bucket inventory.
     pub fn send_data_tick(&self, label: &str, now: i64) -> Option<SmsgNetMsg> {
         let mut st = self.st.lock().unwrap();
+        if !st.enabled {
+            // disabled: one final smsgDisabled per peer we had chatted with
+            // (legacy SecureMsgDisable pushes it immediately; tri7's tick loop
+            // is the only outbound path), then silence.
+            if let Some(pos) = st.disable_notices.iter().position(|l| l == label) {
+                st.disable_notices.remove(pos);
+                return Some(SmsgNetMsg {
+                    command: "smsgDisabled",
+                    payload: enc_vch(&[]),
+                });
+            }
+            return None;
+        }
         let pd = st.peers.entry(label.to_string()).or_default();
         if pd.last_seen == 0 {
             // first contact: ping once, do nothing until the pong
@@ -380,6 +482,15 @@ impl SmsgEngine {
             }
         };
         let mut st = self.st.lock().unwrap();
+        if !st.enabled {
+            // disabled: keep peer-state bookkeeping alive, ignore everything
+            // else (legacy ProcessMessage guards every smsg command on
+            // fSecMsgEnabled — no pong, no data, no storage while disabled)
+            if command == "smsgDisabled" {
+                st.peers.entry(label.to_string()).or_default().enabled = false;
+            }
+            return vec![];
+        }
         match command {
             "smsgPing" => vec![SmsgNetMsg {
                 command: "smsgPong",
@@ -769,11 +880,108 @@ impl SmsgEngine {
         n
     }
 
+    /// Runtime secure-messaging toggle (smsgenable/smsgdisable).
+    /// Legacy starts secure messaging at boot unless -nosmsg; the verbs are
+    /// runtime-only and never persisted — tri7 boots the engine ENABLED the
+    /// same way (its very existence means the wallet was plaintext at boot).
+    pub fn enabled(&self) -> bool {
+        self.st.lock().unwrap().enabled
+    }
+
+    /// SecureMsgDisable parity: stop data flow, drop the bucket set, and
+    /// owe every enabled peer one final smsgDisabled.
+    pub fn disable(&self) {
+        let mut st = self.st.lock().unwrap();
+        st.enabled = false;
+        st.disable_notices = st
+            .peers
+            .iter()
+            .filter(|(_, p)| p.enabled)
+            .map(|(l, _)| l.clone())
+            .collect();
+        st.buckets.clear();
+        st.locks.clear();
+        // legacy also sets pnode->smsgData.fEnabled = false per peer
+        for (_, p) in st.peers.iter_mut() {
+            p.enabled = false;
+        }
+    }
+
+    /// SecureMsgEnable parity: rebuild the bucket set and clear the peer
+    /// table so the first-contact ping re-handshakes everyone (legacy pings
+    /// each peer on enable).
+    pub fn enable(&self, now: i64) {
+        let mut st = self.st.lock().unwrap();
+        st.enabled = true;
+        st.disable_notices.clear();
+        st.peers.clear();
+        st.locks.clear();
+        st.buckets = self.rebuild_buckets(now);
+    }
+
+    /// Current smsgoptions.
+    pub fn options(&self) -> SecMsgOptions {
+        self.st.lock().unwrap().options
+    }
+
+    /// Set + persist smsgoptions (the store's settings table is the
+    /// smsg.ini equivalent).
+    pub fn set_options(&self, o: SecMsgOptions) -> Result<(), String> {
+        self.store.set_setting(
+            SecMsgOptions::OPT_RECV_KEY,
+            if o.new_address_recv { "true" } else { "false" },
+        )?;
+        self.store.set_setting(
+            SecMsgOptions::OPT_ANON_KEY,
+            if o.new_address_anon { "true" } else { "false" },
+        )?;
+        self.st.lock().unwrap().options = o;
+        Ok(())
+    }
+
+    /// SecureMsgScanBuckets parity: rescan every relay-store message against
+    /// the owned keys, re-delivering whatever the inbox is missing. Returns
+    /// the number of newly delivered messages.
+    pub fn scan_buckets(&self, now: i64) -> usize {
+        let mut st = self.st.lock().unwrap();
+        let wires: Vec<Vec<u8>> = match self.store.list(FOLDER_RELAY) {
+            Ok(ms) => ms.into_iter().map(|m| m.data).collect(),
+            Err(_) => return 0,
+        };
+        let mut found = 0usize;
+        for w in &wires {
+            if self.scan_into_inbox(&mut st, w, now) {
+                found += 1;
+            }
+        }
+        found
+    }
+
+    /// ScanChainForPublicKeys parity, one push at a time: a 33-byte
+    /// compressed pubkey learns (hash160(pubkey) → pubkey) in the address db
+    /// (legacy takes the address from the prevout's scriptPubKey; for the
+    /// standard P2PKH case that address IS hash160(pubkey), which covers the
+    /// addrbook's purpose — reply-key lookup). Returns (added, duplicate).
+    pub fn learn_pubkey(&self, pubkey: &[u8], now: i64) -> Result<(bool, bool), String> {
+        if pubkey.len() != 33 {
+            return Err(format!(
+                "pubkey must be 33 bytes (compressed), got {}",
+                pubkey.len()
+            ));
+        }
+        let _pk = secp256k1::PublicKey::from_slice(pubkey)
+            .map_err(|_| "pubkey is invalid".to_string())?;
+        let h160 = crate::address::hash160(pubkey);
+        let inserted = self.store.insert_pubkey(&h160, pubkey, now)?;
+        Ok((inserted, !inserted))
+    }
+
     /// smsglocalinfo / smsgkeys JSON.
     pub fn localinfo_json(&self) -> Value {
         let st = self.st.lock().unwrap();
         json!({
-            "enabled": true,
+            "enabled": st.enabled,
+            "options": st.options.as_json(),
             "addresses": self.owned.iter().map(|k| k.address.clone()).collect::<Vec<_>>(),
             "keys": self.owned.len(),
             "buckets": st.buckets.len(),
@@ -1344,5 +1552,148 @@ mod tests {
         assert!(a.add_address(&k.b.address, &k.a.pubkey_bytes()).is_err());
         assert!(a.add_address(&k.b.address, &k.b.pubkey_bytes()).is_ok());
         assert!(a.add_address(&k.b.address, &[1u8; 30]).is_err());
+    }
+
+    // ---- smsgenable / smsgdisable / smsgoptions / scans (workqueue item 11) ----
+
+    #[test]
+    fn disable_stops_data_and_notifies_each_enabled_peer_once() {
+        let k = make_keys();
+        let a = engine("togg-a", vec![k.a.clone(), k.b.clone()]);
+        let now = now_i64();
+        // handshake peer p1 to "enabled" via the ping/pong dance
+        a.send_data_tick("p1", now); // first contact → ping
+        a.handle("p1", "smsgPong", &enc_vch(&[]), now);
+        // give the engine a bucket so an enabled peer gets an inv
+        a.send_local(&k.a.address, &k.b.address, "hello toggle", now).unwrap();
+        assert!(a.send_data_tick("p1", now + SMSG_SEND_DELAY).is_some());
+
+        a.disable();
+        assert!(!a.enabled());
+        // the only outbound while disabled is ONE smsgDisabled, then silence
+        let out = a.send_data_tick("p1", now + 10);
+        assert!(out.is_some());
+        assert_eq!(out.unwrap().command, "smsgDisabled");
+        assert!(a.send_data_tick("p1", now + 12).is_none());
+        // inbound data is refused while disabled (no pong, no storage)
+        assert!(a.handle("p1", "smsgPing", &enc_vch(&[]), now + 13).is_empty());
+        let wire = crate::smsg::smsg_encrypt(Some(&k.b), &k.a.pubkey_bytes(), "x", now).unwrap();
+        let body = build_msg_body(bucket_time_of(now), &[wire]);
+        a.handle("p1", "smsgMsg", &enc_vch(&body), now + 14);
+        assert_eq!(
+            a.list_folder_json(FOLDER_INBOX, false).unwrap().as_array().unwrap().len(),
+            0,
+            "disabled engine must not deliver"
+        );
+        // a second disable is a no-op (no duplicate notices)
+        a.disable();
+        assert!(a.send_data_tick("p1", now + 16).is_none());
+    }
+
+    #[test]
+    fn enable_rebuilds_buckets_and_rehandshakes_peers() {
+        let k = make_keys();
+        let a = engine("togg-b", vec![k.a.clone(), k.b.clone()]);
+        let now = now_i64();
+        a.send_data_tick("p1", now);
+        a.handle("p1", "smsgPong", &enc_vch(&[]), now);
+        a.send_local(&k.a.address, &k.b.address, "again", now).unwrap();
+
+        a.disable();
+        a.enable(now + 60);
+        assert!(a.enabled());
+        // peers were reset: first contact pings again (legacy pings on enable)
+        let out = a.send_data_tick("p1", now + 60);
+        assert!(out.is_some());
+        assert_eq!(out.unwrap().command, "smsgPing");
+        // buckets were rebuilt: after the pong the inv flows again
+        a.handle("p1", "smsgPong", &enc_vch(&[]), now + 61);
+        let out = a.send_data_tick("p1", now + 61 + SMSG_SEND_DELAY);
+        assert!(out.is_some());
+        assert_eq!(out.unwrap().command, "smsgInv");
+    }
+
+    #[test]
+    fn options_roundtrip_through_the_store() {
+        let k = make_keys();
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-smsgopt-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
+        // legacy defaults: both true
+        assert_eq!(a.options(), SecMsgOptions::default());
+        let mut o = a.options();
+        o.assign(SecMsgOptions::OPT_RECV, false);
+        a.set_options(o).unwrap();
+        assert_eq!(a.options().new_address_recv, false);
+        assert_eq!(a.options().new_address_anon, true);
+        // persisted: a fresh engine on the same store reads the same values
+        let b = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
+        assert_eq!(b.options().new_address_recv, false);
+        assert_eq!(b.options().new_address_anon, true);
+        // localinfo reports the real state
+        let info = b.localinfo_json();
+        assert_eq!(info["enabled"], serde_json::json!(true));
+        assert_eq!(info["options"]["newAddressRecv"], serde_json::json!(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_value_tokens_match_legacy() {
+        for t in ["+", "on", "true", "1"] {
+            assert_eq!(SecMsgOptions::parse_value(t), Some(true), "token {t}");
+        }
+        for t in ["-", "off", "false", "0"] {
+            assert_eq!(SecMsgOptions::parse_value(t), Some(false), "token {t}");
+        }
+        assert_eq!(SecMsgOptions::parse_value("yes"), None);
+        assert_eq!(SecMsgOptions::parse_value(""), None);
+        assert_eq!(
+            SecMsgOptions::render(SecMsgOptions::OPT_RECV, true),
+            "newAddressRecv = true"
+        );
+    }
+
+    #[test]
+    fn scan_buckets_redelivers_relay_messages_to_inbox() {
+        let k = make_keys();
+        let a = engine("scanb", vec![k.a.clone(), k.b.clone()]);
+        let now = now_i64();
+        // a local send lands in outbox + relay but NOT the inbox
+        a.send_local(&k.a.address, &k.b.address, "rescan me", now).unwrap();
+        assert_eq!(
+            a.list_folder_json(FOLDER_INBOX, false).unwrap().as_array().unwrap().len(),
+            0
+        );
+        let found = a.scan_buckets(now + 1);
+        assert_eq!(found, 1);
+        let rows = a.list_folder_json(FOLDER_INBOX, false).unwrap().as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["to"], serde_json::json!(k.b.address));
+        // idempotent: a second scan finds nothing new
+        assert_eq!(a.scan_buckets(now + 2), 0);
+    }
+
+    #[test]
+    fn learn_pubkey_validates_and_dedupes() {
+        let k = make_keys();
+        let a = engine("learnpk", vec![k.a.clone()]);
+        let now = now_i64();
+        let (added, dup) = a.learn_pubkey(&k.b.pubkey_bytes(), now).unwrap();
+        assert!(added && !dup);
+        // duplicate learn
+        let (added, dup) = a.learn_pubkey(&k.b.pubkey_bytes(), now).unwrap();
+        assert!(!added && dup);
+        // secp-invalid 33 bytes rejected (x = 0xff…ff ≥ the field prime),
+        // wrong length rejected
+        let mut bad = [0xffu8; 33];
+        bad[0] = 2;
+        assert!(a.learn_pubkey(&bad, now).is_err());
+        assert!(a.learn_pubkey(&[2u8; 32], now).is_err());
+        // the learned key is usable: a reply to b resolves without addaddress
+        let from = k.a.address.clone();
+        a.send_local(&from, &k.b.address, "reply", now).unwrap();
     }
 }

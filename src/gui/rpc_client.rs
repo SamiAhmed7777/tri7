@@ -55,6 +55,13 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // legacy parity 2026-11-09 (workqueue item 11): the RPC console can drive
+    // the runtime toggles + option store + rescans (no GUI page calls these)
+    "smsgenable",
+    "smsgdisable",
+    "smsgoptions",
+    "smsgscanchain",
+    "smsgscanbuckets",
     // wallet file state (File ▸ Encrypt / Change / Unlock / Remove) — the
     // passphrase is never stored by the GUI, and the node validates it
     "encryptwallet",

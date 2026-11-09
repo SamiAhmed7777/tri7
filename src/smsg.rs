@@ -1091,6 +1091,10 @@ impl MessageStore {
                hash160 BLOB PRIMARY KEY,
                pubkey BLOB NOT NULL,
                added INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS settings (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
              );",
         )
         .map_err(|e| format!("smsg schema: {}", e))?;
@@ -1211,6 +1215,35 @@ impl MessageStore {
             )
             .map_err(|e| format!("smsg insert_pubkey: {}", e))?;
         Ok(n > 0)
+    }
+
+    /// Persist one smsg option (legacy smsg.ini parity — the ini file is a
+    /// key=value text store; the SQLite settings table is the tri7 equivalent,
+    /// read at engine open and written on smsgoptions set).
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .map_err(|e| format!("smsg set_setting: {}", e))?;
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key = ?1")
+            .map_err(|e| format!("smsg get_setting: {}", e))?;
+        let mut rows = stmt.query([key]).map_err(|e| format!("smsg get_setting: {}", e))?;
+        if let Some(r) = rows
+            .next()
+            .map_err(|e| format!("smsg get_setting: {}", e))?
+        {
+            Ok(Some(r.get::<_, String>(0).map_err(|e| format!("smsg get_setting row: {}", e))?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn lookup_pubkey(&self, hash160: &[u8; 20]) -> Result<Option<Vec<u8>>, String> {

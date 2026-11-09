@@ -7023,6 +7023,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 let (Some(from), Some(to), Some(msg)) = (ps(0), ps(1), ps(2)) else {
                     return Err((-8, "smsgsend expects [from, to, message]".into()));
                 };
@@ -7041,6 +7044,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 let unread_only = ps(0).as_deref() == Some("unread");
                 let folder = if method == "smsginbox" {
                     tri7_core::smsg::FOLDER_INBOX
@@ -7055,6 +7061,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 let now = now_secs() as i64;
                 let purged = engine.purge(now);
                 let info = engine.localinfo_json();
@@ -7070,6 +7079,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 let n = engine.purge(now_secs() as i64);
                 Ok(serde_json::json!({ "purged": n }))
             }
@@ -7077,6 +7089,9 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 let (Some(addr), Some(pk)) = (ps(0), ps(1)) else {
                     return Err((-8, "smsgaddaddress expects [address, pubkey-hex]".into()));
                 };
@@ -7091,7 +7106,181 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let Some(engine) = &self.smsg else {
                     return Err((-1, SMSG_NOT_WIRED.into()));
                 };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
                 Ok(engine.localinfo_json())
+            }
+            // ---- legacy parity 2026-11-09 (workqueue item 11 SMSG-TOGGLES):
+            // runtime enable/disable + the smsg.ini option store + the two
+            // rescans (rpcsmessage.cpp smsgenable/smsgdisable/smsgoptions/
+            // smsgscanchain/smsgscanbuckets) ----
+            "smsgenable" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.get(0).is_some() {
+                    return Err((-8, "smsgenable takes no parameters".into()));
+                }
+                if engine.enabled() {
+                    return Err((-1, "Secure messaging is already enabled.".into()));
+                }
+                engine.enable(now_secs() as i64);
+                log("smsg: enabled via RPC (SecureMsgEnable parity)");
+                Ok(serde_json::json!({ "result": "Enabled secure messaging." }))
+            }
+            "smsgdisable" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.get(0).is_some() {
+                    return Err((-8, "smsgdisable takes no parameters".into()));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is already disabled.".into()));
+                }
+                engine.disable();
+                log("smsg: disabled via RPC (SecureMsgDisable parity)");
+                Ok(serde_json::json!({ "result": "Disabled secure messaging." }))
+            }
+            "smsgoptions" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                match smsg_options_cmd(params) {
+                    Err(e) => Err(e),
+                    Ok(SmsgOptionsCmd::List) => {
+                        let o = engine.options();
+                        Ok(serde_json::json!({
+                            // legacy emits two duplicate "option" pairs (a
+                            // json_spirit vector-of-pairs); a JSON object
+                            // cannot carry duplicate keys, so the array is
+                            // the information-preserving tri7 shape
+                            "options": [
+                                tri7_core::smsg_net::SecMsgOptions::render(
+                                    tri7_core::smsg_net::SecMsgOptions::OPT_RECV,
+                                    o.new_address_recv,
+                                ),
+                                tri7_core::smsg_net::SecMsgOptions::render(
+                                    tri7_core::smsg_net::SecMsgOptions::OPT_ANON,
+                                    o.new_address_anon,
+                                ),
+                            ],
+                            "result": "Success.",
+                        }))
+                    }
+                    Ok(SmsgOptionsCmd::Set { optname, value }) => {
+                        let (Some(optname), Some(value)) = (optname, value) else {
+                            return Ok(serde_json::json!({
+                                "result": "Too few parameters.",
+                                "expected": "set <optname> <value>",
+                            }));
+                        };
+                        let Some(b) = tri7_core::smsg_net::SecMsgOptions::parse_value(&value)
+                        else {
+                            return Ok(serde_json::json!({ "result": "Unknown value." }));
+                        };
+                        let mut o = engine.options();
+                        if !o.applies_to(&optname) {
+                            return Ok(serde_json::json!({ "result": "Option not found." }));
+                        }
+                        o.assign(&optname, b);
+                        engine.set_options(o).map_err(|e| (-1, e))?;
+                        log(&format!("smsgoptions: {} = {}", optname, b));
+                        Ok(serde_json::json!({
+                            "set option": tri7_core::smsg_net::SecMsgOptions::render(&optname, b),
+                        }))
+                    }
+                    Ok(SmsgOptionsCmd::UnknownMode) => Ok(serde_json::json!({
+                        "result": "Unknown Mode.",
+                        // legacy's own expected-string typo ("smsgoption") kept
+                        // for byte parity with rpcsmessage.cpp
+                        "expected": "smsgoption [list|set <optname> <value>]",
+                    })),
+                }
+            }
+            "smsgscanchain" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.get(0).is_some() {
+                    return Err((-8, "smsgscanchain takes no parameters".into()));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                let now = now_secs() as i64;
+                // ScanChainForPublicKeys parity, window-bounded: legacy walks
+                // genesis→tip; tri7 scans the served window clamped to the
+                // last 50k blocks so an RPC call can never run away (recent
+                // blocks are where new peers' keys live anyway)
+                const SMSG_SCAN_MAX_BLOCKS: u64 = 50_000;
+                let (base, tip) = {
+                    match self.st.try_lock() {
+                        Ok(g) => (g.base, g.tip_height),
+                        Err(_) => {
+                            let h = self.mirror.height();
+                            (h.saturating_sub(4600), h)
+                        }
+                    }
+                };
+                let lo = tip.saturating_sub(SMSG_SCAN_MAX_BLOCKS - 1).max(base);
+                let mut scanned = 0u64;
+                let mut keys_added = 0u64;
+                let mut duplicates = 0u64;
+                let mut invalid = 0u64;
+                if let Some(store) = &self.store {
+                    for h in lo..=tip {
+                        let Ok(Some(raw)) = store.raw_body_by_height(h) else {
+                            continue;
+                        };
+                        let mut r = tri7_core::legacy::Reader::new(&raw);
+                        let Ok(block) = tri7_core::legacy::Block::read(&mut r) else {
+                            continue;
+                        };
+                        scanned += 1;
+                        for tx in &block.vtx {
+                            for vin in &tx.vin {
+                                for pk in script_pushes_33(&vin.script_sig) {
+                                    match engine.learn_pubkey(pk, now) {
+                                        Ok((true, _)) => keys_added += 1,
+                                        Ok((false, true)) => duplicates += 1,
+                                        Err(_) => invalid += 1,
+                                        Ok((_, _)) => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(serde_json::json!({
+                    "result": "Scan Chain Completed.",
+                    "from_height": lo,
+                    "to_height": tip,
+                    "scanned_blocks": scanned,
+                    "keys_added": keys_added,
+                    "duplicates": duplicates,
+                    "invalid": invalid,
+                }))
+            }
+            "smsgscanbuckets" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.get(0).is_some() {
+                    return Err((-8, "smsgscanbuckets takes no parameters".into()));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                let found = engine.scan_buckets(now_secs() as i64);
+                Ok(serde_json::json!({
+                    "result": "Scan Buckets Completed.",
+                    "found": found,
+                }))
             }
             _ => Err((-32601, format!("ops adapter: unknown method {}", method))),
         }
@@ -7100,6 +7289,86 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
 
 const SMSG_NOT_WIRED: &str =
     "smsg engine not loaded — run tri7d with --wallet (smsg needs wallet keys)";
+
+/// 33-byte compressed-pubkey pushes inside a script (legacy ScanBlock parity:
+/// smessage.cpp:2286 walks each scriptSig op and keys on opcode==33).
+pub fn script_pushes_33(script: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < script.len() {
+        let op = script[i] as usize;
+        i += 1;
+        let n = match op {
+            0 => continue, // OP_0 (empty push)
+            1..=75 => op,
+            76 => {
+                if i >= script.len() {
+                    break;
+                }
+                let n = script[i] as usize;
+                i += 1;
+                n
+            }
+            77 => {
+                if i + 2 > script.len() {
+                    break;
+                }
+                let n = u16::from_le_bytes([script[i], script[i + 1]]) as usize;
+                i += 2;
+                n
+            }
+            78 => {
+                if i + 4 > script.len() {
+                    break;
+                }
+                let n = u32::from_le_bytes([script[i], script[i + 1], script[i + 2], script[i + 3]])
+                    as usize;
+                i += 4;
+                n
+            }
+            _ => continue, // non-push opcode
+        };
+        if i + n > script.len() {
+            break;
+        }
+        if n == 33 {
+            out.push(&script[i..i + 33]);
+        }
+        i += n;
+    }
+    out
+}
+
+/// smsgoptions command shape (rpcsmessage.cpp:63): `[list|set <opt> <val>]`,
+/// list is the default mode. Arity > 3 is the only thrown error (-8); the
+/// soft legacy results (Too few parameters / Unknown value / Option not
+/// found / Unknown Mode) come back as enum variants the arm renders as
+/// result objects, exactly like legacy returns them.
+#[derive(Debug, PartialEq)]
+enum SmsgOptionsCmd {
+    List,
+    Set {
+        optname: Option<String>,
+        value: Option<String>,
+    },
+    UnknownMode,
+}
+
+fn smsg_options_cmd(params: &serde_json::Value) -> Result<SmsgOptionsCmd, (i64, String)> {
+    let n = params.as_array().map(|a| a.len()).unwrap_or(0);
+    if n > 3 {
+        return Err((-8, "smsgoptions [list|set <optname> <value>]".into()));
+    }
+    match params.get(0).and_then(|v| v.as_str()) {
+        None => Ok(SmsgOptionsCmd::List),
+        Some("list") => Ok(SmsgOptionsCmd::List),
+        Some("set") => Ok(SmsgOptionsCmd::Set {
+            optname: params.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
+            value: params.get(2).and_then(|v| v.as_str()).map(|s| s.to_string()),
+        }),
+        Some(_) => Ok(SmsgOptionsCmd::UnknownMode),
+    }
+}
 
 fn hex_upper(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02X}", x)).collect()
@@ -11328,6 +11597,75 @@ addnode=host:notaport
             -8,
             "floats are not sizes"
         );
+    }
+
+    // ---- smsgenable / smsgdisable / smsgoptions / scans (workqueue item 11) ----
+
+    #[test]
+    fn smsg_options_cmd_matches_legacy_shapes() {
+        // default and explicit list
+        assert_eq!(smsg_options_cmd(&serde_json::json!([])), Ok(SmsgOptionsCmd::List));
+        assert_eq!(
+            smsg_options_cmd(&serde_json::json!(["list"])),
+            Ok(SmsgOptionsCmd::List)
+        );
+        // set carries both option + value
+        assert_eq!(
+            smsg_options_cmd(&serde_json::json!(["set", "newAddressRecv", "off"])),
+            Ok(SmsgOptionsCmd::Set {
+                optname: Some("newAddressRecv".into()),
+                value: Some("off".into()),
+            })
+        );
+        // set with the value missing is the legacy "Too few parameters." path
+        assert_eq!(
+            smsg_options_cmd(&serde_json::json!(["set", "newAddressRecv"])),
+            Ok(SmsgOptionsCmd::Set {
+                optname: Some("newAddressRecv".into()),
+                value: None,
+            })
+        );
+        // unknown mode renders the legacy result object (with its own typo)
+        assert_eq!(
+            smsg_options_cmd(&serde_json::json!(["bogus"])),
+            Ok(SmsgOptionsCmd::UnknownMode)
+        );
+        // arity > 3 throws -8 (legacy runtime_error)
+        assert_eq!(
+            smsg_options_cmd(&serde_json::json!(["set", "a", "b", "c"])),
+            Err((-8, "smsgoptions [list|set <optname> <value>]".to_string()))
+        );
+    }
+
+    #[test]
+    fn script_pushes_33_finds_only_exact_compressed_pubkey_pushes() {
+        // 0x21 (33) + 33 bytes + 0xac (OP_CHECKSIG) — the P2PK form
+        let mut p2pk = vec![0x21u8];
+        p2pk.extend_from_slice(&[7u8; 33]);
+        p2pk.push(0xac);
+        let pushes = script_pushes_33(&p2pk);
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0], [7u8; 33].as_slice());
+        // a 32-byte push (0x20) is NOT a pubkey push
+        let mut p32 = vec![0x20u8];
+        p32.extend_from_slice(&[7u8; 32]);
+        assert!(script_pushes_33(&p32).is_empty());
+        // a scriptSig carrying a signature push (var) then a 33-byte pubkey
+        let mut sig = vec![71u8]; // 71-byte DER sig
+        sig.extend_from_slice(&[0x30u8; 71]);
+        sig.push(0x21);
+        sig.extend_from_slice(&[9u8; 33]);
+        let pushes = script_pushes_33(&sig);
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0], [9u8; 33].as_slice());
+        // PUSHDATA1 form (0x4c 0x21) also yields the 33 bytes
+        let mut pd1 = vec![0x4cu8, 0x21u8];
+        pd1.extend_from_slice(&[3u8; 33]);
+        assert_eq!(script_pushes_33(&pd1).len(), 1);
+        // truncated pushes don't panic and don't match
+        let mut trunc = vec![0x21u8];
+        trunc.extend_from_slice(&[1u8; 20]);
+        assert!(script_pushes_33(&trunc).is_empty());
     }
 
     // ---- repairwallet / resendtx (workqueue item 9 RPC-P1b) ----

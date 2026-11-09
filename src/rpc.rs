@@ -137,6 +137,15 @@ pub const NATIVE_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // ---- legacy parity 2026-11-09 (workqueue item 11 SMSG-TOGGLES): runtime
+    // enable/disable + the smsg.ini option store + the two rescans
+    // (rpcsmessage.cpp: smsgenable/smsgdisable/smsgoptions/smsgscanchain/
+    // smsgscanbuckets) ----
+    "smsgenable",
+    "smsgdisable",
+    "smsgoptions",
+    "smsgscanchain",
+    "smsgscanbuckets",
     // ---- parity audit 2026-11-03: legacy info/util methods (rpcmining /
     // rpcnet / rpcblockchain / rpcwallet surfaces servable from tri7's own
     // providers — no ops/daemon needed) ----
@@ -226,6 +235,13 @@ pub const OPS_METHODS: &[&str] = &[
     "smsgaddaddress",
     "smsgkeys",
     "smsglocalinfo",
+    // ---- legacy parity 2026-11-09 (workqueue item 11): the toggles ride the
+    // live engine too (runtime enable/disable, options, the two rescans) ----
+    "smsgenable",
+    "smsgdisable",
+    "smsgoptions",
+    "smsgscanchain",
+    "smsgscanbuckets",
     // ---- legacy parity 2026-11-06: offline tx workflow + wallet file ----
     "signrawtransaction",
     "createrawtransaction",
