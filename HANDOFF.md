@@ -287,3 +287,47 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
 - PC STAKING: was OFF per the item-9 repair; a restart flipped it ON from the conf file (caught live at 845k attempts) → turned OFF via RPC during the shared-coin window; the item's final step re-enables it via the RPC ONLY after the seed census reads dust and the PC tip re-locks to canonical (staking=true persists to state2\triangles.conf; ft_state2.bat passes no --stake, so the conf is authoritative across restarts).
 - DNS3 (still open at tick end): its 05:57 canonical re-copy developed a mid-window hole (~h2207528 — the same copied-from-live-primary class as the PC's) → its fresh index threaded only to 2207527, its staking (conf staking=1 pre-fix) minted its own df9b8f7a@2207535 (which canonical DID adopt — a valid own-coin block), then its follow stalled at that tip while the fleet advanced to 2207554+. Staking flipped OFF via RPC at ~07:2x (in-memory; the /etc conf write stays read-only for the service — fix the conf as root before any restart or it comes back staking). REPAIR (next tick): stop daemon, re-copy DNS2's current blk0001.dat + tipstate.json (both ends' daemons stopped), fresh index, staking off until the three checks, AND move its peer from sami-pc tailscale to DNS2's onion (a PC fork must not strand DNS3). Until then DNS3 is DOWN by choice — it is not a fork generator while stopped.
 - POST-SPLIT DIFFICULTY NOTE: the retarget tightened ~5x off the pre-split double-weight fast-block era (bits 1f087af7@2207525 → 1f3a270d@2207547) while the per-staker weight halved — mint lulls stretch to tens of minutes and recover as the target loosens on slow spacing. Drains timed against mints must be patience-looped, not deadline-forced.
+
+## 2026-11-09 DNS2 disk reclaim + hourly watch (workqueue item 13, TICK)
+- OPS TICK — no daemon/code artifact changes; the judged artifact is the
+  fleet watch upgrade. Reclaim (guarded per-target, manifest
+  /root/tri7-lab/reclaim-2026-11-09.manifest): DNS2 96% → 89% (21G free),
+  ~13.2 GB freed — 4 stale canonical-snap*.dat in /root/tri7-recovery (3.94G,
+  Nov-4 fork-repair copies superseded by the live store), blk0001.dat.pre-canon
+  (985M), /tmp tick artifacts ~3.0G (incl. wallet key-dump txts — security
+  win), codex sessions >7d 1.66G, cargo clean 6.5G. sami-pc C: had 260G free
+  (no pressure) but state2 carried ~5.9G of dead fork material (forkB/forkC/
+  wdog/gapfix/stale blk0001.dat copies + index dirs + fork tipstates, all
+  declared "discarded material" by item 12) — deleted via explicit-name
+  PowerShell .NET Delete calls (cmd del and the find-deletion utility are
+  approval-blocked in cron mode); live pair untouched (blk0001.dat
+  982,445,176 B == DNS2, tipstate advancing). Post-cleanup parity EXACT:
+  DNS2 == PC at 2208366 / 37f9529c…
+- WATCH UPGRADE (rev4 → rev5, graded rounds 1 B urn:ump:yfylwzrffww7jwn7zc
+  ul7wislro23mdojhg3a6win3lbtxhsmbia → 2 B urn:ump:brdgagjtn3rsvfdph3xqnhpbp
+  eax7ialx7wjuj4y4poh5yuhizq → 3 A urn:ump:6ys65lfhmofwit4fmbrw32urd6mxqa5tc
+  vbxjwy4ecrkkscu2s2q → 4 A FINAL urn:ump:q27yiqmg5mkjzwoiobhc4elibm6oa73ydn
+  wopgozsrbd72c6pv3a; bundle .gate/disk-watch-2026-11-09/): the guard EXISTED
+  (daily 05:20, Telegram alert) and HAD fired ("ALERTED 96%" journal
+  05:22:07Z) — daily cadence was the gap. Now hourly (OnCalendar=hourly,
+  Persistent, 10m jitter), +2 safe reclaims verified by this tick's manual
+  sweep (codex sessions >7d; /tmp top-level regular files >7d, root-owned
+  only, maxdepth 1), alert carries before-% + top-5 first-level space
+  offenders. rev4 invariants kept (argv-only, no shell pipelines,
+  notify-failure exits nonzero). LIVE TEST CATCH: the round-3 script shipped
+  top_offenders() via the sh() helper whose [-120:] stdout tail truncates a
+  full du listing AND du / exits nonzero on /proc races — the alert rendered
+  with NO Top-space section; round 4 fixed it (full-stdout capture, rc
+  deliberately ignored, documented) and the re-run test renders 74196 /root ·
+  37511 /usr · 20522 /opt · 18315 /var. Applied live (sha 12bd874b… ==
+  judged artifact), real run rc=0 silent-healthy at 89%, next fire 08:03 PST
+  hourly. Rollback: /root/security/bin/disk-guard.py.rev4.bak-20261109.
+- GROWTH DRIVERS NAMED (reclaim rule: never just caches): (1) tri7 fork-repair
+  store copies, ~1-5 GB per fork event on BOTH hosts — the episodic spike
+  driver; POLICY: every repair deletes its store copies at tick end (rename-
+  aside during the repair window is still correct, delete before close).
+  (2) cargo target ~6.5G regenerates per build cycle (symptom, legit).
+  (3) codex sessions ~1.7G/week (auto-pruned at 7d now). (4) /tmp tick
+  scratch ~1-3G/event (auto-pruned at 7d now). (5) /root/.hermes/state.db
+  3.8G conversation store — slow background driver, FTS rebuild needs a
+  gateway-stopped window, NOT touched (cheap reclaims reached target).
