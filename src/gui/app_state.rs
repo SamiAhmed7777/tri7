@@ -47,8 +47,12 @@ pub struct VerifyForm {
 /// What the window's close button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseDecision {
-    /// keep the process (and the node) alive, minimize the window
+    /// keep the process (and the node) alive, minimize the window to the
+    /// taskbar
     Minimize,
+    /// keep the process (and the node) alive, hide the window into the
+    /// system tray
+    Tray,
     /// close the window for real
     Quit,
 }
@@ -359,6 +363,13 @@ pub struct AppState {
     /// the options were saved, but the node-side fee push did not take —
     /// a notice, NOT a failed apply
     pub options_fee_notice: Option<String>,
+    /// true while the window is hidden in the system tray (the wallet and
+    /// the node keep running; the tray icon brings the window back)
+    pub tray_hidden: bool,
+    /// true when the user asked to QUIT for real (the tray's "Exit" item).
+    /// The close button's keep-running behaviour must not swallow it, so
+    /// the close handler checks this first and lets the window close.
+    pub force_quit: bool,
     /// the saved fee has been pushed to the node at least once this session
     pub fee_pushed_to_node: bool,
     /// the fee value (microTRI) the node last ACCEPTED this session. A
@@ -456,6 +467,8 @@ impl AppState {
             fee_live_sats: None,
             options_save_error: None,
             options_fee_notice: None,
+            tray_hidden: false,
+            force_quit: false,
             fee_pushed_to_node: false,
             pushed_fee_microtri: None,
             send_result: None,
@@ -2579,9 +2592,22 @@ impl AppState {
 
     /// What the X button must do (the Options -> Display choice).
     /// Extracted as a pure function so the real close path is testable.
-    pub fn close_decision(&self) -> CloseDecision {
+    /// What the window's close button does.
+    ///
+    /// `has_tray` says whether a system tray icon actually exists. The
+    /// rule is deliberately conservative: the wallet is NEVER hidden into a
+    /// tray that does not exist, and the wallet NEVER dies when the
+    /// operator asked for it to keep running.
+    ///
+    ///   tray wanted + a tray exists -> hide into the tray
+    ///   tray wanted + no tray        -> minimize to the taskbar
+    ///   minimize wanted              -> minimize to the taskbar
+    ///   neither                      -> quit for real
+    pub fn close_decision(&self, has_tray: bool) -> CloseDecision {
         let o = &self.options;
-        if o.minimize_on_close || o.tray_on_close {
+        if o.tray_on_close && has_tray {
+            CloseDecision::Tray
+        } else if o.tray_on_close || o.minimize_on_close {
             CloseDecision::Minimize
         } else {
             CloseDecision::Quit

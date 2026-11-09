@@ -45,7 +45,8 @@ fn img(tex: &TextureHandle, size: Vec2) -> egui::Image<'static> {
 
 macro_rules! asset_map {
     ($($key:literal => $path:literal),* $(,)?) => {
-        fn asset_bytes(key: &str) -> Option<&'static [u8]> {
+        /// The embedded artwork, by key (see the asset_map! call below).
+        pub fn asset_bytes(key: &str) -> Option<&'static [u8]> {
             match key {
                 $($key => Some(include_bytes!(concat!("assets/", $path))),)*
                 _ => None,
@@ -229,6 +230,10 @@ pub struct Tri7App {
     node_bootstrapped: bool,
     /// first-run logic (remembered wallet / auto-generate) ran once
     first_run_checked: bool,
+    /// the system tray icon (Windows). Present when the platform has a tray
+    /// AND the operator asked for "minimize to the tray"; the wallet can
+    /// then be closed to the tray and reopened from it.
+    tray: Option<crate::gui::tray::TrayIcon>,
 
     // ---- view-only state (spec §10/§12.3; no engine logic) ----
     send_step: SendStep,
@@ -294,6 +299,29 @@ impl Tri7App {
     fn ico(&mut self, ui: &mut egui::Ui, key: &str, size: f32) {
         if let Some(tex) = self.tex(ui.ctx(), key) {
             ui.add(img(&tex, Vec2::splat(size)));
+        }
+    }
+
+    /// Make the tray icon match the current option: present when the
+    /// operator asked for the tray, absent otherwise. Creating it here
+    /// (not only at start) means the choice takes effect immediately, and
+    /// that the window is never hidden into a tray that does not exist.
+    fn sync_tray_icon(&mut self) {
+        let wanted = self.st.options.tray_on_close && crate::gui::tray::platform_has_tray();
+        if wanted && self.tray.is_none() {
+            self.tray = crate::gui::tray::create_tray();
+            if self.tray.is_none() {
+                // the tray could not be created: the option cannot be
+                // honoured, so say so rather than hiding the window into
+                // nowhere
+                self.st.options.tray_on_close = false;
+                self.st.status_log.push(
+                    "The system tray icon could not be created - keeping the wallet in the taskbar."
+                        .into(),
+                );
+            }
+        } else if !wanted {
+            self.tray = None;
         }
     }
 
@@ -1672,25 +1700,79 @@ impl Tri7App {
     }
 }
 
+/// The wallet's app icon (the brand mark), as raw PNG bytes. Used for the
+/// system-tray icon.
+pub fn brand_mark_bytes() -> Option<&'static [u8]> {
+    asset_bytes("brand/mark64")
+}
+
 impl eframe::App for Tri7App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Close button behaviour (Options -> Display):
-        //   minimize / tray -> keep the process (and the node) running
+        // Close button behaviour (Options -> Window):
+        //   minimize        -> the window minimizes, the process AND the node
+        //                     keep running
+        //   tray            -> the window is HIDDEN and the wallet lives in
+        //                     the system tray, the process AND the node keep
+        //                     running
         //   quit            -> let the window close for real
         // CancelClose is what actually stops the window from being destroyed.
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.st.close_decision() == crate::gui::app_state::CloseDecision::Minimize {
+            // A real quit request (the tray's "Exit" item) must NOT be
+            // swallowed by the keep-running behaviour: the user asked for
+            // the wallet to stop, so the window closes for real.
+            if self.st.force_quit {
+                self.st.force_quit = false;
+            } else {
+            let decision = self.st.close_decision(self.tray.is_some());
+            if decision == crate::gui::app_state::CloseDecision::Minimize
+                || decision == crate::gui::app_state::CloseDecision::Tray
+            {
                 // Keep the WINDOW alive (CancelClose) and minimize it. The
                 // process - and the node it supervises - keep running, so the
                 // wallet stays reachable and staking continues.
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                self.st.status_log.push(
-                    "Triangles is still running (node + staking). Reopen from the taskbar."
-                        .into(),
-                );
+                if decision == crate::gui::app_state::CloseDecision::Tray
+                    && self.tray.is_some()
+                {
+                    // "Minimize to the tray instead of the taskbar": the
+                    // window disappears from the taskbar entirely and the
+                    // wallet is reachable from the tray icon.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.st.tray_hidden = true;
+                    self.st.status_log.push(
+                        "Triangles is still running (node + staking). Reopen from the system tray."
+                            .into(),
+                    );
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    self.st.status_log.push(
+                        "Triangles is still running (node + staking). Reopen from the taskbar."
+                            .into(),
+                    );
+                }
             }
             // both flags off -> the window closes for real (a real quit)
+            }
+        }
+
+        // The system tray: a click on the icon brings the wallet back, and
+        // the Exit item quits it for real.
+        if let Some(tray) = self.tray.as_mut() {
+            match tray.poll() {
+                Some(crate::gui::tray::TrayAction::Show) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.st.tray_hidden = false;
+                }
+                Some(crate::gui::tray::TrayAction::Quit) => {
+                    // ask for a REAL quit: the close handler must not
+                    // intercept it and minimize the wallet instead
+                    self.st.force_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                None => {}
+            }
         }
         Self::apply_theme(ctx);
         self.header(ctx);
@@ -4943,15 +5025,62 @@ impl Tri7App {
             }
             2 => {
                 // Window
-                let mut off = false;
-                ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut off, "Minimize to the tray instead of the taskbar"),
-                )
-                .on_disabled_hover_text("Not supported by this desktop shell");
-                let mut off2 = false;
-                ui.add_enabled(false, egui::Checkbox::new(&mut off2, "Minimize on close"))
+                //
+                // Both behaviours are REAL now: the wallet keeps running
+                // (node and staking) when the window is closed, either to
+                // the taskbar or to the system tray. "Minimize to the tray"
+                // needs the tray icon, which this build creates on Windows;
+                // on a platform without a tray the checkbox says so instead
+                // of silently doing nothing.
+                let has_tray = crate::gui::tray::platform_has_tray();
+                ui.horizontal(|ui| {
+                    let mut tray = self.st.options.tray_on_close;
+                    let mut tray_edit = ui
+                        .add_enabled(
+                            has_tray,
+                            egui::Checkbox::new(&mut tray, "Minimize to the tray instead of the taskbar"),
+                        );
+                    if !has_tray {
+                        tray_edit = tray_edit.on_disabled_hover_text(
+                            "This build has no system tray on this platform",
+                        );
+                    }
+                    if tray_edit.changed() {
+                        self.st.options.tray_on_close = tray;
+                        // The two checkboxes are two places to express ONE
+                        // choice: "close the window, keep the wallet
+                        // running". Turning the tray OFF therefore leaves
+                        // that choice on - the window simply goes back to
+                        // the taskbar instead of the tray.
+                        if !tray {
+                            self.st.options.minimize_on_close = true;
+                        }
+                        // the icon must EXIST before the window can be
+                        // hidden into it - so it is created (or dropped)
+                        // right now, not at the next start
+                        self.sync_tray_icon();
+                    }
+                    let mut min = self.st.options.minimize_on_close;
+                    if ui
+                        .add(egui::Checkbox::new(&mut min, "Minimize on close"))
+                        .changed()
+                    {
+                        self.st.options.minimize_on_close = min;
+                        if !min {
+                            // turning this off leaves no keep-running
+                            // choice at all, so the tray goes with it
+                            self.st.options.tray_on_close = false;
+                        }
+                        // the icon must match the choice right now
+                        self.sync_tray_icon();
+                    }
+                });
+                ui.add_enabled(false, egui::Checkbox::new(&mut { false }, "Show only a tray icon after minimizing the window"))
                     .on_disabled_hover_text("Not supported by this desktop shell");
+                th::text_meta(
+                    ui,
+                    "Closing the window keeps Triangles running: the node and staking continue, and the wallet is reopened from the taskbar or the system tray.",
+                );
             }
             _ => {
                 // Display
@@ -6186,8 +6315,26 @@ pub fn run(cfg: UiConfig) {
     };
     let app = Box::new(|cc: &eframe::CreationContext| {
         Tri7App::apply_theme(&cc.egui_ctx);
+        let mut st = AppState::new(cfg);
+        // The tray icon is created only when the operator asked for
+        // "minimize to the tray instead of the taskbar" - the saved
+        // options are the source of that choice. If the icon cannot be
+        // created the option is turned back OFF, so the state and the
+        // reality agree: the window will minimize to the taskbar rather
+        // than be hidden into a tray that does not exist.
+        let mut tray = None;
+        if st.options.tray_on_close {
+            tray = crate::gui::tray::create_tray();
+            if tray.is_none() {
+                st.options.tray_on_close = false;
+                st.status_log.push(
+                    "The system tray icon could not be created - keeping the wallet in the taskbar."
+                        .into(),
+                );
+            }
+        }
         Ok::<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>(Box::new(Tri7App {
-            st: AppState::new(cfg),
+            st,
             tex: HashMap::new(),
             console_open: false,
             poll_ticker: 0,
@@ -6213,6 +6360,7 @@ pub fn run(cfg: UiConfig) {
             node: None,
             node_bootstrapped: false,
             first_run_checked: false,
+            tray,
         }))
     });
     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {

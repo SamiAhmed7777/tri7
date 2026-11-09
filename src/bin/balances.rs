@@ -78,6 +78,8 @@ fn main() {
         wallet: wallet_path.as_deref().map(std::path::Path::new),
         utxos_out: utxos_out_path.as_deref().map(std::path::Path::new),
         end_height,
+        // the height it was told to reach IS the height it is chasing
+        replay_target: if end_height > 0 { Some(end_height) } else { None },
         allow_stale,
     };
     let rep = match build_balances_snapshot(&opts, &mut progress) {

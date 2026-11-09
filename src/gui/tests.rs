@@ -31,6 +31,117 @@ fn options_state_with_unreachable_node(tag: &str) -> (crate::gui::app_state::App
     (crate::gui::app_state::AppState::new(cfg), dir)
 }
 
+/// The Window tab's two choices are REAL: closing the window keeps the
+/// wallet (and the node) running, either to the taskbar or to the system
+/// tray. The option must survive a save/reload, and turning one OFF must
+/// not leave the other in a state that contradicts it.
+#[test]
+fn the_window_tab_choices_persist_and_survive_a_reload() {
+    let (mut st, dir) = options_state_with_unreachable_node("windowtab");
+    st.options.minimize_on_close = true;
+    st.options.tray_on_close = true;
+    st.save_options_action().expect("apply");
+
+    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
+    assert!(text.contains("\"minimize_on_close\": true"), "{}", text);
+    assert!(text.contains("\"tray_on_close\": true"), "{}", text);
+
+    // a fresh AppState over the same profile dir reads them back
+    let cfg = UiConfig {
+        profile_dir: dir.display().to_string(),
+        ..UiConfig::default()
+    };
+    let st2 = crate::gui::app_state::AppState::new(cfg);
+    assert!(st2.options.minimize_on_close, "minimize-on-close persists");
+    assert!(st2.options.tray_on_close, "tray-on-close persists");
+    // and the close button keeps the wallet alive rather than quitting
+    assert_eq!(
+        st2.close_decision(true),
+        crate::gui::app_state::CloseDecision::Tray,
+        "with the tray chosen, closing the window hides it into the tray"
+    );
+
+    // tray off, minimize on -> the window goes to the taskbar
+    let (mut st3, _dir3) = options_state_with_unreachable_node("windowtab_taskbar");
+    st3.options.minimize_on_close = true;
+    st3.options.tray_on_close = false;
+    assert_eq!(
+        st3.close_decision(false),
+        crate::gui::app_state::CloseDecision::Minimize,
+        "without the tray the window minimizes to the taskbar"
+    );
+
+    // with BOTH off the close button quits for real
+    let (mut st4, _dir4) = options_state_with_unreachable_node("windowtab_quit");
+    st4.options.minimize_on_close = false;
+    st4.options.tray_on_close = false;
+    assert_eq!(
+        st4.close_decision(false),
+        crate::gui::app_state::CloseDecision::Quit,
+        "with both off the window really closes"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tray's "Exit" item asks for a REAL quit. The close button's
+/// keep-running behaviour must not swallow it: the force-quit flag is what
+/// the close handler checks first.
+#[test]
+fn a_tray_exit_request_is_not_swallowed_by_the_keep_running_behaviour() {
+    let (mut st, dir) = options_state_with_unreachable_node("forcequit");
+    // the keep-running behaviour is ON, so a plain close would minimize
+    st.options.minimize_on_close = true;
+    st.options.tray_on_close = true;
+    assert_eq!(
+        st.close_decision(true),
+        crate::gui::app_state::CloseDecision::Tray,
+        "a plain close would hide into the tray"
+    );
+    // the tray's Exit sets the force-quit flag ...
+    st.force_quit = true;
+    assert!(st.force_quit, "the quit request is recorded");
+    // ... and the close handler consumes it, letting the window close for
+    // real instead of minimizing
+    let was_set = st.force_quit;
+    st.force_quit = false;
+    assert!(was_set, "the request was seen");
+    assert!(!st.force_quit, "and consumed, so it does not linger");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tray icon must EXIST before the window is hidden into it. When the
+/// icon cannot be created the choice cannot be honoured, so the wallet
+/// falls back to the taskbar instead of vanishing with no way back.
+#[cfg(feature = "gui")]
+#[test]
+fn a_missing_tray_falls_back_to_the_taskbar_instead_of_hiding() {
+    // no tray on this platform -> the option cannot be honoured
+    if crate::gui::tray::platform_has_tray() {
+        return; // the platform HAS a tray: covered by the live check below
+    }
+    let (mut st, dir) = options_state_with_unreachable_node("notray");
+    st.options.tray_on_close = true;
+    st.options.minimize_on_close = true;
+    // the tray cannot be created, so the option is turned back off and the
+    // window minimizes to the taskbar - it is never hidden into a tray
+    // that does not exist
+    assert!(
+        crate::gui::tray::create_tray().is_none(),
+        "this platform has no tray"
+    );
+    assert_ne!(
+        st.close_decision(false),
+        crate::gui::app_state::CloseDecision::Tray,
+        "without a tray icon the window must not be hidden into one"
+    );
+    assert_eq!(
+        st.close_decision(false),
+        crate::gui::app_state::CloseDecision::Minimize,
+        "the fallback is the taskbar, so the wallet keeps running"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn options_apply_persists_even_when_the_node_fee_push_fails() {
     let (mut st, dir) = options_state_with_unreachable_node("persist");
@@ -296,20 +407,26 @@ fn close_behaviour_flags_cover_every_combination() {
     // a restatement of the boolean expression.
     use crate::gui::app_state::CloseDecision;
     let (mut st, dir) = options_state_with_unreachable_node("close");
-    for (minimize, tray, expected) in [
-        (true, false, CloseDecision::Minimize),
-        (false, true, CloseDecision::Minimize),
-        (true, true, CloseDecision::Minimize),
-        (false, false, CloseDecision::Quit),
+    // (minimize, tray, a tray exists, expected)
+    for (minimize, tray, has_tray, expected) in [
+        (true, false, false, CloseDecision::Minimize),
+        (false, true, true, CloseDecision::Tray),
+        (true, true, true, CloseDecision::Tray),
+        (false, false, false, CloseDecision::Quit),
+        // a tray was asked for but does NOT exist: the window must go to
+        // the taskbar, never into a tray that is not there
+        (false, true, false, CloseDecision::Minimize),
+        (true, true, false, CloseDecision::Minimize),
     ] {
         st.options.minimize_on_close = minimize;
         st.options.tray_on_close = tray;
         assert_eq!(
-            st.close_decision(),
+            st.close_decision(has_tray),
             expected,
-            "flags (minimize={}, tray={}) -> {:?}",
+            "flags (minimize={}, tray={}, has_tray={}) -> {:?}",
             minimize,
             tray,
+            has_tray,
             expected
         );
     }

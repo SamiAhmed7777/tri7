@@ -53,6 +53,16 @@ pub struct BalancesBuildOpts<'a> {
     pub utxos_out: Option<&'a Path>,
     /// coverage contract end height (usize::MAX = whatever the walk reaches).
     pub end_height: usize,
+    /// The tip this replay is CHASING. The snapshot publishes it, and the
+    /// RPC's completeness rule compares the snapshot's coverage against it:
+    /// a replay that stopped short of the tip it was chasing was capped by
+    /// a hole in the store, and its figure omits everything above the cap.
+    ///
+    /// This is deliberately NOT `end_height`: end_height is where the walk
+    /// is ALLOWED to stop (0 = walk to EOF), while this is where it was
+    /// TRYING to get to. They differ when the store's last body sits below
+    /// the tip.
+    pub replay_target: Option<usize>,
     /// accept a stale-branch stop as full coverage.
     pub allow_stale: bool,
 }
@@ -296,7 +306,12 @@ pub fn build_balances_snapshot(
     // snapshot that stopped short of it (check_coverage), so a snapshot
     // whose height equals this target is a whole-chain figure; one whose
     // height is lower was capped by a hole in the store.
-    j.push_str(&format!("  \"replay_target_height\": {},\n", opts.end_height));
+    let replay_target = opts
+        .replay_target
+        .or(if opts.end_height > 0 { Some(opts.end_height) } else { None });
+    if let Some(t) = replay_target {
+        j.push_str(&format!("  \"replay_target_height\": {},\n", t));
+    }
     j.push_str(&format!(
         "  \"covered_tip_hash\": \"{}\",\n",
         crate::legacy::hash_to_display(&tip_hash)
@@ -628,6 +643,7 @@ mod tests {
             wallet: None,
             utxos_out: None,
             end_height,
+            replay_target: if end_height > 0 { Some(end_height) } else { None },
             allow_stale,
         };
         let mut progress = |_: usize, _: usize| {};
@@ -674,6 +690,7 @@ mod tests {
             wallet: None,
             utxos_out: None,
             end_height: 1,
+            replay_target: Some(1),
             allow_stale,
         };
         let mut progress = |_: usize, _: usize| {};
@@ -699,7 +716,8 @@ mod tests {
                 out: &out,
                 wallet: None,
                 utxos_out: None,
-                end_height: 1, // unreachable with only h0 present
+                end_height: 1,
+            replay_target: Some(1), // unreachable with only h0 present
                 allow_stale: false,
             };
             let mut progress = |_: usize, _: usize| {};

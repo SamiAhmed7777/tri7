@@ -13,6 +13,7 @@ winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
+tray-icon = { version = "0.26.1", optional = true }
 
 [[bin]]
 name = "tri7"
@@ -72,7 +73,10 @@ cbc = { version = "0.1", features = ["alloc"] }
 
 [features]
 default = []
-gui = ["dep:egui", "dep:eframe", "dep:image", "dep:rfd", "dep:ureq", "dep:arboard"]
+gui = ["dep:egui", "dep:eframe", "dep:image", "dep:rfd", "dep:ureq", "dep:arboard",
+       # the system tray icon (Windows target only: tray-icon is a
+       # cfg(windows) dependency, so this is a no-op elsewhere)
+       "dep:tray-icon"]
 
 [profile.release]
 opt-level = 3

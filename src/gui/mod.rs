@@ -31,3 +31,5 @@ mod tests;
 pub mod app;
 #[cfg(feature = "gui")]
 pub mod theme;
+#[cfg(feature = "gui")]
+pub mod tray;

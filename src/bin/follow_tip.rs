@@ -4131,6 +4131,13 @@ struct WalletLive {
     wallet: tri7_core::wallet::WalletKeys,
     base: u64,
     live: HashMap<(Hash, u32), LiveOut>,
+    /// every prevout this view saw being SPENT, with the height of the
+    /// spending block. The live map only holds coins it seeded itself, so a
+    /// coin that arrived BEFORE the window (and is therefore in the replay
+    /// snapshot) is not in the map when the spend is applied - the removal
+    /// is a no-op and the snapshot would keep listing a coin that no longer
+    /// exists. This map is what tells the merge that the coin is gone.
+    spent: HashMap<(Hash, u32), u64>,
     /// true when the wallet file is encrypted and the secrets have not been
     /// supplied yet: the node still syncs and watches its addresses, but it
     /// cannot stake or sign. Cleared by `walletpassphrase`, restored by
@@ -4367,6 +4374,7 @@ impl WalletLive {
             wallet,
             base,
             live: HashMap::new(),
+            spent: HashMap::new(),
             locked: false,
             unlock_until: None,
         };
@@ -4403,6 +4411,9 @@ impl WalletLive {
         for tx in block.vtx.iter().skip(1) {
             for vin in &tx.vin {
                 if vin.prev_n != u32::MAX {
+                    // remember the spend even when the coin is not in the
+                    // map: it may be a coin the replay snapshot holds
+                    self.spent.insert((vin.prev_hash, vin.prev_n), height);
                     self.live.remove(&(vin.prev_hash, vin.prev_n));
                 }
             }
@@ -4607,6 +4618,145 @@ struct LiveWalletProvider {
     rich_cache: Arc<Mutex<tri7_core::rpc::RichListCache>>,
 }
 
+
+/// The wallet's own outputs as the LIVE view knows them (the ones it
+/// replayed in its window). A pure function of the live view so the merge
+/// below can be tested without a live node.
+fn live_rows_for(wl: &SharedWalletLive) -> (Vec<UtxoRow>, Vec<(String, u32, u64)>, u64) {
+    let Ok(g) = wl.lock() else { return (Vec::new(), Vec::new(), 0) };
+    let Some(w) = g.as_ref() else { return (Vec::new(), Vec::new(), 0) };
+    let kb = w.key_by_payload();
+    let mut rows: Vec<UtxoRow> = Vec::new();
+    for ((txid, n), o) in w.live.iter() {
+        let addr = tri7_core::address::script_to_dest(&o.script)
+            .map(|d| tri7_core::address::payload_to_address(&d.payload()))
+            .filter(|a| {
+                tri7_core::address::script_to_dest(&o.script)
+                    .map(|d| kb.contains_key(&d.payload()))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_default();
+        if addr.is_empty() {
+            continue; // not ours
+        }
+        rows.push(UtxoRow {
+            txid: tri7_core::p2p::internal_to_display(txid),
+            n: *n,
+            address: addr,
+            script_hex: o.script.iter().map(|b| format!("{:02x}", b)).collect(),
+            value_sats: o.value,
+            height: o.height,
+            // date history from the BLOCK time (nTime): stakers leave the tx
+            // field at 0 and the legacy client dates rows from the block, so
+            // this matches it exactly
+            tx_time: o.created_epoch as i64,
+            // prev_kind must say what the coin IS. It used to be inferred
+            // from tx_time == 0, which only means "the staker left nTime
+            // blank" - so every live stake was reported as a plain transfer
+            // and the Overview Stake row could never fill.
+            prev_kind: if o.coinstake {
+                "coinstake"
+            } else if o.coinbase {
+                "coinbase"
+            } else if o.tx_time == 0 {
+                "stake" // legacy label kept for older consumers
+            } else {
+                "regular"
+            }
+            .into(),
+        });
+    }
+    // the spends this view saw, in display form, with the height of the
+    // spending block
+    let spends: Vec<(String, u32, u64)> = w
+        .spent
+        .iter()
+        .map(|((txid, n), height)| {
+            (
+                tri7_core::p2p::internal_to_display(txid),
+                *n,
+                *height,
+            )
+        })
+        .collect();
+    (rows, spends, w.base)
+}
+
+/// Merge the replay snapshot (genesis..coverage) with the live view's
+/// outputs (window..tip) into the wallet's WHOLE unspent set.
+///
+/// The live rows kept are strictly ABOVE the coverage height, so the two
+/// ranges never overlap and no coin is counted twice. The result is
+/// ordered newest first.
+fn merge_whole_wallet_utxos(
+    snapshot_rows: Vec<UtxoRow>,
+    live_rows: Vec<UtxoRow>,
+    spends: Vec<(String, u32, u64)>,
+    coverage: u64,
+    live_base: u64,
+    has_snapshot: bool,
+) -> Vec<UtxoRow> {
+    // NO SNAPSHOT AT ALL (a fresh wallet folder): the live view is the
+    // whole set there is. There is nothing to merge and no gap to worry
+    // about - the live view's window base is simply where its replay
+    // started, and its rows are what the wallet owns.
+    if !has_snapshot {
+        let mut rows = live_rows;
+        rows.sort_by(|a, b| b.height.cmp(&a.height));
+        return rows;
+    }
+
+    // A coin in the snapshot can have been SPENT after the snapshot's
+    // coverage. The live view saw that spend (it applies every block from
+    // its window base onwards), so the coin is removed here. Without this
+    // the merge would keep listing a coin that no longer exists - the
+    // wallet would show more than it holds.
+    //
+    // Only spends ABOVE the coverage count: a spend at or below the
+    // coverage is already reflected in the snapshot itself.
+    let spent_after: std::collections::HashSet<(String, u32)> = spends
+        .into_iter()
+        .filter(|(_, _, h)| *h > coverage)
+        .map(|(txid, n, _)| (txid, n))
+        .collect();
+
+    // THE GAP.
+    //
+    // The snapshot covers the height range [0, coverage] (genesis up to
+    // and including its coverage height). The live view covers the range
+    // [live_base, tip] (its window base up to the tip).
+    //
+    // The two ranges are contiguous - no height is covered by neither -
+    // when live_base <= coverage + 1. When live_base > coverage + 1 there
+    // is a HOLE: the heights in (coverage, live_base) are covered by
+    // NEITHER source. A coin received in the hole would be missing (the
+    // wallet would understate) and a coin spent in the hole would still be
+    // listed (the wallet would overstate).
+    //
+    // Such a merge is not a wallet - it is two halves of one with a piece
+    // missing. It is REJECTED: the snapshot alone is served, which is a
+    // consistent set as of its coverage height, and the caller is told the
+    // figure is capped (the RPC's completeness rule marks it).
+    if live_base > coverage + 1 {
+        let mut rows = snapshot_rows;
+        rows.sort_by(|a, b| b.height.cmp(&a.height));
+        return rows;
+    }
+
+    let mut rows: Vec<UtxoRow> = snapshot_rows
+        .into_iter()
+        .filter(|r| !spent_after.contains(&(r.txid.clone(), r.n)))
+        .collect();
+    let mut fresh: Vec<UtxoRow> = live_rows
+        .into_iter()
+        .filter(|r| r.height > coverage)
+        .collect();
+    fresh.sort_by(|a, b| b.height.cmp(&a.height));
+    rows.append(&mut fresh);
+    rows.sort_by(|a, b| b.height.cmp(&a.height));
+    rows
+}
+
 impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     fn state_dir(&self) -> String {
         self.state_dir.display().to_string()
@@ -4789,59 +4939,41 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn utxos(&self) -> Vec<UtxoRow> {
-        // live view present: serve the LIVE unspent set (the Transactions
-        // page / listunspent then shows real history without any snapshot
-        // files - a fresh wallet folder has none)
-        if let Ok(g) = self.wl.lock() {
-            if let Some(w) = g.as_ref() {
-                let kb = w.key_by_payload();
-                let mut rows: Vec<UtxoRow> = Vec::new();
-                for ((txid, n), o) in w.live.iter() {
-                    let addr = tri7_core::address::script_to_dest(&o.script)
-                        .map(|d| tri7_core::address::payload_to_address(&d.payload()))
-                        .filter(|a| {
-                            tri7_core::address::script_to_dest(&o.script)
-                                .map(|d| kb.contains_key(&d.payload()))
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or_default();
-                    if addr.is_empty() {
-                        continue; // not ours
-                    }
-                    rows.push(UtxoRow {
-                        txid: tri7_core::p2p::internal_to_display(txid),
-                        n: *n,
-                        address: addr,
-                        script_hex: o.script.iter().map(|b| format!("{:02x}", b)).collect(),
-                        value_sats: o.value,
-                        height: o.height,
-                        // date history from the BLOCK time (nTime): stakers
-                        // leave the tx field at 0 and the legacy client dates
-                        // rows from the block, so this matches it exactly
-                        tx_time: o.created_epoch as i64,
-                        // prev_kind must say what the coin IS. It used to be
-                        // inferred from tx_time == 0, which only means "the
-                        // staker left nTime blank" - so every live stake was
-                        // reported as a plain transfer and the Overview Stake
-                        // row could never fill.
-                        prev_kind: if o.coinstake {
-                            "coinstake"
-                        } else if o.coinbase {
-                            "coinbase"
-                        } else if o.tx_time == 0 {
-                            "stake" // legacy label kept for older consumers
-                        } else {
-                            "regular"
-                        }
-                        .into(),
-                    });
-                }
-                rows.sort_by(|a, b| b.height.cmp(&a.height));
-                return rows;
-            }
-        }
-        self.snap.utxos()
+        // THE WHOLE WALLET'S UNSPENT SET.
+        //
+        // Two sources, each incomplete on its own:
+        //
+        //  - the replay SNAPSHOT covers the chain from GENESIS, so it knows
+        //    every coin the wallet ever received; but it stops at its
+        //    coverage height, so it misses the coins that arrived after.
+        //  - the LIVE view is fresh (it follows the tip), but it is seeded
+        //    from the chain-state WINDOW base, so it misses every coin the
+        //    wallet received BEFORE that base.
+        //
+        // Serving the live view alone is what made the wallet show
+        // 1,627 TRI for a wallet holding 5,291 TRI: the Overview card sums
+        // this list. Serving the snapshot alone would instead miss the most
+        // recent coins.
+        //
+        // So: the snapshot, PLUS the live view's outputs that are NEWER
+        // than the snapshot's coverage. The two ranges do not overlap (the
+        // live rows kept are strictly above the coverage height, and the
+        // snapshot ends at it), so nothing is counted twice.
+        let snap_coverage = self.snap.coverage();
+        let has_snapshot = snap_coverage.is_some();
+        let coverage = snap_coverage.map(|(h, _)| h).unwrap_or(0);
+        let snapshot_rows = self.snap.utxos();
+        let (live_rows, spends, live_base) = live_rows_for(&self.wl);
+        merge_whole_wallet_utxos(
+            snapshot_rows,
+            live_rows,
+            spends,
+            coverage,
+            live_base,
+            has_snapshot,
+        )
     }
+
 
     fn history(&self) -> Vec<tri7_core::history::HistoryRec> {
         // history.json is produced by the txhistory bin (one sequential pass
@@ -8277,6 +8409,10 @@ fn main() {
                         // match across BOTH snapshots) stays green
                         utxos_out: b_wallet.as_ref().map(|_| b_utxos.as_path()),
                         end_height: 0,
+                        // the tip this replay is chasing: the snapshot
+                        // publishes it, so the RPC can tell a whole-chain
+                        // figure from one that was capped by a hole
+                        replay_target: Some(tip as usize),
                         allow_stale: true,
                     };
                     let mut progress = |blocks: usize, live: usize| {
@@ -9716,6 +9852,235 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
 mod tests {
     use super::*;
 
+    // ---- the whole wallet's unspent set ----
+
+    /// The Overview card sums listunspent, so that list has to be the WHOLE
+    /// wallet: the replay snapshot (genesis..coverage) PLUS the live view's
+    /// outputs newer than that coverage, MINUS the snapshot coins that were
+    /// spent after the coverage.
+    ///
+    /// The live view alone is window scoped - it missed every coin the
+    /// wallet received before the window base, which is what made the
+    /// wallet show 1,627 TRI for a wallet holding 5,291 TRI. The snapshot
+    /// alone would instead miss the newest coins, and would keep listing
+    /// coins that have since been spent.
+    #[test]
+    fn the_unspent_set_is_the_snapshot_plus_the_fresh_live_outputs() {
+        fn row(txid: &str, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n: 0,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        // the snapshot: two coins, coverage h200
+        let snapshot = vec![row("aa", 100, 100), row("bb", 200, 200)];
+        // the live view: one OLD coin (the window's past - the snapshot
+        // already knows it) and one NEW coin (after the coverage)
+        let live = vec![row("cc", 150, 999), row("dd", 250, 333)];
+
+        let merged = merge_whole_wallet_utxos(snapshot, live, Vec::new(), 200, 100, true);
+        let total: i64 = merged.iter().map(|r| r.value_sats).sum();
+        assert_eq!(
+            merged.len(),
+            3,
+            "expected the snapshot's two coins plus the one fresh live output"
+        );
+        assert_eq!(
+            total, 633,
+            "the whole wallet's coins, each counted once: 100 + 200 + 333"
+        );
+        // the live view's OLD output (999) is not counted twice - the
+        // snapshot already carries that coin
+        assert!(
+            !merged.iter().any(|r| r.txid == "cc"),
+            "a coin the snapshot already knows must not be counted twice"
+        );
+        // and the fresh one IS there
+        assert!(
+            merged.iter().any(|r| r.txid == "dd"),
+            "a coin newer than the coverage must be included"
+        );
+        // newest first
+        assert_eq!(merged[0].height, 250);
+    }
+
+    /// A coin the snapshot lists can have been SPENT after the snapshot's
+    /// coverage. The live view saw that spend (it applies every block from
+    /// its window base onwards), so the merged set must NOT keep listing
+    /// it - otherwise the wallet shows more than it holds.
+    #[test]
+    fn a_snapshot_coin_spent_after_the_coverage_is_removed() {
+        fn row(txid: &str, n: u32, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        // the snapshot holds two coins
+        let snapshot = vec![row("aa", 0, 100, 100), row("bb", 1, 150, 200)];
+        // "aa" was spent at h260 - AFTER the coverage (h200)
+        let spends = vec![("aa".to_string(), 0u32, 260u64)];
+        // and the live view has one new coin
+        let live = vec![row("dd", 0, 250, 333)];
+
+        let merged = merge_whole_wallet_utxos(snapshot, live, spends, 200, 100, true);
+        let total: i64 = merged.iter().map(|r| r.value_sats).sum();
+        assert!(
+            !merged.iter().any(|r| r.txid == "aa"),
+            "a coin spent after the coverage must not be listed"
+        );
+        assert!(merged.iter().any(|r| r.txid == "bb"), "the other coin stays");
+        assert!(merged.iter().any(|r| r.txid == "dd"), "the fresh coin is there");
+        assert_eq!(total, 533, "200 + 333 - the spent 100");
+    }
+
+    /// A spend at or BELOW the coverage is already reflected in the
+    /// snapshot itself, so it must not remove anything (the snapshot is the
+    /// authority for its own range).
+    #[test]
+    fn a_spend_at_or_below_the_coverage_removes_nothing() {
+        fn row(txid: &str, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n: 0,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        let snapshot = vec![row("aa", 100, 100)];
+        let spends = vec![("aa".to_string(), 0u32, 150u64)];
+        let merged = merge_whole_wallet_utxos(snapshot, Vec::new(), spends, 200, 100, true);
+        assert_eq!(merged.len(), 1, "the snapshot is the authority below coverage");
+    }
+
+    /// With no snapshot at all (a fresh wallet folder) the live view is the
+    /// whole set - nothing to merge, nothing lost.
+    #[test]
+    fn with_no_snapshot_the_live_set_is_served_as_is() {
+        fn row(txid: &str, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n: 0,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        let live = vec![row("aa", 150, 999)];
+        let merged = merge_whole_wallet_utxos(Vec::new(), live, Vec::new(), 0, 0, false);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].value_sats, 999);
+    }
+
+    /// THE GAP. The snapshot covers genesis..coverage; the live view covers
+    /// its window base..tip. When the live view's base is ABOVE the
+    /// snapshot's coverage there is a hole between them that NEITHER source
+    /// covers - a coin received in the hole would be missing and a coin
+    /// spent in the hole would still be listed. Such a merge is REJECTED:
+    /// the snapshot alone is served, which is a consistent set as of its
+    /// own coverage height.
+    #[test]
+    fn a_gap_between_the_coverage_and_the_live_window_base_is_rejected() {
+        fn row(txid: &str, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n: 0,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        // the snapshot covers genesis..h100
+        let snapshot = vec![row("aa", 50, 100)];
+        // the live view's window starts at h200 - the hole is h101..h199
+        let live = vec![row("zz", 250, 333)];
+        let merged = merge_whole_wallet_utxos(snapshot, live, Vec::new(), 100, 200, true);
+        assert!(
+            !merged.iter().any(|r| r.txid == "zz"),
+            "with a hole between the two sources the merge is not trustworthy"
+        );
+        assert_eq!(merged.len(), 1, "the snapshot alone is served");
+        assert_eq!(merged[0].txid, "aa");
+    }
+
+    /// The merge's boundary cases: the live window base BELOW, EQUAL to and
+    /// just ABOVE the coverage. Below and equal are fine (the ranges touch
+    /// or overlap and the merge is exact); one above is the gap, which is
+    /// rejected.
+    #[test]
+    fn the_merge_boundary_is_the_live_window_base_versus_the_coverage() {
+        fn row(txid: &str, height: u64, sats: i64) -> UtxoRow {
+            UtxoRow {
+                txid: txid.into(),
+                n: 0,
+                address: "Told".into(),
+                script_hex: "51".into(),
+                value_sats: sats,
+                height,
+                tx_time: 1,
+                prev_kind: "regular".into(),
+            }
+        }
+        // the live window base is BELOW the coverage: the ranges overlap
+        // and the merge is exact
+        let merged = merge_whole_wallet_utxos(
+            vec![row("aa", 50, 100)],
+            vec![row("zz", 250, 333)],
+            Vec::new(),
+            200,
+            100,
+            true,
+        );
+        assert_eq!(merged.len(), 2, "overlapping ranges merge exactly");
+        assert!(merged.iter().any(|r| r.txid == "zz"));
+
+        // the live window base is EQUAL to the coverage: the ranges touch
+        let merged = merge_whole_wallet_utxos(
+            vec![row("aa", 50, 100)],
+            vec![row("zz", 250, 333)],
+            Vec::new(),
+            200,
+            200,
+            true,
+        );
+        assert_eq!(merged.len(), 2, "touching ranges merge exactly");
+        assert!(merged.iter().any(|r| r.txid == "zz"));
+
+        // the live window base is ONE above the coverage: that is the gap
+        let merged = merge_whole_wallet_utxos(
+            vec![row("aa", 50, 100)],
+            vec![row("zz", 250, 333)],
+            Vec::new(),
+            200,
+            202,
+            true,
+        );
+        assert_eq!(merged.len(), 1, "a hole above the coverage rejects the merge");
+        assert!(!merged.iter().any(|r| r.txid == "zz"));
+    }
+
     // ---- wallet balance ownership ----
 
     /// build a WalletLive from a synthetic wallet + live map, no store needed
@@ -9746,6 +10111,7 @@ mod tests {
             },
             base: 0,
             live: outs.into_iter().collect(),
+            spent: HashMap::new(),
             locked: false,
             unlock_until: None,
         }
@@ -10573,6 +10939,7 @@ addnode=host:notaport
             },
             base: 100,
             live: HashMap::new(),
+            spent: HashMap::new(),
             locked: false,
             unlock_until: None,
         };
@@ -10811,6 +11178,7 @@ addnode=host:notaport
             },
             base: 100,
             live: HashMap::new(),
+            spent: HashMap::new(),
             locked: false,
             unlock_until: None,
         };
