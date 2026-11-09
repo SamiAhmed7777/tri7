@@ -4712,6 +4712,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                     // genesis (base == 0), which is what the balance-source
                     // selection checks.
                     blocks_replayed: Some(tip.saturating_sub(w.base) + 1),
+                    // the live view replayed base..=tip: it reached the tip
+                    // it was chasing, and (checked by the caller) it
+                    // started at genesis
+                    replay_target_height: Some(tip),
                 });
             }
         }

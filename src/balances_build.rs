@@ -292,6 +292,11 @@ pub fn build_balances_snapshot(
     let mut j = String::with_capacity(1 << 22);
     j.push_str("{\n");
     j.push_str(&format!("  \"height\": {},\n", covered_to));
+    // The tip the replay was CHASING. The build refuses to produce a
+    // snapshot that stopped short of it (check_coverage), so a snapshot
+    // whose height equals this target is a whole-chain figure; one whose
+    // height is lower was capped by a hole in the store.
+    j.push_str(&format!("  \"replay_target_height\": {},\n", opts.end_height));
     j.push_str(&format!(
         "  \"covered_tip_hash\": \"{}\",\n",
         crate::legacy::hash_to_display(&tip_hash)

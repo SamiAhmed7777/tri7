@@ -313,6 +313,14 @@ pub struct BalanceView {
     /// chain". None when the source did not publish it (then the figure
     /// cannot be proven whole and fails closed).
     pub blocks_replayed: Option<u64>,
+    /// The tip the replay was chasing. The build refuses to publish a
+    /// snapshot that stopped short of it, so `coverage_height ==
+    /// replay_target_height` is the direct statement "this figure covers
+    /// the whole chain as of that height". A snapshot whose coverage is
+    /// BELOW the target was capped by a hole in the store, and its figure
+    /// omits everything the wallet earned above the cap. None when the
+    /// source did not publish it (fail closed).
+    pub replay_target_height: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -424,6 +432,7 @@ pub struct BalancesSnap {
     /// it equals height + 1 the replay covered EVERY height from genesis,
     /// which is the fact that proves the figure is the whole wallet's.
     pub blocks_replayed: Option<u64>,
+    pub replay_target_height: Option<u64>,
     pub wallet: Vec<WalletAddrRow>,
     pub received: HashMap<String, i64>,
     pub mine: HashSet<String>,
@@ -441,6 +450,7 @@ pub fn load_balances_snap(path: &PathBuf) -> BalancesSnap {
         total_wallet_sats: 0,
         total_supply_sats: 0,
         blocks_replayed: None,
+        replay_target_height: None,
         wallet: Vec::new(),
         received: HashMap::new(),
         mine: HashSet::new(),
@@ -461,6 +471,7 @@ pub fn load_balances_snap(path: &PathBuf) -> BalancesSnap {
     snap.coverage_hash = v["covered_tip_hash"].as_str().unwrap_or("").to_string();
     snap.total_wallet_sats = v["totals"]["wallet_balance_sats"].as_i64().unwrap_or(0);
     snap.blocks_replayed = v["totals"]["blocks_replayed"].as_u64();
+    snap.replay_target_height = v["replay_target_height"].as_u64();
     snap.total_supply_sats = v["totals"]["total_balance_sats"].as_i64().unwrap_or(0);
     if let Some(arr) = v["wallet"].as_array() {
         for w in arr {
@@ -773,6 +784,7 @@ impl WalletProvider for SnapshotWallet {
             addresses: b.wallet.len(),
             utxos: b.wallet.iter().map(|w| w.utxos).sum::<u64>() as usize,
             blocks_replayed: b.blocks_replayed,
+            replay_target_height: b.replay_target_height,
         })
     }
 
@@ -2491,15 +2503,23 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                             }
                         }
                     };
-                    // coverage: the replay reached the end of the chain when
-                    // its own block count accounts for every height it
-                    // claims (blocks_replayed == height + 1). The snapshot
-                    // publishes that count.
-                    let coverage_ok = b
-                        .blocks_replayed
-                        .zip(b.coverage_height.checked_add(1))
-                        .map(|(n, expected)| n == expected)
-                        .unwrap_or(false);
+                    // coverage: the replay must have reached the tip it was
+                    // CHASING. The build refuses to publish a snapshot that
+                    // stopped short (a hole in the store), so a snapshot
+                    // whose coverage equals its target is a whole-chain
+                    // figure, and one whose coverage is BELOW the target was
+                    // capped and omits everything above the cap. The
+                    // block count is checked as well: the replay must have
+                    // walked every height from genesis.
+                    let coverage_ok = match (
+                        b.replay_target_height,
+                        b.blocks_replayed.zip(b.coverage_height.checked_add(1)),
+                    ) {
+                        (Some(target), Some((walked, expected))) => {
+                            b.coverage_height == target && walked == expected
+                        }
+                        _ => false,
+                    };
                     let complete = chain_ok && coverage_ok;
                     (
                         b.sats,
@@ -2525,6 +2545,7 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 addresses: 0,
                 supply_sats: 0,
                 blocks_replayed: None,
+                replay_target_height: None,
             });
             NativeOutcome::Ok(json!({
                 "walletversion": 60000,
@@ -3948,6 +3969,9 @@ mod tests {
                     addresses: 248,
                     utxos: 177,
                     blocks_replayed: self.coverage.as_ref().map(|(_, _)| coverage_height + 1),
+                    // a published coverage means the replay reached the tip
+                    // it was chasing
+                    replay_target_height: self.coverage.as_ref().map(|(_, _)| coverage_height),
                 }
             })
         }
@@ -4533,6 +4557,29 @@ mod tests {
             info["balance_partial"],
             json!(false),
             "a proven-whole snapshot is not partial just because the tip moved on"
+        );
+    }
+
+    /// A snapshot whose coverage is BELOW the tip the replay was chasing was
+    /// CAPPED by a hole in the store: it omits everything the wallet earned
+    /// above the cap, so it must be flagged even though it walked every
+    /// height it had.
+    #[test]
+    fn a_capped_snapshot_below_its_replay_target_stays_flagged_partial() {
+        let t = StubTip;
+        // the stub's default coverage is a capped one: it names a height it
+        // reached and a hash the node does not serve at that height
+        let w = StubWallet {
+            balance: Some(3_036_990_591),
+            ..Default::default()
+        };
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(
+            info["balance_partial"],
+            json!(true),
+            "a capped snapshot must be flagged"
         );
     }
 
