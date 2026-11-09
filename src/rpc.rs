@@ -2823,25 +2823,35 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         "addmultisigaddress" => {
             // legacy rpcwallet.cpp:836: build an m-of-n P2SH multisig address
             // from Triangles addresses / hex pubkeys, store the redeem script
-            // (AddCScript) and return the bare address string.
-            let n_required = match ptry!(p_u64(params, 0, "nrequired")) {
-                Some(n) => n,
-                None => return NativeOutcome::Err(-8, "expected nrequired parameter".into()),
+            // (AddCScript) and return the bare address string. Every legacy
+            // failure here is std::runtime_error, which the v5 dispatcher
+            // (trianglesrpc.cpp:1321) rethrows as JSONRPCError(RPC_MISC_ERROR)
+            // → error code -1 carrying the verbatim string.
+            let n_required = match param_get(params, 0, "nrequired") {
+                // legacy get_int(): a negative nrequired parses and must fall
+                // into the "at least one key" check below
+                Some(Value::Number(n)) => n.as_i64(),
+                _ => None,
+            };
+            let Some(n_required) = n_required else {
+                return NativeOutcome::Err(-8, "expected nrequired parameter".into());
             };
             let keys_param = match param_get(params, 1, "keys") {
                 Some(Value::Array(a)) => a.clone(),
                 _ => return NativeOutcome::Err(-8, "expected an array of keys".into()),
             };
-            let _account = ptry!(p_str(params, 2, "account"));
-            if n_required < 1 || n_required > 16 {
+            let account = ptry!(p_str(params, 2, "account")).unwrap_or_default();
+            // legacy check order (rpcwallet.cpp:851): nrequired < 1 first
+            if n_required < 1 {
                 return NativeOutcome::Err(
-                    -8,
-                    "a multisignature address must require between 1 and 16 keys".into(),
+                    -1,
+                    "a multisignature address must require at least one key to redeem".into(),
                 );
             }
-            if (keys_param.len() as u64) < n_required {
+            // ... then the keys count (rpcwallet.cpp:855)
+            if (keys_param.len() as i64) < n_required {
                 return NativeOutcome::Err(
-                    -8,
+                    -1,
                     format!(
                         "not enough keys supplied (got {} keys, but need at least {} to redeem)",
                         keys_param.len(),
@@ -2873,14 +2883,15 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             let mut pubkeys: Vec<Vec<u8>> = Vec::with_capacity(keys_param.len());
             for k in &keys_param {
                 let Some(ks) = k.as_str() else {
-                    return NativeOutcome::Err(-5, "Invalid public key".into());
+                    // legacy keys[i].get_str() throws → -1 via the dispatcher
+                    return NativeOutcome::Err(-1, "Invalid public key".into());
                 };
                 if let Ok(payload) = crate::address::address_to_payload(ks) {
                     // a valid address: must be a P2PKH 'T' address referring
                     // to a key the wallet holds the full pubkey for
                     if payload[0] != crate::address::PUBKEY_ADDRESS {
                         return NativeOutcome::Err(
-                            -5,
+                            -1,
                             format!("{ks} does not refer to a key"),
                         );
                     }
@@ -2888,26 +2899,41 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                         Some(wk) => pubkeys.push(wk.pubkey.clone()),
                         None => {
                             return NativeOutcome::Err(
-                                -4,
+                                -1,
                                 format!("no full public key for address {ks}"),
                             )
                         }
                     }
                 } else if let Ok(pk) = crate::p2p::hex_decode(ks) {
+                    // legacy throws " Invalid public key: "+ks — the LEADING
+                    // SPACE is in the v5 source (rpcwallet.cpp:882), keep it
+                    // byte-for-byte
                     if secp256k1::PublicKey::from_slice(&pk).is_err() {
                         return NativeOutcome::Err(
-                            -5,
-                            format!("Invalid public key: {ks}"),
+                            -1,
+                            format!(" Invalid public key: {ks}"),
                         );
                     }
                     pubkeys.push(pk);
                 } else {
-                    return NativeOutcome::Err(-5, format!("Invalid public key: {ks}"));
+                    return NativeOutcome::Err(-1, format!(" Invalid public key: {ks}"));
                 }
+            }
+
+            // The 16-key cap: legacy SetMultisig/EncodeOP_N is
+            // assert(n >= 0 && n <= 16) — it ABORTS the process. tri7 refuses
+            // instead (a deliberate, documented deviation from legacy).
+            // Checked AFTER the legacy-ordered checks above so e.g.
+            // nrequired=17 with 2 keys still answers "not enough keys".
+            if n_required > 16 || pubkeys.len() > 16 {
+                return NativeOutcome::Err(
+                    -8,
+                    "a multisignature address must require between 1 and 16 keys".into(),
+                );
             }
             let redeem = match crate::multisig::redeem_script(n_required as u8, &pubkeys) {
                 Ok(r) => r,
-                Err(e) => return NativeOutcome::Err(-8, format!("addmultisigaddress: {e}")),
+                Err(e) => return NativeOutcome::Err(-1, e),
             };
             let address = crate::multisig::p2sh_address(&redeem);
             let mut wh = match crate::wallet::WalletHandle::open_readwrite(&path) {
@@ -2923,6 +2949,15 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 wh.close();
                 return NativeOutcome::Err(-1, format!("addmultisigaddress: {e}"));
             }
+            // legacy SetAddressBookName(innerID, strAccount) right after
+            // AddCScript; an empty account name erases the row in the
+            // original client, so a missing/empty [account] writes nothing.
+            if !account.is_empty() {
+                if let Err(e) = wh.set_label(&address, &account) {
+                    wh.close();
+                    return NativeOutcome::Err(-1, format!("addmultisigaddress: {e}"));
+                }
+            }
             wh.close();
             NativeOutcome::Ok(json!(address))
         }
@@ -2930,13 +2965,21 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
         "addredeemscript" => {
             // legacy rpcwallet.cpp:905: store a hex redeem script in the
             // wallet (AddCScript) so its P2SH address becomes spendable.
+            // Returns the bare P2SH address string (CTrianglesAddress).
             let Some(hex) = ptry!(p_str(params, 0, "redeemScript")) else {
                 return NativeOutcome::Err(-8, "expected redeemScript parameter".into());
             };
-            let _account = ptry!(p_str(params, 1, "account"));
+            let account = ptry!(p_str(params, 1, "account")).unwrap_or_default();
             let script = match crate::p2p::hex_decode(&hex) {
                 Ok(s) => s,
-                Err(_) => return NativeOutcome::Err(-5, "Invalid redeemScript".into()),
+                // legacy ParseHexV (trianglesrpc.cpp:151):
+                // RPC_INVALID_PARAMETER with the verbatim format string
+                Err(_) => {
+                    return NativeOutcome::Err(
+                        -8,
+                        format!("redeemScript must be hexadecimal string (not '{hex}')"),
+                    )
+                }
             };
             let path = match wallet_file_path() {
                 Some(p) => p,
@@ -2951,18 +2994,24 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
             let mut wh = match crate::wallet::WalletHandle::open_readwrite(&path) {
                 Ok(w) => w,
                 Err(e) => {
-                    return NativeOutcome::Err(
-                        -1,
-                        format!("addredeemscript: cannot open wallet: {e}"),
-                    )
+                    return NativeOutcome::Err(-1, format!("addredeemscript: cannot open wallet: {e}"))
                 }
             };
             if let Err(e) = wh.put_redeem_script(&script) {
                 wh.close();
                 return NativeOutcome::Err(-1, format!("addredeemscript: {e}"));
             }
+            // legacy SetAddressBookName(innerID, strAccount) — see
+            // addmultisigaddress above for the empty-name note
+            if !account.is_empty() {
+                let addr = crate::multisig::p2sh_address(&script);
+                if let Err(e) = wh.set_label(&addr, &account) {
+                    wh.close();
+                    return NativeOutcome::Err(-1, format!("addredeemscript: {e}"));
+                }
+            }
             wh.close();
-            NativeOutcome::Ok(json!(true))
+            NativeOutcome::Ok(json!(crate::multisig::p2sh_address(&script)))
         }
 
         // Ops verbs that may run before the live wallet view is ready (a pure
@@ -6634,8 +6683,10 @@ fn new_parity_verbs_are_in_native_and_routed() {
 }
 
 /// addmultisigaddress / addredeemscript end to end against a REAL wallet
-/// file: bare-address reply, redeem script stored under its scriptID,
-/// legacy error codes (-8 bad params, -5 bad address/key, -4 key not found).
+/// file: bare-address reply, redeem script stored under its scriptID, the
+/// [account] label row (legacy SetAddressBookName), and legacy error
+/// surfaces: runtime_error → -1 with the verbatim v5 strings; -8 only for
+/// ParseHexV and the 16-key refusal that replaces legacy's assert-abort.
 #[test]
 fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -6689,6 +6740,20 @@ fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     let v = call(&d, "addmultisigaddress", json!([2, [hex_encode(&p2), a1]]));
     assert_eq!(v["result"], json!(addr));
 
+    // repeat WITH an [account] → legacy SetAddressBookName writes the label
+    // row on the P2SH address (empty/absent [account] writes nothing)
+    let v = call(&d, "addmultisigaddress", json!([2, [hex_encode(&p2), a1], "trust"]));
+    assert!(v["error"].is_null(), "label-write call errored: {v}");
+    assert_eq!(v["result"], json!(addr));
+    {
+        let w = crate::wallet::read_wallet(&path).unwrap();
+        assert!(
+            w.names.iter().any(|(a, l)| a == &addr && l == "trust"),
+            "addmultisigaddress must write the [account] label row: {:?}",
+            w.names
+        );
+    }
+
     // the redeem script really is stored under its scriptID
     let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
     let id = crate::address::hash160(&redeem);
@@ -6698,31 +6763,90 @@ fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     );
     wh.close();
 
-    // addredeemscript stores arbitrary hex and replies true
+    // addredeemscript stores arbitrary hex and replies the bare P2SH address
     let other = crate::multisig::redeem_script(1, &[p3.clone()]).unwrap();
+    let other_addr = crate::multisig::p2sh_address(&other);
     let v = call(&d, "addredeemscript", json!([hex_encode(&other)]));
-    assert_eq!(v["result"], json!(true));
+    assert_eq!(
+        v["result"],
+        json!(other_addr),
+        "reply is the bare P2SH address (legacy CTrianglesAddress)"
+    );
     let v = call(&d, "addredeemscript", json!([hex_encode(&other), "savings"]));
-    assert_eq!(v["result"], json!(true), "[account] accepted for shape compat");
+    assert_eq!(v["result"], json!(other_addr), "[account] accepted for shape compat");
+    {
+        let w = crate::wallet::read_wallet(&path).unwrap();
+        assert!(
+            w.names.iter().any(|(a, l)| a == &other_addr && l == "savings"),
+            "addredeemscript must write the [account] label row: {:?}",
+            w.names
+        );
+    }
 
-    // legacy error codes
+    // legacy error surfaces: runtime_error → RPC_MISC_ERROR (-1) carrying
+    // the verbatim v5 strings (dispatcher trianglesrpc.cpp:1321)
     let v = call(&d, "addmultisigaddress", json!([2]));
     assert_eq!(v["error"]["code"], -8, "missing keys array");
     let v = call(&d, "addmultisigaddress", json!([0, [hex_encode(&p1), hex_encode(&p2)]]));
-    assert_eq!(v["error"]["code"], -8, "nrequired < 1");
+    assert_eq!(v["error"]["code"], -1, "nrequired < 1");
+    assert_eq!(
+        v["error"]["message"],
+        "a multisignature address must require at least one key to redeem"
+    );
     let v = call(&d, "addmultisigaddress", json!([3, [hex_encode(&p1), hex_encode(&p2)]]));
-    assert_eq!(v["error"]["code"], -8, "not enough keys");
+    assert_eq!(v["error"]["code"], -1, "not enough keys");
+    assert_eq!(
+        v["error"]["message"],
+        "not enough keys supplied (got 2 keys, but need at least 3 to redeem)"
+    );
+    // legacy check order: the count check fires BEFORE the 16-key refusal
+    let v = call(&d, "addmultisigaddress", json!([17, [hex_encode(&p1), hex_encode(&p2)]]));
+    assert_eq!(
+        v["error"]["code"], -1,
+        "nrequired above the key count answers not-enough first"
+    );
+    let seventeen = (0..17)
+        .map(|i| {
+            let secret = crate::legacy::sha256d(format!("tri7-ms-17/{i}").as_bytes());
+            let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+            let secp = secp256k1::Secp256k1::signing_only();
+            hex_encode(&secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize().to_vec())
+        })
+        .collect::<Vec<_>>();
+    let v = call(&d, "addmultisigaddress", json!([1, seventeen]));
+    assert_eq!(
+        v["error"]["code"], -8,
+        "17 keys: legacy assert-aborts here, tri7 refuses"
+    );
+    assert_eq!(
+        v["error"]["message"],
+        "a multisignature address must require between 1 and 16 keys"
+    );
     let v = call(&d, "addmultisigaddress", json!([1, ["not-a-key-or-address"]]));
-    assert_eq!(v["error"]["code"], -5, "invalid key");
+    assert_eq!(v["error"]["code"], -1, "invalid key");
+    assert_eq!(
+        v["error"]["message"],
+        " Invalid public key: not-a-key-or-address"
+    );
     let v = call(&d, "addmultisigaddress", json!([1, [hex_encode(&[0x02, 0x55])]]));
-    assert_eq!(v["error"]["code"], -5, "hex but not a valid pubkey");
+    assert_eq!(v["error"]["code"], -1, "hex but not a valid pubkey");
+    assert_eq!(v["error"]["message"], " Invalid public key: 0255");
     let not_ours = crate::wallet::pubkey_to_address(&p3);
-    let v = call(&d, "addmultisigaddress", json!([1, [not_ours]]));
-    assert_eq!(v["error"]["code"], -4, "valid address, key not in wallet");
+    let v = call(&d, "addmultisigaddress", json!([1, [not_ours.clone()]]));
+    assert_eq!(v["error"]["code"], -1, "valid address, key not in wallet");
+    assert_eq!(
+        v["error"]["message"],
+        format!("no full public key for address {not_ours}")
+    );
     let v = call(&d, "addmultisigaddress", json!([1, [addr]]));
-    assert_eq!(v["error"]["code"], -5, "a C address does not refer to a key");
+    assert_eq!(v["error"]["code"], -1, "a C address does not refer to a key");
+    assert_eq!(v["error"]["message"], format!("{addr} does not refer to a key"));
     let v = call(&d, "addredeemscript", json!(["zzzz"]));
-    assert_eq!(v["error"]["code"], -5, "invalid hex redeemScript");
+    assert_eq!(v["error"]["code"], -8, "invalid hex redeemScript");
+    assert_eq!(
+        v["error"]["message"],
+        "redeemScript must be hexadecimal string (not 'zzzz')"
+    );
     let v = call(&d, "addredeemscript", json!([]));
     assert_eq!(v["error"]["code"], -8, "missing redeemScript");
 

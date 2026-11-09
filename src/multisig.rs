@@ -400,4 +400,42 @@ mod tests {
         assert_eq!(redeem[1], 0x41);
         assert_eq!(*redeem.last().unwrap(), 0xae);
     }
+
+    /// The canonical privkey = 1, 2, 3 vectors from the p2sh-multisig
+    /// reference (reproduced from a spec-only implementation): the 2-of-3
+    /// redeem script must be byte-exact and its P2SH address must match the
+    /// published known answers, not merely self-consistency.
+    #[test]
+    fn known_answer_vectors_privkeys_1_2_3() {
+        let pk = |n: u64| -> Vec<u8> {
+            let mut secret = [0u8; 32];
+            secret[31] = n as u8;
+            let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+            let secp = secp256k1::Secp256k1::signing_only();
+            secp256k1::PublicKey::from_secret_key(&secp, &sk)
+                .serialize()
+                .to_vec()
+        };
+        // canonical compressed pubkeys for privkeys 1..=3
+        assert_eq!(
+            hex(&pk(1)),
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+        let keys = [pk(1), pk(2), pk(3)];
+
+        let redeem23 = redeem_script(2, &keys).unwrap();
+        assert_eq!(
+            hex(&redeem23),
+            "52210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+             2102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\
+             2102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\
+             53ae"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(redeem23.len(), 105);
+        assert_eq!(p2sh_address(&redeem23), "CJU8gKtn4aNBBovbywqPqZo6mjA1B1pLD1");
+
+        let redeem13 = redeem_script(1, &keys).unwrap();
+        assert_eq!(p2sh_address(&redeem13), "Cc7Jwy788GFxRiW8Xza64Ra6C9Qb78maFS");
+    }
 }

@@ -843,7 +843,10 @@ fn decode_address_payload(s: &str) -> Result<[u8; 21], String> {
     if checksum[..4] != full[21..] {
         return Err(format!("address \"{}\": checksum mismatch", s));
     }
-    if full[0] != crate::address::PUBKEY_ADDRESS {
+    if full[0] != crate::address::PUBKEY_ADDRESS && full[0] != crate::address::SCRIPT_ADDRESS {
+        // labels are written for BOTH address classes: legacy
+        // SetAddressBookName runs on CTxDestination, and addmultisigaddress /
+        // addredeemscript attach accounts to P2SH (C…) addresses
         return Err(format!(
             "address \"{}\": wrong version byte {:#04x}",
             s, full[0]
