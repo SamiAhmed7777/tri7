@@ -2222,8 +2222,6 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         blocks: Some(2_204_751),
         sync: Some(s),
         daemon_balance_sats: Some(3_036_990_591), // uTRI: 3,036.990591 TRI (COIN=1e6)
-        daemon_balance_partial: Some(false),
-        daemon_balance_height: Some(2_201_090),
         daemon_utxos: None,
         wallet_history: None,
         local_onion: None,
@@ -2241,8 +2239,6 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
         blocks: Some(2_204_751),
         sync: None,
         daemon_balance_sats: None,
-        daemon_balance_partial: None,
-        daemon_balance_height: None,
         daemon_utxos: None,
         wallet_history: None,
         local_onion: None,
@@ -2373,8 +2369,6 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
         blocks: Some(2_205_301),
         sync: None,
         daemon_balance_sats: None,
-        daemon_balance_partial: None,
-        daemon_balance_height: None,
         daemon_utxos: Some(vec![
             // the collapsed stake's live coins (full values): must NOT duplicate
             utxo(&"aa".repeat(32), 14_260_000, "coinstake"),

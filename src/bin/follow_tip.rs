@@ -4661,7 +4661,20 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
 
     fn balance(&self) -> Option<BalanceView> {
         if let Ok(g) = self.wl.lock() {
-            if let Some(w) = g.as_ref() {
+            // The live view is the wallet's UNSPENT set, and it only knows
+            // about coins that appeared in the range it replayed. It is
+            // seeded from the chain-state window base, so on a node that
+            // resumed from a state file it MISSES the coins the wallet
+            // received before that base - and a balance that silently
+            // omits the wallet's older coins is worse than a slightly
+            // stale one.
+            //
+            // The live view may therefore serve the balance ONLY when it
+            // replayed the wallet's WHOLE history (base == 0, the
+            // from-zero case). Otherwise the replay snapshot - which
+            // covers the chain from genesis - is the whole-wallet figure
+            // and is served instead.
+            if let Some(w) = g.as_ref().filter(|w| w.base == 0) {
                 let b = &self.snap.balances;
                 let (tip, tip_hash) = match self.st.try_lock() {
                     Ok(s) => (
@@ -4693,6 +4706,12 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                     coverage_hash: tip_hash,
                     addresses: owned.len(),
                     utxos: w.live.len(),
+                    // the live view replayed base..=tip: it walked
+                    // tip - base + 1 heights, and its base is the height it
+                    // started from. It is whole-chain only when it started at
+                    // genesis (base == 0), which is what the balance-source
+                    // selection checks.
+                    blocks_replayed: Some(tip.saturating_sub(w.base) + 1),
                 });
             }
         }

@@ -307,6 +307,12 @@ pub struct BalanceView {
     pub coverage_hash: String,
     pub addresses: usize,
     pub utxos: usize,
+    /// How many blocks the replay that produced this snapshot actually
+    /// walked. `coverage_height + 1` means it walked EVERY height from
+    /// genesis — that is the fact that says "this figure covers the whole
+    /// chain". None when the source did not publish it (then the figure
+    /// cannot be proven whole and fails closed).
+    pub blocks_replayed: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -414,6 +420,10 @@ pub struct BalancesSnap {
     pub coverage_hash: String,
     pub total_wallet_sats: i64,
     pub total_supply_sats: i64,
+    /// How many blocks the replay that produced this snapshot walked. When
+    /// it equals height + 1 the replay covered EVERY height from genesis,
+    /// which is the fact that proves the figure is the whole wallet's.
+    pub blocks_replayed: Option<u64>,
     pub wallet: Vec<WalletAddrRow>,
     pub received: HashMap<String, i64>,
     pub mine: HashSet<String>,
@@ -430,6 +440,7 @@ pub fn load_balances_snap(path: &PathBuf) -> BalancesSnap {
         coverage_hash: String::new(),
         total_wallet_sats: 0,
         total_supply_sats: 0,
+        blocks_replayed: None,
         wallet: Vec::new(),
         received: HashMap::new(),
         mine: HashSet::new(),
@@ -449,6 +460,7 @@ pub fn load_balances_snap(path: &PathBuf) -> BalancesSnap {
     snap.height = v["height"].as_u64().unwrap_or(0);
     snap.coverage_hash = v["covered_tip_hash"].as_str().unwrap_or("").to_string();
     snap.total_wallet_sats = v["totals"]["wallet_balance_sats"].as_i64().unwrap_or(0);
+    snap.blocks_replayed = v["totals"]["blocks_replayed"].as_u64();
     snap.total_supply_sats = v["totals"]["total_balance_sats"].as_i64().unwrap_or(0);
     if let Some(arr) = v["wallet"].as_array() {
         for w in arr {
@@ -760,6 +772,7 @@ impl WalletProvider for SnapshotWallet {
             coverage_hash: b.coverage_hash.clone(),
             addresses: b.wallet.len(),
             utxos: b.wallet.iter().map(|w| w.utxos).sum::<u64>() as usize,
+            blocks_replayed: b.blocks_replayed,
         })
     }
 
@@ -2437,13 +2450,65 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                     let cov = idx_h.map(|h| (h, Value::Null));
                     (sats, n, idx_h, false, cov)
                 }
-                (None, Some(b)) => (
-                    b.sats,
-                    b.utxos,
-                    Some(b.coverage_height),
-                    true,
-                    Some((b.coverage_height, Value::String(b.coverage_hash.clone()))),
-                ),
+                (None, Some(b)) => {
+                    // The snapshot is the WHOLE wallet only if it was built
+                    // from THIS node's chain and that replay reached the end
+                    // of it. Two independent facts are required, and BOTH
+                    // must hold:
+                    //
+                    //  (1) CHAIN IDENTITY. The snapshot names the hash it
+                    //      verified at its coverage height. That hash must
+                    //      equal the hash THIS node serves at that height
+                    //      (the node's own store). A snapshot from another
+                    //      chain - or one that names no hash at all - cannot
+                    //      be proven to be this chain's, so it FAILS CLOSED.
+                    //  (2) WHOLE-CHAIN COVERAGE. The replay must have
+                    //      reached the end of the chain. A snapshot that
+                    //      stopped short is a capped figure.
+                    //
+                    // The tip MOVES while the node runs: a snapshot that
+                    //      covered the chain to hN is complete even when the
+                    //      tip has since advanced to hN+k. Requiring
+                    //      coverage == the live tip would flag every
+                    //      wallet as partial forever, which is exactly the
+                    //      noise this flag must not be. The snapshot's own
+                    //      coverage is the honest bound.
+                    let tip = deps.tip.tip();
+                    let chain_ok = match b.coverage_hash.trim() {
+                        "" => false, // no hash: cannot prove identity
+                        h => {
+                            // the node's own hash at the coverage height
+                            let node_hash = deps.blocks.hash_at(b.coverage_height).ok().flatten();
+                            match node_hash {
+                                Some(nh) => nh.eq_ignore_ascii_case(h),
+                                // the node cannot say: fall back to the
+                                // tip it serves (a snapshot at the tip that
+                                // names the tip hash IS this chain)
+                                None => {
+                                    b.coverage_height == tip.height
+                                        && tip.blockhash.eq_ignore_ascii_case(h)
+                                }
+                            }
+                        }
+                    };
+                    // coverage: the replay reached the end of the chain when
+                    // its own block count accounts for every height it
+                    // claims (blocks_replayed == height + 1). The snapshot
+                    // publishes that count.
+                    let coverage_ok = b
+                        .blocks_replayed
+                        .zip(b.coverage_height.checked_add(1))
+                        .map(|(n, expected)| n == expected)
+                        .unwrap_or(false);
+                    let complete = chain_ok && coverage_ok;
+                    (
+                        b.sats,
+                        b.utxos,
+                        Some(b.coverage_height),
+                        !complete,
+                        Some((b.coverage_height, Value::String(b.coverage_hash.clone()))),
+                    )
+                }
                 (None, None) => (0, 0, None, true, None),
             };
             if bal.is_none() && live.is_none() {
@@ -2459,6 +2524,7 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 coverage_hash: String::new(),
                 addresses: 0,
                 supply_sats: 0,
+                blocks_replayed: None,
             });
             NativeOutcome::Ok(json!({
                 "walletversion": 60000,
@@ -3755,6 +3821,10 @@ mod tests {
     use std::sync::Mutex;
 
     const TIP_H: u64 = 2_204_064;
+    /// a deterministic display hash for a height (the stub's chain)
+    fn tip_hash_at(h: u64) -> String {
+        format!("{h:064x}")
+    }
     const TIP_HASH: &str = "5b074b34b0b1a4074b8a1a765da89e6e18af6fdc12a24b80e2b41a0a4d9bb899";
     const WIN_BASE: u64 = 2_199_465;
     const MOD_H: u64 = 2_203_769;
@@ -3812,6 +3882,9 @@ mod tests {
 
     struct StubWallet {
         balance: Option<i64>,
+        /// overrides the snapshot's coverage height/hash, so a test can
+        /// place the replay at the tip (or on a different chain)
+        coverage: Option<(u64, String)>,
         received: HashMap<String, i64>,
         mine: Vec<String>,
         utxos: Vec<UtxoRow>,
@@ -3831,6 +3904,7 @@ mod tests {
                 paytxfee: std::sync::RwLock::new(None),
                 keypool: std::sync::RwLock::new(None),
                 balance: Some(3_036_990_591),
+                coverage: None,
                 received,
                 mine: vec!["T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY".to_string()],
                 utxos: vec![UtxoRow {
@@ -3861,14 +3935,20 @@ mod tests {
             Ok(())
         }
         fn balance(&self) -> Option<BalanceView> {
-            self.balance.map(|sats| BalanceView {
-                sats,
-                supply_sats: 222_507_326_452,
-                coverage_height: 2_201_090,
-                coverage_hash: "f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307"
-                    .into(),
-                addresses: 248,
-                utxos: 177,
+            self.balance.map(|sats| {
+                let (coverage_height, coverage_hash) = self.coverage.clone().unwrap_or((
+                    2_201_090,
+                    "f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307".into(),
+                ));
+                BalanceView {
+                    sats,
+                    supply_sats: 222_507_326_452,
+                    coverage_height,
+                    coverage_hash,
+                    addresses: 248,
+                    utxos: 177,
+                    blocks_replayed: self.coverage.as_ref().map(|(_, _)| coverage_height + 1),
+                }
             })
         }
         fn coverage(&self) -> Option<(u64, String)> {
@@ -3896,6 +3976,9 @@ mod tests {
 
     struct StubBlocks {
         ready: bool,
+        /// the node's OWN chain hash at a height — the identity oracle the
+        /// completeness rule consults
+        chain_hash: Option<(u64, String)>,
     }
     impl BlockDataProvider for StubBlocks {
         fn ready(&self) -> bool {
@@ -3918,6 +4001,11 @@ mod tests {
             Ok(None)
         }
         fn hash_at(&self, h: u64) -> Result<Option<String>, String> {
+            if let Some((hh, hv)) = &self.chain_hash {
+                if *hh == h {
+                    return Ok(Some(hv.clone()));
+                }
+            }
             if h <= 10 {
                 Ok(Some(format!("{:064x}", h)))
             } else {
@@ -3978,7 +4066,7 @@ mod tests {
     fn parse_error_returns_32700() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let (status, out) = handle_body(&d, "this is not json");
         assert_eq!(status, 200);
@@ -3991,7 +4079,7 @@ mod tests {
     fn batch_request_yields_array_of_envelopes() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let body = json!([
             {"id": 1, "method": "getblockcount"},
@@ -4013,7 +4101,7 @@ mod tests {
     fn empty_batch_is_invalid_request() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let (_, out) = handle_body(&d, "[]");
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -4024,7 +4112,7 @@ mod tests {
     fn gettip_and_getblockcount_from_tipstate() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "gettip", json!([]));
         assert_eq!(v["result"]["height"], json!(TIP_H));
@@ -4040,7 +4128,7 @@ mod tests {
     fn getbestblockhash_native_from_tipstate() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "getbestblockhash", json!([]));
         assert_eq!(v["result"], json!(TIP_HASH));
@@ -4052,7 +4140,7 @@ mod tests {
     fn getstakemodifier_in_and_out_of_window() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         // positional
         let v = call(&d, "getstakemodifier", json!([MOD_H]));
@@ -4075,7 +4163,7 @@ mod tests {
     fn getdifficulty_uses_daemon_arithmetic_and_shape() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "getdifficulty", json!([]));
         // daemon shape: an object with both proof types; "proof-of-stake"
@@ -4100,7 +4188,7 @@ mod tests {
     fn getbalance_matches_replay_total() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "getbalance", json!([]));
         assert_eq!(v["source"], "tri7");
@@ -4123,7 +4211,7 @@ mod tests {
     fn listwalletaddresses_reports_entries() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listwalletaddresses", json!([]));
         let arr = v["result"].as_array().unwrap();
@@ -4136,7 +4224,7 @@ mod tests {
     fn getreceivedbyaddress_known_and_unknown() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(
             &d,
@@ -4171,7 +4259,7 @@ mod tests {
     fn validateaddress_decodes_and_flags_mine() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         // wallet address from the live snapshot (P2PKH, version 65)
         let v = call(
@@ -4207,7 +4295,7 @@ mod tests {
     fn listunspent_filters_by_confirmations() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listunspent", json!([]));
         let arr = v["result"].as_array().unwrap();
@@ -4227,7 +4315,7 @@ mod tests {
     fn live_index_wins_over_the_replay_snapshot() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let hash = [7u8; 32];
         let mut idx = TempIndex::new("wins");
         idx.seed(2_206_001, hash, true);
@@ -4273,7 +4361,7 @@ mod tests {
     fn live_index_must_match_the_served_chain_exactly() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let hash = [7u8; 32];
         let addrs = vec!["Tlive000000000000000000000000000000".to_string()];
 
@@ -4324,7 +4412,7 @@ mod tests {
     fn incomplete_index_is_never_served_as_authoritative() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let hash = [7u8; 32];
         let mut idx = TempIndex::new("building");
         idx.seed(2_206_001, hash, false); // not finished
@@ -4348,6 +4436,106 @@ mod tests {
         assert_eq!(info["coverage_height"], 2_201_090u64);
     }
 
+    /// A snapshot whose replay REACHED the chain tip is the whole wallet:
+    /// it must NOT be flagged partial. The flag means "this number is
+    /// capped", nothing else.
+    #[test]
+    fn an_at_tip_snapshot_fallback_is_not_flagged_partial() {
+        let t = StubTip;
+        // a wallet whose snapshot reached the tip the node serves
+        let w = StubWallet {
+            balance: Some(5_292_853_544),
+            coverage: Some((TIP_H, TIP_HASH.into())),
+            ..Default::default()
+        };
+        // the node serves TIP_HASH at TIP_H: the snapshot is this chain's
+        let b = StubBlocks {
+            ready: true,
+            chain_hash: Some((TIP_H, TIP_HASH.into())),
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance"], json!(5292.853544));
+        assert_eq!(info["balance_height"], TIP_H);
+        assert_eq!(
+            info["balance_partial"],
+            json!(false),
+            "a snapshot that reached the tip is the whole wallet"
+        );
+    }
+
+    /// A snapshot that reached the tip HEIGHT but names a DIFFERENT chain
+    /// describes coins this node does not have: it must stay flagged.
+    #[test]
+    fn an_at_tip_snapshot_on_a_different_chain_stays_flagged_partial() {
+        let t = StubTip;
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let w = StubWallet {
+            balance: Some(5_292_853_544),
+            // the tip height, but a hash this node does not serve
+            coverage: Some((TIP_H, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into())),
+            ..Default::default()
+        };
+        let b = StubBlocks {
+            ready: true,
+            chain_hash: Some((TIP_H, TIP_HASH.into())),
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(
+            info["balance_partial"],
+            json!(true),
+            "a snapshot on another chain is not this node's wallet"
+        );
+    }
+
+    /// A snapshot with NO replay-count proof is still flagged: without
+    /// `blocks_replayed` there is no evidence the replay covered every
+    /// height from genesis, so the figure fails closed even if its hash
+    /// matches the node's chain.
+    #[test]
+    fn a_snapshot_without_a_replay_count_proof_stays_flagged_partial() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = deps(&t, &w, &b, None);
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance_height"], 2_201_090u64);
+        assert_eq!(
+            info["balance_partial"],
+            json!(true),
+            "a snapshot that stopped short of the tip is capped"
+        );
+    }
+
+    /// A snapshot that is BEHIND the moving tip but is PROVEN whole (its
+    /// hash matches the node's own chain at its coverage height, and its
+    /// replay count accounts for every height from genesis) is NOT partial.
+    /// The tip moves while the node runs; requiring coverage == the live tip
+    /// would flag every wallet as partial forever.
+    #[test]
+    fn a_proven_whole_snapshot_behind_the_moving_tip_is_not_partial() {
+        let t = StubTip;
+        let w = StubWallet {
+            balance: Some(5_292_853_544),
+            // proven whole at an EARLIER height than the tip
+            coverage: Some((TIP_H - 100, tip_hash_at(TIP_H - 100))),
+            ..Default::default()
+        };
+        let b = StubBlocks {
+            ready: true,
+            chain_hash: Some((TIP_H - 100, tip_hash_at(TIP_H - 100))),
+        };
+        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info["balance_height"], TIP_H - 100);
+        assert_eq!(
+            info["balance_partial"],
+            json!(false),
+            "a proven-whole snapshot is not partial just because the tip moved on"
+        );
+    }
+
     /// Without a live index the node falls back to the replay snapshot and
     /// says the figure is partial, so a UI never presents a capped number as
     /// the whole balance.
@@ -4355,7 +4543,7 @@ mod tests {
     fn snapshot_fallback_is_flagged_partial() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
         let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
@@ -4516,7 +4704,7 @@ mod tests {
     fn live_index_answers_without_a_replay_snapshot() {
         let t = StubTip;
         let w = StubNoSnapshot;
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let hash = [7u8; 32];
         let mut idx = TempIndex::new("nosnapshot");
         idx.seed(2_206_001, hash, true);
@@ -4544,7 +4732,7 @@ mod tests {
     fn no_view_at_all_is_an_error_not_zero() {
         let t = StubTip;
         let w = StubNoSnapshot;
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
         let v = call(&d, "getbalance", json!([]));
         assert!(v["error"].is_object(), "expected an error, got {}", v);
@@ -4554,7 +4742,7 @@ mod tests {
     fn getinfo_composite_fields() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "getinfo", json!([]));
         assert_eq!(v["result"]["blocks"], json!(TIP_H));
@@ -4568,7 +4756,7 @@ mod tests {
     fn health_reports_all_subsystems() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         let v = call(&d, "health", json!([]));
@@ -4585,7 +4773,7 @@ mod tests {
     fn unknown_method_rejected_and_not_forwarded() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         // Must name a wallet-write verb that has NO handler and is in NO list.
@@ -4726,7 +4914,7 @@ mod tests {
                 hist_row(13, "dd", 3_000_000, "in"),
             ],
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
         // count=2, from=1 -> skip the newest (dd), take cc and bb, ascending
         let v = call(&d, "listtransactions", json!(["", 2, 1]));
@@ -4746,7 +4934,7 @@ mod tests {
         // the block index is still building is that miss.
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: false };
+        let b = StubBlocks { ready: false, chain_hash: None };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         let v = call(&d, "getblock", json!(["ab".repeat(32)]));
@@ -4849,7 +5037,7 @@ mod tests {
             labels: Default::default(),
             balances: [("Tsolo1".to_string(), 2_500_000)].into_iter().collect(),
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listaddressgroupings", json!([]));
         let g = flat_groups(&v["result"]);
@@ -4887,7 +5075,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listaddressgroupings", json!([]));
         let g = flat_groups(&v["result"]);
@@ -4914,7 +5102,7 @@ mod tests {
             labels: Default::default(),
             balances: Default::default(),
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listaddressgroupings", json!([]));
         let g = flat_groups(&v["result"]);
@@ -4940,7 +5128,7 @@ mod tests {
             labels: Default::default(),
             balances: Default::default(),
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listaddressgroupings", json!([]));
         assert_eq!(flat_groups(&v["result"]), vec![vec!["TB".to_string()]]);
@@ -4954,7 +5142,7 @@ mod tests {
             labels: Default::default(),
             balances: Default::default(),
         };
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "listaddressgroupings", json!([]));
         assert_eq!(v["result"], json!([]));
@@ -5062,7 +5250,7 @@ mod tests {
     fn native_miss_falls_back_to_proxy_while_warming() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: false };
+        let b = StubBlocks { ready: false, chain_hash: None };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         let v = call(&d, "getblock", json!(["ab".repeat(32)]));
@@ -5079,7 +5267,7 @@ mod tests {
     fn native_miss_without_proxy_is_a_clear_error() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: false };
+        let b = StubBlocks { ready: false, chain_hash: None };
         let d = deps(&t, &w, &b, None);
         let v = call(&d, "getblock", json!(["ab".repeat(32)]));
         assert_eq!(v["error"]["code"], -1);
@@ -5093,11 +5281,11 @@ mod tests {
     fn proxy_transport_error_is_reported() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let mut p = StubProxy::default();
         p.fail = true;
         let d = deps(&t, &w, &b, Some(&p));
-        let b2 = StubBlocks { ready: false };
+        let b2 = StubBlocks { ready: false, chain_hash: None };
         let d = deps(&t, &w, &b2, Some(&p));
         let v = call(&d, "getblock", json!(["ab".repeat(32)]));
         assert_eq!(v["error"]["code"], -32001);
@@ -5111,7 +5299,7 @@ mod tests {
     fn not_found_when_index_ready_is_native_error() {
         let t = StubTip;
         let w = StubWallet::default();
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let p = StubProxy::default();
         let d = deps(&t, &w, &b, Some(&p));
         let v = call(&d, "getblock", json!(["ab".repeat(32)]));
@@ -5531,7 +5719,7 @@ mod tests {
     #[test]
     fn listunspent_gates_on_real_snapshot_coverage() {
         let t = StubTip;
-        let b = StubBlocks { ready: true };
+        let b = StubBlocks { ready: true, chain_hash: None };
         let dir = cov_dir("rpc");
         let good = load_pair(
             &dir,
@@ -5852,7 +6040,7 @@ impl TipProvider for T {
 fn ops_methods_route_to_the_engine_and_never_to_the_proxy() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let ops = StubOps::new(true);
     let d = Deps {
         tip: &t,
@@ -5883,7 +6071,7 @@ fn ops_methods_route_to_the_engine_and_never_to_the_proxy() {
 fn ops_not_wired_is_a_clear_native_error_and_getstakinginfo_is_never_proxied() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     let v = call(&d, "smsginbox", json!([]));
     assert_eq!(v["error"]["code"], -1);
@@ -5902,7 +6090,7 @@ fn ops_not_wired_is_a_clear_native_error_and_getstakinginfo_is_never_proxied() {
 fn health_carries_peer_detail_and_node_ops_flags() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let ops = StubOps::new(true);
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
     let v = call(&d, "health", json!([]));
@@ -6010,7 +6198,7 @@ fn pow_subsidy_schedule_matches_legacy_getproofowreward() {
 fn help_lists_every_native_and_proxy_method() {
     let t = StubTip;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = deps(&t, &w, &b, None);
     let v = call(&d, "help", json!([]));
     let text = v["result"].as_str().unwrap();
@@ -6098,7 +6286,7 @@ fn getblockbynumber_aliases_getblock_height() {
 fn getblockchaininfo_and_getnetworkinfo_from_tip_and_snapshot() {
     let t = StubTip;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = deps(&t, &w, &b, None);
     let v = call(&d, "getblockchaininfo", json!([]));
     assert_eq!(v["result"]["chain"], "main");
@@ -6116,7 +6304,7 @@ fn getblockchaininfo_and_getnetworkinfo_from_tip_and_snapshot() {
 #[test]
 fn getwalletinfo_serves_snapshot_and_errors_without_one() {
     let t = StubTip;
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let w = StubWallet::default();
     let d = deps(&t, &w, &b, None);
     let v = call(&d, "getwalletinfo", json!([]));
@@ -6140,7 +6328,7 @@ fn getwalletinfo_reports_the_real_keypool_census() {
     // the ops engine publishes the `pool`-row census → getwalletinfo carries
     // the REAL numbers (size + oldest); zero is a real value, not unknown
     let t = StubTip;
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let mut w = StubWallet::default();
     *w.keypool.write().unwrap() = Some((116, Some(1_781_668_383)));
     let d = deps(&t, &w, &b, None);
@@ -6159,7 +6347,7 @@ fn getwalletinfo_reports_the_real_keypool_census() {
 fn getmininginfo_composes_ops_stats_and_nulls_when_engine_down() {
     let t = StubTip;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     // live engine: staking stats flow through
     let ops = StubOps::new(true);
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
@@ -6179,7 +6367,7 @@ fn getmininginfo_composes_ops_stats_and_nulls_when_engine_down() {
 fn getsubsidy_and_estimatefee_are_static_legacy_policy() {
     let t = StubTip;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = deps(&t, &w, &b, None);
     let v = call(&d, "getsubsidy", json!([]));
     assert_eq!(v["result"], json!(0.0), "tip above h9001: PoW subsidy 0");
@@ -6195,7 +6383,7 @@ fn getsubsidy_and_estimatefee_are_static_legacy_policy() {
 fn verifymessage_signs_and_verifies_in_legacy_param_order() {
     let t = StubTip;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = deps(&t, &w, &b, None);
     // a real signature from the shared sign/verify implementation
     let secret = [7u8; 32];
@@ -6229,7 +6417,7 @@ fn verifymessage_signs_and_verifies_in_legacy_param_order() {
 fn decoderawtransaction_round_trips_a_built_tx() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     // build via createrawtransaction so both verbs are exercised together
     let txid = "11".repeat(32);
@@ -6254,7 +6442,7 @@ fn decoderawtransaction_round_trips_a_built_tx() {
 fn decoderawtransaction_refuses_garbage() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     let v = call(&d, "decoderawtransaction", json!(["zz"]));
     assert_eq!(v["error"]["code"], -22);
@@ -6264,7 +6452,7 @@ fn decoderawtransaction_refuses_garbage() {
 fn decodescript_reports_asm_type_and_p2sh() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     let script = "76a914".to_string() + &"22".repeat(20) + "88ac";
     let v = call(&d, "decodescript", json!([script]));
@@ -6286,7 +6474,7 @@ fn decodescript_reports_asm_type_and_p2sh() {
 fn estimatefee_tracks_settxfee_and_uses_the_chain_coin() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
 
     // default: the chain minimum for a typical 1-in/2-out spend
@@ -6315,7 +6503,7 @@ fn estimatefee_tracks_settxfee_and_uses_the_chain_coin() {
 fn settxfee_accepts_the_operator_range_and_refuses_outside_it() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     // the setting is operator-controlled now (nTransactionFee): inside the
     // range it is accepted and published, outside it is refused loudly
@@ -6330,7 +6518,7 @@ fn settxfee_accepts_the_operator_range_and_refuses_outside_it() {
 fn walletinfo_reports_fee_and_lock_state_from_the_published_extras() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     // unwired defaults: fee = the chain constant, locked = u64::MAX (unencrypted)
     let v = call(&d, "getwalletinfo", json!([]));
@@ -6342,7 +6530,7 @@ fn walletinfo_reports_fee_and_lock_state_from_the_published_extras() {
 fn listreceivedbyaddress_uses_the_same_map_as_getreceivedbyaddress() {
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
     let addr = "T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY";
     let one = call(&d, "getreceivedbyaddress", json!([addr]));
@@ -6419,7 +6607,7 @@ fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     std::env::set_var("TRI7_WALLET_PATH", &path);
     let t = T;
     let w = StubWallet::default();
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
 
     // 2-of-2 from one hex pubkey + one wallet address → bare C address reply
@@ -6582,7 +6770,7 @@ impl WalletProvider for RichStubWallet {
 #[test]
 fn richlist_routes_passively_with_default_count_and_errors() {
     let t = StubTip;
-    let b = StubBlocks { ready: true };
+    let b = StubBlocks { ready: true, chain_hash: None };
     // routing: count param → take(top), default 100, and the passive verb
     // answers with ops = None (explorer pressure never gates on the engine).
     let w_ok = RichStubWallet(

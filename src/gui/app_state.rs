@@ -139,14 +139,6 @@ pub struct DebugInfo {
     /// daemon-side wallet balance (getbalance, sats) — the live truth when
     /// the daemon tracks this wallet's keys (local snapshot may be absent)
     pub daemon_balance_sats: Option<i64>,
-    /// The node says the balance is PARTIAL (getwalletinfo.balance_partial):
-    /// its spendable view does not reach the chain tip (an index still
-    /// building, or a chain replay capped at an archive seam). The UI must
-    /// say so instead of presenting the number as the whole balance.
-    pub daemon_balance_partial: Option<bool>,
-    /// The height the node's spendable view was verified up to
-    /// (getwalletinfo.balance_height).
-    pub daemon_balance_height: Option<u64>,
     /// daemon-side unspent set (listunspent) — the Transactions/history truth
     /// when the wallet folder has no local snapshot (fresh installs)
     pub daemon_utxos: Option<Vec<crate::gui::state::UtxoRec>>,
@@ -2239,8 +2231,6 @@ impl AppState {
                 if let Some(f) = wi.get("paytxfee").and_then(|v| v.as_f64()) {
                     self.fee_live_sats = Some((f * 1_000_000.0).round() as i64);
                 }
-                info.daemon_balance_partial = wi.get("balance_partial").and_then(|v| v.as_bool());
-                info.daemon_balance_height = wi.get("balance_height").and_then(|v| v.as_u64());
             }
             match rpc_client::rpc_call(&addr, "getconnectioncount", &[]) {
                 Ok(v) => {

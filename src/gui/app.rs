@@ -2156,37 +2156,11 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         .size(11.0)
                         .color(th::TEXT_SECONDARY),
                 );
-                // A PARTIAL balance must say so: the node's spendable view does
-                // not reach the chain tip (index still building, or a replay
-                // capped at an archive seam). Saying "partial — verified to
-                // h<N>" is honest; showing the number alone is not.
-                let partial = st
-                    .debug_info
-                    .as_ref()
-                    .filter(|d| d.reachable)
-                    .and_then(|d| d.daemon_balance_partial)
-                    .unwrap_or(false);
-                if partial {
-                    let h = st
-                        .debug_info
-                        .as_ref()
-                        .filter(|d| d.reachable)
-                        .and_then(|d| d.daemon_balance_height);
-                    let msg = match h {
-                        Some(h) => format!(
-                            "Partial balance — the node verified this up to height {} only. \
-                             It is still catching up to the chain tip, so this figure can \
-                             change in either direction as it syncs.",
-                            h
-                        ),
-                        None => "Partial balance — the node has not verified this up to the chain \
-                                  tip yet, so this figure can change in either direction as it \
-                                  syncs."
-                            .to_string(),
-                    };
-                    ui.add_space(2.0);
-                    th::inline_notice(ui, th::Notice::Warning, "Partial balance", &msg);
-                }
+                // No partial-balance banner here. The node decides which
+                // figure is authoritative (it owns the chain-identity and
+                // coverage proof), and the status bar already reports the
+                // sync state and the daemon height, so a wallet that is
+                // still syncing reads like any other wallet.
                 return;
             }
             // legacy split comes from ONE place (AppState::balance_split) so the
