@@ -45,6 +45,9 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // phase 7 milestone 2
     "getstakinginfo",
     "staking",
+    // legacy parity 2026-11-09 (GUI-POLISH): the Options reserve field reads
+    // the node's current value and pushes edits on Apply through this verb
+    "reservebalance",
     "sendrawtransaction",
     "getpeerinfo",
     "smsgsend",
