@@ -150,6 +150,12 @@ pub const NATIVE_METHODS: &[&str] = &[
     "smsgoptions",
     "smsgscanchain",
     "smsgscanbuckets",
+    // ---- legacy parity 2026-11-09 (SMSG read-side): the bucket listing +
+    // the key-store read/write pair (rpcsmessage.cpp: smsgbuckets/
+    // smsggetpubkey/smsgaddkey) ----
+    "smsgbuckets",
+    "smsggetpubkey",
+    "smsgaddkey",
     // ---- parity audit 2026-11-03: legacy info/util methods (rpcmining /
     // rpcnet / rpcblockchain / rpcwallet surfaces servable from tri7's own
     // providers — no ops/daemon needed) ----
@@ -249,6 +255,11 @@ pub const OPS_METHODS: &[&str] = &[
     "smsgoptions",
     "smsgscanchain",
     "smsgscanbuckets",
+    // ---- legacy parity 2026-11-09 (SMSG read-side): bucket listing + the
+    // key-store pair live on the live engine (smsg store) ----
+    "smsgbuckets",
+    "smsggetpubkey",
+    "smsgaddkey",
     // ---- legacy parity 2026-11-06: offline tx workflow + wallet file ----
     "signrawtransaction",
     "createrawtransaction",
@@ -6787,6 +6798,17 @@ fn new_parity_verbs_are_in_native_and_routed() {
     // engine (it writes the wallet file), served nowhere else
     assert!(NATIVE_METHODS.contains(&"keypoolrefill"), "missing from NATIVE_METHODS");
     assert!(OPS_METHODS.contains(&"keypoolrefill"), "missing from OPS_METHODS");
+}
+
+/// SMSG read-side lane (2026-11-09): smsgbuckets / smsggetpubkey / smsgaddkey
+/// all need the live smsg store, so each must sit in BOTH routing lists —
+/// NATIVE_METHODS alone would still answer -32601 before dispatch.
+#[test]
+fn smsg_readside_verbs_are_routed() {
+    for m in ["smsgbuckets", "smsggetpubkey", "smsgaddkey"] {
+        assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+        assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+    }
 }
 
 /// addmultisigaddress / addredeemscript end to end against a REAL wallet

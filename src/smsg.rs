@@ -1190,6 +1190,20 @@ impl MessageStore {
         Ok(n > 0)
     }
 
+    /// Remove every row in one folder (smsgbuckets dump parity: legacy
+    /// deletes the per-bucket files; the relay folder rows are tri7's
+    /// equivalent). Returns the count removed.
+    pub fn clear_folder(&self, folder: u16) -> Result<usize, String> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute(
+                "DELETE FROM messages WHERE folder = ?1",
+                rusqlite::params![folder as i64],
+            )
+            .map_err(|e| format!("smsg clear_folder: {}", e))?;
+        Ok(n)
+    }
+
     /// Purge: delete messages received beyond the retention window; returns
     /// the count removed (legacy expiry parity — 48h receive-time retention).
     pub fn purge_expired(&self, now: i64) -> Result<usize, String> {

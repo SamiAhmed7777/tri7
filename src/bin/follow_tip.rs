@@ -7374,6 +7374,80 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "found": found,
                 }))
             }
+            // ---- legacy parity 2026-11-09 (SMSG read-side): the bucket
+            // listing + the key-store read/write pair (rpcsmessage.cpp
+            // smsgbuckets/smsggetpubkey/smsgaddkey) ----
+            "smsgbuckets" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.as_array().map(|a| a.len()).unwrap_or(0) > 1 {
+                    return Err((
+                        -8,
+                        "smsgbuckets [stats|dump]\nDisplay some statistics.".into(),
+                    ));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                match ps(0).as_deref().unwrap_or("stats") {
+                    "stats" => Ok(engine.buckets_stats_json()),
+                    "dump" => {
+                        engine.buckets_dump();
+                        Ok(serde_json::json!({ "result": "Removed all buckets." }))
+                    }
+                    _ => Ok(serde_json::json!({
+                        "result": "Unknown Mode.",
+                        "expected": "[stats|dump].",
+                    })),
+                }
+            }
+            "smsggetpubkey" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.as_array().map(|a| a.len()).unwrap_or(0) != 1 {
+                    return Err((
+                        -8,
+                        "smsggetpubkey <address>\nReturn the base58 encoded compressed public key for an address.\nTests localkeys first, then looks in public key db.\n"
+                            .into(),
+                    ));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                let Some(addr) = ps(0) else {
+                    return Err((
+                        -8,
+                        "smsggetpubkey <address>\nReturn the base58 encoded compressed public key for an address.\nTests localkeys first, then looks in public key db.\n"
+                            .into(),
+                    ));
+                };
+                Ok(engine.get_public_key_json(&addr))
+            }
+            "smsgaddkey" => {
+                let Some(engine) = &self.smsg else {
+                    return Err((-1, SMSG_NOT_WIRED.into()));
+                };
+                if params.as_array().map(|a| a.len()).unwrap_or(0) != 2 {
+                    return Err((
+                        -8,
+                        "smsgaddkey <address> <pubkey>\nAdd address, pubkey pair to database."
+                            .into(),
+                    ));
+                }
+                if !engine.enabled() {
+                    return Err((-1, "Secure messaging is disabled.".into()));
+                }
+                let (Some(addr), Some(pubk)) = (ps(0), ps(1)) else {
+                    return Err((
+                        -8,
+                        "smsgaddkey <address> <pubkey>\nAdd address, pubkey pair to database."
+                            .into(),
+                    ));
+                };
+                Ok(engine.add_key_json(&addr, &pubk))
+            }
             _ => Err((-32601, format!("ops adapter: unknown method {}", method))),
         }
     }
