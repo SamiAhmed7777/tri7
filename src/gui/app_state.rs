@@ -942,7 +942,26 @@ impl AppState {
                 keys_by_hash160.insert(crate::address::hash160(pubkey), (pubkey.clone(), *secret));
             }
         }
-        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+        // Attach-mode authority (operator directive 2026-11-10 — the
+        // sync-bar ruling applied to the sweep): coin maturity is measured
+        // against the DAEMON's live height. The local tipstate snapshot is
+        // a fallback for an offline wallet view only; on a fresh install it
+        // does not exist, tip_height fell back to 0, and every coinstake
+        // UTXO failed the maturity check — "no spendable balance to
+        // migrate" with 1534 TRI of spendable coins (live operator
+        // incident). No height at all is a LOUD error, never an empty sweep.
+        let tip_height: u32 = self
+            .debug_info
+            .as_ref()
+            .filter(|di| di.reachable)
+            .and_then(|di| di.blocks)
+            .map(|b| b as u32)
+            .or_else(|| self.tip.as_ref().map(|t| t.height as u32))
+            .ok_or_else(|| {
+                "no chain height available (daemon unreachable and no local \
+                 tip state) — cannot determine coin maturity for the sweep"
+                    .to_string()
+            })?;
         let spend_height = tip_height + 1;
         let mut out = Vec::new();
         for u in &derived.utxos {

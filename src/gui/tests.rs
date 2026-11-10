@@ -3777,6 +3777,62 @@ fn utxo_rec(txid: [u8; 32], script: Vec<u8>, address: String) -> gs::UtxoRec {
 }
 
 #[test]
+fn sweep_sources_measure_maturity_against_daemon_live_height() {
+    // Operator incident 2026-11-10 (screenshot: "Seed phrase added ... no
+    // spendable balance to migrate" with 1534 TRI of spendable coins): the
+    // sweep measured coin maturity against the LOCAL tipstate snapshot —
+    // absent on a fresh install, so spend_height collapsed to 1 and every
+    // coinstake UTXO failed the maturity check. The daemon's live height is
+    // the authority (the sync-bar ruling applied to the sweep).
+    let owned = synthetic_wallet_key(0x47);
+    let h = hash160(&owned.pubkey);
+    let mut stake = utxo_rec([0x5a; 32], p2pkh_script_from_hash160(&h), {
+        let a = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h).payload());
+        a
+    });
+    stake.prev_kind = "coinstake".into();
+    stake.height = 2_208_600; // mature at daemon height 2_208_751 (depth 151 >= 7)
+    let mut st = sweep_hash160_state(vec![stake], vec![owned.clone()]);
+    // THE incident shape: no local tipstate at all, daemon reachable.
+    st.tip = None;
+    st.debug_info = Some(crate::gui::app_state::DebugInfo {
+        reachable: true,
+        connections: Some(1),
+        blocks: Some(2_208_751),
+        sync: None,
+        daemon_balance_sats: None,
+        daemon_utxos: None,
+        wallet_history: None,
+        local_onion: None,
+        local_i2p: None,
+        error: None,
+    });
+    let inputs = st
+        .sweep_source_candidates()
+        .expect("daemon live height must drive the maturity check");
+    assert_eq!(inputs.len(), 1, "the mature coinstake coin must be selectable");
+    assert_eq!(inputs[0].secret, owned.secret);
+
+    // The old-code shape — tip None AND daemon unknown — is a LOUD error,
+    // never a silent empty sweep ("no spendable balance to migrate").
+    let mut st2 = sweep_hash160_state(
+        vec![utxo_rec([0x5b; 32], p2pkh_script_from_hash160(&h), {
+            let a = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h).payload());
+            a
+        })],
+        vec![owned],
+    );
+    st2.tip = None;
+    st2.debug_info = None;
+    let err = st2
+        .sweep_source_candidates()
+        .expect_err("no height anywhere must fail loud");
+    assert!(
+        err.contains("no chain height available"),
+        "unexpected error: {err}"
+    );
+}
+
 fn sweep_key_match_uses_script_hash160_and_survives_corrupted_stored_addresses() {
     let owned = synthetic_wallet_key(0x42);
     let h = hash160(&owned.pubkey);
