@@ -895,6 +895,12 @@ fn rollback_tip(st: &mut ChainState) -> Result<(u64, Hash), String> {
     st.records.retain(|r| r.height <= new_tip);
     st.pending_headers.clear();
     st.daemon_tip = Some(new_tip as i64);
+    // the abandoned branch's heights must serve NOTHING until the adopted
+    // branch re-fills them — even the frozen height map is inert above the
+    // rolled-back tip (fleet item 18)
+    if let Some(store) = live_store() {
+        store.drop_chain_slots_above(new_tip);
+    }
     Ok((new_tip, new_hash))
 }
 
@@ -1241,6 +1247,11 @@ impl ChainState {
             }
             self.checksums.drain(..excess);
             self.base += excess as u64;
+            // the overlay tail slides with the window (bounded over long runs;
+            // history below the base serves from the frozen build-time map)
+            if let Some(store) = live_store() {
+                store.drop_chain_slots_below(self.base);
+            }
             // WindowOutputs heights are window-relative too (apply_block takes
             // st.rel(h)) — re-base so kernel-meta consumers stay aligned.
             self.utxo.rebase(excess);
@@ -3120,6 +3131,10 @@ fn advance_with_block(
         generated_stake_modifier: generated,
         hash_proof_of_stake: outcome.proof,
     });
+    // the store's height lookups must serve exactly this body at h from now
+    // on (fleet item 18: a raced body that reached the height map/appendix
+    // first must never shadow the chain's slot choice)
+    chain_slot_note(h, &hash);
     st.checksums.push(cs);
     if h > st.tip_height {
         // real tip advance — distinct from the periodic 30s state writes
@@ -4620,13 +4635,30 @@ fn collect_headers(
         h += 1;
         let next = match store.block_by_height(h) {
             Ok(Some(hit)) => hit.block,
-            _ => match recent.at_height(h) {
-                Some((_, raw)) => match Block::read(&mut Reader::new(raw)) {
-                    Ok(b) => b,
-                    Err(_) => break,
-                },
-                None => break,
-            },
+            _ => {
+                // store miss: with a live chain registered, serve the CHAIN's
+                // body out of the recent cache — a blind at_height() here
+                // hands out the latest ARRIVAL at that height, which after a
+                // lost race is exactly the body our chain does not contain
+                // (fleet item 18). Below the registered window (or with no
+                // live chain: read-only consumers) the legacy fallback stands.
+                match store.chain_slot_hash(h) {
+                    Some(want) => match recent.get(&want) {
+                        Some((_, raw)) => match Block::read(&mut Reader::new(raw)) {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        },
+                        None => break,
+                    },
+                    None => match recent.at_height(h) {
+                        Some((_, raw)) => match Block::read(&mut Reader::new(raw)) {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        },
+                        None => break,
+                    },
+                }
+            }
         };
         let stop_hit = *stop != [0u8; 32] && next.hash() == *stop;
         out.push(next);
@@ -5856,6 +5888,53 @@ struct OpsAdapter {
     /// block store for the pool's deep-coin prevout fallback
     /// (WalletThenStoreUtxoView); None keeps the wallet-only view
     store: Option<Arc<BlockStore>>,
+}
+
+/// The live block store: height-lookup consumers deep in the follow loops
+/// (boot seed, tip advance, rollback, window trim) register the chain's slot
+/// choice on it. Same process-wide pattern as LIVE_ADDRINDEX — the accept
+/// sites don't thread a store handle through every helper.
+static LIVE_STORE: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<tri7_core::blockindex::BlockStore>>>,
+> = std::sync::OnceLock::new();
+
+fn set_live_store(store: std::sync::Arc<tri7_core::blockindex::BlockStore>) {
+    let cell = LIVE_STORE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        *g = Some(store);
+    }
+}
+
+fn live_store() -> Option<std::sync::Arc<tri7_core::blockindex::BlockStore>> {
+    let cell = LIVE_STORE.get()?;
+    cell.lock().ok().and_then(|g| g.clone())
+}
+
+/// Tip advance: the store's height lookups serve exactly this body at this
+/// height from now on. Without the registration the frozen height map and
+/// the first-arrival appendix can shadow the chain's slot with a raced body
+/// — the DNS2 stale-slot-serve that froze every follower mid-batch (fleet
+/// item 18).
+fn chain_slot_note(height: u64, hash: &Hash) {
+    if let Some(store) = live_store() {
+        store.set_chain_slot(height, *hash);
+    }
+}
+
+/// Boot seed: the tipstate window IS the threaded lineage — register every
+/// entry so height lookups serve the chain we actually hold, never a raced
+/// body that reached the store first. Also arms the chain-tip guard: no
+/// height above the live tip is served at all.
+fn seed_chain_slots(st: &ChainState) {
+    let Some(store) = live_store() else { return };
+    for (i, e) in st.entries.iter().enumerate() {
+        store.set_chain_slot(st.base + i as u64, e.hash);
+    }
+    log(&format!(
+        "chain slots: seeded {} window entries from base h{} — height serving follows the threaded tip (stale-slot guard on)",
+        st.entries.len(),
+        st.base
+    ));
 }
 
 /// Legacy address-index verbs take either `[["addr1","addr2"]]` or
@@ -9259,6 +9338,12 @@ fn main() {
     // a restart with a partial tipstate continues from its tip. When the
     // rounds return 0, we ARE at the peer tip and normal follow takes over.
     let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+    // register the live store + seed the chain-slot overlay from the loaded
+    // tipstate (the threaded lineage) BEFORE any peer can ask us for headers:
+    // height serving must follow the chain we hold from the first reply
+    // (fleet item 18 — the stale-slot-serve fork generator)
+    set_live_store(Arc::clone(&store));
+    seed_chain_slots(&st);
     // FROM-ZERO durability prerequisite: the disk store must EXIST and be
     // ready BEFORE the first block is accepted. A from-zero box has no
     // blk0001.dat — without it the index build fails (stat on a missing
@@ -11946,6 +12031,63 @@ mod tests {
     fn rollback_tip_refuses_at_window_base() {
         let mut stg = synthetic_chain(100, 100);
         assert!(rollback_tip(&mut stg).is_err());
+    }
+
+    // ---- item 18 STALE-SLOT-SERVE: chain-slot overlay wiring ----
+
+    /// The follow loop must keep the store's height serving on the threaded
+    /// lineage: the boot seed registers the whole tipstate window, every
+    /// rollback drops the abandoned slots (and the above-tip guard), and a
+    /// window slide drops the tail. Runs against a real (unconfigured)
+    /// BlockStore — slot registration never touches the index internals.
+    #[test]
+    fn chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip() {
+        let store = tri7_core::blockindex::BlockStore::new(None, None);
+        set_live_store(Arc::clone(&store));
+
+        // boot seed: a 6-entry window h100..h105
+        let mut hdrs: Vec<Block> = Vec::new();
+        let mut prev = [0x71u8; 32];
+        for i in 0..6u8 {
+            let hdr = mk_header(prev, 0x30 + i, 0x2000_ffff);
+            prev = hdr.hash();
+            hdrs.push(hdr);
+        }
+        let mut stg = chain_state_from_window(100, &hdrs);
+        seed_chain_slots(&stg);
+        assert_eq!(store.chain_slots_len(), 6);
+        assert_eq!(store.chain_slot_tip(), Some(105));
+
+        // advance wiring: chain_slot_note is what advance_with_block calls —
+        // a new tip slot raises the guard
+        let next = mk_header(prev, 0x40, 0x2000_ffff);
+        chain_slot_note(106, &next.hash());
+        assert_eq!(store.chain_slot_tip(), Some(106));
+
+        // rollback: the abandoned slots above the fork vanish (the old tip
+        // h105 AND the noted h106) and no height above the rolled-back tip
+        // resolves at all
+        let (new_tip, new_hash) = rollback_tip(&mut stg).expect("rollback");
+        assert_eq!(new_tip, 104);
+        assert_eq!(new_hash, hdrs[4].hash());
+        assert_eq!(store.chain_slot_tip(), Some(104), "guard dropped with the rollback");
+        assert_eq!(store.chain_slots_len(), 5, "h105 + h106 slots removed");
+        assert!(store.chain_slot_hash(105).is_none());
+        assert!(store.chain_slot_hash(106).is_none());
+        assert_eq!(store.chain_slot_hash(104), Some(hdrs[4].hash()));
+
+        // window slide: trim drops the below-base tail (bounded overlay)
+        store.drop_chain_slots_below(102);
+        assert_eq!(store.chain_slots_len(), 3); // h102..h104
+        assert_eq!(store.chain_slot_tip(), Some(104), "slide keeps the tip");
+
+        // cleanup: no other test may see a live store
+        if let Some(cell) = LIVE_STORE.get() {
+            if let Ok(mut g) = cell.lock() {
+                *g = None;
+            }
+        }
+        assert!(live_store().is_none());
     }
 
     // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----

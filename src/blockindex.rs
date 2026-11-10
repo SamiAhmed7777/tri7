@@ -775,6 +775,28 @@ pub struct BlockStore {
     /// 30µs each), so a restart-time rebuild buffer made appends crawl at
     /// ~11 blk/s and degrade linearly (measured live on DNS3).
     pending_keys: std::sync::Mutex<std::collections::HashSet<Hash>>,
+    /// Chain-slot overlay: height → the block hash the LIVE chain holds at
+    /// that height (see `set_chain_slot`). Height lookups prefer this over
+    /// the frozen build-time height map and the first-arrival appendix scan:
+    /// a raced body appended BEFORE our own chain refilled a slot must never
+    /// shadow the chain's choice — that shadow made the heavy staker serve a
+    /// body its own getblockhash disagreed with (fleet item 18, the DNS2
+    /// stale-slot-serve fork generator). The follow loop seeds the whole
+    /// tipstate window on boot, notes every tip advance, and drops slots
+    /// above the fork point on rollback; without a live chain registered
+    /// (read-only consumers: GUI explorer, tx prevout lookup) the legacy
+    /// resolution is untouched.
+    chain_slots: std::sync::RwLock<std::collections::HashMap<u64, Hash>>,
+    /// Highest registered slot (None until the follow loop seeds one). No
+    /// height above it is served from ANY resolution — bodies accepted above
+    /// our tip (raced pushes, gap fills for a lost race) must not be handed
+    /// to peers as our chain.
+    chain_tip: std::sync::Mutex<Option<u64>>,
+    /// Heights where the legacy resolution (height map / appendix) disagreed
+    /// with the overlay — the stale-slot audit counter. Every divergent
+    /// lookup counts; the LOG fires once per height (see `stale_slots_seen`).
+    pub stale_slot_hits: std::sync::atomic::AtomicU64,
+    stale_slots_seen: std::sync::Mutex<std::collections::HashSet<u64>>,
 }
 
 pub struct StoreInner {
@@ -869,7 +891,58 @@ impl BlockStore {
             failure: RwLock::new(None),
             pending: std::sync::Mutex::new(Vec::new()),
             pending_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
+            chain_slots: std::sync::RwLock::new(std::collections::HashMap::new()),
+            chain_tip: std::sync::Mutex::new(None),
+            stale_slot_hits: std::sync::atomic::AtomicU64::new(0),
+            stale_slots_seen: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
+    }
+
+    /// Record the live chain's block at `height`. Called by the follow loop
+    /// at every tip advance and once per window entry on boot (seeded from
+    /// the tipstate = the threaded lineage). After this, height lookups
+    /// serve exactly this body: the height map and the first-arrival
+    /// appendix can no longer shadow it.
+    pub fn set_chain_slot(&self, height: u64, hash: Hash) {
+        self.chain_slots.write().unwrap().insert(height, hash);
+        let mut tip = self.chain_tip.lock().unwrap();
+        match *tip {
+            Some(t) if height <= t => {}
+            _ => *tip = Some(height),
+        }
+    }
+
+    /// Rollback: drop slots ABOVE `height` so the abandoned branch's heights
+    /// serve nothing at all until the adopted branch re-fills them (the
+    /// chain-tip guard makes even the legacy map inert for those heights).
+    pub fn drop_chain_slots_above(&self, height: u64) {
+        self.chain_slots.write().unwrap().retain(|h, _| *h <= height);
+        let mut tip = self.chain_tip.lock().unwrap();
+        if let Some(t) = *tip {
+            if t > height {
+                *tip = Some(height);
+            }
+        }
+    }
+
+    /// Window slide: drop slots BELOW `height` (history below the window
+    /// base is served from the frozen build-time map; the overlay tail stays
+    /// bounded over long runs).
+    pub fn drop_chain_slots_below(&self, height: u64) {
+        self.chain_slots.write().unwrap().retain(|h, _| *h >= height);
+    }
+
+    /// Registered chain tip (None = no live chain seeded; legacy semantics).
+    pub fn chain_slot_tip(&self) -> Option<u64> {
+        *self.chain_tip.lock().unwrap()
+    }
+
+    pub fn chain_slots_len(&self) -> usize {
+        self.chain_slots.read().unwrap().len()
+    }
+
+    pub fn stale_slot_hits(&self) -> u64 {
+        self.stale_slot_hits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Cache-ONLY load: swap in the on-disk cache when it matches the blocks
@@ -1072,30 +1145,22 @@ impl BlockStore {
         Ok(None)
     }
 
-    /// Raw bytes for a height, verified against the height map so a gap can
-    /// never hand back a neighbouring frame.
+    /// Raw bytes for a height, chain-verified: the registered slot (the
+    /// live tip's choice) wins over the height map / appendix, and a height
+    /// above the chain tip serves nothing — so a raced or refilled slot can
+    /// never hand back a body the node's own chain does not contain.
     pub fn raw_body_by_height(&self, h: u64) -> Result<Option<Vec<u8>>, String> {
         let inner = match self.inner() {
             Some(i) => i,
             None => return Ok(None),
         };
-        let want = self.hash_at_height(h)?;
-        let off = match inner.blocks.offset_by_height(h) {
-            Some(o) => o,
-            None => return Ok(None),
-        };
-        let body = Self::read_frame(&inner, off)?;
-        let w = match want {
-            // No expected hash means we cannot prove what this frame is.
-            // Serving it anyway would hand out an unverified body.
-            Some(w) => w,
-            None => return Ok(None),
-        };
-        let got = crate::p2p::internal_to_display(&header_hash(&body)?);
-        if got != w {
+        if !inner.heights_ok {
             return Ok(None);
         }
-        Ok(Some(body))
+        match self.height_slot(&inner, h)? {
+            Some((_, _, body)) => Ok(Some(body)),
+            None => Ok(None),
+        }
     }
 
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
@@ -1172,54 +1237,181 @@ impl BlockStore {
             .and_then(|inner| inner.blocks.offset_by_height(h))
     }
 
-    /// Locate a block by main-chain height (height map authoritative inside
-    /// the window, frame-order-derived below it — see module docs). Unavailable
-    /// when the build's chain-threading anchor failed.
+    /// Locate a block by main-chain height. The live chain's registered slot
+    /// wins over the frozen height map and the first-arrival appendix; no
+    /// height above the registered chain tip is served at all (raced bodies
+    /// stored above our tip are not our chain). Unavailable when the build's
+    /// chain-threading anchor failed.
     pub fn block_by_height(&self, h: u64) -> Result<Option<BlockHit>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
         if !inner.heights_ok {
             return Ok(None);
         }
-        let off = match inner.blocks.offset_by_height(h) {
-            Some(o) => o,
-            None => {
-                // main height map ended below h — consult the appendix (a
-                // gap-recovery append above the threaded tip)
-                for f in inner.appendix.read().unwrap().iter() {
-                    if f.height == Some(h) {
-                        let body = Self::read_frame(&inner, f.off)?;
-                        let hash = header_hash(&body)?;
-                        let block = Self::parse_frame(&body)?;
-                        return Ok(Some(BlockHit {
-                            block,
-                            hash,
-                            off: f.off,
-                            body_len: body.len(),
-                            height: Some(h),
-                        }));
-                    }
-                }
-                return Ok(None);
+        match self.height_slot(&inner, h)? {
+            Some((hash, off, body)) => {
+                let block = Self::parse_frame(&body)?;
+                Ok(Some(BlockHit {
+                    block,
+                    hash,
+                    off,
+                    body_len: body.len(),
+                    height: Some(h),
+                }))
             }
-        };
-        let body = Self::read_frame(&inner, off)?;
-        let hash = header_hash(&body)?;
-        let block = Self::parse_frame(&body)?;
-        Ok(Some(BlockHit {
-            block,
-            hash,
-            off,
-            body_len: body.len(),
-            height: Some(h),
-        }))
+            None => Ok(None),
+        }
     }
 
-    /// The main-chain block hash at a height (display hex), read from the
-    /// height map's frame header.
+    /// One height-slot resolution: (hash, frame offset, raw body).
+    ///
+    /// Resolution order: (1) nothing above the registered chain tip; (2) the
+    /// chain-slot overlay (the live tip's slot choice — seeded from the
+    /// threaded tipstate, maintained at every advance/rollback); (3) the
+    /// build-time height map; (4) the appendix scan (first arrival wins).
+    /// When the overlay and the legacy resolution disagree, the CHAIN's body
+    /// is fetched by hash and the divergence is counted + logged once per
+    /// height — that log is the fleet's stale-slot audit (item 18: DNS2
+    /// served a raced body its own getblockhash denied, freezing followers
+    /// mid-batch).
+    fn height_slot(
+        &self,
+        inner: &Arc<StoreInner>,
+        h: u64,
+    ) -> Result<Option<(Hash, u64, Vec<u8>)>, String> {
+        if let Some(tip) = self.chain_slot_tip() {
+            if h > tip {
+                return Ok(None);
+            }
+        }
+        let want = self.chain_slots.read().unwrap().get(&h).copied();
+        let legacy: Option<(Hash, u64, Vec<u8>)> = match inner.blocks.offset_by_height(h) {
+            Some(off) => {
+                let body = Self::read_frame(inner, off)?;
+                Some((header_hash(&body)?, off, body))
+            }
+            None => {
+                // main height map ended below h — consult the appendix (a
+                // gap-recovery or raced append above the threaded tip)
+                let appendix = inner.appendix.read().unwrap();
+                let mut found: Option<(u64, Vec<u8>)> = None;
+                for f in appendix.iter() {
+                    if f.height == Some(h) {
+                        found = Some((f.off, Self::read_frame(inner, f.off)?));
+                        break;
+                    }
+                }
+                match found {
+                    Some((off, body)) => Some((header_hash(&body)?, off, body)),
+                    None => None,
+                }
+            }
+        };
+        match (want, legacy) {
+            (Some(w), Some((lh, off, body))) if lh == w => Ok(Some((w, off, body))),
+            (Some(w), legacy_other) => {
+                // The frozen map / first-arrival appendix disagree with the
+                // live chain (or hold nothing): fetch the CHAIN's body by
+                // hash. Serving the legacy body here hands a peer a block
+                // our own getblockhash would deny.
+                self.note_stale_slot(h, legacy_other.as_ref().map(|(lh, _, _)| *lh));
+                match self.slot_body_by_hash(inner, &w)? {
+                    Some((off, body)) => Ok(Some((w, off, body))),
+                    // chain body absent from this store: serve nothing (the
+                    // caller's recent-cache fallback may still cover it)
+                    None => Ok(None),
+                }
+            }
+            (None, legacy) => Ok(legacy),
+        }
+    }
+
+    /// Fetch a body by full hash: main candidates, then the appendix (the
+    /// by_key map holds only the FIRST arrival for a key8 slot, so a raced
+    /// body can sit there instead of ours — keep scanning).
+    fn slot_body_by_hash(
+        &self,
+        inner: &Arc<StoreInner>,
+        hash: &Hash,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        for e in inner.blocks.candidates_by_key(key8(hash)) {
+            let body = Self::read_frame(inner, e.off)?;
+            if &header_hash(&body)? == hash {
+                return Ok(Some((e.off, body)));
+            }
+        }
+        let key = key8(hash);
+        let appendix = inner.appendix.read().unwrap();
+        let mut found: Option<(u64, Vec<u8>)> = None;
+        for f in appendix.iter() {
+            if f.key != key {
+                continue;
+            }
+            let body = Self::read_frame(inner, f.off)?;
+            if &header_hash(&body)? == hash {
+                found = Some((f.off, body));
+                break;
+            }
+        }
+        Ok(found)
+    }
+
+    /// Count the divergence and log it once per height (the audit trail).
+    fn note_stale_slot(&self, h: u64, legacy: Option<Hash>) {
+        self.stale_slot_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fresh = {
+            let mut s = self.stale_slots_seen.lock().unwrap_or_else(|e| e.into_inner());
+            if s.len() > 8192 {
+                // audit trail bound: a pathological store would grow the set
+                // without limit — clearing it only re-logs recent heights
+                s.clear();
+            }
+            s.insert(h)
+        };
+        if fresh {
+            let want = self.chain_slots.read().unwrap().get(&h).copied();
+            let fmt = |x: Option<Hash>| {
+                x.map(|v| crate::p2p::internal_to_display(&v))
+                    .unwrap_or_else(|| "nothing".into())
+            };
+            eprintln!(
+                "[blockidx] STALE SLOT h{}: height map/appendix serves {} but the live chain slot is {} — serving the chain's body",
+                h,
+                fmt(legacy),
+                fmt(want)
+            );
+        }
+    }
+
+    /// The registered chain hash at `height` (None = no slot / above the
+    /// chain tip). Serving callers use it to pick the chain's OWN body out
+    /// of the recent cache instead of a blind latest-arrival lookup.
+    pub fn chain_slot_hash(&self, h: u64) -> Option<Hash> {
+        if let Some(tip) = self.chain_slot_tip() {
+            if h > tip {
+                return None;
+            }
+            return self.chain_slots.read().unwrap().get(&h).copied();
+        }
+        None
+    }
+
+    /// The main-chain block hash at a height (display hex). The live chain's
+    /// registered slot answers first — getblockhash must never contradict
+    /// what serving hands out at the same height; no answer above the chain
+    /// tip.
     pub fn hash_at_height(&self, h: u64) -> Result<Option<String>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
         if !inner.heights_ok {
             return Ok(None);
+        }
+        if let Some(tip) = self.chain_slot_tip() {
+            if h > tip {
+                return Ok(None);
+            }
+            if let Some(w) = self.chain_slots.read().unwrap().get(&h) {
+                return Ok(Some(crate::p2p::internal_to_display(w)));
+            }
         }
         let off = match inner.blocks.offset_by_height(h) {
             Some(o) => o,
@@ -2053,6 +2245,204 @@ mod tests {
         // miss → None
         assert!(store.tx_by_id(&[0xAB; 32]).unwrap().is_none());
         assert!(store.block_by_hash(&[0xCD; 32]).unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- chain-slot overlay: the fleet item 18 stale-slot-serve defect ----
+
+    /// Wait for the store to be Ready (spawn_build + poll, same envelope as
+    /// the gap-recovery test above).
+    fn wait_ready(store: &Arc<BlockStore>) {
+        let mut waited = 0;
+        while waited < 100 && !matches!(store.status(), StoreStatus::Ready { .. }) {
+            std::thread::sleep(Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(matches!(store.status(), StoreStatus::Ready { .. }));
+    }
+
+    /// THE DNS2 RACE (fleet item 18): the height map threads up to h2; a
+    /// raced body for h3 is appended FIRST (first-arrival appendix slot),
+    /// then the chain's own h3 body arrives. Without the overlay, lookups
+    /// serve the raced body forever — the fork generator. With the chain
+    /// slot registered, every height lookup serves exactly the chain's body
+    /// and the divergence is counted for the audit.
+    #[test]
+    fn chain_slot_overlay_beats_first_arrival_appendix() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("slotappend");
+        let path = dir.join("blk.dat");
+        // file holds genesis..b2-live ONLY (the map threads 0..=2); b3 is
+        // appended at runtime — the raced body first, then ours
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        assert!(frames.ends_with(&b3_frame));
+        std::fs::write(&path, &frames[..frames.len() - b3_frame.len()]).unwrap();
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes[..3].to_vec(),
+            tip: 2,
+        }));
+        wait_ready(&store);
+
+        // the raced body: same prev (b2), different txs → different hash
+        let raced = block(hashes[2], vec![coin_tx(vec![0xdd], 6_666_666, vec![])]);
+        assert_ne!(header_hash_ok(&frame_bytes(&raced)), hashes[3]);
+        store
+            .append_block(&frame_bytes(&raced)[8..], Some(3))
+            .unwrap();
+        store.append_block(&b3_frame[8..], Some(3)).unwrap();
+
+        // DEFECT SHAPE (documented): with NO live chain registered the
+        // legacy first-arrival resolution serves the raced body
+        let legacy_hit = store.block_by_height(3).unwrap().unwrap();
+        assert_eq!(legacy_hit.hash, header_hash_ok(&frame_bytes(&raced)));
+
+        // register the chain's slot (what advance_with_block does) →
+        // every height lookup now serves the chain's own body
+        store.set_chain_slot(3, hashes[3]);
+        let hit = store.block_by_height(3).unwrap().unwrap();
+        assert_eq!(hit.hash, hashes[3], "serving follows the chain, not arrival order");
+        assert_eq!(
+            store.hash_at_height(3).unwrap().unwrap(),
+            internal_to_display(&hashes[3]),
+            "getblockhash must never contradict serving"
+        );
+        let raw = store.raw_body_by_height(3).unwrap().unwrap();
+        assert_eq!(raw, b3_frame[8..], "raw getblock serves the chain's bytes");
+        assert_eq!(hit.height, Some(3));
+        // the divergence was counted for the audit
+        assert!(store.stale_slot_hits() >= 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No height above the registered chain tip is served from ANY
+    /// resolution — even one the frozen height map holds (post-rollback the
+    /// abandoned branch must reach no peer until the adopted branch
+    /// re-fills those heights).
+    #[test]
+    fn no_serving_above_the_registered_chain_tip() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("slotguard");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 3,
+        }));
+        wait_ready(&store);
+
+        // the chain rolled back to h2 (abandoned b3): the map still holds
+        // h3 → b3, but the chain tip is 2 → nothing serves above it
+        store.set_chain_slot(0, hashes[0]);
+        store.set_chain_slot(1, hashes[1]);
+        store.set_chain_slot(2, hashes[2]);
+        store.drop_chain_slots_above(2);
+        assert_eq!(store.chain_slot_tip(), Some(2));
+        assert!(store.block_by_height(3).unwrap().is_none());
+        assert!(store.hash_at_height(3).unwrap().is_none());
+        assert!(store.raw_body_by_height(3).unwrap().is_none());
+        // below the guard the window serves normally
+        assert_eq!(store.block_by_height(2).unwrap().unwrap().hash, hashes[2]);
+
+        // re-adopt b3 (the judge's heavier-branch path re-fills the slot):
+        // set_chain_slot raises the tip again and serving resumes with the
+        // chain's own body
+        store.set_chain_slot(3, hashes[3]);
+        assert_eq!(store.chain_slot_tip(), Some(3));
+        assert_eq!(store.block_by_height(3).unwrap().unwrap().hash, hashes[3]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// In-window refill (the OTHER stale-slot layer): the judge switched the
+    /// chain to a branch the frozen height map does not know — the overlay
+    /// re-points the slot and the switch is counted, while a store with NO
+    /// registered chain keeps the exact legacy semantics (read-only
+    /// consumers: GUI explorer, tx prevout lookup).
+    #[test]
+    fn chain_slot_repoints_a_refilled_in_window_slot() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("slotrefill");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 3,
+        }));
+        wait_ready(&store);
+
+        // full chain registered (the boot seed)
+        for (i, h) in hashes.iter().enumerate() {
+            store.set_chain_slot(i as u64, *h);
+        }
+        assert_eq!(store.chain_slots_len(), 4);
+        assert_eq!(store.chain_slot_tip(), Some(3));
+
+        // the branch flipped in-window: the chain now holds b2-stale at h2
+        // (frame IS on disk — unthreaded). Serving must follow the chain.
+        let b2_stale = block(hashes[1], vec![coin_tx(vec![0xaa], 9_999_999, vec![])]);
+        let stale_hash = header_hash_ok(&frame_bytes(&b2_stale));
+        store.set_chain_slot(2, stale_hash);
+        let hit = store.block_by_height(2).unwrap().unwrap();
+        assert_eq!(hit.hash, stale_hash, "the chain's slot choice wins in-window too");
+        assert_eq!(
+            store.hash_at_height(2).unwrap().unwrap(),
+            internal_to_display(&stale_hash)
+        );
+        let raw2 = store.raw_body_by_height(2).unwrap().unwrap();
+        assert_eq!(
+            raw2,
+            frame_bytes(&b2_stale)[8..],
+            "raw getblock serves the chain's in-window body too"
+        );
+        assert!(store.stale_slot_hits() >= 1);
+
+        // window slide bounds the overlay tail
+        store.drop_chain_slots_below(2);
+        assert_eq!(store.chain_slots_len(), 2); // h2, h3
+        assert_eq!(store.chain_slot_tip(), Some(3), "below-drop keeps the tip");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Read-only consumers (no live chain registered) keep the exact legacy
+    /// semantics — the overlay only arms where the follow loop seeded it.
+    #[test]
+    fn without_a_registered_chain_legacy_resolution_is_untouched() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("slotlegacy");
+        let path = dir.join("blk.dat");
+        // map threads 0..=2; the runtime appends land in the appendix
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        std::fs::write(&path, &frames[..frames.len() - b3_frame.len()]).unwrap();
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes[..3].to_vec(),
+            tip: 2,
+        }));
+        wait_ready(&store);
+        let raced = block(hashes[2], vec![coin_tx(vec![0xdd], 6_666_666, vec![])]);
+        store
+            .append_block(&frame_bytes(&raced)[8..], Some(3))
+            .unwrap();
+        store.append_block(&b3_frame[8..], Some(3)).unwrap();
+
+        assert_eq!(store.chain_slot_tip(), None, "no live chain seeded");
+        assert_eq!(store.chain_slots_len(), 0);
+        // first arrival wins, exactly as before this change
+        let hit = store.block_by_height(3).unwrap().unwrap();
+        assert_eq!(hit.hash, header_hash_ok(&frame_bytes(&raced)));
+        assert_eq!(
+            store.hash_at_height(3).unwrap().unwrap(),
+            internal_to_display(&header_hash_ok(&frame_bytes(&raced)))
+        );
+        assert_eq!(store.stale_slot_hits(), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
