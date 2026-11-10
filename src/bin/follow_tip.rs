@@ -12022,6 +12022,14 @@ mod tests {
 
     #[test]
     fn gap_find_missing_satisfied_by_recent_cache() {
+        // gap_find_missing takes its store as a PARAMETER (audit-verified:
+        // neither it nor this test reaches the LIVE_STORE global — the
+        // production caller threads its own store handle at the gap
+        // recovery site). This guard is therefore conservative surplus:
+        // uniform serialization with the live-store consumers around the
+        // gap path, kept because it costs nothing and cannot weaken any
+        // assertion. See scripts/live_store_callgraph_audit.py.
+        let _g = lock_live_store_tests();
         let stg = synthetic_chain(100, 105);
         let store = BlockStore::new(None, None);
         let mut recent = RecentBlocks::new();
@@ -12030,8 +12038,83 @@ mod tests {
         assert_eq!(gap_find_missing(&stg, &store, &recent, Some(104)), None);
     }
 
+    // ---- LIVE-STORE TEST SERIALIZATION (lock + reset) ----
+    //
+    // set_live_store / seed_chain_slots / chain_slot_note / rollback_tip /
+    // try_adopt_heavier_branch all route through the process-global
+    // LIVE_STORE, and cargo runs these tests on parallel threads. A test
+    // that holds a store in the global while a concurrently-running test
+    // fires one of those paths mutates a FOREIGN store mid-run: the
+    // CI-flaky chain_slot_wiring test failed its slots-len assert because
+    // another test's adopt-rollback (drop_chain_slots_above h103 on ITS
+    // window) deleted h104 from the chain_slot_wiring store between its
+    // tip and len reads (reproduced locally with probe sleeps: left 4,
+    // right 5 — the exact CI signature). There is no sleep to widen here;
+    // the deterministic fix is mutual exclusion: every test that can
+    // transitively reach the global holds this lock for its whole body.
+    // Assertions are untouched — only the interleaving is removed.
+    //
+    // The guard ALSO RESETS the global on acquire (lock + reset): every
+    // guarded test starts with LIVE_STORE empty, so stale sequential
+    // state cannot leak either — a setter that forgets to clean up, or
+    // one that panics between set_live_store and its cleanup, is
+    // neutralized by the next acquirer. The reachability proof that every
+    // global-reaching test takes this lock (through the PRODUCTION call
+    // graph, not just test-local calls) lives in
+    // scripts/live_store_callgraph_audit.py, which exits nonzero if any
+    // reacher is ever left unguarded.
+    static LIVE_STORE_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
+    /// Serialize the LIVE_STORE-touching tests (see the block comment above)
+    /// and hand every acquirer a CLEAN global: the reset below runs while
+    /// this thread exclusively holds the test lock, so no sibling can be
+    /// mid-observation. Poison-tolerant: one panicked test must not cascade
+    /// lock errors into the siblings waiting on the same mutex.
+    fn lock_live_store_tests() -> std::sync::MutexGuard<'static, ()> {
+        let guard = LIVE_STORE_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // lock + reset: the guarded test starts from an EMPTY global. (If
+        // LIVE_STORE was never initialized, .get() is None and there is
+        // nothing to clear — this must not arm the OnceLock.)
+        if let Some(cell) = LIVE_STORE.get() {
+            if let Ok(mut slot) = cell.lock() {
+                *slot = None;
+            }
+        }
+        guard
+    }
+
+    /// The serialization guard must hand every acquirer a CLEAN global: a
+    /// predecessor's store (set but not cleared, or abandoned by a panic
+    /// between set_live_store and its cleanup) may never leak into the
+    /// next guarded test through live_store().
+    #[test]
+    fn live_store_test_lock_resets_the_global_on_acquire() {
+        let _g = lock_live_store_tests();
+        assert!(
+            live_store().is_none(),
+            "lock_live_store_tests must reset LIVE_STORE on acquire"
+        );
+        // simulate a predecessor that registered a store and "died" before
+        // its cleanup (BlockStore::new returns Arc<BlockStore> directly)
+        set_live_store(tri7_core::blockindex::BlockStore::new(None, None));
+        assert!(live_store().is_some());
+        drop(_g);
+
+        // the next acquirer starts clean again
+        let _g2 = lock_live_store_tests();
+        assert!(
+            live_store().is_none(),
+            "stale LIVE_STORE survived a lock_live_store_tests() re-acquire"
+        );
+    }
+
     #[test]
     fn rollback_tip_drops_the_phantom_and_truncates() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         // a record + pending header above the rollback point must go too
         stg.records.push(BlockRec {
@@ -12071,6 +12154,7 @@ mod tests {
     /// regression guard for "two stakers kept their own block forever".
     #[test]
     fn fork_choice_refuses_lighter_and_adopts_heavier() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let ancestor_hash = stg.entry_abs(103).unwrap().hash;
 
@@ -12112,6 +12196,7 @@ mod tests {
 
     #[test]
     fn rollback_tip_refuses_at_window_base() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 100);
         assert!(rollback_tip(&mut stg).is_err());
     }
@@ -12125,6 +12210,7 @@ mod tests {
     /// BlockStore — slot registration never touches the index internals.
     #[test]
     fn chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip() {
+        let _live_store_serial = lock_live_store_tests();
         let store = tri7_core::blockindex::BlockStore::new(None, None);
         set_live_store(Arc::clone(&store));
 
@@ -12436,6 +12522,7 @@ mod tests {
 
     #[test]
     fn recon_heavier_branch_switches_and_queues_the_validated_body_path() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
@@ -12476,6 +12563,7 @@ mod tests {
 
     #[test]
     fn recon_lighter_branch_is_ignored_and_the_reconciliation_closes() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
@@ -12510,6 +12598,7 @@ mod tests {
 
     #[test]
     fn recon_unknown_fork_point_escalates_then_drops_the_peer() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
@@ -12538,6 +12627,7 @@ mod tests {
 
     #[test]
     fn recon_accumulates_cap_sized_batches_before_judging() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
@@ -12632,6 +12722,7 @@ mod tests {
 
     #[test]
     fn recon_linkage_guard_stops_the_batch_when_the_chain_breaks() {
+        let _live_store_serial = lock_live_store_tests();
         // DNS3's live wrong-adoption shape (2026-11-10): a served header
         // whose prev does not chain onto our window must END the batch —
         // heights may never drift from real linkage. Without the guard the
@@ -12664,6 +12755,7 @@ mod tests {
 
     #[test]
     fn recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches() {
+        let _live_store_serial = lock_live_store_tests();
         // the PC's LIVE fork shape (2026-11-10): the peer re-serves our own
         // prefix from the locator anchor BEFORE its branch — the judge must
         // fork at the FIRST NEW header (branch_base - 1), not at the serve
@@ -12717,6 +12809,7 @@ mod tests {
 
     #[test]
     fn recon_empty_reply_judges_and_closes_a_cap_sized_branch() {
+        let _live_store_serial = lock_live_store_tests();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();

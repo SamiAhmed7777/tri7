@@ -1,0 +1,544 @@
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: unused doc comment
+    --> src/spend.rs:1006:5
+     |
+1006 |     /// Version, nTime, the two CompactSize counts, and nLockTime.
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1007 |     let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+     |     -------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `sha256d`
+  --> src/txpool.rs:17:21
+   |
+17 | use crate::legacy::{sha256d, Hash, Tx};
+   |                     ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `peers_arg`
+   --> src/gui/node_supervisor.rs:141:13
+    |
+141 |         let peers_arg = peers.join(" --daemon ");
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_peers_arg`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:1800:17
+     |
+1800 |             let mut push_group = |addrs: Vec<String>,
+     |                 ----^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `entries`
+    --> src/rpc.rs:2192:32
+     |
+2192 |                     let (base, entries) = deps.tip.window();
+     |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entries`
+
+warning: unused variable: `deps`
+    --> src/rpc.rs:3221:30
+     |
+3221 | fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+     |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_deps`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:553:13
+    |
+553 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:301:13
+    |
+301 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/spend.rs:1152:5
+     |
+1152 |     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: value assigned to `p` is never read
+   --> src/wallet_encrypt.rs:106:5
+    |
+106 |     p += 4;
+    |     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1911:8
+     |
+1911 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1917:8
+     |
+1917 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1927:4
+     |
+1927 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1936:4
+     |
+1936 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: associated function `key_of` is never used
+    --> src/smsg.rs:1104:8
+     |
+1072 | impl MessageStore {
+     | ----------------- associated function in this implementation
+...
+1104 |     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
+     |        ^^^^^^
+
+warning: fields `pubkey`, `label`, and `encrypted` are never read
+   --> src/bdb_import.rs:318:9
+    |
+316 |     struct KeyRow {
+    |            ------ fields in this struct
+317 |         secret: Option<[u8; 32]>,
+318 |         pubkey: Vec<u8>,
+    |         ^^^^^^
+319 |         label: String,
+    |         ^^^^^
+320 |         encrypted: bool,
+    |         ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: `tri7-core` (lib) generated 19 warnings (run `cargo fix --lib -p tri7-core` to apply 9 suggestions)
+warning: unused import: `LAST_HARDCODED_CHECKPOINT`
+  --> src/bin/follow_tip.rs:68:40
+   |
+68 |     tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Vin` and `Vout`
+     --> src/bin/follow_tip.rs:12806:37
+      |
+12806 |         use tri7_core::legacy::{Tx, Vin, Vout};
+      |                                     ^^^  ^^^^
+
+warning: unused import: `WalletProvider`
+  --> src/bin/follow_tip.rs:79:131
+   |
+79 | ...DataProvider, EntryView, Proxy, SnapshotWallet, UtxoRow, WalletProvider,
+   |                                                             ^^^^^^^^^^^^^^
+
+warning: unused variable: `fork`
+   --> src/bin/follow_tip.rs:746:9
+    |
+746 |     let fork = recon.fork_height.take();
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_fork`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `b`
+    --> src/bin/follow_tip.rs:2436:17
+     |
+2436 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> src/bin/follow_tip.rs:2436:20
+     |
+2436 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `d`
+    --> src/bin/follow_tip.rs:2436:23
+     |
+2436 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                       ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:3455:9
+     |
+3455 |     let mut connect = |stats: &mut Stats| -> Result<Session, String> {
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `wcfg`
+    --> src/bin/follow_tip.rs:3451:9
+     |
+3451 |     let wcfg = Config {
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wcfg`
+
+warning: variable `session_dead` is assigned to, but never used
+    --> src/bin/follow_tip.rs:3563:17
+     |
+3563 |             let mut session_dead = false;
+     |                 ^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_session_dead` instead
+
+warning: value assigned to `session_dead` is never read
+    --> src/bin/follow_tip.rs:3598:25
+     |
+3569 |                     session_dead = true;
+     |                     ------------------- `session_dead` is overwritten here before the previous value is read
+...
+3598 |                         session_dead = true;
+     |                         ^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `session_dead` is never read
+    --> src/bin/follow_tip.rs:3569:21
+     |
+3569 |                     session_dead = true;
+     |                     ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sync_started`
+    --> src/bin/follow_tip.rs:3817:9
+     |
+3817 |     let sync_started = Instant::now();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sync_started`
+
+warning: unused variable: `a`
+    --> src/bin/follow_tip.rs:5311:22
+     |
+5311 |             .filter(|a| {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `wallet_ready`
+    --> src/bin/follow_tip.rs:6978:21
+     |
+6978 |                 let wallet_ready = wl.is_some();
+     |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wallet_ready`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:8820:24
+     |
+8820 |             .and_then(|mut r| r.get(&hash).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:8834:24
+     |
+8834 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:8862:24
+     |
+8862 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:8891:65
+     |
+8891 |         let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
+     |                                                                 ----^
+     |                                                                 |
+     |                                                                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/bin/follow_tip.rs:10215:25
+      |
+10215 |                     let mut stg = st_shared.lock().unwrap();
+      |                         ----^^^
+      |                         |
+      |                         help: remove this `mut`
+
+warning: unused variable: `wp`
+    --> src/bin/follow_tip.rs:9844:26
+     |
+9844 |                 let Some(wp) = &wp2 else { return };
+     |                          ^^ help: if this is intentional, prefix it with an underscore: `_wp`
+
+warning: value assigned to `owned_n` is never read
+    --> src/bin/follow_tip.rs:9876:30
+     |
+9876 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+     |                              ^^^^^^^^^^^ this value is reassigned later and never used
+...
+9879 |                             owned_n = cands.len();
+     |                             --------------------- `owned_n` is overwritten here before the previous value is read
+
+warning: value assigned to `funded_n` is never read
+    --> src/bin/follow_tip.rs:9876:43
+     |
+9876 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+     |                                           ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+9880 |                             funded_n = w.owned_count();
+     |                             -------------------------- `funded_n` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+     --> src/bin/follow_tip.rs:11877:13
+      |
+11877 |         let mut r = vec![0u8; 18].into_iter().collect::<Vec<u8>>();
+      |             ----^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/bin/follow_tip.rs:12548:13
+      |
+12548 |         let mut mk_chain = |prev: Hash, n: usize, bits: u32| -> (Vec<Block>, Hash) {
+      |             ----^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/bin/follow_tip.rs:12773:13
+      |
+12773 |         let mut heights: Vec<u64> = loc
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: methods `total_recv` and `total_sent` are never used
+    --> src/bin/follow_tip.rs:2076:8
+     |
+2069 | impl Stats {
+     | ---------- methods in this implementation
+...
+2076 |     fn total_recv(&self) -> u64 {
+     |        ^^^^^^^^^^
+...
+2079 |     fn total_sent(&self) -> u64 {
+     |        ^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `connect` is never used
+    --> src/bin/follow_tip.rs:2132:8
+     |
+2131 | impl Session {
+     | ------------ associated function in this implementation
+2132 |     fn connect(addr: &str) -> Result<Session, String> {
+     |        ^^^^^^^
+
+warning: field `kernel_seeded` is never read
+    --> src/bin/follow_tip.rs:2733:5
+     |
+2731 | struct ValidationOutcome {
+     |        ----------------- field in this struct
+2732 |     kernel_enforced: bool,
+2733 |     kernel_seeded: bool,
+     |     ^^^^^^^^^^^^^
+
+warning: field `pubkeys` is never read
+    --> src/bin/follow_tip.rs:5905:5
+     |
+5888 | struct OpsAdapter {
+     |        ---------- field in this struct
+...
+5905 |     pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+     |     ^^^^^^^
+
+warning: constant `EARLY_OPS` is never used
+    --> src/bin/follow_tip.rs:6070:7
+     |
+6070 | const EARLY_OPS: &[&str] = &[
+     |       ^^^^^^^^^
+
+warning: method `ready_early` is never used
+    --> src/bin/follow_tip.rs:6082:8
+     |
+6080 | impl OpsAdapter {
+     | --------------- method in this implementation
+6081 |     /// True when this verb may run before the live wallet view is ready.
+6082 |     fn ready_early(&self, method: &str) -> bool {
+     |        ^^^^^^^^^^^
+
+warning: field `msgs_out` is never read
+     --> src/bin/follow_tip.rs:10760:5
+      |
+10739 | struct Peer {
+      |        ---- field in this struct
+...
+10760 |     msgs_out: u64,
+      |     ^^^^^^^^
+
+warning: direct cast of function item into an integer
+    --> src/bin/follow_tip.rs:3181:51
+     |
+3181 |         libc::signal(libc::SIGINT, tri7_on_signal as libc::sighandler_t);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+     |
+3181 |         libc::signal(libc::SIGINT, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+    --> src/bin/follow_tip.rs:3182:52
+     |
+3182 |         libc::signal(libc::SIGTERM, tri7_on_signal as libc::sighandler_t);
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+help: first cast to a pointer `as *const ()`
+     |
+3182 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (bin "follow_tip" test) generated 35 warnings (run `cargo fix --bin "follow_tip" -p tri7-core --tests` to apply 22 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running unittests src/bin/follow_tip.rs (/root/tri7-lanes/target-flaky/debug/deps/follow_tip-1a3388f999763100)
+
+running 77 tests
+test tests::a_snapshot_coin_spent_after_the_coverage_is_removed ... ok
+test tests::a_spend_at_or_below_the_coverage_removes_nothing ... ok
+test tests::addnode_ignored_list_requires_host_port_shape ... ok
+test tests::a_short_snapshot_on_disk_seeds_the_scheduler_once ... ok
+test tests::a_gap_between_the_coverage_and_the_live_window_base_is_rejected ... ok
+test tests::a_short_walk_is_retried_even_when_normally_not_stale ... ok
+test tests::advertised_store_key_filters_loopback_placeholders ... ok
+test tests::assume_valid_gate_boundaries_below_at_above_horizon ... ok
+test tests::balance_counts_only_owned_outputs ... ok
+test tests::checkpoint_anchor_matches_the_daemon_verified_hash ... ok
+test tests::checkpoint_anchor_verification_at_boundary_only ... ok
+test tests::checkpoint_horizon_constants_match_the_deployed_client ... ok
+test tests::daemon_flag_replaces_default_and_appends ... ok
+test tests::dialable_store_host_accepts_onion_and_i2p_only ... ok
+test tests::fork_choice_refuses_lighter_and_adopts_heavier ... ok
+test tests::gap_fill_valid_hash_link_merkle ... ok
+test tests::gap_find_missing_satisfied_by_recent_cache ... ok
+test tests::backfill_pick_indices_clamp_to_the_local_window_tip ... ok
+test tests::gap_find_missing_targets_the_lowest_absent_tail_body ... ok
+test tests::iso_secs_roundtrip ... ok
+test tests::intake_header_batch_accepts_multi_block_announcements_without_reconciling ... ok
+test tests::keypool_size_argument_legacy_semantics ... ok
+test tests::live_store_test_lock_resets_the_global_on_acquire ... ok
+test tests::net_stake_weight_uses_pos_blocks_and_72_window ... ok
+test tests::newest_replayable_tip_walks_back_only_over_missing_bodies ... ok
+test tests::addnode_conf_parsing_dual_overlay ... ok
+test tests::parallel_fetch_reassembly_is_strictly_ordered ... ok
+test tests::conf_stake_flag_resolution_and_persistence ... ok
+test tests::peer_target_parse_i2p_and_onion_transports ... ok
+test tests::peer_target_parse_onion_gets_socks ... ok
+test tests::balance_is_zero_for_unfunded_wallet ... ok
+test tests::chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip ... ok
+test tests::peer_target_parse_ipv4 ... ok
+test tests::reaching_the_tip_resets_the_streak ... ok
+test tests::peer_target_parse_rejects_garbage ... ok
+test tests::recent_blocks_insert_get_at_height ... ok
+test tests::recent_blocks_ignores_duplicate_hash ... ok
+test tests::ordinary_staleness_builds_immediately ... ok
+test tests::recent_blocks_evicts_oldest_beyond_cap ... ok
+test tests::recon_locator_spans_the_window_down_to_the_base ... ok
+test tests::recon_accumulates_cap_sized_batches_before_judging ... ok
+test tests::recon_heavier_branch_switches_and_queues_the_validated_body_path ... ok
+test tests::recon_linkage_guard_stops_the_batch_when_the_chain_breaks ... ok
+test tests::recon_lighter_branch_is_ignored_and_the_reconciliation_closes ... ok
+test tests::repair_swap_replaces_the_live_map_atomically ... ok
+test tests::resend_mine_gate_prunes_before_reaccept ... ok
+test tests::repairwallet_and_resendtx_arity_matches_legacy ... ok
+test tests::repair_diff_counts_only_wallet_owned_mismatches ... ok
+test tests::reservebalance_verb_set_contract ... ok
+test tests::script_pushes_33_finds_only_exact_compressed_pubkey_pushes ... ok
+test tests::self_verify_zips_vin_sorted_order_not_selection_order ... ok
+test tests::smsg_options_cmd_matches_legacy_shapes ... ok
+test tests::socks5_greeting_bytes ... ok
+test tests::socks5_reply_drain_variants ... ok
+test tests::socks5_request_domain_form_for_onion ... ok
+test tests::socks5_request_ipv4_form ... ok
+test tests::stale_duplicate_header_segments_are_dropped_not_fatal ... ok
+test tests::recon_empty_reply_judges_and_closes_a_cap_sized_branch ... ok
+test tests::status_gate_degraded_needs_both_quiets ... ok
+test tests::status_gate_degraded_when_both_quiets ... ok
+test tests::status_gate_exit_codes_are_stable ... ok
+test tests::status_gate_healthy_when_peer_recent ... ok
+test tests::recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches ... ok
+test tests::recon_unknown_fork_point_escalates_then_drops_the_peer ... ok
+test tests::rollback_tip_drops_the_phantom_and_truncates ... ok
+test tests::status_gate_missing_peer_data_counts_quiet ... ok
+test tests::status_gate_stale_state_fails_even_static ... ok
+test tests::the_merge_boundary_is_the_live_window_base_versus_the_coverage ... ok
+test tests::the_backoff_is_capped_so_the_rebuilds_stay_periodic ... ok
+test tests::status_gate_static_skips_network_gate ... ok
+test tests::rollback_tip_refuses_at_window_base ... ok
+test tests::the_rebuild_scheduler_backs_off_and_converges ... ok
+test tests::the_unspent_set_is_the_snapshot_plus_the_fresh_live_outputs ... ok
+test tests::with_no_snapshot_the_live_set_is_served_as_is ... ok
+test tests::txpool_rejects_spends_outside_the_live_view_via_ops_shape ... ok
+test tests::wallet_live_apply_candidates_weight ... ok
+test tests::stale_locator_body_cannot_anchor_the_serve_past_our_refilled_slot ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+

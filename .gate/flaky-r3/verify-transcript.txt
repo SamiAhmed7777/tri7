@@ -1,0 +1,76 @@
+# tri7 lane/flaky-test-fix — flaky-lane round-3 verification transcript
+# =====================================================================
+# This file was committed AFTER the verification below ran, so the tree
+# at the code commit exactly matches what these commands executed.
+
+CODE COMMIT (runnable revision, all lane work):
+  188a2a67812268075ccf55d8140751401a561fb5   [flaky-lane r3] LIVE_STORE test serialization: lock+reset guard + whole-call-graph reachability proof
+  branch: lane/flaky-test-fix  (master untouched)
+  worktree at run time: clean (git status empty)
+
+# ---------------------------------------------------------------------
+# 1. Whole-call-graph reachability audit at the code commit
+# ---------------------------------------------------------------------
+command:
+  python3 scripts/live_store_callgraph_audit.py src/bin/follow_tip.rs
+result:
+  exit code 0 (PASS)
+  output byte-identical to the committed transcript
+  (.gate/flaky-r3/live-store-callgraph-transcript.txt), except the
+  `generated : <timestamp>` line. diff-verified.
+  verdict lines from the audit:
+    tests reaching LIVE_STORE : 16 (12 proven + 4 adjudicated collision-only)
+      of which GUARDED        : 12
+      of which ADJUDICATED    : 4 -> daemon_flag_replaces_default_and_appends,
+          addnode_conf_parsing_dual_overlay,
+          addnode_ignored_list_requires_host_port_shape,
+          conf_stake_flag_resolution_and_persistence
+      of which UNGUARDED      : 0
+    guarded without proven reach (conservative surplus, harmless): 1
+      - gap_find_missing_satisfied_by_recent_cache
+    VERDICT: PASS — 12 proven reachers all hold lock_live_store_tests();
+    the 4 adjudicated tests are str::trim false unions (mechanically
+    re-checked every run; adjudication self-revokes on any ChainState
+    producer or accessor call appearing in their bodies).
+
+# ---------------------------------------------------------------------
+# 2. Eight consecutive greens AFTER the commit (full follow_tip suite)
+# ---------------------------------------------------------------------
+command (per run, i = 1..8):
+  CARGO_TARGET_DIR=/root/tri7-lanes/target-flaky cargo test --bin follow_tip
+environment: Linux, rustc stable, debugprofile, target dir
+  /root/tri7-lanes/target-flaky (dedicated to this lane; other lanes'
+  targets untouched). Full per-run logs: .gate/flaky-r3/greens-run-<i>.log
+
+run 1: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+run 2: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+run 3: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+run 4: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+run 5: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+run 6: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+run 7: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+run 8: exit=0  test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+8 consecutive greens: CONFIRMED (each log ends `test result: ok. 77 passed;
+0 failed`). The formerly CI-flaky chain_slot_wiring test runs under
+lock_live_store_tests() (lock + reset) in every run.
+
+# ---------------------------------------------------------------------
+# 3. What changed in the code commit
+# ---------------------------------------------------------------------
+- src/bin/follow_tip.rs (tests mod): LIVE_STORE_TEST_LOCK guard now also
+  RESETS the LIVE_STORE global on acquire (lock + reset — every guarded
+  test starts from an empty global; a forgotten cleanup or a panicked
+  setter is neutralized by the next acquirer). New test
+  live_store_test_lock_resets_the_global_on_acquire asserts the reset
+  behavior across re-acquires. chain_slot_wiring's explicit end-of-test
+  cleanup + is_none() assert kept as defense in depth. 12 guarded tests
+  total (+1 new reset test = 13 lock callers). gap_find test comment
+  corrected to the audit-verified truth (no global reach; guard is
+  documented conservative surplus).
+- scripts/live_store_callgraph_audit.py: NEW — the whole-call-graph
+  transitive reachability proof (blocker 1). See its docstring for the
+  resolution model (brace-precise bodies, receiver-aware call classes,
+  conservative same-name union, documented adjudications).
+- No test assertion was weakened; the diff only serializes interleaving
+  and adds the reset + its test.

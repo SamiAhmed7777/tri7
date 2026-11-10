@@ -1,0 +1,253 @@
+# LIVE_STORE whole-call-graph audit transcript — tri7 lane/flaky-test-fix, judge round 3
+# command : python3 scripts/live_store_callgraph_audit.py src/bin/follow_tip.rs
+# repo    : /root/tri7-lanes/lane-flaky  (branch lane/flaky-test-fix)
+# state   : worktree == commit that carries this file (see verify transcript for SHAs)
+# ================================================================================
+==============================================================================
+LIVE_STORE WHOLE-CALL-GRAPH REACHABILITY AUDIT
+==============================================================================
+source file   : src/bin/follow_tip.rs
+lines         : 13641  (mod tests boundary @ line 11101)
+generated     : 2026-11-10T05:30:29+00:00
+python        : 3.14.9
+
+resolution model: brace-precise fn bodies; receiver-aware call classes
+  bare name( -> free fns only | .name( -> methods only | ::name( -> union
+  same-(class,name) defs resolve to their UNION — conservative: adds
+  reach, never hides it. lock_live_store_tests is excluded from the
+  accessor set (it IS the guard; its reset runs under the test lock).
+
+fn defs total : 301 (prod 205, tests-mod 96; methods 98, free 203)
+#[test] fns   : 77
+guard helper  : lock_live_store_tests @ line 12009 (tests scope)
+same-name free fns (union-resolved): install_signal_handlers, row
+same-name methods  (union-resolved): apply_block, balance, call, new, ready, tip, trim, utxo
+
+ADJUDICATED SAME-NAME COLLISIONS (documented + mechanically re-checked):
+  method `trim`: std str::trim (String/&str receiver) vs local inherent
+  WindowOutputs::trim@1111 and ChainState::trim@1223. Only ChainState::trim
+  reaches LIVE_STORE (live_store() -> drop_chain_slots_below). Receiver
+  types are beyond regex-level analysis, so `.trim()` unions all three;
+  the affected tests below are listed per-name with mechanical guards —
+  if one ever gains a ChainState producer or a live-store accessor call,
+  the adjudication self-revokes and the run FAILS.
+    - daemon_flag_replaces_default_and_appends: ('calls PeerTarget::parse(spec.trim(),..) on String config values; constructs no ChainState',)
+    - addnode_conf_parsing_dual_overlay: ('reach inherits the str::trim call INSIDE prod addnode_targets_from_conf@1831 (line.trim()); the test itself parses &str specs; constructs no ChainState',)
+    - addnode_ignored_list_requires_host_port_shape: ('same inherited str::trim inside addnode_targets_from_conf@1831; constructs no ChainState',)
+    - conf_stake_flag_resolution_and_persistence: ('calls line.trim()/v.trim() on read config lines; constructs no ChainState',)
+
+ACCESSOR SET (reach targets):
+  chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip @ line 12147 (free, #[test] direct)
+  live_store @ line 5926 (free, prod)
+  set_live_store @ line 5919 (free, prod)
+  direct-textual LIVE_STORE refs excluded from targets (the guard itself):
+    lock_live_store_tests @ line 12009 (tests-scope guard; reset runs locked)
+
+BACKWARD CLOSURE (every fn that can transitively reach an accessor): 31 node(s)
+  production free fns (14): addnode_targets_from_conf@L1831, advance_with_block@L3050, chain_slot_note@L5936, handle_message@L8181, main@L9172, parse_args@L1574, read_rpc_creds@L1955, recon_dispatch@L801, recon_intake@L576, rollback_tip@L880, seed_chain_slots@L5946, stake_tick@L5701, sync_from_zero@L3688, try_adopt_heavier_branch@L917
+  methods (1): trim
+  tests-side fns (16): addnode_conf_parsing_dual_overlay@L12875, addnode_ignored_list_requires_host_port_shape@L12923, chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip@L12147, conf_stake_flag_resolution_and_persistence@L12987, daemon_flag_replaces_default_and_appends@L11700, fork_choice_refuses_lighter_and_adopts_heavier@L12091, live_store_test_lock_resets_the_global_on_acquire@L12030, recon_accumulates_cap_sized_batches_before_judging@L12536, recon_empty_reply_judges_and_closes_a_cap_sized_branch@L12718, recon_heavier_branch_switches_and_queues_the_validated_body_path@L12431, recon_lighter_branch_is_ignored_and_the_reconciliation_closes@L12472, recon_linkage_guard_stops_the_batch_when_the_chain_breaks@L12631, recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches@L12664, recon_unknown_fork_point_escalates_then_drops_the_peer@L12507, rollback_tip_drops_the_phantom_and_truncates@L12051, rollback_tip_refuses_at_window_base@L12133
+
+FULL REACHABILITY TABLE (every #[test] fn):
+------------------------------------------------------------------------------
+  the_unspent_set_is_the_snapshot_plus_the_fresh_live_outputs @ L11117
+      reach: NONE  [no-guard-needed]
+  a_snapshot_coin_spent_after_the_coverage_is_removed @ L11167
+      reach: NONE  [no-guard-needed]
+  a_spend_at_or_below_the_coverage_removes_nothing @ L11202
+      reach: NONE  [no-guard-needed]
+  the_rebuild_scheduler_backs_off_and_converges @ L11230
+      reach: NONE  [no-guard-needed]
+  the_backoff_is_capped_so_the_rebuilds_stay_periodic @ L11252
+      reach: NONE  [no-guard-needed]
+  a_short_walk_is_retried_even_when_normally_not_stale @ L11274
+      reach: NONE  [no-guard-needed]
+  reaching_the_tip_resets_the_streak @ L11285
+      reach: NONE  [no-guard-needed]
+  ordinary_staleness_builds_immediately @ L11300
+      reach: NONE  [no-guard-needed]
+  with_no_snapshot_the_live_set_is_served_as_is @ L11310
+      reach: NONE  [no-guard-needed]
+  a_gap_between_the_coverage_and_the_live_window_base_is_rejected @ L11337
+      reach: NONE  [no-guard-needed]
+  the_merge_boundary_is_the_live_window_base_versus_the_coverage @ L11368
+      reach: NONE  [no-guard-needed]
+  a_short_snapshot_on_disk_seeds_the_scheduler_once @ L11423
+      reach: NONE  [no-guard-needed]
+  self_verify_zips_vin_sorted_order_not_selection_order @ L11514
+      reach: NONE  [no-guard-needed]
+  balance_counts_only_owned_outputs @ L11618
+      reach: NONE  [no-guard-needed]
+  balance_is_zero_for_unfunded_wallet @ L11644
+      reach: NONE  [no-guard-needed]
+  peer_target_parse_ipv4 @ L11669
+      reach: NONE  [no-guard-needed]
+  peer_target_parse_onion_gets_socks @ L11679
+      reach: NONE  [no-guard-needed]
+  peer_target_parse_rejects_garbage @ L11692
+      reach: NONE  [no-guard-needed]
+  daemon_flag_replaces_default_and_appends @ L11700
+      reach(tainted): daemon_flag_replaces_default_and_appends -> trim@L1111 -> live_store@L5926 -> live_store
+      guard: ADJUDICATED collision-only path (str::trim vs ChainState::trim — see header table)
+  status_gate_healthy_when_peer_recent @ L11728
+      reach: NONE  [no-guard-needed]
+  status_gate_degraded_needs_both_quiets @ L11736
+      reach: NONE  [no-guard-needed]
+  status_gate_degraded_when_both_quiets @ L11748
+      reach: NONE  [no-guard-needed]
+  status_gate_static_skips_network_gate @ L11756
+      reach: NONE  [no-guard-needed]
+  status_gate_stale_state_fails_even_static @ L11763
+      reach: NONE  [no-guard-needed]
+  status_gate_missing_peer_data_counts_quiet @ L11771
+      reach: NONE  [no-guard-needed]
+  iso_secs_roundtrip @ L11781
+      reach: NONE  [no-guard-needed]
+  recent_blocks_insert_get_at_height @ L11798
+      reach: NONE  [no-guard-needed]
+  recent_blocks_evicts_oldest_beyond_cap @ L11815
+      reach: NONE  [no-guard-needed]
+  recent_blocks_ignores_duplicate_hash @ L11832
+      reach: NONE  [no-guard-needed]
+  socks5_request_ipv4_form @ L11844
+      reach: NONE  [no-guard-needed]
+  socks5_request_domain_form_for_onion @ L11853
+      reach: NONE  [no-guard-needed]
+  socks5_greeting_bytes @ L11864
+      reach: NONE  [no-guard-needed]
+  socks5_reply_drain_variants @ L11869
+      reach: NONE  [no-guard-needed]
+  status_gate_exit_codes_are_stable @ L11886
+      reach: NONE  [no-guard-needed]
+  gap_find_missing_targets_the_lowest_absent_tail_body @ L11942
+      reach: NONE  [no-guard-needed]
+  gap_find_missing_satisfied_by_recent_cache @ L11959
+      reach: NONE  [GUARDED]
+  live_store_test_lock_resets_the_global_on_acquire @ L12030
+      reach: live_store_test_lock_resets_the_global_on_acquire -> live_store@L5926[P] -> live_store
+      reach: live_store_test_lock_resets_the_global_on_acquire -> set_live_store@L5919[P] -> set_live_store
+      guard: GUARDED
+  rollback_tip_drops_the_phantom_and_truncates @ L12051
+      reach: rollback_tip_drops_the_phantom_and_truncates -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  fork_choice_refuses_lighter_and_adopts_heavier @ L12091
+      reach: fork_choice_refuses_lighter_and_adopts_heavier -> try_adopt_heavier_branch@L917[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  rollback_tip_refuses_at_window_base @ L12133
+      reach: rollback_tip_refuses_at_window_base -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip @ L12147
+      reach: chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip -> chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip (DIRECT textual LIVE_STORE access)
+      guard: GUARDED
+  stale_locator_body_cannot_anchor_the_serve_past_our_refilled_slot @ L12282
+      reach: NONE  [no-guard-needed]
+  backfill_pick_indices_clamp_to_the_local_window_tip @ L12406
+      reach: NONE  [no-guard-needed]
+  recon_heavier_branch_switches_and_queues_the_validated_body_path @ L12431
+      reach: recon_heavier_branch_switches_and_queues_the_validated_body_path -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_lighter_branch_is_ignored_and_the_reconciliation_closes @ L12472
+      reach: recon_lighter_branch_is_ignored_and_the_reconciliation_closes -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_unknown_fork_point_escalates_then_drops_the_peer @ L12507
+      reach: recon_unknown_fork_point_escalates_then_drops_the_peer -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_accumulates_cap_sized_batches_before_judging @ L12536
+      reach: recon_accumulates_cap_sized_batches_before_judging -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_linkage_guard_stops_the_batch_when_the_chain_breaks @ L12631
+      reach: recon_linkage_guard_stops_the_batch_when_the_chain_breaks -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches @ L12664
+      reach: recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_empty_reply_judges_and_closes_a_cap_sized_branch @ L12718
+      reach: recon_empty_reply_judges_and_closes_a_cap_sized_branch -> recon_intake@L576[P] -> rollback_tip@L880[P] -> live_store@L5926[P] -> live_store
+      guard: GUARDED
+  recon_locator_spans_the_window_down_to_the_base @ L12766
+      reach: NONE  [no-guard-needed]
+  intake_header_batch_accepts_multi_block_announcements_without_reconciling @ L12781
+      reach: NONE  [no-guard-needed]
+  gap_fill_valid_hash_link_merkle @ L12805
+      reach: NONE  [no-guard-needed]
+  peer_target_parse_i2p_and_onion_transports @ L12856
+      reach: NONE  [no-guard-needed]
+  addnode_conf_parsing_dual_overlay @ L12875
+      reach(tainted): addnode_conf_parsing_dual_overlay -> addnode_targets_from_conf@L1831 -> trim@L1111 -> live_store@L5926 -> live_store
+      guard: ADJUDICATED collision-only path (str::trim vs ChainState::trim — see header table)
+  addnode_ignored_list_requires_host_port_shape @ L12923
+      reach(tainted): addnode_ignored_list_requires_host_port_shape -> addnode_targets_from_conf@L1831 -> trim@L1111 -> live_store@L5926 -> live_store
+      guard: ADJUDICATED collision-only path (str::trim vs ChainState::trim — see header table)
+  dialable_store_host_accepts_onion_and_i2p_only @ L12941
+      reach: NONE  [no-guard-needed]
+  advertised_store_key_filters_loopback_placeholders @ L12958
+      reach: NONE  [no-guard-needed]
+  conf_stake_flag_resolution_and_persistence @ L12987
+      reach(tainted): conf_stake_flag_resolution_and_persistence -> trim@L1111 -> live_store@L5926 -> live_store
+      guard: ADJUDICATED collision-only path (str::trim vs ChainState::trim — see header table)
+  net_stake_weight_uses_pos_blocks_and_72_window @ L13016
+      reach: NONE  [no-guard-needed]
+  wallet_live_apply_candidates_weight @ L13039
+      reach: NONE  [no-guard-needed]
+  txpool_rejects_spends_outside_the_live_view_via_ops_shape @ L13155
+      reach: NONE  [no-guard-needed]
+  keypool_size_argument_legacy_semantics @ L13166
+      reach: NONE  [no-guard-needed]
+  reservebalance_verb_set_contract @ L13195
+      reach: NONE  [no-guard-needed]
+  smsg_options_cmd_matches_legacy_shapes @ L13238
+      reach: NONE  [no-guard-needed]
+  script_pushes_33_finds_only_exact_compressed_pubkey_pushes @ L13274
+      reach: NONE  [no-guard-needed]
+  newest_replayable_tip_walks_back_only_over_missing_bodies @ L13307
+      reach: NONE  [no-guard-needed]
+  repairwallet_and_resendtx_arity_matches_legacy @ L13325
+      reach: NONE  [no-guard-needed]
+  repair_diff_counts_only_wallet_owned_mismatches @ L13356
+      reach: NONE  [no-guard-needed]
+  repair_swap_replaces_the_live_map_atomically @ L13387
+      reach: NONE  [no-guard-needed]
+  resend_mine_gate_prunes_before_reaccept @ L13492
+      reach: NONE  [no-guard-needed]
+  assume_valid_gate_boundaries_below_at_above_horizon @ L13509
+      reach: NONE  [no-guard-needed]
+  checkpoint_anchor_matches_the_daemon_verified_hash @ L13554
+      reach: NONE  [no-guard-needed]
+  checkpoint_anchor_verification_at_boundary_only @ L13568
+      reach: NONE  [no-guard-needed]
+  parallel_fetch_reassembly_is_strictly_ordered @ L13590
+      reach: NONE  [no-guard-needed]
+  stale_duplicate_header_segments_are_dropped_not_fatal @ L13613
+      reach: NONE  [no-guard-needed]
+  checkpoint_horizon_constants_match_the_deployed_client @ L13633
+      reach: NONE  [no-guard-needed]
+------------------------------------------------------------------------------
+
+tests reaching LIVE_STORE : 16 (12 proven + 4 adjudicated collision-only)
+  of which GUARDED        : 12
+  of which ADJUDICATED    : 4 -> daemon_flag_replaces_default_and_appends, addnode_conf_parsing_dual_overlay, addnode_ignored_list_requires_host_port_shape, conf_stake_flag_resolution_and_persistence
+  of which UNGUARDED      : 0
+guarded without proven reach (conservative surplus, harmless): 1
+  - gap_find_missing_satisfied_by_recent_cache
+tests with no reach and no guard : 60
+
+VALUE-PASSING SUSPICION (bare fn-name refs into the closure, no call
+parens — informational, human eyes required, usually local variables):
+  main @ line 1563: Given EXPLICITLY, the node BUILDS and maintains\n\
+  rollback_tip @ line 12051: fn rollback_tip_drops_the_phantom_and_truncates() {
+  rollback_tip @ line 12133: fn rollback_tip_refuses_at_window_base() {
+  stake_tick @ line 1466: stake_tick_secs: u64,
+  stake_tick @ line 1615: stake_tick_secs: 15,
+  sync_from_zero @ line 1473: sync_from_zero: bool,
+  sync_from_zero @ line 1618: sync_from_zero: false,
+
+VERDICT: PASS — every LIVE_STORE-reaching #[test] fn is accounted for:
+        12 proven reachers all hold lock_live_store_tests() for their whole body;
+        4 further tests are adjudicated collision-only
+        (str::trim false union, mechanically re-checked each run). Every
+        reach path is transitively closed through the whole call graph
+        (production fns, methods, test helpers). Stale-global leakage is
+        additionally cut by the lock+reset inside the guard: each
+        acquirer starts from an empty LIVE_STORE.
+# ================================================================================
+# audit exit code: 0
