@@ -1428,6 +1428,28 @@ impl BlockStore {
         None
     }
 
+    /// The ORACLE-canonical hash at a height: only the build-time height_off
+    /// map answers (chain slots and runtime appendix arrivals never do). This
+    /// is the ancestry proof for below-window serving anchors — a runtime-
+    /// appended stale fork at a gap height (or anywhere) can never pass it,
+    /// because height_off is frozen at build time and only the build-verified
+    /// frames occupy it.
+    pub fn canonical_hash_at_height(&self, h: u64) -> Option<Hash> {
+        let inner = self.inner()?;
+        if !inner.heights_ok {
+            return None;
+        }
+        let off = inner.blocks.offset_by_height(h)?;
+        if off == HEIGHT_GAP {
+            return None;
+        }
+        // offsets are FRAME starts (magic u32 + len u32, then the body):
+        // skip the 8-byte frame prefix before hashing the header
+        let mut hdr = [0u8; 80];
+        read_exact_at(&inner.file, &mut hdr, off + 8).ok()?;
+        header_hash(&hdr).ok()
+    }
+
     /// The main-chain block hash at a height (display hex). The live chain's
     /// registered slot answers first — getblockhash must never contradict
     /// what serving hands out at the same height; no answer above the chain
