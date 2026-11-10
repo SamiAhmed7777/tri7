@@ -491,6 +491,38 @@ struct ReconAcc {
     /// per header). A header whose prev breaks the chain ends the batch —
     /// heights may never drift from real linkage.
     expected_prev: Option<Hash>,
+    /// last time an empty tip-poll reply fired the window-locator
+    /// reconciliation request (fleet item 18: an empty reply while the peer
+    /// claims a higher start height IS fork evidence). 60 s cooldown keeps
+    /// a keep-ours tie from re-requesting every poll.
+    empty_fork_recon_at: Option<Instant>,
+    /// a window-locator reconciliation request is IN FLIGHT to this peer:
+    /// an empty reply to THAT request is "no overlap", not new fork
+    /// evidence — the empty-reply trigger must not re-fire on its echo
+    /// (r5 judge blocker: a truly disjoint peer would otherwise re-ask
+    /// forever, just rate-limited). Cleared the moment any non-empty
+    /// headers reply arrives.
+    awaiting_window_reply: bool,
+}
+
+/// (item 18) Should an EMPTY headers reply trigger the window-locator
+/// reconciliation? Only when it is genuine fork evidence: the peer claims a
+/// start height above our tip (it cannot hold our tip's continuation),
+/// no window re-ask is already in flight (an empty echo of our own re-ask
+/// means "no overlap", not evidence), and the 60 s cooldown has expired.
+fn empty_reply_fork_recon_due(
+    peer_start_height: i32,
+    tip_height: u64,
+    awaiting_window_reply: bool,
+    last_request: Option<Instant>,
+) -> bool {
+    if awaiting_window_reply {
+        return false;
+    }
+    if peer_start_height <= tip_height as i32 {
+        return false;
+    }
+    last_request.map_or(true, |t| t.elapsed() >= Duration::from_secs(60))
 }
 
 #[derive(Debug)]
@@ -813,6 +845,7 @@ fn recon_dispatch(
                 "headers announcement does not chain to our tip — requesting reconciliation with the window locator ({} anchor(s))",
                 build_recon_locator(st).len()
             ));
+            recon.awaiting_window_reply = true;
             let stop = [0u8; 32];
             peer.sess.send(
                 "getheaders",
@@ -8234,9 +8267,41 @@ fn handle_message(
                 // some future batch happened to arrive)
                 if recon.fork_height.is_some() {
                     recon_dispatch(st, peer, &[], recon, pending_from_headers, stats)?;
+                    return Ok(());
+                }
+                // (item 18) an empty reply to a TIP-locator poll is fork
+                // evidence when the peer's handshake start height is above
+                // ours: "nothing after your tip" + "I am N blocks ahead"
+                // can only both hold if our tip is NOT on their chain.
+                // Re-ask with the window locator — its reply chains at the
+                // shared ancestor and the judge sees the real fork. (Live
+                // fleet catch 2026-11-10: a follower whose tip hash the
+                // peer never held got silent empty replies forever and
+                // never learned about the 80-block fork.)
+                if empty_reply_fork_recon_due(
+                    peer.start_height,
+                    st.tip_height,
+                    recon.awaiting_window_reply,
+                    recon.empty_fork_recon_at,
+                ) {
+                    recon.empty_fork_recon_at = Some(Instant::now());
+                    recon.awaiting_window_reply = true;
+                    log(&format!(
+                        "empty tip-poll reply while {} claims h{} (we are h{}) — requesting window-locator reconciliation",
+                        peer.label, peer.start_height, st.tip_height
+                    ));
+                    let stop = [0u8; 32];
+                    peer.sess.send(
+                        "getheaders",
+                        &tri7_core::p2p::build_getheaders(&build_recon_locator(st), &stop),
+                        stats,
+                    )?;
                 }
                 return Ok(());
             }
+            // a NON-empty reply answers whatever was in flight (tip poll or
+            // window re-ask alike) — the next empty reply is evidence again
+            recon.awaiting_window_reply = false;
             // (item 17b) A batch that does not chain DIRECTLY to our tip is
             // reconciliation material — a competing branch, OR the peer's
             // reply serving from an in-window anchor below the tip (with a
@@ -12299,6 +12364,34 @@ mod tests {
         assert!(served.is_empty(), "heightless raced frame: no anchor either way");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The r5-judge blocker pin: an empty tip-poll reply fires the
+    /// window-locator re-ask ONLY as genuine fork evidence — never on the
+    /// empty echo of our own in-flight window re-ask (a truly disjoint peer
+    /// must not re-ask forever), never when the peer is at/below our tip
+    /// (we are the ahead side), and never inside the 60 s cooldown.
+    #[test]
+    fn empty_tip_poll_reply_triggers_window_recon_only_as_fork_evidence() {
+        let cooled = Instant::now() - Duration::from_secs(120);
+        let recent_req = Instant::now();
+        // fork evidence, nothing in flight, cooled down → fire (fresh + expired)
+        assert!(empty_reply_fork_recon_due(2208734, 2208650, false, None));
+        assert!(empty_reply_fork_recon_due(2208734, 2208650, false, Some(cooled)));
+        // the peer is at/below our tip: we are the ahead side, nothing to learn
+        assert!(!empty_reply_fork_recon_due(2208650, 2208650, false, None));
+        assert!(!empty_reply_fork_recon_due(2208000, 2208650, false, None));
+        // our own window re-ask is in flight: the empty echo is "no overlap",
+        // not evidence — never re-trigger (the r5 judge blocker)
+        assert!(!empty_reply_fork_recon_due(2208734, 2208650, true, None));
+        assert!(!empty_reply_fork_recon_due(2208734, 2208650, true, Some(cooled)));
+        // cooldown still running
+        assert!(!empty_reply_fork_recon_due(
+            2208734,
+            2208650,
+            false,
+            Some(recent_req)
+        ));
     }
 
     // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----

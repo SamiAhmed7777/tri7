@@ -176,3 +176,49 @@ master while this item ran — both graded B, judge urns in their commits); the
 lib suite is 562 now (the lanes' +5). diff-r4-final.patch is THIS item's
 complete diff vs the new master base; the two previously submitted patches
 remain superseded. Suite: 562 lib + 76 follow_tip green on the merged tree.
+
+## ROUND 5 (same tick, the THIRD live-caught layer): the empty-reply fork evidence
+
+With the locator guard deployed on Pi+DNS3+DNS2, DNS3 STILL sat silent at
+its fork tip: zero journal lines, only poll/reply traffic. Decode: this
+protocol has NO proactive block relay — peers discover tips purely through
+getheaders REPLIES (the mint relay log line notwithstanding, the only
+block/headers sends are getdata/getheaders answers). DNS3's poll locator
+holds only ITS OWN branch hashes ([tip], [prev,tip]); DNS2 (which never held
+the raced bodies) resolves nothing and serves an EMPTY headers message — and
+the empty-reply handler (item 17b) only judged when a branch was already
+accumulating. Silent dead-end, the third way the fleet fork could never
+heal.
+
+FIX: an empty reply to a TIP-locator poll while the peer's handshake
+start_height is ABOVE our tip is fork evidence — "nothing after your tip" +
+"I am N ahead" can only both hold if our tip is not on their chain. The
+handler now re-asks with the window locator (60 s cooldown on the per-peer
+ReconAcc, so a keep-ours tie cannot re-request every poll); the window
+reply chains at the shared ancestor and the judge fires. recon_intake itself
+is unchanged and remains covered by the r1-r4 tests.
+
+Tests: 567 lib + 76 follow_tip green (the lanes' sweep tests included).
+Deployed on top of r2 on DNS3 (sha e902ffd4…): the convergence acceptance
+test (work item 3) runs immediately after — DNS3 must switch to canonical
+WITHOUT a store re-copy.
+
+## ROUND 5 verdict: GRADE C (urn:ump:4twr4glvkcjbmh2rfa3qpnlvdf6jfmktzyyc7c5rep76rwvnu3na), both blockers taken:
+1. (unpinned headline fix) → the trigger condition is EXTRACTED into
+   empty_reply_fork_recon_due(peer_start_height, tip_height,
+   awaiting_window_reply, last_request) and pinned by
+   empty_tip_poll_reply_triggers_window_recon_only_as_fork_evidence:
+   fires on fork evidence (peer above our tip) with nothing in flight and
+   the cooldown expired; never when the peer is at/below our tip; never
+   while our own window re-ask is in flight; never inside the 60 s cooldown.
+2. (empty echo of our own re-ask loops forever on a disjoint peer) → new
+   ReconAcc.awaiting_window_reply: SET whenever a window-locator request is
+   sent (the fork-evidence path AND the NeedAnchorLocator path), CLEARED the
+   moment any non-empty headers reply arrives. An empty reply while in
+   flight is "no overlap", not evidence — the trigger never fires on its own
+   echo.
+
+## ROUND 6 note
+diff-r6-final.patch = the complete delta vs master 3eb9226 (the r2 locator
+guard + r5 empty-evidence + r6 blockers), the as-committed-to-be tree.
+Suite: 567 lib + 77 follow_tip green; release all-bins green.

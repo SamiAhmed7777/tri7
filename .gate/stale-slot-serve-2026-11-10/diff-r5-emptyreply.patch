@@ -1,0 +1,51 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 19fb519..d0bf757 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -491,6 +491,11 @@ struct ReconAcc {
+     /// per header). A header whose prev breaks the chain ends the batch —
+     /// heights may never drift from real linkage.
+     expected_prev: Option<Hash>,
++    /// last time an empty tip-poll reply fired the window-locator
++    /// reconciliation request (fleet item 18: an empty reply while the peer
++    /// claims a higher start height IS fork evidence). 60 s cooldown keeps
++    /// a keep-ours tie from re-requesting every poll.
++    empty_fork_recon_at: Option<Instant>,
+ }
+ 
+ #[derive(Debug)]
+@@ -8234,6 +8239,34 @@ fn handle_message(
+                 // some future batch happened to arrive)
+                 if recon.fork_height.is_some() {
+                     recon_dispatch(st, peer, &[], recon, pending_from_headers, stats)?;
++                    return Ok(());
++                }
++                // (item 18) an empty reply to a TIP-locator poll is fork
++                // evidence when the peer's handshake start height is above
++                // ours: "nothing after your tip" + "I am N blocks ahead"
++                // can only both hold if our tip is NOT on their chain.
++                // Re-ask with the window locator — its reply chains at the
++                // shared ancestor and the judge sees the real fork. (Live
++                // fleet catch 2026-11-10: a follower whose tip hash the
++                // peer never held got silent empty replies forever and
++                // never learned about the 80-block fork.) The cooldown
++                // keeps a keep-ours tie from re-requesting every poll.
++                if peer.start_height > st.tip_height as i32
++                    && recon
++                        .empty_fork_recon_at
++                        .map_or(true, |t| t.elapsed() >= Duration::from_secs(60))
++                {
++                    recon.empty_fork_recon_at = Some(Instant::now());
++                    log(&format!(
++                        "empty tip-poll reply while {} claims h{} (we are h{}) — requesting window-locator reconciliation",
++                        peer.label, peer.start_height, st.tip_height
++                    ));
++                    let stop = [0u8; 32];
++                    peer.sess.send(
++                        "getheaders",
++                        &tri7_core::p2p::build_getheaders(&build_recon_locator(st), &stop),
++                        stats,
++                    )?;
+                 }
+                 return Ok(());
+             }
