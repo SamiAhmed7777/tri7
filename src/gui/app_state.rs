@@ -531,6 +531,14 @@ pub struct AppState {
     /// true while a staking on/off toggle RPC is in flight (button guard)
     pub staking_toggle_inflight: bool,
     // ---- auto-update (src/updater.rs) ----
+    /// Set by updater_install_action after the platform wrapper SPAWNED
+    /// successfully: the GUI must EXIT so the wrapper's wait-loop (which
+    /// polls for the GUI process to disappear) can proceed to install +
+    /// relaunch. 2026-11-10: the button never exited the app — the wrapper
+    /// spun forever on the still-running GUI and "Install now & restart"
+    /// never restarted (operator report, laptop). Headless callers may
+    /// ignore this flag.
+    pub pending_exit: bool,
     pub updater: crate::updater::UpdateState,
     /// Events from the check/download worker threads (gui feature only).
     pub updater_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateEvent>>,
@@ -574,6 +582,22 @@ impl AppState {
         // on Windows detect the NSIS install root for installer-vs-portable
         #[allow(unused_mut)]
         let mut updater = crate::updater::UpdateState::new(Path::new(&cfg.profile_dir));
+        // A previous auto-update whose INSTALLER failed leaves a marker in the
+        // update work dir (written by the wrapper after rc != 0). Surface it
+        // once: the operator must know "install and restart" did NOT complete,
+        // instead of silently running the old build believing it updated.
+        let install_failed_marker =
+            Path::new(&cfg.profile_dir).join("update").join("install-failed.marker");
+        let mut status_log: Vec<String> = Vec::new();
+        if install_failed_marker.exists() {
+            let note = std::fs::read_to_string(&install_failed_marker)
+                .map(|t| t.trim().to_string())
+                .unwrap_or_else(|_| "rc unknown".into());
+            status_log.push(format!(
+                "update: the last install FAILED ({note}) — you are still on the                  previous version; retry from Options"
+            ));
+            let _ = std::fs::remove_file(&install_failed_marker);
+        }
         #[cfg(target_os = "windows")]
         if let Ok(lad) = std::env::var("LOCALAPPDATA") {
             updater.windows_install_root =
@@ -582,6 +606,7 @@ impl AppState {
         AppState {
             cfg,
             screen: Screen::Overview,
+            pending_exit: false,
             net_drawer_open: None,
             load_error: None,
             wallet: None,
@@ -615,7 +640,7 @@ impl AppState {
             last_history_fetch: None,
             last_auto_refresh: None,
             dialogs: Dialogs::default(),
-            status_log: Vec::new(),
+            status_log,
             explorer,
             wallet_rw: None,
             allow_wallet_writes: true,
@@ -1366,6 +1391,10 @@ impl AppState {
         }
         #[cfg(not(feature = "gui"))]
         let _ = &plan;
+        // The wrapper is spawned and its FIRST loop polls for this process to
+        // disappear — exit now (the caller's update loop acts on this flag;
+        // wallet state is already flushed above).
+        self.pending_exit = true;
         Ok(plan.describe)
     }
 

@@ -21,6 +21,55 @@ use std::collections::HashSet;
 /// An AppState wired to a temp profile dir and an UNREACHABLE node (rpc_addr
 /// points at a closed port): the fee push therefore always fails, which is
 /// exactly the operator's reported situation.
+/// 2026-11-10 (judge r2, lane-updaterexit): a wrapper whose INSTALLER failed
+/// leaves install-failed.marker in the update work dir; the relaunched GUI
+/// must surface the failure ONCE (status log) and clear the marker — a failed
+/// install must never read as a successful install-and-restart.
+#[test]
+fn install_failed_marker_is_surfaced_once_and_cleared() {
+    let dir = std::env::temp_dir().join(format!(
+        "tri7gui_ifm_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("update")).unwrap();
+    std::fs::write(dir.join("update").join("install-failed.marker"), "rc=2").unwrap();
+    let cfg = UiConfig {
+        profile_dir: dir.display().to_string(),
+        rpc_addr: Some("127.0.0.1:1".into()),
+        ..UiConfig::default()
+    };
+    let st = crate::gui::app_state::AppState::new(cfg);
+    let surfaced = st
+        .status_log
+        .iter()
+        .any(|l| l.contains("install FAILED") && l.contains("retry from Options"));
+    assert!(
+        surfaced,
+        "the failed install must be surfaced in the status log: {:?}",
+        st.status_log
+    );
+    assert!(
+        !dir.join("update").join("install-failed.marker").exists(),
+        "the marker must be cleared after surfacing (else every start re-alarms)"
+    );
+    // second construction: no marker, no repeat alarm
+    let cfg2 = UiConfig {
+        profile_dir: dir.display().to_string(),
+        rpc_addr: Some("127.0.0.1:1".into()),
+        ..UiConfig::default()
+    };
+    let st2 = crate::gui::app_state::AppState::new(cfg2);
+    assert!(
+        !st2
+            .status_log
+            .iter()
+            .any(|l| l.contains("install FAILED")),
+        "no repeat alarm without a marker"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn options_state_with_unreachable_node(tag: &str) -> (crate::gui::app_state::AppState, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("tri7gui_opts_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2144,6 +2193,14 @@ fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
         let desc = st.updater_install_action().expect("install accepted");
         assert!(desc.contains("/S"));
         assert_eq!(st.updater.phase, crate::updater::UpdatePhase::InstallPending);
+        // 2026-11-10 (operator report, laptop): a successful install action
+        // MUST arm the exit flag — the wrapper's first wait-loop polls for
+        // the GUI process to disappear; a GUI that stays alive leaves the
+        // wrapper spinning forever ("Install now & restart" never restarted).
+        assert!(
+            st.pending_exit,
+            "a spawned install must arm pending_exit so the GUI exits"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

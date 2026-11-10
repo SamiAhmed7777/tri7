@@ -1714,6 +1714,15 @@ pub fn brand_mark_bytes() -> Option<&'static [u8]> {
 
 impl eframe::App for Tri7App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Updater: the install wrapper's FIRST loop polls for this process to
+        // disappear — once updater_install_action armed pending_exit, exit
+        // immediately (wallet state was flushed before the payload spawned;
+        // the wrapper then installs and relaunches). 2026-11-10: this exit was
+        // missing entirely, so "Install now & restart" never restarted
+        // (operator report, laptop).
+        if self.st.pending_exit {
+            std::process::exit(0);
+        }
         // Close button behaviour (Options -> Window):
         //   minimize        -> the window minimizes, the process AND the node
         //                     keep running
