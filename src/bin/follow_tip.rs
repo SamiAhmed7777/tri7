@@ -86,6 +86,12 @@ use tri7_core::rpc::{
 const WINDOW_ENTRIES: usize = 4600; // ≥ selection interval + stake-age cap + margin
 const WINDOW_BLOCKS: usize = 1500; // full-tx records for kernel prevout resolution
 const POLL_SECS: u64 = 30;
+/// (item 19) consecutive empty tip-poll replies that are fork evidence on
+/// their own — start_height is frozen at HANDSHAKE, so an equal-at-handshake
+/// session that later forks can never satisfy the height comparison; the
+/// streak is the robust trigger. At POLL_SECS=30 this fires ~90 s into a
+/// silent-fork shape (the live sami-pc fork sat 25+ min before this existed).
+const EMPTY_REPLY_EVIDENCE_STREAK: u32 = 3;
 
 // ---- keypool (legacy `pool` rows) — parity item KEYPOOLREFILL ------------
 /// Legacy default -keypool setting (bitcoin 0.8-era): 100 pre-derived keys.
@@ -492,34 +498,79 @@ struct ReconAcc {
     /// heights may never drift from real linkage.
     expected_prev: Option<Hash>,
     /// last time an empty tip-poll reply fired the window-locator
-    /// reconciliation request (fleet item 18: an empty reply while the peer
-    /// claims a higher start height IS fork evidence). 60 s cooldown keeps
-    /// a keep-ours tie from re-requesting every poll.
+    /// reconciliation request (fleet items 18+19: an empty reply is fork
+    /// evidence — immediately when the peer's start height is above ours,
+    /// after EMPTY_REPLY_EVIDENCE_STREAK consecutive empties regardless of
+    /// the handshake-frozen height). 60 s cooldown keeps a keep-ours tie
+    /// from re-requesting every poll.
     empty_fork_recon_at: Option<Instant>,
+    /// (item 19) consecutive empty tip-poll replies seen since the last
+    /// non-empty reply or the last fired re-ask. The robust fork-evidence
+    /// trigger: start_height cannot change after the handshake, so a
+    /// session that handshook at EQUAL height and later forked would
+    /// otherwise never produce evidence. Per follow loop (shared across
+    /// peers — the same granularity as empty_fork_recon_at and
+    /// awaiting_window_reply): any peer's non-empty reply resets it, so
+    /// evidence only accumulates while NO peer answers us.
+    empty_tip_poll_streak: u32,
     /// a window-locator reconciliation request is IN FLIGHT to this peer:
     /// an empty reply to THAT request is "no overlap", not new fork
     /// evidence — the empty-reply trigger must not re-fire on its echo
     /// (r5 judge blocker: a truly disjoint peer would otherwise re-ask
-    /// forever, just rate-limited). Cleared the moment any non-empty
+    /// forever, just rate-limited). Set on EVERY window-locator send
+    /// (fork-evidence path, NeedAnchorLocator, the mixed-batch and
+    /// unknown-inv follow-ups) and cleared the moment any non-empty
     /// headers reply arrives.
     awaiting_window_reply: bool,
 }
 
-/// (item 18) Should an EMPTY headers reply trigger the window-locator
-/// reconciliation? Only when it is genuine fork evidence: the peer claims a
-/// start height above our tip (it cannot hold our tip's continuation),
-/// no window re-ask is already in flight (an empty echo of our own re-ask
-/// means "no overlap", not evidence), and the 60 s cooldown has expired.
+/// (item 19) An empty headers reply just arrived: count it toward the
+/// consecutive-empty streak — unless it is the echo of our own in-flight
+/// window re-ask, which is "no overlap", not evidence (it neither counts
+/// nor resets the streak).
+fn note_reply_empty(recon: &mut ReconAcc) {
+    if !recon.awaiting_window_reply {
+        recon.empty_tip_poll_streak += 1;
+    }
+}
+
+/// Any NON-empty headers reply answers whatever was in flight (tip poll,
+/// window re-ask, unknown-inv follow-up alike): clear the in-flight flag
+/// and restart the streak from zero — the next empty reply is evidence
+/// again.
+fn note_reply_nonempty(recon: &mut ReconAcc) {
+    recon.awaiting_window_reply = false;
+    recon.empty_tip_poll_streak = 0;
+}
+
+/// (items 18+19) Should an EMPTY headers reply trigger the window-locator
+/// reconciliation? TWO independent triggers, because height-based firing is
+/// inherently handshake-frozen:
+///  (a) FAST PATH (item 18): the peer's handshake start_height is above our
+///      tip — a single empty reply is already fork evidence ("nothing after
+///      your tip" + "I am N blocks ahead" cannot both hold on one chain);
+///  (b) STREAK PATH (item 19, the robust trigger): N consecutive empty
+///      tip-poll replies REGARDLESS of the start_height comparison —
+///      start_height froze at handshake, so a session that handshook at
+///      EQUAL height and later forked never satisfies (a) and would sit
+///      silent forever (live fleet catch 2026-11-10: sami-pc sat 25+ min on
+///      a 9-block fork with an equal-at-handshake session).
+/// Neither trigger fires while a window re-ask is in flight (an empty echo
+/// of our own re-ask is "no overlap", not evidence) nor inside the 60 s
+/// cooldown.
 fn empty_reply_fork_recon_due(
     peer_start_height: i32,
     tip_height: u64,
+    empty_streak: u32,
     awaiting_window_reply: bool,
     last_request: Option<Instant>,
 ) -> bool {
     if awaiting_window_reply {
         return false;
     }
-    if peer_start_height <= tip_height as i32 {
+    let height_evidence = peer_start_height > tip_height as i32;
+    let streak_evidence = empty_streak >= EMPTY_REPLY_EVIDENCE_STREAK;
+    if !(height_evidence || streak_evidence) {
         return false;
     }
     last_request.map_or(true, |t| t.elapsed() >= Duration::from_secs(60))
@@ -8269,26 +8320,42 @@ fn handle_message(
                     recon_dispatch(st, peer, &[], recon, pending_from_headers, stats)?;
                     return Ok(());
                 }
-                // (item 18) an empty reply to a TIP-locator poll is fork
-                // evidence when the peer's handshake start height is above
-                // ours: "nothing after your tip" + "I am N blocks ahead"
-                // can only both hold if our tip is NOT on their chain.
-                // Re-ask with the window locator — its reply chains at the
-                // shared ancestor and the judge sees the real fork. (Live
-                // fleet catch 2026-11-10: a follower whose tip hash the
-                // peer never held got silent empty replies forever and
-                // never learned about the 80-block fork.)
+                // (items 18+19) an empty reply to a TIP-locator poll is fork
+                // evidence: immediately when the peer's handshake start
+                // height is above ours ("nothing after your tip" + "I am N
+                // blocks ahead" can only both hold if our tip is NOT on
+                // their chain — item 18), or after N CONSECUTIVE empties
+                // regardless of start_height — the handshake froze that
+                // value, so an equal-at-handshake session that later forked
+                // could never fire the height path and sat silent forever
+                // (live fleet catch 2026-11-10, item 19). Re-ask with the
+                // window locator — its reply chains at the shared ancestor
+                // and the judge sees the real fork.
+                note_reply_empty(recon);
                 if empty_reply_fork_recon_due(
                     peer.start_height,
                     st.tip_height,
+                    recon.empty_tip_poll_streak,
                     recon.awaiting_window_reply,
                     recon.empty_fork_recon_at,
                 ) {
+                    let mut reasons: Vec<&str> = Vec::new();
+                    if peer.start_height > st.tip_height as i32 {
+                        reasons.push("start-height");
+                    }
+                    if recon.empty_tip_poll_streak >= EMPTY_REPLY_EVIDENCE_STREAK
+                    {
+                        reasons.push("streak");
+                    }
+                    // empty_reply_fork_recon_due() only returned true because
+                    // at least one trigger held, so `reasons` is non-empty
+                    let reason = reasons.join("+");
                     recon.empty_fork_recon_at = Some(Instant::now());
                     recon.awaiting_window_reply = true;
+                    recon.empty_tip_poll_streak = 0;
                     log(&format!(
-                        "empty tip-poll reply while {} claims h{} (we are h{}) — requesting window-locator reconciliation",
-                        peer.label, peer.start_height, st.tip_height
+                        "empty tip-poll reply ({} trigger) while {} claims h{} (we are h{}) — requesting window-locator reconciliation",
+                        reason, peer.label, peer.start_height, st.tip_height
                     ));
                     let stop = [0u8; 32];
                     peer.sess.send(
@@ -8301,7 +8368,8 @@ fn handle_message(
             }
             // a NON-empty reply answers whatever was in flight (tip poll or
             // window re-ask alike) — the next empty reply is evidence again
-            recon.awaiting_window_reply = false;
+            // from a fresh streak (item 19)
+            note_reply_nonempty(recon);
             // (item 17b) A batch that does not chain DIRECTLY to our tip is
             // reconciliation material — a competing branch, OR the peer's
             // reply serving from an in-window anchor below the tip (with a
@@ -8320,6 +8388,9 @@ fn handle_message(
                 // the window anchors — the reply re-enters this handler and
                 // takes the competing-branch path if it is one
                 log("headers batch partly unlinked to the tip — requesting window-locator reconciliation");
+                // mark the re-ask in flight (item 19): its empty reply is
+                // "no overlap", never streak evidence
+                recon.awaiting_window_reply = true;
                 let stop = [0u8; 32];
                 peer.sess.send(
                     "getheaders",
@@ -8363,6 +8434,9 @@ fn handle_message(
                 // inv from a peer that never saw our tip must give it an
                 // in-window ancestor to reconcile from — the reply re-enters
                 // the headers handler's competing-branch judge
+                // mark the re-ask in flight (item 19): its empty reply is
+                // "no overlap", never streak evidence
+                recon.awaiting_window_reply = true;
                 let stop = [0u8; 32];
                 peer.sess.send(
                     "getheaders",
@@ -12455,29 +12529,122 @@ mod tests {
     /// The r5-judge blocker pin: an empty tip-poll reply fires the
     /// window-locator re-ask ONLY as genuine fork evidence — never on the
     /// empty echo of our own in-flight window re-ask (a truly disjoint peer
-    /// must not re-ask forever), never when the peer is at/below our tip
-    /// (we are the ahead side), and never inside the 60 s cooldown.
+    /// must not re-ask forever), never inside the 60 s cooldown, and (with
+    /// the streak still short) never when the peer is at/below our tip.
+    /// The equal/below-at-N cases are the item-19 test below.
     #[test]
     fn empty_tip_poll_reply_triggers_window_recon_only_as_fork_evidence() {
         let cooled = Instant::now() - Duration::from_secs(120);
         let recent_req = Instant::now();
-        // fork evidence, nothing in flight, cooled down → fire (fresh + expired)
-        assert!(empty_reply_fork_recon_due(2208734, 2208650, false, None));
-        assert!(empty_reply_fork_recon_due(2208734, 2208650, false, Some(cooled)));
-        // the peer is at/below our tip: we are the ahead side, nothing to learn
-        assert!(!empty_reply_fork_recon_due(2208650, 2208650, false, None));
-        assert!(!empty_reply_fork_recon_due(2208000, 2208650, false, None));
+        // fork evidence via the item-18 height fast path (streak 0: one
+        // empty reply is enough when the peer claims a higher start height),
+        // nothing in flight, cooled down → fire (fresh + expired)
+        assert!(empty_reply_fork_recon_due(2208734, 2208650, 0, false, None));
+        assert!(empty_reply_fork_recon_due(2208734, 2208650, 0, false, Some(cooled)));
+        // the peer at/below our tip with a SHORT streak: we may be the ahead
+        // side, nothing to learn yet
+        assert!(!empty_reply_fork_recon_due(2208650, 2208650, 0, false, None));
+        assert!(!empty_reply_fork_recon_due(2208000, 2208650, 0, false, None));
         // our own window re-ask is in flight: the empty echo is "no overlap",
         // not evidence — never re-trigger (the r5 judge blocker)
-        assert!(!empty_reply_fork_recon_due(2208734, 2208650, true, None));
-        assert!(!empty_reply_fork_recon_due(2208734, 2208650, true, Some(cooled)));
+        assert!(!empty_reply_fork_recon_due(2208734, 2208650, 0, true, None));
+        assert!(!empty_reply_fork_recon_due(2208734, 2208650, 0, true, Some(cooled)));
         // cooldown still running
         assert!(!empty_reply_fork_recon_due(
             2208734,
             2208650,
+            0,
             false,
             Some(recent_req)
         ));
+    }
+
+    /// (item 19) THE regression shape, live-caught on sami-pc 2026-11-10:
+    /// the session handshook at EQUAL height, the fork grew afterwards, and
+    /// start_height — frozen at handshake — could never rise above our tip,
+    /// so the item-18 height trigger was structurally unable to fire while
+    /// the PC sat 25+ min on a 9-block fork. The streak trigger must fire on
+    /// N consecutive empty tip-poll replies REGARDLESS of the (stale)
+    /// start_height comparison, with the echo + cooldown guards intact.
+    #[test]
+    fn empty_reply_streak_fires_regardless_of_start_height() {
+        let cooled = Instant::now() - Duration::from_secs(120);
+        let recent_req = Instant::now();
+        // equal-at-handshake (start_height == tip, the frozen value):
+        // streaks below N never fire; the Nth consecutive empty reply does.
+        assert!(!empty_reply_fork_recon_due(
+            2208769, 2208769, 1, false, None
+        ));
+        assert!(!empty_reply_fork_recon_due(
+            2208769, 2208769, 2, false, None
+        ));
+        assert!(empty_reply_fork_recon_due(
+            2208769, 2208769, 3, false, None
+        ));
+        assert!(empty_reply_fork_recon_due(
+            2208769,
+            2208769,
+            3,
+            false,
+            Some(cooled)
+        ));
+        // the stale height must not suppress the robust trigger in the other
+        // direction either (peer frozen BELOW our tip)
+        assert!(empty_reply_fork_recon_due(
+            2208000, 2208769, 3, false, None
+        ));
+        // ...but the streak path respects the cooldown like the fast path
+        assert!(!empty_reply_fork_recon_due(
+            2208769,
+            2208769,
+            3,
+            false,
+            Some(recent_req)
+        ));
+        // the echo guard binds the streak path too: an in-flight window
+        // re-ask's empty reply is "no overlap", never a re-trigger — even
+        // with a long streak banked
+        assert!(!empty_reply_fork_recon_due(
+            2208769, 2208769, 5, true, None
+        ));
+        // item-18 fast path intact: ONE empty reply with start_height above
+        // our tip fires immediately (the streak value is irrelevant)
+        assert!(empty_reply_fork_recon_due(
+            2208780, 2208769, 0, false, None
+        ));
+        assert!(empty_reply_fork_recon_due(
+            2208780,
+            2208769,
+            1,
+            false,
+            Some(cooled)
+        ));
+    }
+
+    /// (item 19) streak bookkeeping: consecutive empties climb; an empty
+    /// echo of an in-flight re-ask neither counts nor resets; any non-empty
+    /// reply clears both the in-flight flag and the streak.
+    #[test]
+    fn empty_reply_streak_bookkeeping_counts_and_resets() {
+        let mut recon = ReconAcc::default();
+        assert_eq!(recon.empty_tip_poll_streak, 0);
+        // three consecutive empties (nothing in flight) climb to N
+        for _ in 0..3 {
+            note_reply_empty(&mut recon);
+        }
+        assert_eq!(recon.empty_tip_poll_streak, 3);
+        // the echo of our own in-flight window re-ask: neither counts nor
+        // resets (it is "no overlap", not evidence)
+        recon.awaiting_window_reply = true;
+        note_reply_empty(&mut recon);
+        assert_eq!(recon.empty_tip_poll_streak, 3);
+        // a non-empty reply answers whatever was in flight: full reset
+        note_reply_nonempty(&mut recon);
+        assert!(!recon.awaiting_window_reply);
+        assert_eq!(recon.empty_tip_poll_streak, 0);
+        // the next empty counts from one again
+        note_reply_empty(&mut recon);
+        assert_eq!(recon.empty_tip_poll_streak, 1);
     }
 
     // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----
