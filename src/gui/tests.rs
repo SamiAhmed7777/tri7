@@ -2551,6 +2551,104 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
     assert!(!lbl2.contains("Syncing"), "{}", lbl2);
 }
 
+/// Operator directive 2026-11-10: in attach mode (GUI attached to an external
+/// daemon over RPC — the only mode) the status-bar sync display reports the
+/// DAEMON's live state, period. No local tipstate snapshot figure may appear
+/// anywhere in the path, the red/warning bar lives only while the daemon
+/// itself reports syncing:true, and a stale local tip far behind the daemon
+/// tip must NOT drag the indicator off green.
+#[test]
+fn attach_mode_sync_display_is_daemon_only() {
+    use crate::gui::app_state::{AppState, DebugInfo, GuiSync};
+
+    let mut st = AppState::new(gs::UiConfig::default());
+    // the stale local snapshot the operator rejected: "2208662 blocks",
+    // frozen when the GUI started while the daemon walks ahead of it
+    st.tip = Some(gs::TipInfo {
+        height: 2_208_662,
+        blockhash: String::new(),
+        updated_utc: String::new(),
+        last_advance_utc: String::new(),
+        window_base: 0,
+        daemon_tip: None,
+        tip_time: 0,
+        tip_bits: 0,
+        tip_modifier: 0,
+        tip_generated: false,
+        tip_pos: false,
+    });
+
+    // 1. daemon syncing:true → its live walk IS the display: daemon height,
+    //    warning progress (< 1.0 → the red bar path), and NO local figure
+    st.debug_info = Some(DebugInfo {
+        reachable: true,
+        connections: Some(8),
+        blocks: Some(2_208_687),
+        sync: Some(GuiSync {
+            height: 2_208_687,
+            target_height: 2_209_001,
+            blocks_per_sec: 914.0,
+            eta_secs: 40,
+            syncing: true,
+        }),
+        ..DebugInfo::default()
+    });
+    let (progress, label) = st.daemon_sync_display();
+    assert!(progress < 1.0, "warning while daemon syncing: {}", progress);
+    assert!(label.contains("Syncing 2208687 / 2209001"), "{}", label);
+    assert!(!label.contains("2208662"), "local snapshot leaked: {}", label);
+    assert!(!label.contains("blocks (daemon"), "old local-vs-daemon format: {}", label);
+    assert!(
+        !st.status_blocks_label().contains("2208662"),
+        "local snapshot leaked into the label"
+    );
+
+    // 2. daemon syncing:false (refresh_debug_info leaves sync None once it
+    //    reports caught-up) → green (1.0) with the daemon's LIVE height, even
+    //    though the local snapshot sits 25 blocks behind — the old code
+    //    rendered a red gap bar and "2208662 blocks (daemon 2208687)" here.
+    //    ROUND-2: the daemon's LIVE answer is Some(GuiSync { syncing:false })
+    //    — the daemon FOLLOWING the chain is the healthy state; round-1 code
+    //    fell into the syncing arm there and stayed red forever.
+    st.debug_info.as_mut().unwrap().sync = Some(GuiSync {
+        height: 2_208_687,
+        target_height: 2_208_687,
+        blocks_per_sec: 0.0,
+        eta_secs: 0,
+        syncing: false,
+    });
+    let (progress2, label2) = st.daemon_sync_display();
+    assert_eq!(progress2, 1.0, "daemon syncing:false must be green");
+    assert!(label2.contains("Synced · daemon 2208687"), "{}", label2);
+    assert!(!label2.contains("2208662"), "local snapshot leaked: {}", label2);
+    assert!(!label2.contains("blocks ("), "no local-figure format: {}", label2);
+
+    // 2b. sync=None (refresh leaves it None once synced) stays honest too
+    st.debug_info.as_mut().unwrap().sync = None;
+    let (progress2b, label2b) = st.daemon_sync_display();
+    assert_eq!(progress2b, 1.0, "daemon-synced fallback must be green");
+    assert!(label2b.contains("Synced · daemon 2208687"), "{}", label2b);
+    assert!(!label2b.contains("2208662"), "local snapshot leaked: {}", label2b);
+
+    // 3. daemon unreachable → honest "no tri7d RPC"; the local snapshot is
+    //    never resurrected as a fallback figure
+    st.debug_info = Some(DebugInfo {
+        reachable: false,
+        ..DebugInfo::default()
+    });
+    let (progress3, label3) = st.daemon_sync_display();
+    assert_eq!(progress3, 0.0);
+    assert_eq!(label3, "no tri7d RPC");
+    assert!(!label3.contains("2208662"), "local snapshot leaked: {}", label3);
+
+    // 4. never polled (debug_info None) → same honesty, still no local figure
+    st.debug_info = None;
+    let (progress4, label4) = st.daemon_sync_display();
+    assert_eq!(progress4, 0.0);
+    assert_eq!(label4, "no tri7d RPC");
+    assert!(!label4.contains("2208662"), "local snapshot leaked: {}", label4);
+}
+
 /// transactiontablemodel.cpp amount/tooltip parity for the shared row view:
 /// stake rows render the legacy net (the reward, NOT principal+reward),
 /// sends render a leading "-", and the tooltip is formatTooltip() verbatim
@@ -3460,4 +3558,108 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
         est, build.n_bytes, build.fee_sats
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Tor/I2P drawer decoupling (operator report 2026-11-10): the status-bar chip
+// must open the drawer as an overlay on the CURRENT screen — never navigate —
+// and the Receive Coins page must not host the drawer block anymore.
+// ---------------------------------------------------------------------------
+
+/// Behavioral: net_chip_clicked TOGGLES the drawer and touches nothing but
+/// the drawer state — st.screen must never move. Regression: the chip used
+/// to assign Screen::Receive, yanking the operator off whatever screen they
+/// were on. Also pins the ONE close-timer contract (20 s tick closes, a
+/// fresh touch survives the tick).
+#[test]
+fn net_chip_toggles_the_drawer_without_navigating() {
+    let mut st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
+    st.screen = Screen::Transactions;
+    assert!(st.net_drawer_open.is_none());
+
+    // first click: opens on the CURRENT screen, screen unchanged
+    st.net_chip_clicked();
+    assert!(st.net_drawer_open.is_some(), "the chip must open the drawer");
+    assert_eq!(st.screen, Screen::Transactions, "the chip must never navigate");
+
+    // reopening from a different screen: still no navigation (the drawer is
+    // an overlay on whatever is showing — including Receive itself)
+    st.screen = Screen::Receive;
+    st.net_drawer_open = None;
+    st.net_chip_clicked();
+    assert!(st.net_drawer_open.is_some());
+    assert_eq!(st.screen, Screen::Receive);
+
+    // second click: toggles closed, again without touching the screen
+    st.net_chip_clicked();
+    assert!(st.net_drawer_open.is_none());
+    assert_eq!(st.screen, Screen::Receive);
+
+    // the ONE auto-close timer: 20 s of no interaction folds it away …
+    st.net_chip_clicked();
+    st.net_drawer_open =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(21));
+    st.net_drawer_tick();
+    assert!(st.net_drawer_open.is_none(), "the 20 s auto-close must stay");
+
+    // … and a fresh touch is inside the window: the tick must NOT close it
+    st.net_chip_clicked();
+    st.net_drawer_touch();
+    st.net_drawer_tick();
+    assert!(st.net_drawer_open.is_some(), "a fresh touch must survive the tick");
+}
+
+/// Source-level seam (app.rs is feature-gated `gui`, so the headless suite
+/// cannot render it — include_str! still reads the file off disk): the
+/// Receive render path must not reference the drawer at all, the status-bar
+/// chip must not navigate, and the drawer body must exist EXACTLY once (as
+/// the screen-independent overlay — no second copy, no second close timer).
+#[test]
+fn receive_page_no_longer_renders_the_tor_i2p_drawer_block() {
+    let app = include_str!("app.rs");
+
+    // text of one `fn name` up to the next 4-space-indented fn in app.rs
+    let fn_src = |name: &str| -> String {
+        let start = app
+            .find(&format!("fn {}", name))
+            .unwrap_or_else(|| panic!("fn {} must exist in app.rs", name));
+        let rest = &app[start..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+
+    // 1. the Receive page render fn no longer references the drawer
+    let receive = fn_src("page_receive");
+    assert!(
+        !receive.contains("net_drawer"),
+        "Receive Coins must not host the Tor/I2P drawer block"
+    );
+
+    // 2. the status-bar chip never navigates (old bug: Screen::Receive jump)
+    let statusbar = fn_src("statusbar");
+    assert!(
+        !statusbar.contains("Screen::Receive"),
+        "the status-bar chip must not navigate to Receive"
+    );
+    assert!(
+        statusbar.contains("net_chip_clicked"),
+        "the chip must toggle through net_chip_clicked"
+    );
+
+    // 3. ONE drawer body: the moved content lives only in the overlay
+    let overlay = fn_src("net_drawer_overlay");
+    assert!(
+        overlay.contains("Peers reach you on these addresses"),
+        "the overlay must carry the drawer body"
+    );
+    assert_eq!(
+        app.matches("Peers reach you on these addresses").count(),
+        1,
+        "the drawer body must exist exactly once (no second copy)"
+    );
+    assert_eq!(
+        app.matches("fn net_drawer").count(),
+        1,
+        "exactly one drawer renderer (net_drawer_overlay)"
+    );
 }
