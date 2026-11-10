@@ -143,24 +143,23 @@ fn main() {
         );
         // sample rows EXACTLY as the page renders them: the shared row view
         // (page == CSV == probe), printing the rendered status sentence and
-        // amount string verbatim, plus the hover tooltip it would show
+        // amount string verbatim, plus the hover tooltip it would show.
+        // Every merged row is printed EXACTLY ONCE: the sampled section's
+        // indices come from probe_row_plan (lib-tested) and the full dump
+        // skips exactly those indices — an earlier revision printed recent
+        // stakes in BOTH sections, which read as duplicated staking history
+        // (judge blocker, lane-stake-net round 1).
         let (_, _, _, _, _, tip_h) = st.balance_split();
-        let mut stake_printed = 0usize;
-        let mut send_printed = 0usize;
-        for (i, r) in merged.iter().enumerate() {
+        let plan = tri7_core::gui::app_state::probe_row_plan(
+            merged.len(),
+            |i| {
+                merged[i].prev_kind == "coinstake" || merged[i].legacy_kind == "mined"
+            },
+            |i| st.tx_row_view(&merged[i], tip_h as u32).negative,
+        );
+        for i in &plan {
+            let r = &merged[*i];
             let view = st.tx_row_view(r, tip_h as u32);
-            let is_stake = r.prev_kind == "coinstake" || r.legacy_kind == "mined";
-            let is_send = view.negative;
-            if i >= 5 {
-                if !(is_stake && stake_printed < 3) && !(is_send && send_printed < 3) {
-                    continue;
-                }
-                if is_stake {
-                    stake_printed += 1;
-                } else if is_send {
-                    send_printed += 1;
-                }
-            }
             println!(
                 "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
                 r.height,
@@ -171,13 +170,34 @@ fn main() {
                 view.tooltip.replace('\n', " / ")
             );
         }
+        // 2026-11-09 incident probe: the NEWEST coinstake row must render the
+        // legacy net (the reward), never the rolled principal — the rendered
+        // amount + stake_net state on one line, so a regression shows up here
+        // as principal-not-reward without opening the GUI.
+        if let Some(r) = merged.iter().find(|r| r.prev_kind == "coinstake") {
+            let view = st.tx_row_view(r, tip_h as u32);
+            println!(
+                "newest stake: h{} ({}) | stake_net {} | amt {} | tooltip \"{}\"",
+                r.height,
+                tri7_core::gui::app_state::stamp_date(r.tx_time),
+                match r.stake_net {
+                    Some(net) => format!("Some({net})"),
+                    None => "None (unknown)".to_string(),
+                },
+                view.amount_text,
+                view.tooltip.replace('\n', " / ")
+            );
+        }
         println!("--- what the page would print ---");
         println!("{}", st.history_status_line());
-        // --history-probe-full: audit dump — EVERY merged row through the
-        // same shared view (the default samples 5 + 3 stake + 3 send)
+        // --history-probe-full: audit dump — every merged row the sampled
+        // section did NOT already print, through the same shared view
         if args.iter().any(|a| a == "--history-probe-full") {
             println!("--- full dump: {} rows ---", merged.len());
-            for r in merged.iter() {
+            for (i, r) in merged.iter().enumerate() {
+                if plan.contains(&i) {
+                    continue; // the sampled section already printed this row
+                }
                 let view = st.tx_row_view(r, tip_h as u32);
                 println!(
                     "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
