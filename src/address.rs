@@ -229,6 +229,18 @@ mod tests {
     // different address string: bare-pubkey attribution follows the key bytes
     // the script actually carries.
     const WALLET_PUBKEY_UNCOMPRESSED_ADDRESS: &str = "TUbCqmzp7jH934PZwSVb596NbkDw59ck3i";
+    // Live sweep-migration vector (2026-11-10 incident, daemon listunspent):
+    // UTXO 4d0be43c…:0 scriptPubKey 76 a9 14 86cb0e9408ee60c88d72a126801a29904d7770df 88 ac
+    // pays to exactly this VALID address. (The incident notes quote the
+    // hash160 chunk as "…0df88" — the trailing "88" is the script's
+    // OP_EQUALVERIFY opcode absorbed into the quoted text; the hash160 is the
+    // 20 bytes ending …0df.)
+    const SWEEP_HASH160: &str = "86cb0e9408ee60c88d72a126801a29904d7770df";
+    const SWEEP_ADDRESS: &str = "TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7";
+    // The wallet's STORED string for the same key — legacy BDB→SQLite import
+    // era corruption, two base58 characters differ (VD**j**→VD**J**,
+    // E**G**h→E**C**h). Daemon validateaddress: isvalid=false.
+    const SWEEP_ADDRESS_CORRUPTED: &str = "TNFvoQdbk7VDJ8oZD1EbKkrPmZAECh6Md7";
 
     fn unhex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -301,6 +313,50 @@ mod tests {
             payload_to_address(&dest.payload()),
             WALLET_PUBKEY_UNCOMPRESSED_ADDRESS
         );
+    }
+
+    #[test]
+    fn sweep_incident_hash160_encodes_to_the_live_address() {
+        // hash160 → payload (version byte copied from the constants above) →
+        // address must reproduce the daemon-confirmed live string exactly.
+        let h: [u8; 20] = unhex(SWEEP_HASH160).as_slice().try_into().unwrap();
+        let payload = payload_for(PUBKEY_ADDRESS, &h);
+        assert_eq!(payload[0], PUBKEY_ADDRESS);
+        assert_eq!(payload_to_address(&payload), SWEEP_ADDRESS);
+        // the same hash straight out of the full P2PKH scriptPubKey
+        let mut script = vec![0x76, 0xa9, 0x14];
+        script.extend_from_slice(&h);
+        script.extend_from_slice(&[0x88, 0xac]);
+        let dest = script_to_dest(&script).expect("live P2PKH script must parse");
+        assert!(dest.is_pubkey_hash());
+        assert_eq!(dest.payload(), payload);
+        assert_eq!(payload_to_address(&dest.payload()), SWEEP_ADDRESS);
+        // the encoder is therefore NOT the bug: it was already producing the
+        // valid string — the incident was the string-keyed key lookup.
+        assert_ne!(SWEEP_ADDRESS_CORRUPTED, SWEEP_ADDRESS);
+    }
+
+    #[test]
+    fn corrupted_sweep_address_fails_checksum_validation() {
+        // Both corrupted characters are legal base58 alphabet members (so the
+        // corruption was silent at store time), yet the string must FAIL
+        // checksum validation: encoder and validator agree the corrupted
+        // string is not an address and can never equal a freshly-encoded one.
+        for ch in SWEEP_ADDRESS_CORRUPTED.chars() {
+            assert!(
+                "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+                    .contains(ch),
+                "char {ch} must be alphabet-legal for this corruption shape"
+            );
+        }
+        let err = address_to_payload(SWEEP_ADDRESS_CORRUPTED)
+            .expect_err("corrupted incident string must fail validation");
+        assert!(err.contains("checksum"), "got: {err}");
+        // the VALID form decodes fine, to exactly the incident hash160 at the
+        // pubkey version byte
+        let payload = address_to_payload(SWEEP_ADDRESS).expect("valid form decodes");
+        assert_eq!(payload[0], PUBKEY_ADDRESS);
+        assert_eq!(&payload[1..], unhex(SWEEP_HASH160).as_slice());
     }
 
     #[test]

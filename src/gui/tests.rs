@@ -3461,3 +3461,264 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Sweep key match — the script's hash160 is the SOLE authority; stored
+// address strings are never consulted for selection. Live incident 2026-11-10: UTXO
+// 4d0be43c…:0 pays the VALID address TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7
+// (vector pinned exactly in src/address.rs tests), but the wallet's stored
+// address strings for the same key are CORRUPTED from the legacy BDB→SQLite
+// import era, so the string-keyed key map missed and the seed migration
+// refused a spendable coin. Synthetic keys ONLY here — no wallet.dat I/O.
+// ---------------------------------------------------------------------------
+
+/// Deterministic corruption mirroring the live shape: two alphabet-legal
+/// character substitutions that break the base58check checksum (the way
+/// VD**j**→VD**J** / E**G**h→E**C**h did).
+fn corrupt_address_two_chars(s: &str, shift: usize) -> String {
+    const ALPHA: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut b = s.as_bytes().to_vec();
+    for idx in [2usize, b.len() - 2] {
+        let pos = ALPHA
+            .iter()
+            .position(|&c| c == b[idx])
+            .expect("address chars are base58");
+        b[idx] = ALPHA[(pos + shift) % ALPHA.len()];
+    }
+    String::from_utf8(b).expect("base58 chars are ascii")
+}
+
+fn p2pkh_script_from_hash160(h: &[u8; 20]) -> Vec<u8> {
+    let mut s = vec![0x76u8, 0xa9, 0x14];
+    s.extend_from_slice(h);
+    s.extend_from_slice(&[0x88, 0xac]);
+    s
+}
+
+/// One synthetic wallet key: fixed secret bytes → compressed pubkey, with
+/// its FRESH (correct) P2PKH address; callers corrupt `address` as needed.
+fn synthetic_wallet_key(seed_byte: u8) -> crate::wallet::WalletKey {
+    let secp = secp256k1::Secp256k1::signing_only();
+    let sk = secp256k1::SecretKey::from_slice(&[seed_byte; 32]).expect("valid secret");
+    let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+        .serialize()
+        .to_vec();
+    let secret = sk.secret_bytes();
+    let address = payload_to_address(&crate::address::ScriptDest::PubkeyHash(hash160(&pubkey)).payload());
+    crate::wallet::WalletKey {
+        pubkey,
+        secret,
+        compressed: true,
+        address,
+        created: None,
+    }
+}
+
+/// AppState with synthetic wallet keys and a derived UTXO set — no wallet
+/// file anywhere (`path` empty; sweep_source_candidates never opens one).
+fn sweep_hash160_state(
+    utxos: Vec<gs::UtxoRec>,
+    keys: Vec<crate::wallet::WalletKey>,
+) -> crate::gui::app_state::AppState {
+    let dir = gui_test_dir("sweep_hash160_match");
+    let mut st = crate::gui::app_state::AppState::new(sweep_test_cfg(&dir, None));
+    st.wallet = Some(crate::gui::state::WalletData {
+        path: String::new(),
+        keys,
+        names: Vec::new(),
+        default_key: None,
+        version: None,
+        best_block: None,
+        scripts: Vec::new(),
+        hd_mnemonic: None,
+        hd_passphrase: None,
+        hd_chain_index: 0,
+        seed_migrated: false,
+    });
+    st.derived = Some(gs::DerivedWallet {
+        balances: gs::compute_balances(&utxos, &|_: &str| None),
+        utxos,
+        snapshot_height: 100,
+        coverage_height: 150,
+        reconcile: gs::ReconcileReport::default(),
+    });
+    st.tip = Some(gs::TipInfo {
+        height: 150,
+        blockhash: String::new(),
+        updated_utc: String::new(),
+        last_advance_utc: String::new(),
+        window_base: 0,
+        daemon_tip: None,
+        tip_time: 1_400_000_500,
+        tip_bits: 0x2000ffff,
+        tip_modifier: 0,
+        tip_generated: false,
+        tip_pos: false,
+    });
+    st
+}
+
+fn utxo_rec(txid: [u8; 32], script: Vec<u8>, address: String) -> gs::UtxoRec {
+    gs::UtxoRec {
+        txid,
+        n: 0,
+        value_sats: 100, // the incident coin: 0.0001 TRI
+        script,
+        address,
+        height: 100,
+        tx_time: 1_400_000_000,
+        legacy_kind: String::new(),
+        stake_net: None,
+        prev_kind: "regular".into(),
+    }
+}
+
+#[test]
+fn sweep_key_match_uses_script_hash160_and_survives_corrupted_stored_addresses() {
+    let owned = synthetic_wallet_key(0x42);
+    let h = hash160(&owned.pubkey);
+    let fresh = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h).payload());
+
+    // The key's stored .address is a CORRUPTED variant of its own address…
+    let mut key = owned.clone();
+    key.address = corrupt_address_two_chars(&fresh, 7);
+    assert_ne!(key.address, fresh);
+    assert!(
+        crate::address::address_to_payload(&key.address).is_err(),
+        "the corruption must break the checksum (daemon isvalid=false shape)"
+    );
+    // …and the derived UTXO carries a DIFFERENT corrupted variant (as on the
+    // live wallet, where the refusal printed one corrupted string while the
+    // key map held another) — the string-keyed map misses BOTH ways.
+    let utxo_addr = corrupt_address_two_chars(&fresh, 11);
+    assert_ne!(utxo_addr, fresh);
+    assert_ne!(utxo_addr, key.address);
+    assert!(crate::address::address_to_payload(&utxo_addr).is_err());
+
+    // 1. hash160 authority: selection SUCCEEDS despite both stored strings
+    //    being corrupted — the script's bytes 3..23 match the pubkey.
+    let st = sweep_hash160_state(
+        vec![utxo_rec([0xa1; 32], p2pkh_script_from_hash160(&h), utxo_addr)],
+        vec![key.clone()],
+    );
+    let inputs = st
+        .sweep_source_candidates()
+        .expect("hash160 match must select the coin with corrupted stored addresses");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].pubkey, owned.pubkey);
+    assert_eq!(inputs[0].secret, owned.secret);
+    assert_eq!(inputs[0].value, 100);
+    assert_eq!(inputs[0].script_pubkey, p2pkh_script_from_hash160(&h));
+    assert!(inputs[0].txid == [0xa1; 32] && inputs[0].n == 0);
+    assert!(!inputs[0].is_coinbase && !inputs[0].is_coinstake);
+
+    // 2. uncorrupted data: a clean (key, utxo) address pair selects
+    //    identically through the hash160 authority (no string path exists).
+    let fresh_key = synthetic_wallet_key(0x43);
+    let h2 = hash160(&fresh_key.pubkey);
+    let fresh2 = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h2).payload());
+    let st2 = sweep_hash160_state(
+        vec![utxo_rec([0xa2; 32], p2pkh_script_from_hash160(&h2), fresh2.clone())],
+        vec![fresh_key.clone()],
+    );
+    let inputs2 = st2
+        .sweep_source_candidates()
+        .expect("uncorrupted pair selects via the hash160 authority");
+    assert_eq!(inputs2.len(), 1);
+    assert_eq!(inputs2[0].pubkey, fresh_key.pubkey);
+
+    // 3. fail-closed preserved: a coin the wallet truly holds no key for is
+    //    STILL refused — and the refusal prints the FRESHLY ENCODED address
+    //    of the script's hash160, never the corrupted stored string.
+    let stranger = synthetic_wallet_key(0x44);
+    let h3 = hash160(&stranger.pubkey);
+    let fresh3 = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h3).payload());
+    let stranger_stored = corrupt_address_two_chars(&fresh3, 5);
+    let st3 = sweep_hash160_state(
+        vec![utxo_rec([0xa3; 32], p2pkh_script_from_hash160(&h3), stranger_stored.clone())],
+        vec![key], // does NOT own coin 3
+    );
+    let err = st3.sweep_source_candidates().unwrap_err();
+    assert!(err.contains("no key for it"), "{}", err);
+    assert!(
+        err.contains(&fresh3),
+        "refusal must print the freshly encoded address: {}",
+        err
+    );
+    assert!(
+        !err.contains(&stranger_stored),
+        "refusal must NEVER print the stored corrupted string: {}",
+        err
+    );
+}
+
+#[test]
+fn sweep_key_match_never_trusts_a_stored_string_collision_over_the_script_hash160() {
+    // Judge round-2 collision regression: key A's STORED address string
+    // EQUALS the UTXO's stored address string, but key A's hash160 ≠ the
+    // script's hash160; key B's hash160 == the script's hash160 while B's
+    // stored string differs from the UTXO's. The pre-fix shape (stored
+    // string FIRST, hash160 only as fallback) would take key A on string
+    // equality alone and sign the sweep with the WRONG key — no hash160
+    // check anywhere. Hash160 authority must select key B.
+    let a = synthetic_wallet_key(0x50);
+    let b = synthetic_wallet_key(0x51);
+    let h_a = hash160(&a.pubkey);
+    let h_b = hash160(&b.pubkey);
+    assert_ne!(h_a, h_b, "fixture sanity: distinct keys, distinct hash160s");
+
+    // The UTXO's script pays key B's hash160; its stored string is key A's
+    // VALID (checksum-clean) address — the purest collision shape: the
+    // string matches a held key exactly, the hash160 does not.
+    let utxo_addr = payload_to_address(&crate::address::ScriptDest::PubkeyHash(h_a).payload());
+    assert_ne!(utxo_addr, b.address);
+    let st = sweep_hash160_state(
+        vec![utxo_rec([0xb1; 32], p2pkh_script_from_hash160(&h_b), utxo_addr)],
+        vec![a.clone(), b.clone()],
+    );
+    let inputs = st.sweep_source_candidates().expect(
+        "the script's hash160 must select key B despite the colliding stored string",
+    );
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].pubkey, b.pubkey,
+        "must select key B (script hash160), never key A (stored-string collision)"
+    );
+    assert_eq!(inputs[0].secret, b.secret);
+    assert_ne!(inputs[0].pubkey, a.pubkey);
+    assert_ne!(inputs[0].secret, a.secret);
+    assert_eq!(inputs[0].script_pubkey, p2pkh_script_from_hash160(&h_b));
+}
+
+#[test]
+fn sweep_key_match_refuses_when_only_a_string_colliding_key_exists() {
+    // Judge round-2 wrong-key refusal: ONLY key A exists — its stored string
+    // EQUALS the UTXO's stored string but its hash160 ≠ the script's hash160
+    // (the script pays a hash160 no held key derives from). The string match
+    // must NOT rescue the selection: the sweep refuses, printing the
+    // FRESHLY ENCODED address of the script's hash160 — never the stored
+    // (string-matching) one.
+    let a = synthetic_wallet_key(0x52);
+    let missing = synthetic_wallet_key(0x53); // NOT inserted into the wallet
+    let h_missing = hash160(&missing.pubkey);
+    let fresh_missing =
+        payload_to_address(&crate::address::ScriptDest::PubkeyHash(h_missing).payload());
+
+    let utxo_addr = a.address.clone(); // the stored string that WOULD match
+    let st = sweep_hash160_state(
+        vec![utxo_rec([0xb2; 32], p2pkh_script_from_hash160(&h_missing), utxo_addr)],
+        vec![a.clone()],
+    );
+    let err = st.sweep_source_candidates().unwrap_err();
+    assert!(err.contains("no key for it"), "{}", err);
+    assert!(
+        err.contains(&fresh_missing),
+        "refusal must print the freshly encoded address of the script's hash160: {}",
+        err
+    );
+    assert!(
+        !err.contains(&a.address),
+        "refusal must NEVER echo the (string-matching) stored address: {}",
+        err
+    );
+}
