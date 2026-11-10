@@ -65,6 +65,11 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "smsgoptions",
     "smsgscanchain",
     "smsgscanbuckets",
+    // legacy parity 2026-11-09 (SMSG read-side): the RPC console can list
+    // buckets + look up / import peer keys (no GUI page calls these)
+    "smsgbuckets",
+    "smsggetpubkey",
+    "smsgaddkey",
     // wallet file state (File ▸ Encrypt / Change / Unlock / Remove) — the
     // passphrase is never stored by the GUI, and the node validates it
     "encryptwallet",
