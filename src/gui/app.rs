@@ -249,10 +249,6 @@ pub struct Tri7App {
     /// oldest first. Clicking the Date header flips it (Sami: "oldest to the
     /// newest and then back again").
     tx_sort_desc: bool,
-    /// Tor/I2P address drawer: Some(t) = open, t is when it was last touched.
-    /// It closes itself after 20 s of no interaction (Sami: "reveal itself and
-    /// then automatically go back away when they don't need to see it").
-    net_drawer_open: Option<std::time::Instant>,
     tx_min_amount: String,
     tx_type_filter: usize,
     tx_status_filter: usize,
@@ -572,42 +568,32 @@ impl Tri7App {
                         conn_color,
                     );
                     ui.separator();
-                    // 2. sync cluster — expands; thin progress bar while syncing
+                    // 2. sync cluster — expands; thin progress bar while the
+                    //    DAEMON is syncing (attach mode: the daemon's live
+                    //    state is the whole display — no local snapshot, and
+                    //    the warning/red bar lives only while the daemon
+                    //    itself reports syncing:true)
                     let (progress, label) = self.sync_progress();
                     let synced = progress >= 1.0;
-                    let sync_icon = if self.st.tip.is_some() && synced {
+                    let sync_icon = if synced {
                         "icons/synced"
                     } else {
                         "icons/notsynced"
                     };
+                    // green only when the daemon reports synced (progress 1.0
+                    // is reachable only via a live daemon answer); amber
+                    // warning while it reports syncing or cannot be reached
                     let sync_color = if synced {
-                        if self.st.debug_info.as_ref().map(|d| d.reachable).unwrap_or(false) {
-                            th::SUCCESS
-                        } else {
-                            th::TEXT_MUTED
-                        }
+                        th::SUCCESS
                     } else {
                         th::WARNING
                     };
                     let sync_tex = self.tex(ui.ctx(), sync_icon);
                     th::status_cluster(ui, sync_tex.as_ref(), "Sync", sync_color);
-                    let reachable = self
-                        .st
-                        .debug_info
-                        .as_ref()
-                        .map(|d| d.reachable)
-                        .unwrap_or(false);
-                    if synced && reachable {
+                    if synced {
+                        // label already reads "Synced · daemon <live height>"
                         ui.label(
-                            egui::RichText::new(format!("Synced · {}", label))
-                                .size(11.0)
-                                .strong()
-                                .color(sync_color),
-                        );
-                    } else if synced {
-                        // local tip known but no tri7d RPC — say so honestly
-                        ui.label(
-                            egui::RichText::new(label).size(11.0).strong().color(th::TEXT_MUTED),
+                            egui::RichText::new(label).size(11.0).strong().color(sync_color),
                         );
                     } else {
                         ui.scope(|ui| {
@@ -719,11 +705,13 @@ impl Tri7App {
                         "Peer transports: C = clearnet, T = Tor, I = I2P",
                     );
                     ui.separator();
-                    // 5b. Tor/I2P handle: there is ONE drawer implementation
-                    // (net_drawer on the Receive page). This jumps there and
-                    // opens it, instead of growing a second copy that would
-                    // drift out of sync. The Display tab's "Show onion
-                    // address in status bar" option gates it (legacy
+                    // 5b. Tor/I2P handle: ONE drawer, rendered as a
+                    // screen-independent overlay (net_drawer_overlay). The
+                    // chip TOGGLES it without navigating, so it opens on
+                    // whatever screen the operator is on — the Receive page
+                    // does not host the block anymore (operator report
+                    // 2026-11-10). The Display tab's "Show onion address in
+                    // status bar" option gates it (legacy
                     // OptionsModel::ShowOnionAddress hid the status bar's
                     // onion address when it was off).
                     if self.st.transport_chip_visible() {
@@ -736,11 +724,10 @@ impl Tri7App {
                             .small(),
                         );
                         if net_btn.clicked() {
-                            self.st.screen = crate::gui::state::Screen::Receive;
-                            self.net_drawer_open = Some(std::time::Instant::now());
+                            self.st.net_chip_clicked();
                         }
                         net_btn.on_hover_text(
-                            "Your Tor and I2P addresses, with copy — opens on Receive Coins",
+                            "Your Tor and I2P addresses, with copy — toggles the drawer right here",
                         );
                     }
                     // 6. refresh — 28 px icon-only ghost button
@@ -1806,6 +1793,9 @@ impl eframe::App for Tri7App {
 
         self.dialogs(ctx);
         self.debug_window(ctx);
+        // Tor/I2P drawer overlay — screen-independent: renders on whatever
+        // screen is showing, driven ONLY by st.net_drawer_open.
+        self.net_drawer_overlay(ctx);
         if DEBUG_TOGGLE.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.console_open = true;
         }
@@ -1964,37 +1954,10 @@ impl eframe::App for Tri7App {
 
 impl Tri7App {
     fn sync_progress(&self) -> (f32, String) {
-        // live daemon sync progress (from-zero walk) drives the bar directly
-        if let Some(di) = &self.st.debug_info {
-            if di.reachable {
-                if let Some(s) = &di.sync {
-                    if s.syncing {
-                        return (s.fraction(), s.label());
-                    }
-                }
-                // daemon following, no local chain state: treat as synced
-                // (wallet-only folder design — the daemon owns the chain)
-                if self.st.tip.as_ref().map(|t| t.height).unwrap_or(0) == 0 {
-                    return (1.0, self.st.status_blocks_label());
-                }
-            }
-        }
-        match (&self.st.tip, &self.st.debug_info) {
-            (Some(tip), Some(di)) if di.reachable && di.blocks == Some(tip.height) => {
-                (1.0, self.st.status_blocks_label())
-            }
-            (Some(tip), Some(di)) if di.reachable => {
-                let d = di.blocks.unwrap_or(0);
-                let p = if d > 0 {
-                    tip.height as f32 / d.max(1) as f32
-                } else {
-                    0.0
-                };
-                (p.clamp(0.0, 1.0), self.st.status_blocks_label())
-            }
-            (Some(tip), _) => (1.0, format!("{} blocks (no tri7d RPC)", tip.height)),
-            _ => (0.0, "no chain state".into()),
-        }
+        // ATTACH MODE ONLY (operator directive 2026-11-10): the daemon's live
+        // state IS the sync display — one implementation in AppState, no
+        // local tipstate figure anywhere in this path
+        self.st.daemon_sync_display()
     }
 
     fn load_screen(&mut self, ui: &mut egui::Ui) {
@@ -3091,8 +3054,6 @@ impl Tri7App {
             "Receive Coins",
             "Manage receiving addresses and create payment requests",
         );
-        // Tor / I2P identity: a drawer that reveals the addresses on demand
-        self.net_drawer(ui);
         // HD seed status strip: what this wallet's keys derive from (or the
         // honest no-seed note for pre-HD random-key wallets) + the seed
         // migration state and its entry point.
@@ -3544,17 +3505,17 @@ impl Tri7App {
         });
     }
 
-    /// Tor / I2P identity drawer: a single row that reveals the node's onion
-    /// and i2p addresses with Copy buttons, then folds itself away again.
-    fn net_drawer(&mut self, ui: &mut egui::Ui) {
-        // auto-close after 20 s
-        if let Some(opened) = self.net_drawer_open {
-            if opened.elapsed().as_secs() > 20 {
-                self.net_drawer_open = None;
-            }
+    /// Tor / I2P identity drawer — a SCREEN-INDEPENDENT overlay (egui::Window
+    /// anchored above the status bar, right-aligned): the status-bar chip
+    /// opens it on ANY screen without navigating. ONE drawer body and ONE
+    /// close timer (AppState::net_drawer_tick, the 20 s auto-close) — this
+    /// codebase already fought "two drawers, two close timers" drift once,
+    /// so the body must not be copied anywhere else.
+    fn net_drawer_overlay(&mut self, ctx: &egui::Context) {
+        self.st.net_drawer_tick();
+        if self.st.net_drawer_open.is_none() {
+            return;
         }
-        let open = self.net_drawer_open.is_some();
-        let arrow = if open { "▾" } else { "▸" };
         let onion = self
             .st
             .debug_info
@@ -3565,24 +3526,15 @@ impl Tri7App {
             .debug_info
             .as_ref()
             .and_then(|d| d.local_i2p.clone());
-
-        let btn = egui::Button::new(
-            egui::RichText::new(format!("{} Tor / I2P addresses", arrow))
-                .size(12.0)
-                .color(th::TEXT_SECONDARY),
-        )
-        .fill(th::PANEL_BG)
-        .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE));
-        if ui.add(btn).clicked() {
-            self.net_drawer_open = if open {
-                None
-            } else {
-                Some(std::time::Instant::now())
-            };
-        }
-        if self.net_drawer_open.is_some() {
-            ui.add_space(4.0);
-            th::card(ui, |ui| {
+        let mut open = true;
+        let mut touched = false;
+        egui::Window::new("Tor / I2P addresses")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -48.0])
+            .show(ctx, |ui| {
                 for (label, value, kind) in [
                     ("Tor (.onion)", onion, "onion"),
                     ("I2P", i2p, "i2p"),
@@ -3603,8 +3555,7 @@ impl Tri7App {
                                 );
                                 if th::ghost_button(ui, "Copy").clicked() {
                                     ui.output_mut(|o| o.copied_text = v.clone());
-                                    // touching a control keeps the drawer open
-                                    self.net_drawer_open = Some(std::time::Instant::now());
+                                    touched = true;
                                 }
                             }
                             None => {
@@ -3630,9 +3581,16 @@ impl Tri7App {
                     .color(th::TEXT_MUTED),
                 );
             });
-            ui.add_space(6.0);
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        if touched {
+            // touching a control keeps the drawer open
+            self.st.net_drawer_touch();
         }
+        if !open {
+            // the X on the window title bar folds it away early
+            self.st.net_drawer_open = None;
+        }
+        // keep repainting so the 20 s auto-close fires without user input
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 
     fn ab_edit_dialog(&mut self, ui: &mut egui::Ui) {
@@ -6425,7 +6383,6 @@ pub fn run(cfg: UiConfig, start_minimized: bool) {
             tx_selected: None,
             tx_search: String::new(),
             tx_sort_desc: true,
-            net_drawer_open: None,
             tx_min_amount: String::new(),
             tx_type_filter: 0,
             tx_status_filter: 0,
