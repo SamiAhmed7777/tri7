@@ -114,3 +114,65 @@ Height→body resolution never consults the LIVE chain:
 - `frame_offset` (ops trim example) intentionally left on the frozen map.
 - The overlay is RAM-only; a restart re-seeds from the tipstate. Read-only
   BlockStore consumers (GUI, prevout lookup) never seed → legacy behavior.
+
+## ROUND 2 (same tick, live-caught on the fleet): the locator-anchor guard
+
+Deploying r1 to DNS2+DNS3 exposed the SECOND-ORDER stale-slot defect live:
+DNS3 (new binary, seeded from its own fork lineage) still could not converge.
+Its journal looped every minute: `recon: served header at h2208650 breaks the
+window chain (prev 259ede68 expected a55aa6d3) — judging the chained prefix
+only`.
+
+Root cause: the serving peer in DNS3's peer set (Pi, still on the pre-fix
+binary) holds DNS3's pushed race blocks in its APPENDIX (height-tagged
+runtime appends) AND the canonical chain in its frozen height map. DNS3's
+recon locator contains its own branch hashes (a55aa6d3@2208649, child); the
+peer's locator resolution is hash-keyed (`store.block_by_hash`) and resolved
+a55aa6d3 at height 2208649 — so the serve ANCHORED at 2208649 and served the
+peer's own 2208650 block from the height map (prev 259ede68). DNS3's guard
+correctly refused to link and the reconciliation never judged.
+
+Fix (same principle, one layer deeper): a locator hash may only anchor a
+serve when it is a body OUR LIVE CHAIN actually holds at that height —
+`store.chain_slot_hash(hit_height) == Some(hash)` — applied to BOTH the
+store hit and the recent-cache hit in `collect_headers`' anchor loop.
+Unregistered stores keep the legacy behavior exactly (pinned). A re-scanned
+(heightless) raced frame anchors nothing either way (also pinned — pre-change
+parity).
+
+Fleet consequence: with the fix deployed on every serving node, a follower
+whose locator holds branch hashes gets served from the deepest SHARED chain
+anchor — the reply chains into the follower's window, the judge sees the real
+fork, and the heavier-branch switch can fire. This is the missing piece for
+work item (3) (convergence without a re-copy).
+
+Tests: 557 lib + 76 follow_tip green.
+- `stale_locator_body_cannot_anchor_the_serve_past_our_refilled_slot` (new,
+  bin): pins the live Pi shape — raced-hash-only locator anchors nothing;
+  raced+shared locator serves from the shared ancestor (b3,b4); clean locator
+  unchanged; appendix-height raced body still anchors on an UNREGISTERED
+  store (legacy); re-scanned heightless raced frame anchors nothing either way.
+- `encode_frame` exported from the lib so bin tests build byte-identical
+  stores (FRAME_MAGIC was private).
+
+## ROUND 3 verdict: GRADE B zero blockers (urn:ump:yvjjj75cjordoaf5m3vlnfwicnuh3lsg32pswestxk7dj63cedaq).
+POLISH TAKEN (the substantive one): raw_body_by_height's UNREGISTERED path is
+restored to the exact legacy semantics — height-map frame proven by
+hash_at_height, or nothing (the old no-proof-no-serve guard; a map-miss never
+served an appendix body). The chain-registered path keeps the height_slot
+resolution. Test legs added to
+without_a_registered_chain_legacy_resolution_is_untouched:
+raw_body_by_height(3) (appendix-only height) → None;
+raw_body_by_height(2) (in-map) → the proven body.
+Also taken: blank line after encode_frame.
+RECORDED (cosmetic): audit seen-set clear-vs-LRU (8192 bound, re-log only);
+chain_tip Mutex+slots RwLock two-acquisition window (benign — rollback drops
+slots then re-advances re-note them; a torn read serves the legacy body for
+one lookup); encode_frame consumers = bin tests + future ops tooling (doc'd).
+
+## ROUND 4 note
+Base moved under us (sibling lanes merged lane/drawer + lane/sweep-fix onto
+master while this item ran — both graded B, judge urns in their commits); the
+lib suite is 562 now (the lanes' +5). diff-r4-final.patch is THIS item's
+complete diff vs the new master base; the two previously submitted patches
+remain superseded. Suite: 562 lib + 76 follow_tip green on the merged tree.

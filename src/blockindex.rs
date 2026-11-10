@@ -143,6 +143,18 @@ impl TxIndex {
 // ---------------------------------------------------------------------------
 
 const FRAME_MAGIC: u32 = 0x0522_3570; // LE [70 35 22 05]
+
+/// On-disk frame envelope for a raw block body (magic + len + body). Public
+/// so the follow_tip tests and ops tooling can synthetically build stores
+/// byte-identical to what append_block writes.
+pub fn encode_frame(body: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(8 + body.len());
+    f.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+    f.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    f.extend_from_slice(body);
+    f
+}
+
 const MAX_FRAME: usize = 8 << 20;
 
 /// Walk the transactions of a serialized block, invoking `cb(start, end)`
@@ -1149,6 +1161,9 @@ impl BlockStore {
     /// live tip's choice) wins over the height map / appendix, and a height
     /// above the chain tip serves nothing — so a raced or refilled slot can
     /// never hand back a body the node's own chain does not contain.
+    /// UNREGISTERED stores keep the exact legacy semantics: the height-map
+    /// frame proven by `hash_at_height`, or nothing (the old
+    /// no-proof-no-serve guard — a map-miss never served an appendix body).
     pub fn raw_body_by_height(&self, h: u64) -> Result<Option<Vec<u8>>, String> {
         let inner = match self.inner() {
             Some(i) => i,
@@ -1157,10 +1172,27 @@ impl BlockStore {
         if !inner.heights_ok {
             return Ok(None);
         }
-        match self.height_slot(&inner, h)? {
-            Some((_, _, body)) => Ok(Some(body)),
-            None => Ok(None),
+        if self.chain_slot_tip().is_some() {
+            return match self.height_slot(&inner, h)? {
+                Some((_, _, body)) => Ok(Some(body)),
+                None => Ok(None),
+            };
         }
+        let want = self.hash_at_height(h)?;
+        let off = match inner.blocks.offset_by_height(h) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        let body = Self::read_frame(&inner, off)?;
+        let Some(w) = want else {
+            // No expected hash means we cannot prove what this frame is.
+            // Serving it anyway would hand out an unverified body.
+            return Ok(None);
+        };
+        if crate::p2p::internal_to_display(&header_hash(&body)?) != w {
+            return Ok(None);
+        }
+        Ok(Some(body))
     }
 
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
@@ -2441,6 +2473,15 @@ mod tests {
         assert_eq!(
             store.hash_at_height(3).unwrap().unwrap(),
             internal_to_display(&header_hash_ok(&frame_bytes(&raced)))
+        );
+        // raw_body_by_height legacy legs: an appendix-only height (map miss)
+        // serves NOTHING (the old no-proof-no-serve guard), and an in-map
+        // height serves the map's proven body
+        assert!(store.raw_body_by_height(3).unwrap().is_none());
+        let b2 = block(hashes[1], vec![coin_tx(vec![0xbb], 8_888_888, vec![])]);
+        assert_eq!(
+            store.raw_body_by_height(2).unwrap().unwrap(),
+            frame_bytes(&b2)[8..]
         );
         assert_eq!(store.stale_slot_hits(), 0);
         std::fs::remove_dir_all(&dir).ok();

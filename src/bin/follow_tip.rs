@@ -4610,14 +4610,32 @@ fn collect_headers(
     locator: &[Hash],
     stop: &Hash,
 ) -> Vec<Block> {
-    // deepest known height among the locator hashes
+    // deepest known height among the locator hashes. ONLY a body our live
+    // chain actually holds at that height may anchor the serve: a raced body
+    // APPENDED to our store must not resolve a locator to a height our chain
+    // refilled — the serve would jump past our own block there and the
+    // follower's linkage guard would see a prev it cannot connect (live
+    // fleet catch 2026-11-10: DNS3's locator holding its race block made the
+    // peer anchor at that height and serve its refilled child, and the
+    // reconciliation never judged — the fleet item 18 second-order defect).
+    // Unregistered stores (no live chain seeded) keep the legacy behavior.
+    let chain_armed = store.chain_slot_tip().is_some();
     let mut start_h: Option<u64> = None;
     for h in locator {
         let hit = store.block_by_hash(h).ok().flatten();
         let height = match hit {
-            Some(hit) => hit.height,
+            Some(hit) => match hit.height {
+                Some(hgt) if !chain_armed || store.chain_slot_hash(hgt) == Some(*h) => Some(hgt),
+                _ => None, // raced / unthreaded / unknown body: not an anchor
+            },
             None => match recent.get(h) {
-                Some((hgt, _)) if *hgt > 0 => Some(*hgt),
+                Some((hgt, _)) if *hgt > 0 => {
+                    if !chain_armed || store.chain_slot_hash(*hgt) == Some(*h) {
+                        Some(*hgt)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             },
         };
@@ -12088,6 +12106,199 @@ mod tests {
             }
         }
         assert!(live_store().is_none());
+    }
+
+    // ---- item 18 second-order: the locator-anchor chain guard ----
+
+    fn bin_frame(b: &Block) -> Vec<u8> {
+        let mut body = b.header_bytes();
+        let n = b.vtx.len() as u64;
+        if n < 0xfd {
+            body.push(n as u8);
+        } else {
+            body.push(0xfd);
+            body.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+        for t in &b.vtx {
+            body.extend_from_slice(&t.serialize());
+        }
+        let s = b.block_sig.len() as u64;
+        if s < 0xfd {
+            body.push(s as u8);
+        } else {
+            body.push(0xfd);
+            body.extend_from_slice(&(s as u16).to_le_bytes());
+        }
+        body.extend_from_slice(&b.block_sig);
+        tri7_core::blockindex::encode_frame(&body)
+    }
+
+    fn bin_coin_tx(v: u8, val: i64) -> tri7_core::legacy::Tx {
+        tri7_core::legacy::Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![tri7_core::legacy::Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: vec![v],
+                sequence: u32::MAX,
+            }],
+            vout: vec![tri7_core::legacy::Vout {
+                value: val,
+                script_pubkey: vec![0x51],
+            }],
+            locktime: 0,
+        }
+    }
+
+    fn bin_block(prev: Hash, seed: u8) -> Block {
+        let mut b = Block {
+            version: 2,
+            prev_hash: prev,
+            merkle_root: [0u8; 32],
+            time: 1_700_000_100,
+            bits: 0x2000_ffff,
+            nonce: 7,
+            vtx: vec![bin_coin_tx(seed, 5_000_000)],
+            block_sig: vec![],
+        };
+        b.merkle_root = b.merkle_root();
+        b
+    }
+
+    fn wait_store_ready(store: &Arc<tri7_core::blockindex::BlockStore>) {
+        let mut waited = 0;
+        while waited < 100
+            && !matches!(
+                store.status(),
+                tri7_core::blockindex::StoreStatus::Ready { .. }
+            )
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(matches!(
+            store.status(),
+            tri7_core::blockindex::StoreStatus::Ready { .. }
+        ));
+    }
+
+    /// THE PI-SIDE LIVE SHAPE (fleet item 18, caught live 2026-11-10 03:2xZ):
+    /// the serving peer's appendix holds the follower's raced block AND its
+    /// height map holds its own chain — a locator containing the raced hash
+    /// anchored the serve AT that height, so the reply jumped past our own
+    /// refilled block there and its first header's prev was one the
+    /// follower's linkage guard could not connect ("prev 259ede68 expected
+    /// a55aa6d3") — the reconciliation never judged and the follower sat on
+    /// its fork forever. The chain-verified anchor skips the raced hash and
+    /// serves from the shared ancestor: exactly the reply whose judge fires.
+    #[test]
+    fn stale_locator_body_cannot_anchor_the_serve_past_our_refilled_slot() {
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-loc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blk.dat");
+        // chain g → b1 → b2 → b3 → b4 threaded by the oracle; raced (also a
+        // child of b2) appended at runtime into the appendix at height 3
+        let g = bin_block([0u8; 32], 0x11);
+        let b1 = bin_block(g.hash(), 0x22);
+        let b2 = bin_block(b1.hash(), 0x33);
+        let b3 = bin_block(b2.hash(), 0x44);
+        let b4 = bin_block(b3.hash(), 0x55);
+        let raced = bin_block(b2.hash(), 0x66);
+        assert_ne!(raced.hash(), b3.hash());
+        let mut frames = Vec::new();
+        let mut hashes = Vec::new();
+        for b in [&g, &b1, &b2, &b3, &b4] {
+            frames.extend_from_slice(&bin_frame(b));
+            hashes.push(b.hash());
+        }
+        std::fs::write(&path, &frames).unwrap();
+        let store = tri7_core::blockindex::BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 4,
+        }));
+        wait_store_ready(&store);
+        store
+            .append_block(&bin_frame(&raced)[8..], Some(3))
+            .unwrap();
+
+        // live chain registered (the boot seed covers the whole window)
+        for (i, h) in hashes.iter().enumerate() {
+            store.set_chain_slot(i as u64, *h);
+        }
+
+        let mut recent = RecentBlocks::new();
+        recent.insert(raced.hash(), 3, &bin_frame(&raced)[8..]);
+        recent.insert(b4.hash(), 4, &bin_frame(&b4)[8..]);
+
+        // a locator holding ONLY the raced hash must not anchor at all
+        let served = collect_headers(&store, &recent, &[raced.hash()], &[0u8; 32]);
+        assert!(
+            served.is_empty(),
+            "a raced locator hash must not anchor the serve"
+        );
+
+        // raced hash FIRST, shared chain hash second: the guard skips the
+        // raced entry and serves from the shared ancestor b2 — the reply
+        // that lets the follower's judge see the real fork
+        let served = collect_headers(&store, &recent, &[raced.hash(), b2.hash()], &[0u8; 32]);
+        assert_eq!(served.len(), 2, "serve from the shared ancestor");
+        assert_eq!(served[0].hash(), b3.hash());
+        assert_eq!(served[1].hash(), b4.hash());
+
+        // a clean locator serves normally
+        let served = collect_headers(&store, &recent, &[b1.hash()], &[0u8; 32]);
+        assert_eq!(served.len(), 3);
+        assert_eq!(served[0].hash(), b2.hash());
+
+        // unregistered store: the legacy behavior returns — a raced body
+        // carrying an APPENDIX height CAN anchor there (read-only consumers
+        // unchanged). A re-scanned (restart) raced frame is heightless in the
+        // main index and anchors nothing either way — so this leg builds a
+        // fresh file and appends the raced body, matching the live server's
+        // long-running-process appendix shape.
+        let path2 = dir.join("blk2.dat");
+        std::fs::write(&path2, &frames).unwrap();
+        let store2 =
+            tri7_core::blockindex::BlockStore::new(Some(path2.clone()), Some(dir.join("idx2")));
+        store2.spawn_build(Some(tri7_core::blockindex::BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 4,
+        }));
+        wait_store_ready(&store2);
+        store2
+            .append_block(&bin_frame(&raced)[8..], Some(3))
+            .unwrap();
+        let mut recent2 = RecentBlocks::new();
+        recent2.insert(raced.hash(), 3, &bin_frame(&raced)[8..]);
+        recent2.insert(b4.hash(), 4, &bin_frame(&b4)[8..]);
+        let served = collect_headers(&store2, &recent2, &[raced.hash()], &[0u8; 32]);
+        assert_eq!(served.len(), 1, "legacy anchor (no live chain): serves from 4");
+        assert_eq!(served[0].hash(), b4.hash());
+        // and a RE-SCANNED raced frame (restart absorbed it into the main
+        // index without a height) anchors nothing even without a live chain —
+        // pre-change parity for the restart shape
+        let store3 = tri7_core::blockindex::BlockStore::new(Some(path.clone()), Some(dir.join("idx3")));
+        store3.spawn_build(Some(tri7_core::blockindex::BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 4,
+        }));
+        wait_store_ready(&store3);
+        let served = collect_headers(&store3, &recent2, &[raced.hash()], &[0u8; 32]);
+        assert!(served.is_empty(), "heightless raced frame: no anchor either way");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----
