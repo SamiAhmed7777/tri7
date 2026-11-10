@@ -11,6 +11,14 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+// GUI i18n (phase 1): Language + tr() + parse_language. Declared HERE (with
+// an explicit #[path] so the source stays at src/gui/i18n.rs) because this
+// module is the one the feature-gated app.rs ALSO needs, and because the
+// lane's HARD RULES keep mod.rs untouched. Reach it as
+// crate::gui::app_state::i18n.
+#[path = "i18n.rs"]
+pub mod i18n;
+
 // ===========================================================================
 // Sub-states
 // ===========================================================================
@@ -93,6 +101,13 @@ pub struct OptionsState {
     /// (src/gui/autostart.rs) at load and is applied to the OS on Apply.
     #[serde(default)]
     pub start_on_login: bool,
+    /// Display tab language (phase-1 GUI i18n). Serialized as the short code
+    /// string ("en","es","de","fr","pt","ru","zh","ja","tr","it","nl","pl",
+    /// default "en"), so options.json stays operator-readable and a legacy
+    /// file without the key loads as English. Selected via the REAL
+    /// Display-tab dropdown; persisted on Apply with the other options.
+    #[serde(default)]
+    pub language: crate::gui::app_state::i18n::Language,
 }
 
 fn default_true() -> bool {
@@ -163,6 +178,7 @@ impl Default for OptionsState {
             tray_on_close: false,
             show_onion_address: true,
             start_on_login: false,
+            language: crate::gui::app_state::i18n::Language::English,
         }
     }
 }

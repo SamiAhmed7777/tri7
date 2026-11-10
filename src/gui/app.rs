@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::gui::app_state::AppState;
+use crate::gui::app_state::i18n;
 use crate::gui::explorer as ex;
 use crate::gui::app_state as ap;
 use crate::gui::state as s;
@@ -468,6 +469,7 @@ impl Tri7App {
     // historical order), 1 px divider + TOOLS group, Options at the bottom.
     // -----------------------------------------------------------------------
     fn sidebar(&mut self, ctx: &egui::Context) {
+        let lang = self.st.options.language;
         egui::SidePanel::left("nav")
             .exact_width(216.0)
             .resizable(false)
@@ -487,7 +489,7 @@ impl Tri7App {
                 }
                 ui.add_space(8.0);
                 th::hairline(ui);
-                th::nav_group_label(ui, "TOOLS");
+                th::nav_group_label(ui, i18n::tr(lang, "TOOLS"));
                 let tools = [
                     Screen::Staking,
                     Screen::Explorer,
@@ -512,6 +514,7 @@ impl Tri7App {
     }
 
     fn nav_row(&mut self, ui: &mut egui::Ui, screen: Screen) {
+        let lang = self.st.options.language;
         let icon = format!("menu_16/{}", screen.icon());
         let selected = self.st.screen == screen;
         let badge = if screen == Screen::Messages {
@@ -521,7 +524,13 @@ impl Tri7App {
             None
         };
         let tex = self.tex(ui.ctx(), &icon);
-        let mut resp = th::nav_row(ui, tex.as_ref(), screen.label(), badge, selected);
+        let mut resp = th::nav_row(
+            ui,
+            tex.as_ref(),
+            i18n::tr(lang, screen.label()),
+            badge,
+            selected,
+        );
         if resp.clicked() {
             if screen == Screen::Options && self.st.screen != Screen::Options {
                 self.options_return = Some(self.st.screen);
@@ -548,6 +557,7 @@ impl Tri7App {
                     egui::pos2(rect.right(), rect.top() + 1.0),
                 );
                 ui.painter().rect_filled(edge, Rounding::ZERO, th::BORDER_SUBTLE);
+                let lang = self.st.options.language;
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     // 1. connection cluster — actual 0–4 strength by count
@@ -632,11 +642,11 @@ impl Tri7App {
                     let enabled = stake.field("enabled");
                     let staking_on = enabled == "true" && stake.field("staking") == "true";
                     let (stake_icon, stake_label, stake_color) = if staking_on {
-                        ("icons/staking_on", "Staking on", th::SUCCESS)
+                        ("icons/staking_on", i18n::tr(lang, "Staking on"), th::SUCCESS)
                     } else if enabled == "true" {
-                        ("icons/staking_off", "Staking idle", th::WARNING)
+                        ("icons/staking_off", i18n::tr(lang, "Staking idle"), th::WARNING)
                     } else {
-                        ("icons/staking_off", "Staking off", th::TEXT_MUTED)
+                        ("icons/staking_off", i18n::tr(lang, "Staking off"), th::TEXT_MUTED)
                     };
                     let stake_tex = self.tex(ui.ctx(), stake_icon);
                     // CLICKABLE STAKING TOGGLE (Sami: "I should be able to
@@ -692,7 +702,7 @@ impl Tri7App {
                     // 4. encryption cluster (wallet encryption is not tracked
                     // by this build — honest idle state)
                     let enc_tex = self.tex(ui.ctx(), "icons/lock_open");
-                    th::status_cluster(ui, enc_tex.as_ref(), "Unencrypted", th::TEXT_MUTED);
+                    th::status_cluster(ui, enc_tex.as_ref(), i18n::tr(lang, "Unencrypted"), th::TEXT_MUTED);
                     ui.separator();
                     // 5. compact transport summary
                     let transport = self
@@ -729,7 +739,7 @@ impl Tri7App {
                     if self.st.transport_chip_visible() {
                         let net_btn = ui.add(
                             egui::Button::new(
-                                egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
+                                egui::RichText::new(i18n::tr(lang, "⇗ Tor / I2P")).size(11.0).color(th::TEXT_MUTED),
                             )
                             .fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
@@ -2118,7 +2128,8 @@ impl Tri7App {
     // §10.1 Overview
     // -----------------------------------------------------------------------
 fn page_overview(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Overview", "Wallet balance and network status");
+        let lang = self.st.options.language;
+        th::page_header(ui, i18n::tr(lang, "Overview"), "Wallet balance and network status");
         // The Options dialog can be closed with OK while the node-side fee
         // push still failed. The options were applied, but the operator must
         // still be told - the notice lives here because the dialog is gone.
@@ -2169,6 +2180,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
     /// the local key+snapshot derivation fills in when no daemon answers.
     /// Rows render in an egui Grid — no more overlapping text.
     fn overview_balance(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         let marker_tex = self.tex(ui.ctx(), "brand/mark16");
         let st = &mut self.st;
         // daemon balance wins when present (live truth from the synced chain)
@@ -2220,9 +2232,10 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     .spacing([16.0, 7.0])
                     .min_col_width(140.0)
                     .show(ui, |ui| {
+                        let lang_row = lang;
                         let row = |ui: &mut egui::Ui, label: &str, tip: &str, v: String, marker: bool, size: f32| {
-                            ui.label(egui::RichText::new(label).color(th::TEXT_SECONDARY))
-                                .on_hover_text(tip);
+                            ui.label(egui::RichText::new(i18n::tr(lang_row, label)).color(th::TEXT_SECONDARY))
+                                .on_hover_text(i18n::tr(lang_row, tip));
                             ui.horizontal(|ui| {
                                 if marker {
                                     if let Some(tex) = &marker_tex {
@@ -2246,7 +2259,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Total:").color(th::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new(i18n::tr(lang, "Total:")).color(th::TEXT_SECONDARY));
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!("{} {}", tri, s::TICKER))
@@ -2541,9 +2554,10 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
     }
 
     fn page_send(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Send Coins",
+            i18n::tr(lang, "Send Coins"),
             "Create, review, sign, and broadcast a Triangles transaction",
         );
         let step = match (&self.st.send_result, &self.st.broadcast.result, self.send_step) {
@@ -3086,9 +3100,10 @@ impl Tri7App {
     // §10.3 Receive Coins — addresses left, payment request + inline QR right
     // -----------------------------------------------------------------------
     fn page_receive(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Receive Coins",
+            i18n::tr(lang, "Receive Coins"),
             "Manage receiving addresses and create payment requests",
         );
         // Tor / I2P identity: a drawer that reveals the addresses on demand
@@ -3394,9 +3409,10 @@ impl Tri7App {
     // §10.4 Address Book
     // -----------------------------------------------------------------------
     fn page_addressbook(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Address Book",
+            i18n::tr(lang, "Address Book"),
             "Labels and addresses used by this wallet",
         );
         // edit dialog (selection/double-click opens it — no inline writes)
@@ -3701,7 +3717,8 @@ impl Tri7App {
     // row view) — one implementation, no drift.
 
     fn page_transactions(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Transactions", "");
+        let lang = self.st.options.language;
+        th::page_header(ui, i18n::tr(lang, "Transactions"), "");
         // legacy glyph set (transactiontablemodel.cpp txStatusDecoration):
         // unconfirmed circle, clock1..clock5 filling up, green check, conflict
         let glyph_tex: Vec<(&'static str, Option<egui::TextureHandle>)> = [
@@ -3726,7 +3743,12 @@ impl Tri7App {
         th::card(ui, |ui| {
             // filter toolbar (historical page model: type/status/amount/search)
             ui.horizontal(|ui| {
-                let types = ["All types", "Received with", "Mined", "Stake reward"];
+                let types = [
+                    i18n::tr(lang, "All types"),
+                    "Received with",
+                    "Mined",
+                    "Stake reward",
+                ];
                 egui::ComboBox::from_id_source("tx_type")
                     .selected_text(types[self.tx_type_filter])
                     .width(120.0)
@@ -3735,7 +3757,7 @@ impl Tri7App {
                             ui.selectable_value(&mut self.tx_type_filter, i, *tx_);
                         }
                     });
-                let statuses = ["All statuses", "Confirmed", "Pending"];
+                let statuses = [i18n::tr(lang, "All statuses"), "Confirmed", "Pending"];
                 egui::ComboBox::from_id_source("tx_status")
                     .selected_text(statuses[self.tx_status_filter])
                     .width(110.0)
@@ -3744,18 +3766,18 @@ impl Tri7App {
                             ui.selectable_value(&mut self.tx_status_filter, i, *stx);
                         }
                     });
-                th::text_input_h(ui, 110.0, &mut self.tx_min_amount, Some("min amount"));
+                th::text_input_h(ui, 110.0, &mut self.tx_min_amount, Some(i18n::tr(lang, "min amount")));
                 th::text_input_h(
                     ui,
                     220.0,
                     &mut self.tx_search,
-                    Some("label / address / txid"),
+                    Some(i18n::tr(lang, "label / address / txid")),
                 );
                 // Legacy CSV export (transactionview.cpp exportClicked):
                 // Confirmed, Date, Type, Label, Address, Amount, ID. Written
                 // beside the wallet, so no file dialog is needed.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if th::secondary_button(ui, "Export CSV").clicked() {
+                    if th::secondary_button(ui, i18n::tr(lang, "Export CSV")).clicked() {
                         match self.st.export_transactions_csv_action() {
                             Ok(path) => self.st.status_log.push(format!("CSV written: {path}")),
                             Err(e) => self.st.load_error = Some(format!("CSV export: {e}")),
@@ -3832,10 +3854,10 @@ impl Tri7App {
             // legacy table: Status | Date | Type | Address | Amount
             let cols = [
                 th::TableCol::new("", 24.0, false),
-                th::TableCol::new("Date", 160.0, false),
-                th::TableCol::new("Type", 120.0, false),
-                th::TableCol::new("Label/Address", addr_w, false),
-                th::TableCol::new("Amount", 110.0, true),
+                th::TableCol::new(i18n::tr(lang, "Date"), 160.0, false),
+                th::TableCol::new(i18n::tr(lang, "Type"), 120.0, false),
+                th::TableCol::new(i18n::tr(lang, "Label/Address"), addr_w, false),
+                th::TableCol::new(i18n::tr(lang, "Amount"), 110.0, true),
             ];
             // Date header is a real click target: flips newest<->oldest and
             // shows an arrow for the current direction.
@@ -4040,7 +4062,8 @@ impl Tri7App {
     // §10.6 Staking
     // -----------------------------------------------------------------------
     fn page_staking(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Staking", "Proof-of-stake status and wallet weight");
+        let lang = self.st.options.language;
+        th::page_header(ui, i18n::tr(lang, "Staking"), "Proof-of-stake status and wallet weight");
         let big_icon = self.tex(ui.ctx(), "icons/staking_off");
         let on_icon = self.tex(ui.ctx(), "icons/staking_on");
         let st = &mut self.st;
@@ -4409,9 +4432,10 @@ impl Tri7App {
     }
 
     fn page_messages(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Messages",
+            i18n::tr(lang, "Messages"),
             "Encrypted messages sent and received through Triangles",
         );
         self.msg_segmented(ui);
@@ -4758,9 +4782,10 @@ impl Tri7App {
     // §10.10 Sign and Verify Message (tool pages)
     // -----------------------------------------------------------------------
     fn page_sign(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Sign Message",
+            i18n::tr(lang, "Sign Message"),
             "Sign a message to prove you own a TRI address",
         );
         let addrs: Vec<String> = {
@@ -4852,9 +4877,10 @@ impl Tri7App {
     }
 
     fn page_verify(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Verify Message",
+            i18n::tr(lang, "Verify Message"),
             "Verify a message to ensure it was signed with a specified TRI address",
         );
         th::card(ui, |ui| {
@@ -4917,7 +4943,13 @@ impl Tri7App {
     // §10.9 Options — historical tab structure with sticky footer
     // -----------------------------------------------------------------------
     fn options_tabs(&mut self, ui: &mut egui::Ui) {
-        let tabs = ["Main", "Network", "Window", "Display"];
+        let lang = self.st.options.language;
+        let tabs = [
+            i18n::tr(lang, "Main"),
+            i18n::tr(lang, "Network"),
+            i18n::tr(lang, "Window"),
+            i18n::tr(lang, "Display"),
+        ];
         ui.horizontal(|ui| {
             for (i, label) in tabs.iter().enumerate() {
                 let selected = self.options_tab == i;
@@ -4951,7 +4983,8 @@ impl Tri7App {
     }
 
     fn page_options(&mut self, ui: &mut egui::Ui) {
-        th::page_header(ui, "Options", "Wallet and interface preferences");
+        let lang = self.st.options.language;
+        th::page_header(ui, i18n::tr(lang, "Options"), "Wallet and interface preferences");
         self.options_tabs(ui);
         th::card(ui, |ui| match self.options_tab {
             0 => {
@@ -5147,8 +5180,18 @@ impl Tri7App {
                     "Notify when coins are received (system notification)",
                 );
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Language:").color(th::TEXT_SECONDARY));
-                    th::disabled_input(ui, 160.0, "English", "Not supported by this desktop shell");
+                    ui.label(egui::RichText::new(i18n::tr(lang, "Language:")).color(th::TEXT_SECONDARY));
+                    // REAL language selector (phase 1): egui dropdown over the
+                    // 12-language starter set, persisted to options.json as a
+                    // short code on Apply (OptionsState.language).
+                    egui::ComboBox::from_id_source("opt_language")
+                        .selected_text(self.st.options.language.name())
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            for l in i18n::Language::ALL {
+                                ui.selectable_value(&mut self.st.options.language, l, l.name());
+                            }
+                        });
                 });
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Amount unit:").color(th::TEXT_SECONDARY));
@@ -5328,9 +5371,10 @@ impl Tri7App {
     }
 
     fn page_explorer(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         th::page_header(
             ui,
-            "Block Explorer",
+            i18n::tr(lang, "Block Explorer"),
             "Inspect blocks, transactions, addresses, and chain statistics",
         );
         // search field (height / block hash / txid / address)
