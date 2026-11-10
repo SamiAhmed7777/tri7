@@ -467,11 +467,16 @@ const RECON_LOCATOR_MAX: usize = 40;
 /// from the in-window fork point down to the peer's branch tip.
 #[derive(Default)]
 struct ReconAcc {
-    /// height where the branch diverges from our window (None = idle)
+    /// window height the peer SERVES from (the locator anchor — set fresh,
+    /// NOT the fork point: the peer's deepest locator hit can sit below the
+    /// real divergence when it re-serves a known prefix)
     fork_height: Option<u64>,
+    /// height of the branch's FIRST NEW header; the judge/rollback fork is
+    /// branch_base - 1 (the serve anchor is only a serving offset)
+    branch_base: Option<u64>,
     /// sum of work_of(bits) over the accumulated branch headers
     their_work: u128,
-    /// number of branch headers accumulated (their tip height = fork + n)
+    /// number of branch headers accumulated (their tip height = base + n - 1)
     their_blocks: u64,
     /// last accumulated header hash — the continuation anchor
     last_hash: Option<Hash>,
@@ -574,7 +579,7 @@ fn recon_intake(
     // are already accumulating (an EMPTY batch mid-accumulation is a
     // continuation too — the peer answered with nothing because its branch
     // ended, so the accumulated work is judged complete below); anything
-    // else (re)starts from its fork point
+    // else (re)starts from its serve anchor
     let continuing =
         recon.fork_height.is_some() && headers.first().is_none_or(|h| Some(h.prev_hash) == recon.last_hash);
     if !continuing {
@@ -583,14 +588,15 @@ fn recon_intake(
         };
         match st.index_of_hash(&first.prev_hash) {
             Some(idx) => {
-                let fork_h = st.base + idx as u64;
-                if fork_h >= st.tip_height {
+                let anchor_h = st.base + idx as u64;
+                if anchor_h >= st.tip_height {
                     // extends our tip after all (tip advanced between the
                     // gate and here): hand the batch to the normal walk
                     intake_header_batch(st, headers, pending_from_headers, stats);
                     return ReconOutcome::Ignored;
                 }
-                recon.fork_height = Some(fork_h);
+                recon.fork_height = Some(anchor_h);
+                recon.branch_base = None;
                 recon.their_work = 0;
                 recon.their_blocks = 0;
                 recon.headers.clear();
@@ -598,10 +604,11 @@ fn recon_intake(
                 recon.unresolved = 0;
             }
             None => {
-                // fork point outside our window (peer serves from below the
-                // base, or from genesis because it never saw our tip)
+                // serve anchor outside our window (peer serves from below
+                // the base, or from genesis because it never saw our tip)
                 recon.unresolved += 1;
                 recon.fork_height = None;
+                recon.branch_base = None;
                 recon.headers.clear();
                 recon.seen.clear();
                 if recon.unresolved > RECON_MAX_UNRESOLVED {
@@ -615,11 +622,28 @@ fn recon_intake(
 
     // accumulate the NEW headers of this branch (the anchor for the next
     // reply is the last header we actually ADDED, not the batch's literal
-    // last element — a fully-duplicate reply must not move it backwards)
+    // last element — a fully-duplicate reply must not move it backwards).
+    // Heights run from the serve anchor: KNOWN headers still advance the
+    // running height (they are the peer re-serving our own prefix), and the
+    // branch base is the height of the FIRST new header — the real fork for
+    // judging is branch_base - 1, NOT the serve anchor (the locator hit can
+    // sit far below the divergence; the PC-vs-DNS2 live fork had a 128-block
+    // known prefix in every reply)
+    let mut running_h = match recon.branch_base {
+        Some(base) => base + recon.their_blocks, // continuation: next expected
+        None => recon.fork_height.unwrap_or(st.tip_height) + 1,
+    };
     for hdr in headers {
         let hash = hdr.hash();
-        if st.entry_by_hash(&hash).is_some() || recon.seen.contains(&hash) {
+        if st.entry_by_hash(&hash).is_some() {
+            running_h += 1; // our own prefix being re-served
             continue;
+        }
+        if recon.seen.contains(&hash) {
+            continue; // already accumulated in an earlier batch
+        }
+        if recon.branch_base.is_none() {
+            recon.branch_base = Some(running_h);
         }
         recon.seen.insert(hash);
         recon.headers.push(hdr.clone());
@@ -628,9 +652,19 @@ fn recon_intake(
         ));
         recon.their_blocks += 1;
         recon.last_hash = Some(hash);
+        running_h += 1;
     }
 
-    let fork_h = recon.fork_height.unwrap_or(st.tip_height);
+    let Some(branch_base) = recon.branch_base else {
+        // the batch held nothing new (pure re-serve of our own prefix):
+        // nothing to judge, nothing to hold
+        recon.fork_height = None;
+        recon.headers.clear();
+        recon.seen.clear();
+        recon.unresolved = 0;
+        return ReconOutcome::Ignored;
+    };
+    let fork_h = branch_base - 1; // the REAL divergence point
     let our_work: u128 = st.entries[(fork_h - st.base + 1) as usize..]
         .iter()
         .map(|e| tri7_core::forkchoice::work_of(e.bits))
@@ -669,13 +703,14 @@ fn recon_intake(
     recon.their_work = 0;
     recon.their_blocks = 0;
     recon.last_hash = None;
+    recon.branch_base = None;
     recon.unresolved = 0; // any close resets the escalation counter
     let fork = recon.fork_height.take();
     match decision {
         tri7_core::forkchoice::ForkChoice::KeepOurs => {
             log(&format!(
                 "recon: competing branch h{}..h{} ({} blk, work {}) is NOT heavier than ours h{} (work {}) above the fork — ignored, reconciliation closed",
-                fork.unwrap_or(fork_h),
+                fork_h,
                 their_h,
                 adopted,
                 judged_work,
@@ -685,7 +720,7 @@ fn recon_intake(
             ReconOutcome::Ignored
         }
         tri7_core::forkchoice::ForkChoice::Switch { reason } => {
-            let target = fork.unwrap_or(st.tip_height);
+            let target = fork_h; // branch_base - 1: the REAL divergence point
             log(&format!(
                 "FORK CHOICE (reconciliation): {} — rolling back to h{}, adopting {} block(s) via the validated body path",
                 reason,
@@ -711,7 +746,7 @@ fn recon_intake(
             for (i, hdr) in branch.iter().enumerate() {
                 let hash = hdr.hash();
                 st.pending_headers.insert(hash, hdr.clone());
-                pending_from_headers.push_back((hash, target + 1 + i as u64));
+                pending_from_headers.push_back((hash, fork_h + 1 + i as u64));
             }
             stats.reorgs += 1;
             ReconOutcome::Switched {
@@ -8047,14 +8082,15 @@ fn handle_message(
                 }
                 return Ok(());
             }
-            // (item 17b) A batch whose first header neither chains to our
-            // tip nor is already known is a COMPETING BRANCH (announce push
-            // or a getheaders reply): judge it by total work above the fork
-            // point and switch when strictly heavier — instead of the old
-            // tip-only-locator loop that wedged every fork forever.
-            let first_known = st.entry_by_hash(&headers[0].hash()).is_some()
-                || st.pending_headers.contains_key(&headers[0].hash());
-            if headers[0].prev_hash != st.tip_hash && !first_known {
+            // (item 17b) A batch that does not chain DIRECTLY to our tip is
+            // reconciliation material — a competing branch, OR the peer's
+            // reply serving from an in-window anchor below the tip (with a
+            // known-prefix re-serve ahead of the real fork). Both must reach
+            // the judge: recon_intake skips the known prefix, sets the real
+            // branch base at the first NEW header, and judges work there.
+            // (The PC's live fork: every reply began with ~128 known headers
+            // — a first_known bypass here looped forever without judging.)
+            if headers[0].prev_hash != st.tip_hash {
                 recon_dispatch(st, peer, &headers, recon, pending_from_headers, stats)?;
                 return Ok(());
             }
@@ -12050,6 +12086,97 @@ mod tests {
         }
         assert_eq!(stg.tip_height, 101);
         assert_eq!(pend.len(), 2001);
+    }
+
+    /// Build a ChainState whose window entries ARE the given headers — lets
+    /// a test serve a batch that contains real known-prefix headers (the
+    /// entry hashes match by construction).
+    fn chain_state_from_window(base: u64, hdrs: &[Block]) -> ChainState {
+        let mut entries = Vec::new();
+        let mut checksums = Vec::new();
+        for hdr in hdrs {
+            entries.push(IndexEntry {
+                height: entries.len(),
+                hash: hdr.hash(),
+                prev_hash: hdr.prev_hash,
+                time: hdr.time,
+                bits: hdr.bits,
+                is_proof_of_stake: true,
+                entropy_bit: 0,
+                stake_modifier: 0,
+                generated_stake_modifier: true,
+                hash_proof_of_stake: [0u8; 32],
+            });
+            checksums.push(7);
+        }
+        ChainState {
+            base,
+            entries,
+            checksums,
+            utxo: WindowOutputs::new(),
+            records: Vec::new(),
+            no_trim: false,
+            pending_headers: HashMap::new(),
+            tip_height: base + hdrs.len() as u64 - 1,
+            tip_hash: hdrs.last().unwrap().hash(),
+            daemon_tip: Some((base + hdrs.len() as u64 - 1) as i64),
+            last_advance_utc: String::new(),
+            peers_connected: 0,
+            last_peer_utc: None,
+        }
+    }
+
+    #[test]
+    fn recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches() {
+        // the PC's LIVE fork shape (2026-11-10): the peer re-serves our own
+        // prefix from the locator anchor BEFORE its branch — the judge must
+        // fork at the FIRST NEW header (branch_base - 1), not at the serve
+        // anchor, or it compares the branch against 128 blocks of our own
+        // prefix and never switches
+        let mut hdrs: Vec<Block> = Vec::new();
+        let mut prev = [0x77u8; 32]; // h100's hash (the anchor's prev)
+        for i in 0..6u8 {
+            let hdr = mk_header(prev, 0x10 + i, 0x2000_ffff);
+            prev = hdr.hash();
+            hdrs.push(hdr);
+        }
+        // window h100..h105 (6 entries), tip h105
+        let mut stg = chain_state_from_window(100, &hdrs);
+        let h105_hash = stg.tip_hash;
+
+        // the peer serves h101..h105 (KNOWN re-serve) then a 6-block branch
+        let mut batch: Vec<Block> = hdrs[1..].to_vec(); // h101..h105
+        let mut prev = h105_hash;
+        for i in 0..6u8 {
+            let hdr = mk_header(prev, 0x60 + i, 0x2000_ffff);
+            prev = hdr.hash();
+            batch.push(hdr);
+        }
+        // anchor: the batch's first header (h101) descends from h100's hash,
+        // which IS in the window at relative index 0
+        assert_eq!(
+            stg.index_of_hash(&batch[0].prev_hash),
+            Some(0),
+            "h100 must be the serve anchor"
+        );
+
+        let mut recon = ReconAcc::default();
+        let mut pend = VecDeque::new();
+        let mut stats = Stats::default();
+        match recon_intake(&mut stg, &batch, &mut recon, &mut pend, &mut stats) {
+            ReconOutcome::Switched { fork, adopted } => {
+                assert_eq!(fork, 105, "fork at the FIRST NEW header, not the anchor");
+                assert_eq!(adopted, 6);
+            }
+            other => panic!("expected Switched, got {:?}", other),
+        }
+        // nothing to roll back (tip == fork), branch queued at 106..111
+        assert_eq!(stg.tip_height, 105);
+        assert_eq!(stg.tip_hash, h105_hash);
+        assert_eq!(pend.len(), 6);
+        assert_eq!(pend[0].1, 106);
+        assert_eq!(pend[5].1, 111);
+        assert_eq!(stats.reorgs, 1);
     }
 
     #[test]
