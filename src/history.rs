@@ -225,6 +225,28 @@ pub fn scan(
         eprintln!("history: store index ready, threaded tip h{}", tip);
     }
 
+    // One-time migration (2026-11-09 incident): rows written before the
+    // stake_net field existed carry None, and the GUI then rendered every
+    // stake roll as "Mined +<principal> TRI" instead of legacy's net (the
+    // reward, transactionrecord.cpp nNet). Recompute the net for every stored
+    // coinstake row whose input side the store can prove (exact outpoints —
+    // the same recv_total - spent_total walk apply_block runs for new rows).
+    // The fill persists through the ordinary save_cache below (atomic
+    // tmp+rename; the empty-cache guard at scanned_height == 0 stays intact),
+    // so this costs one store pass on the first rescan after the upgrade and
+    // nothing on every later run. Rows whose inputs do not resolve stay None
+    // and render the honest NET-UNKNOWN fallback.
+    if from > 0 && cache.rows.iter().any(|r| r.coinstake && r.stake_net.is_none()) {
+        match backfill_stake_nets(&store, &mut cache) {
+            Ok(n) if n > 0 => eprintln!(
+                "history: backfilled {} pre-field stake row(s) to the legacy net",
+                n
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("history: stake-net backfill skipped: {}", e),
+        }
+    }
+
     let mut f = std::fs::File::open(store_path)
         .map_err(|e| format!("open {}: {}", store_path.display(), e))?;
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -455,6 +477,139 @@ fn apply_block(
             });
         }
     }
+}
+
+/// Exact outpoint ownership over stored rows: (txid internal, output idx) →
+/// (row position, row height). The input side the backfill resolves prevouts
+/// against — rows carry `idx` (the output index), so the match is exact, not
+/// the n<4 over-approximation the incremental spend-marking walk uses.
+pub(crate) type OwnedIndex = HashMap<([u8; 32], u32), (usize, u64)>;
+
+pub(crate) fn build_owned_index(rows: &[HistoryRec]) -> OwnedIndex {
+    let mut m = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.direction != "in" {
+            continue;
+        }
+        if let Ok(bytes) = hex_to_internal(&r.txid) {
+            m.insert((bytes, r.idx), (i, r.height));
+        }
+    }
+    m
+}
+
+/// Legacy net for ONE stake tx from stored rows + the raw tx from the store
+/// (transactionrecord.cpp: `sub.credit = nNet = GetCredit() - GetDebit()`,
+/// with `nNet > 0 ? nNet : GetValueOut() - nDebit` — the REWARD only).
+///
+/// spent_total walks the tx's prevouts against the rows' exact (txid, idx)
+/// outpoints — the same walk `apply_block` runs for new rows, each input
+/// strictly older than the stake block (a stake kernel is always an earlier
+/// coin; the height guard also rejects idx-less rows defaulting to 0).
+///
+/// A coinstake's inputs are by consensus ALL ours, so every vin must resolve
+/// to a stored row: one that does not means the FILE is missing a coin
+/// (scan gap or the pre-stake_net files' dedupe, which never keyed idx) and
+/// the row data cannot prove this debit — the net stays None. The credit
+/// side is the RAW tx's own output sum (legacy GetValueOut parity), not the
+/// rows: a lost output row would otherwise understate the credit and turn a
+/// normal stake's net negative (observed live: one h2192180 stake computed
+/// -12.8M sats from incomplete rows; from the raw tx it is a ~+44k reward).
+///
+/// None = the input side is not fully provable or the result is not a
+/// positive reward, and the caller MUST keep stake_net None so the render
+/// stays honest (the gross amount then shows with a NET-UNKNOWN tooltip,
+/// never silently as income).
+pub(crate) fn compute_backfill_net(
+    rows: &[HistoryRec],
+    owned: &OwnedIndex,
+    stake_height: u64,
+    raw_vout_sats: i64,
+    vins: &[([u8; 32], u32)],
+) -> Option<i64> {
+    if vins.is_empty() {
+        return None;
+    }
+    let mut spent_total = 0i64;
+    for vin in vins {
+        let &(pos, row_height) = owned.get(vin)?;
+        if row_height >= stake_height {
+            return None;
+        }
+        spent_total += rows[pos].value_sats;
+    }
+    let net = raw_vout_sats.checked_sub(spent_total)?;
+    if net <= 0 {
+        None
+    } else {
+        Some(net)
+    }
+}
+
+/// One-time migration (2026-11-09 incident): history.json rows written
+/// before the `stake_net` field existed carry None, and the GUI rendered
+/// every stake roll as "Mined +<principal> TRI" instead of legacy's net (the
+/// reward). For every stored coinstake row, resolve the stake tx from the
+/// block store's tx index, walk its prevouts against the rows' exact
+/// outpoints — the same recv_total - spent_total walk `apply_block` runs for
+/// new rows — and fill the legacy net. The caller persists the fill through
+/// the ordinary `save_cache` (atomic tmp+rename; the empty-cache guard at
+/// scanned_height == 0 stays intact). Rows whose inputs do not resolve in
+/// the store keep None on purpose: unknown must stay unknown.
+/// Returns the number of rows backfilled.
+pub fn backfill_stake_nets(
+    store: &crate::blockindex::BlockStore,
+    cache: &mut HistoryCache,
+) -> Result<usize, String> {
+    // pending stakes grouped by txid: the row positions of each stake tx
+    let mut pending: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in cache.rows.iter().enumerate() {
+        if r.coinstake && r.stake_net.is_none() && r.direction == "in" {
+            pending
+                .entry(r.txid.clone())
+                .or_insert_with(Vec::new)
+                .push(i);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let owned = build_owned_index(&cache.rows);
+    let mut filled = 0usize;
+    for (txid, positions) in pending.iter() {
+        let txid_int = match hex_to_internal(txid) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let hit = match store.tx_by_id(&txid_int) {
+            Ok(Some(h)) => h,
+            _ => continue, // tx not in the store: net stays unknown
+        };
+        let stake_height = match hit.block_height {
+            Some(h) => h,
+            None => continue, // heightless frame: the guard cannot be applied
+        };
+        // credit side from the RAW tx (legacy GetValueOut): every vout sums
+        // in, the vout0 stake marker is 0 by the coinstake definition
+        let raw_vout_sats: i64 = hit.tx.vout.iter().map(|v| v.value).sum();
+        let vins: Vec<([u8; 32], u32)> = hit
+            .tx
+            .vin
+            .iter()
+            .filter(|v| v.prev_n != u32::MAX)
+            .map(|v| (v.prev_hash, v.prev_n))
+            .collect();
+        let net = match compute_backfill_net(&cache.rows, &owned, stake_height, raw_vout_sats, &vins)
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        for &p in positions {
+            cache.rows[p].stake_net = Some(net);
+        }
+        filled += positions.len();
+    }
+    Ok(filled)
 }
 
 /// Chain-threading oracle from `<state_dir>/tipstate.json` (window entries).
@@ -868,6 +1023,338 @@ mod tests {
         let back = serde_json::to_value(&rec).unwrap();
         let re: HistoryRec = serde_json::from_value(back).unwrap();
         assert_eq!(re.input_addresses, rec.input_addresses);
+    }
+
+    /// 2026-11-09 incident, gap 1 — the pure half of the backfill: a
+    /// pre-stake_net coinstake row gets the legacy net backfilled from the
+    /// store's proof of its input side (the raw tx's output sum minus the
+    /// our-rows its prevouts consumed, exact (txid, idx) outpoints, each
+    /// older than the stake block). Rows the file lost (dedupe never keyed
+    /// idx / scan gaps) make the debit side unprovable — ALL vins must
+    /// resolve — and a non-positive result is not a reward: both keep None.
+    #[test]
+    fn backfill_recomputes_pre_field_stake_rows_to_the_legacy_net() {
+        use crate::legacy::Tx;
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[13u8; 32]).unwrap();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec();
+        let payload = crate::address::pubkey_payload(&pubkey);
+        let addr = crate::address::payload_to_address(&payload);
+        let p2pkh = {
+            let mut s = vec![0x76, 0xa9, 0x14];
+            s.extend_from_slice(&payload[1..21]);
+            s.extend_from_slice(&[0x88, 0xac]);
+            s
+        };
+        // the funding coinbase tx, exactly as the chain stored it
+        let cb = Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![crate::legacy::Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![crate::legacy::Vout {
+                value: 33_333_333,
+                script_pubkey: p2pkh.clone(),
+            }],
+            locktime: 0,
+        };
+        let cb_txid = display_hex(&cb.hash());
+        let rows = vec![
+            HistoryRec {
+                txid: cb_txid.clone(),
+                height: 100,
+                time: 1_700_000_000,
+                value_sats: 33_333_333,
+                address: addr.clone(),
+                direction: "in".into(),
+                kind: "coinbase".into(),
+                spent: true,
+                idx: 0,
+                legacy_kind: "mined".into(),
+                coinstake: false,
+                stake_principal: 0,
+                input_addresses: Vec::new(),
+                stake_net: None,
+            },
+            // the pre-field stake row: value = principal+reward output, net unknown
+            HistoryRec {
+                txid: "ab".repeat(32),
+                height: 101,
+                time: 1_700_000_300,
+                value_sats: 33_372_923,
+                address: addr,
+                direction: "in".into(),
+                kind: "coinstake".into(),
+                spent: false,
+                idx: 1,
+                legacy_kind: "mined".into(),
+                coinstake: true,
+                stake_principal: 0,
+                input_addresses: Vec::new(),
+                stake_net: None,
+            },
+        ];
+        let owned = build_owned_index(&rows);
+        let vins = vec![(hex_to_internal(&cb_txid).unwrap(), 0u32)];
+        assert_eq!(
+            compute_backfill_net(&rows, &owned, 101, 33_372_923, &vins),
+            Some(39_590),
+            "legacy nNet = raw tx outputs - our consumed coin"
+        );
+        // a second kernel coin the file LOST (dedupe never keyed idx): the
+        // debit side is unprovable -> None, never a half-computed "net"
+        let half_lost = vec![vins[0], ([9u8; 32], 0u32)];
+        assert_eq!(
+            compute_backfill_net(&rows, &owned, 101, 66_700_000, &half_lost),
+            None
+        );
+        // inputs the store cannot prove at all: keep None
+        let unknown = vec![([9u8; 32], 0u32)];
+        assert_eq!(
+            compute_backfill_net(&rows, &owned, 101, 33_372_923, &unknown),
+            None
+        );
+        // same-block input (idx-less rows defaulting to 0 must not pair here):
+        // the height guard rejects it, so the net stays unknown
+        let owned_same = build_owned_index(&rows);
+        assert_eq!(
+            compute_backfill_net(&rows, &owned_same, 100, 33_333_333, &vins),
+            None
+        );
+        // a non-positive result is not a stake reward (lost output row):
+        // keep None rather than book a stake that "lost" money
+        assert_eq!(
+            compute_backfill_net(&rows, &owned, 101, 33_333_333, &vins),
+            None
+        );
+    }
+
+    /// 2026-11-09 incident, gap 1 — the store half of the backfill: a real
+    /// BlockStore index (oracle-threaded frames) resolves the pre-field
+    /// stake's prevout and fills the legacy net; a coinstake row whose tx is
+    /// NOT in the store keeps None. The fill round-trips through save_cache,
+    /// so the migration persists for the GUI.
+    #[test]
+    fn backfill_stake_nets_fills_from_the_store_and_keeps_unknown_rows_none() {
+        use crate::blockindex::{BlockStore, BuildOracle};
+        use crate::legacy::{Block, Tx, Vin, Vout};
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[14u8; 32]).unwrap();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec();
+        let payload = crate::address::pubkey_payload(&pubkey);
+        let addr = crate::address::payload_to_address(&payload);
+        let p2pkh = {
+            let mut s = vec![0x76, 0xa9, 0x14];
+            s.extend_from_slice(&payload[1..21]);
+            s.extend_from_slice(&[0x88, 0xac]);
+            s
+        };
+
+        // h100 coinbase -> h101 single-output stake (33_333_333 in,
+        // 33_372_923 out => net +39_590), chained and oracle-threaded
+        let coinbase = Tx {
+            version: 1,
+            time: 1_700_000_000,
+            vin: vec![Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![Vout {
+                value: 33_333_333,
+                script_pubkey: p2pkh.clone(),
+            }],
+            locktime: 0,
+        };
+        let cb_block = Block {
+            version: 1,
+            prev_hash: [1u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_000,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![coinbase],
+            block_sig: Vec::new(),
+        };
+        let stake1 = Tx {
+            version: 1,
+            time: 1_700_000_300,
+            vin: vec![Vin {
+                prev_hash: cb_block.vtx[0].hash(),
+                prev_n: 0,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 0,
+                    script_pubkey: Vec::new(),
+                },
+                Vout {
+                    value: 33_372_923,
+                    script_pubkey: p2pkh.clone(),
+                },
+            ],
+            locktime: 0,
+        };
+        let stake_block1 = Block {
+            version: 1,
+            prev_hash: cb_block.hash(),
+            merkle_root: [0u8; 32],
+            time: 1_700_000_300,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![empty_tx(), stake1],
+            block_sig: Vec::new(),
+        };
+
+        let dir = std::env::temp_dir().join(format!("tri7-backfill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dat = dir.join("blk0001.dat");
+        let mut f = std::fs::File::create(&dat).unwrap();
+        for b in [&cb_block, &stake_block1] {
+            let body = b.serialize();
+            use std::io::Write as _;
+            f.write_all(&MAGIC.to_le_bytes()).unwrap();
+            f.write_all(&(body.len() as u32).to_le_bytes()).unwrap();
+            f.write_all(&body).unwrap();
+        }
+        drop(f);
+        let oracle = BuildOracle {
+            base: 100,
+            hashes: vec![cb_block.hash(), stake_block1.hash()],
+            tip: 101,
+        };
+        let store = BlockStore::new(Some(dat.clone()), None);
+        store.spawn_build(Some(oracle));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut ready = false;
+        while std::time::Instant::now() < deadline {
+            if let crate::blockindex::StoreStatus::Ready { .. } = store.status() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test store index must become ready");
+
+        // pre-field cache: the coinbase row + the stake row with stake_net
+        // None, plus a coinstake whose tx the store does NOT have
+        let stake_txid = display_hex(&stake_block1.vtx[1].hash());
+        let cache = HistoryCache {
+            scanned_height: 101,
+            scanned_offset: 999,
+            rows: vec![
+                HistoryRec {
+                    txid: display_hex(&cb_block.vtx[0].hash()),
+                    height: 100,
+                    time: 1_700_000_000,
+                    value_sats: 33_333_333,
+                    address: addr.clone(),
+                    direction: "in".into(),
+                    kind: "coinbase".into(),
+                    spent: true,
+                    idx: 0,
+                    legacy_kind: "mined".into(),
+                    coinstake: false,
+                    stake_principal: 0,
+                    input_addresses: Vec::new(),
+                    stake_net: None,
+                },
+                HistoryRec {
+                    txid: stake_txid.clone(),
+                    height: 101,
+                    time: 1_700_000_300,
+                    value_sats: 33_372_923,
+                    address: addr.clone(),
+                    direction: "in".into(),
+                    kind: "coinstake".into(),
+                    spent: false,
+                    idx: 1,
+                    legacy_kind: "mined".into(),
+                    coinstake: true,
+                    stake_principal: 0,
+                    input_addresses: Vec::new(),
+                    stake_net: None,
+                },
+                HistoryRec {
+                    txid: "ee".repeat(32),
+                    height: 101,
+                    time: 1_700_000_300,
+                    value_sats: 44_444_444,
+                    address: addr,
+                    direction: "in".into(),
+                    kind: "coinstake".into(),
+                    spent: false,
+                    idx: 1,
+                    legacy_kind: "mined".into(),
+                    coinstake: true,
+                    stake_principal: 0,
+                    input_addresses: Vec::new(),
+                    stake_net: None,
+                },
+            ],
+        };
+        let mut cache = cache;
+        let filled = backfill_stake_nets(&store, &mut cache).unwrap();
+        assert_eq!(filled, 1, "only the store-provable stake is filled");
+        assert_eq!(cache.rows[1].stake_net, Some(39_590));
+        assert_eq!(
+            cache.rows[2].stake_net, None,
+            "tx absent from the store: net stays unknown"
+        );
+        assert_eq!(cache.rows[0].stake_net, None, "non-stake row untouched");
+
+        // the fill persists: save_cache + load_cache keeps the net
+        save_cache(&dir, &cache).unwrap();
+        let back = load_cache(&dir).unwrap();
+        assert_eq!(back.rows[1].stake_net, Some(39_590));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The empty-scan guard (seen live on sami-pc): a genesis-started scan
+    /// checkpoints an EMPTY cache immediately; if that file landed over a
+    /// real history the wallet showed zero transactions forever. save_cache
+    /// must refuse to write an empty scanned_height == 0 cache over rows.
+    #[test]
+    fn save_cache_refuses_empty_scan_over_a_non_empty_file() {
+        let dir = std::env::temp_dir().join(format!("tri7-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = HistoryCache {
+            scanned_height: 2_205_300,
+            scanned_offset: 999,
+            rows: vec![HistoryRec {
+                txid: "ab".repeat(32),
+                height: 2_205_299,
+                time: 1_700_000_000,
+                value_sats: 500,
+                address: "T".into(),
+                direction: "in".into(),
+                kind: "regular".into(),
+                spent: false,
+                idx: 0,
+                legacy_kind: "recv_with".into(),
+                coinstake: false,
+                stake_principal: 0,
+                input_addresses: Vec::new(),
+                stake_net: None,
+            }],
+        };
+        save_cache(&dir, &real).unwrap();
+        let before = std::fs::read_to_string(cache_path(&dir)).unwrap();
+        save_cache(&dir, &HistoryCache::default()).unwrap();
+        let after = std::fs::read_to_string(cache_path(&dir)).unwrap();
+        assert_eq!(before, after, "empty scan must not replace real history");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// minimal non-coinbase filler for vtx[0] of test blocks (produces no
