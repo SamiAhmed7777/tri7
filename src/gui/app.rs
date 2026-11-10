@@ -722,22 +722,27 @@ impl Tri7App {
                     // 5b. Tor/I2P handle: there is ONE drawer implementation
                     // (net_drawer on the Receive page). This jumps there and
                     // opens it, instead of growing a second copy that would
-                    // drift out of sync.
-                    let net_btn = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
-                        .small(),
-                    );
-                    if net_btn.clicked() {
-                        self.st.screen = crate::gui::state::Screen::Receive;
-                        self.net_drawer_open = Some(std::time::Instant::now());
+                    // drift out of sync. The Display tab's "Show onion
+                    // address in status bar" option gates it (legacy
+                    // OptionsModel::ShowOnionAddress hid the status bar's
+                    // onion address when it was off).
+                    if self.st.transport_chip_visible() {
+                        let net_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
+                            .small(),
+                        );
+                        if net_btn.clicked() {
+                            self.st.screen = crate::gui::state::Screen::Receive;
+                            self.net_drawer_open = Some(std::time::Instant::now());
+                        }
+                        net_btn.on_hover_text(
+                            "Your Tor and I2P addresses, with copy — opens on Receive Coins",
+                        );
                     }
-                    net_btn.on_hover_text(
-                        "Your Tor and I2P addresses, with copy — opens on Receive Coins",
-                    );
                     // 6. refresh — 28 px icon-only ghost button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
@@ -3891,7 +3896,7 @@ impl Tri7App {
                     }
                 };
                 let type_label = view.type_label.clone();
-                let label = view.label.clone();
+                let address_cell = view.address_cell.clone();
                 let amt = view.amount_text.clone();
                 // tooltip = legacy formatTooltip (status / type / address)
                 let conf_label = view.tooltip.clone();
@@ -3918,7 +3923,7 @@ impl Tri7App {
                     }
                     th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
                     th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
-                    th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
+                    th::table_cell_text(rui, 284.0, cols[3].width, &address_cell, false, th::TEXT_PRIMARY, true);
                     th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
                     resp.clone().on_hover_text(conf_label.clone());
                     resp.clicked()
@@ -4998,9 +5003,6 @@ impl Tri7App {
                             );
                         }
                         ui.end_row();
-                        ui.label(egui::RichText::new("Detach databases:").color(th::TEXT_SECONDARY));
-                        th::disabled_input(ui, 140.0, "—", "Requires daemon integration");
-                        ui.end_row();
                     });
                 th::text_meta(
                     ui,
@@ -5198,12 +5200,21 @@ impl Tri7App {
                 self.st.options.tray_on_close = false;
                 let _ = quit;
 
-                let mut off = false;
-                ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut off, "Show onion address in status bar"),
+                // REAL now: the legacy "Show .onion address in status bar"
+                // checkbox (optionsdialog.ui:1510-1526) gates the status
+                // bar's Tor/I2P chip — the legacy client hid its onion
+                // address label in the status bar when this was off
+                // (trianglesgui.cpp:1791). The daemon already reports the
+                // onion/i2p addresses (debug_info.local_onion/local_i2p), so
+                // this only decides whether the chip is shown.
+                ui.checkbox(
+                    &mut self.st.options.show_onion_address,
+                    "Show onion address in status bar",
                 )
-                .on_disabled_hover_text("Requires daemon integration");
+                .on_hover_text(
+                    "Show the Tor / I2P transport chip in the status bar; \
+                     the addresses themselves come from the node",
+                );
             }
         });
         if let Some(err) = self.st.options_save_error.clone() {

@@ -80,8 +80,14 @@ pub struct OptionsState {
     pub minimize_on_close: bool,
     #[serde(default)]
     pub tray_on_close: bool,
-    #[serde(default)]
-    pub tray_icon_only: bool,
+    /// Display tab: "Show onion address in status bar" — legacy
+    /// OptionsModel::ShowOnionAddress (optionsdialog.ui:1510-1526). The
+    /// legacy client hides the status bar's onion address when it is OFF
+    /// (trianglesgui.cpp:1791); the tri7 status bar carries the Tor/I2P
+    /// transport chip instead, so this is that chip's visibility
+    /// preference. Legacy default: ON.
+    #[serde(default = "default_true")]
+    pub show_onion_address: bool,
     /// "Start Triangles on login" (optionsdialog Main tab; v5
     /// StartAtStartup). The CHECKED state mirrors the OS registration
     /// (src/gui/autostart.rs) at load and is applied to the OS on Apply.
@@ -91,6 +97,29 @@ pub struct OptionsState {
 
 fn default_true() -> bool {
     true
+}
+
+/// The Label/Address COLUMN text of one transaction row, exactly as legacy
+/// `transactiontablemodel.cpp` renders it (`lookupAddress(address,
+/// tooltip=false)`, lines 370-383), honouring the Display tab's "Display
+/// addresses in transaction list" option (legacy `bDisplayAddresses`):
+///
+/// legacy truth table (byte-exact, incl. the trailing space quirk):
+/// - no label          -> `(address)`  (the address is ALWAYS parenthesized
+///    when there is no label — the second if fires on the empty label alone)
+/// - label + option ON  -> `label (address)`
+/// - label + option OFF -> `label ` (legacy appends the label + a trailing
+///    space, then the address append never fires — invisible in the cell,
+///    kept byte-exact; transactiontablemodel.cpp:372 `label + " "` and :378)
+///
+/// The TOOLTIP is a different legacy string (`lookupAddress(address,
+/// tooltip=true)`) and always carries the address — it is untouched here.
+pub fn legacy_address_cell(address: &str, label: Option<&str>, display_addresses: bool) -> String {
+    match label.filter(|l| !l.is_empty()) {
+        Some(l) if display_addresses => format!("{} ({})", l, address),
+        Some(l) => format!("{} ", l),
+        None => format!("({})", address),
+    }
 }
 
 impl Default for OptionsState {
@@ -103,7 +132,7 @@ impl Default for OptionsState {
             notifications: true,
             minimize_on_close: true,
             tray_on_close: false,
-            tray_icon_only: false,
+            show_onion_address: true,
             start_on_login: false,
         }
     }
@@ -132,6 +161,10 @@ pub struct TxRowView {
     pub type_label: String,
     /// Label/Address column text
     pub label: String,
+    /// The Label/Address COLUMN cell text, honouring the "Display addresses
+    /// in transaction list" option (legacy lookupAddress): ON shows
+    /// "Label (address)", OFF hides the address.
+    pub address_cell: String,
     /// legacy status enum (the page maps it to a colour)
     pub status: crate::legacy_rows::LegacyStatus,
     /// outgoing (amount in the red family)
@@ -2003,6 +2036,15 @@ impl AppState {
         }
     }
 
+    /// The status bar's Tor/I2P transport chip (the entry to the onion/i2p
+    /// drawer) is shown only while the Display tab's "Show onion address in
+    /// status bar" preference is on. Legacy `OptionsModel::ShowOnionAddress`
+    /// (optionsdialog.ui:1510-1526) hid the status bar's onion address when
+    /// it was off (trianglesgui.cpp:1791).
+    pub fn transport_chip_visible(&self) -> bool {
+        self.options.show_onion_address
+    }
+
     /// One Transactions row exactly as the page renders it. ONE
     /// implementation shared by the page, the CSV export and the headless
     /// --history-probe so they cannot drift; the probe line prints
@@ -2058,9 +2100,16 @@ impl AppState {
         } else {
             lk.label().to_string()
         };
-        let label = self
-            .label_of(&u.address)
-            .unwrap_or_else(|| u.address.clone());
+        let label_opt = self.label_of(&u.address);
+        let label = label_opt.clone().unwrap_or_else(|| u.address.clone());
+        // the COLUMN cell honours the "Display addresses in transaction list"
+        // option; the TOOLTIP below always carries the address (legacy
+        // lookupAddress(address, tooltip=true)).
+        let address_cell = legacy_address_cell(
+            &u.address,
+            label_opt.as_deref(),
+            self.options.display_addresses,
+        );
         let amount_text = if display_sats < 0 {
             format!(
                 "{} {}",
@@ -2091,6 +2140,7 @@ impl AppState {
             glyph_key,
             type_label,
             label,
+            address_cell,
             status: lstatus,
             negative: display_sats < 0,
         }

@@ -1493,6 +1493,146 @@ fn default_options_carry_the_legacy_default_fee() {
     assert!(o.display_addresses);
 }
 
+// ---------------------------------------------------------------------------
+// GUI-OPTIONS-AUDIT row 29 (display_addresses), row 31 (onion), row 18
+// (detach databases) — the three dead Options rows, made real or removed.
+// ---------------------------------------------------------------------------
+
+/// AUDIT row 29: "Display addresses in transaction list" was a persisted
+/// no-op — the tx table always rendered its Label/Address column. Legacy
+/// `lookupAddress()` (transactiontablemodel.cpp:370-383) puts the raw
+/// address next to the label ONLY when the option is on; with it off the
+/// cell follows legacy `lookupAddress(address, tooltip=false)`
+/// (transactiontablemodel.cpp:370-383) BYTE-EXACT: labeled + OFF -> the
+/// label + legacy's trailing space (the address append never fires); labeled
+/// + ON -> "label (address)"; NO label -> "(address)" ALWAYS parenthesized,
+/// in both option states (the second if fires on the empty label alone).
+#[test]
+fn the_transaction_address_column_follows_the_display_addresses_option() {
+    use crate::gui::app_state::legacy_address_cell;
+    let addr = "TVyCQQPgp3zfsbgZHus1me64Td6ULiuWPL";
+    // OFF: the label + legacy's trailing space (transactiontablemodel.cpp:372)
+    assert_eq!(legacy_address_cell(addr, Some("savings"), false), "savings ");
+    // ON: "Label (address)" — legacy's parenthesised form
+    assert_eq!(
+        legacy_address_cell(addr, Some("savings"), true),
+        format!("savings ({addr})")
+    );
+    // no label: ALWAYS parenthesized, both option states (legacy: the label
+    // is empty so the second if fires regardless of the option)
+    assert_eq!(legacy_address_cell(addr, None, false), format!("({addr})"));
+    assert_eq!(legacy_address_cell(addr, None, true), format!("({addr})"));
+
+    // and the shared row view reads the OPTION, not a hardcoded value
+    let mut st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
+    st.keystore.push(AbEntry {
+        address: addr.into(),
+        label: "savings".into(),
+        secret: None,
+        source: "keystore",
+    });
+    let u = UtxoRec {
+        txid: [9u8; 32],
+        n: 0,
+        value_sats: 1_500_000,
+        script: Vec::new(),
+        address: addr.into(),
+        height: 100,
+        tx_time: 1_700_000_300,
+        prev_kind: "regular".into(),
+        legacy_kind: "recv_with".into(),
+        stake_net: None,
+    };
+    st.options.display_addresses = true;
+    assert_eq!(
+        st.tx_row_view(&u, 200).address_cell,
+        format!("savings ({addr})"),
+        "option ON: the address is shown next to the label"
+    );
+    st.options.display_addresses = false;
+    assert_eq!(
+        st.tx_row_view(&u, 200).address_cell,
+        "savings ",
+        "option OFF: the label + legacy's trailing space (the address append never fires)"
+    );
+
+    // and the unlabeled path: ALWAYS parenthesized, both option states
+    // (a DIFFERENT address — the one above has a keystore label)
+    let no_addr = "TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3";
+    let u_nolabel = UtxoRec {
+        txid: [10u8; 32],
+        n: 0,
+        value_sats: 1_500_000,
+        script: Vec::new(),
+        address: no_addr.into(),
+        height: 100,
+        tx_time: 1_700_000_300,
+        prev_kind: "regular".into(),
+        legacy_kind: "recv_with".into(),
+        stake_net: None,
+    };
+    st.options.display_addresses = true;
+    assert_eq!(
+        st.tx_row_view(&u_nolabel, 200).address_cell,
+        format!("({no_addr})"),
+        "unlabeled + ON: legacy parenthesizes the bare address"
+    );
+    st.options.display_addresses = false;
+    assert_eq!(
+        st.tx_row_view(&u_nolabel, 200).address_cell,
+        format!("({no_addr})"),
+        "unlabeled + OFF: still parenthesized (the empty label fires the second if)"
+    );
+}
+
+/// AUDIT row 31: "Show onion address in status bar" was a permanently
+/// disabled stub even though the daemon already reports the onion/i2p
+/// addresses. It is now a REAL preference for the status bar's Tor/I2P
+/// transport chip, persisted with the rest of the options file.
+#[test]
+fn the_status_bar_transport_chip_follows_the_onion_option_and_persists() {
+    let (mut st, dir) = options_state_with_unreachable_node("onionchip");
+    // legacy default: the onion address IS shown (optionsmodel.cpp:54)
+    assert!(st.transport_chip_visible(), "the chip is on by default");
+    st.options.show_onion_address = false;
+    assert!(
+        !st.transport_chip_visible(),
+        "turning the option off hides the status-bar chip"
+    );
+    st.save_options_action().expect("apply");
+    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
+    assert!(text.contains("\"show_onion_address\": false"), "{}", text);
+    // a fresh AppState over the same profile dir reads it back
+    let cfg = UiConfig {
+        profile_dir: dir.display().to_string(),
+        ..UiConfig::default()
+    };
+    let st2 = crate::gui::app_state::AppState::new(cfg);
+    assert!(!st2.options.show_onion_address, "the preference persists");
+    assert!(!st2.transport_chip_visible());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AUDIT row 18: the "Detach databases" row was permanently disabled
+/// ("Requires daemon integration"), but the tri7 wallet is SQLite-native
+/// and the daemon already ruled `-detachdb` superseded (docs/PARITY_AUDIT.md
+/// :207) — a permanently disabled control is a promise the wallet cannot
+/// keep. The row (and the unused `tray_icon_only` field it was paired with)
+/// are gone.
+#[test]
+fn the_detach_databases_row_and_the_unused_tray_icon_field_are_gone() {
+    let app = include_str!("app.rs");
+    assert!(
+        !app.contains("Detach databases"),
+        "the dead Detach databases row must be deleted"
+    );
+    let state = include_str!("app_state.rs");
+    assert!(
+        !state.contains("tray_icon_only"),
+        "the unread tray_icon_only field must be deleted"
+    );
+}
+
 #[test]
 fn legacy_identity_is_carried_over_exactly() {
     // sidebar order — Overview FIRST (mainwindow.ui)
