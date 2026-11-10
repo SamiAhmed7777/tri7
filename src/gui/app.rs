@@ -1851,6 +1851,7 @@ impl eframe::App for Tri7App {
                 self.node = Some(crate::gui::node_supervisor::EmbeddedNode::new(
                     port,
                     node_dir.join("node.log"),
+                    self.st.cfg.rpc_addr.is_some(),
                 ));
             }
             if let Some(n) = &mut self.node {

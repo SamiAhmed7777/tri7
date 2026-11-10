@@ -13,20 +13,20 @@ echo "repo_head=$(git rev-parse HEAD)"
 echo "repo_head_short=$(git rev-parse --short HEAD)"
 
 echo; echo "== implementation commit refs =="
-for f in src/txpool.rs src/rpc.rs src/stake.rs src/spend.rs src/bin/follow_tip.rs src/bin/tri7_wallet_gui.rs; do
+for f in src/txpool.rs src/rpc.rs src/stake.rs src/spend.rs src/node_embedded.rs src/bin/tri7_wallet_gui.rs; do
   printf '%-28s %s\n' "$f" "$(git log -1 --format='%h %ad %s' --date=format:'%Y-%m-%d' -- "$f")"
 done
 
 echo; echo "== sendrawtransaction: advertised + implemented =="
 grep -n 'sendrawtransaction' src/rpc.rs | sed -n '1,3p'
-grep -n '"sendrawtransaction" =>' src/bin/follow_tip.rs | head -2
+grep -n '"sendrawtransaction" =>' src/node_embedded.rs | head -2
 test -s src/txpool.rs && echo "txpool.rs present: $(wc -l < src/txpool.rs) lines"
 
 echo; echo "== mint includes pool txs =="
-grep -n 'txs_for_block' src/bin/follow_tip.rs | head -2
+grep -n 'txs_for_block' src/node_embedded.rs | head -2
 
 echo; echo "== follower validator: structure-only scan for extra txs =="
-grep -n 'for tx in block.vtx.iter().skip(1)' src/bin/follow_tip.rs | head -3
+grep -n 'for tx in block.vtx.iter().skip(1)' src/node_embedded.rs | head -3
 
 echo; echo "== live mint cadence (last 60 min) =="
 N=$(journalctl -u tri7d --since "-60 min" --no-pager | grep -c 'STAKE MINTED' || true)

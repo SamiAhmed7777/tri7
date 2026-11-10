@@ -4,6 +4,10 @@
 //! module mirrors the wire format of triangles_v5 (the 2013-era C++ client)
 //! so that the same bytes produce the same hashes and the same chain.
 
+// The embedded node module (and its tests) refer to this crate by its
+// published name; make that resolve inside the crate itself.
+extern crate self as tri7_core;
+
 pub mod address;
 pub mod balances_build;
 pub mod blkfile;
@@ -18,6 +22,8 @@ pub mod keytool;
 pub mod legacy;
 pub mod legacy_rows;
 pub mod multisig;
+/// The embedded follow-tip node, welded into the GUI process (single-exe).
+pub mod node_embedded;
 pub mod p2p;
 pub mod rawtx;
 pub mod replay;

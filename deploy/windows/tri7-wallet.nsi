@@ -1,5 +1,7 @@
 ; tri7 Wallet — Cryptographic Triangles (TRI) NSIS installer
-; ONE file installs the GUI wallet + the node + the CLI + the history tool.
+; ONE file installs ONE program: tri7_wallet_gui.exe IS the wallet AND the
+; node (welded in-process, src/node_embedded.rs). No follow_tip.exe, no
+; tri7.exe, no txhistory.exe in the user's folder.
 ; VERSION: overridable from CI (makensis -DVERSION=<ver>) so the installer
 ; metadata AND the output filename carry the Cargo.toml version — the in-app
 ; auto-updater (src/updater.rs) resolves release assets as
@@ -73,10 +75,10 @@ FunctionEnd
 
 Section "Install"
   SetOutPath "$INSTDIR\bin"
+  ; ONE program: the wallet with the node welded in. Legacy installs that
+  ; carried follow_tip.exe / tri7.exe / txhistory.exe keep those files on
+  ; disk (the GUI ignores them — harmless); the uninstaller removes them.
   File "${EXEDIR}\tri7_wallet_gui.exe"
-  File "${EXEDIR}\follow_tip.exe"
-  File "${EXEDIR}\tri7.exe"
-  File "${EXEDIR}\txhistory.exe"
 
   ; the chain store + config live beside the wallet: the GUI's node
   ; supervisor uses <wallet folder>\node\state and
@@ -100,21 +102,15 @@ Section "Install"
 
   ; shortcuts
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
-  ; remove the legacy node shortcut: it pointed at a conf/state pair the
-  ; wallet never used, so launching it started a second node that fought
-  ; the supervised one over the RPC port
+  ; legacy shortcut cleanup: upgrades over pre-weld installs must not leave
+  ; launchers for exes that no longer ship (a stray follow_tip.exe on disk
+  ; from an old install stays harmless, but its shortcut is gone)
   Delete "$SMPROGRAMS\${APPNAME}\tri7d daemon.lnk"
-  ; the wallet shortcut opens THIS folder's wallet
+  Delete "$SMPROGRAMS\${APPNAME}\${APPNAME} node (staking).lnk"
+  ; the wallet shortcut opens THIS folder's wallet — it IS the node now
   CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME} Wallet.lnk" \
     "$INSTDIR\bin\tri7_wallet_gui.exe" '--wallet "$INSTDIR\wallet.dat"' \
     "$INSTDIR\bin\tri7_wallet_gui.exe" 0
-  ; the node shortcut uses the SAME folder and the SAME state dir the
-  ; wallet's supervisor uses - a node with its own state dir would fight
-  ; the supervised one over the same RPC port.
-  CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME} node (staking).lnk" \
-    "$INSTDIR\bin\follow_tip.exe" \
-    '--wallet "$INSTDIR\wallet.dat" --state-dir "$INSTDIR\node\state" --conf "$INSTDIR\node\triangles.conf" --rpc-port 19114 --rpc-bind 127.0.0.1 --forever' \
-    "$INSTDIR\bin\follow_tip.exe" 0
   CreateShortcut "$SMPROGRAMS\${APPNAME}\Uninstall.lnk" \
     "$INSTDIR\uninstall.exe" "" "$INSTDIR" 0
   CreateShortcut "$DESKTOP\${APPNAME} Wallet.lnk" \
@@ -141,6 +137,7 @@ Section "Uninstall"
   ; transport choices). Only the programs and the re-downloadable chain
   ; store go.
   Delete "$INSTDIR\bin\tri7_wallet_gui.exe"
+  ; legacy pre-weld installs may still carry these — clean them up
   Delete "$INSTDIR\bin\follow_tip.exe"
   Delete "$INSTDIR\bin\tri7.exe"
   Delete "$INSTDIR\bin\txhistory.exe"

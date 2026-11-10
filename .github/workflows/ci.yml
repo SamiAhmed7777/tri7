@@ -69,9 +69,12 @@ jobs:
           $v = ($meta.packages | Where-Object { $_.name -eq 'tri7-core' }).version
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "version=$v"
-      - name: Build daemon (follow_tip)
+      # dev tools still build (fleet daemons + debugging) but leave the
+      # user payloads: tri7_wallet_gui.exe IS the wallet AND the node
+      # (in-process, src/node_embedded.rs) — ONE user artifact per shape.
+      - name: Build bins (dev tools)
         run: cargo build --release --bins
-      - name: Build GUI wallet (egui)
+      - name: Build GUI wallet (egui, node welded in)
         run: cargo build --release --features gui --bin tri7_wallet_gui
       - name: Run tests
         run: cargo test --release --lib
@@ -79,20 +82,18 @@ jobs:
         with:
           name: tri7-windows
           path: |
-            target/release/follow_tip.exe
             target/release/tri7_wallet_gui.exe
-            target/release/tri7.exe
-            target/release/txhistory.exe
       # Updater release-asset shapes (src/updater.rs resolves exactly these
       # names on GitHub Releases):
       #   CryptographicTriangles-<ver>-win64-setup.exe        (NSIS /S)
       #   CryptographicTriangles-<ver>-win64-gui-portable.exe (portable exe)
-      #   CryptographicTriangles-<ver>-win64-tri7d.exe        (daemon)
       # plus SHA256SUMS — the digest-pinning source the release body quotes.
+      # The node is WELDED INTO tri7_wallet_gui.exe (src/node_embedded.rs):
+      # no follow_tip.exe / tri7.exe / txhistory.exe in user payloads.
       - name: Build Windows installer (NSIS with version metadata)
         run: |
           choco install nsis -y --no-progress
-          Copy-Item target\release\tri7_wallet_gui.exe, target\release\follow_tip.exe, target\release\tri7.exe, target\release\txhistory.exe deploy\windows\
+          Copy-Item target\release\tri7_wallet_gui.exe deploy\windows\
           if (-not (Test-Path "$env:ChocolateyInstall\bin\makensis.exe")) {
             $mk = Get-ChildItem 'C:\Program Files*\NSIS\makensis.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
           } else {
@@ -100,22 +101,19 @@ jobs:
           }
           & "$mk" "-DVERSION=${{ steps.ver.outputs.version }}" deploy\windows\tri7-wallet.nsi
           Copy-Item target\release\tri7_wallet_gui.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe"
-          Copy-Item target\release\follow_tip.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-tri7d.exe"
       - name: SHA256SUMS (digest pinning for the updater)
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
           $names = @(
             "CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe",
-            "CryptographicTriangles-$v-win64-tri7d.exe"
+            "CryptographicTriangles-$v-win64-gui-portable.exe"
           )
           $files = @(
             "deploy\windows\CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe",
-            "CryptographicTriangles-$v-win64-tri7d.exe"
+            "CryptographicTriangles-$v-win64-gui-portable.exe"
           )
-          $lines = 0..2 | ForEach-Object {
+          $lines = 0..1 | ForEach-Object {
             $h = (Get-FileHash $files[$_] -Algorithm SHA256).Hash.ToLower()
             "$h  $($names[$_])"
           }
@@ -130,7 +128,6 @@ jobs:
           name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-portable-and-digests
           path: |
             CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe
-            CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-tri7d.exe
             SHA256SUMS
 
   macos-build:
