@@ -146,6 +146,10 @@ pub struct UiConfig {
     pub state_dir_explicit: bool,
     pub stake_dryrun_path: String,
     pub rpc_addr: Option<String>, // tri7d native RPC (loopback), None = disable
+    /// attach to an EXTERNAL daemon instead of running the node in-process.
+    /// Default FALSE: the weld's whole point — double-click starts the node
+    /// inside the wallet. Attach is an explicit opt-in (fleet/advanced).
+    pub attach_external: bool,
     pub profile_dir: String,      // GUI side files (keystore/addressbook/options)
     pub balances_path: String,    // phase-1e snapshot (explorer rich list)
     pub explorer_endpoints: Vec<String>, // tried in order; 19112 native first
@@ -167,6 +171,7 @@ impl Default for UiConfig {
                 state_dir_explicit: false,
                 stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
                 rpc_addr: Some("127.0.0.1:19114".into()),
+                attach_external: false,
                 profile_dir: format!("{local}\\Tri7Wallet\\profile"),
                 balances_path: format!("{local}\\Tri7Wallet\\balances.json"),
                 explorer_endpoints: explorer_defaults(),
@@ -178,6 +183,7 @@ impl Default for UiConfig {
                 state_dir_explicit: false,
                 stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
                 rpc_addr: Some("127.0.0.1:19112".into()),
+                attach_external: false,
                 profile_dir: "/root/.tri7_gui".into(),
                 balances_path: "/root/tri7/balances.json".into(),
                 explorer_endpoints: explorer_defaults(),

@@ -560,6 +560,20 @@ mod tests {
     /// attach-to-external (rpc_addr configured — fleet mode): a dead RPC port
     /// is Ok(false), and the in-process runner is NEVER invoked.
     #[test]
+    fn default_gui_config_activates_the_weld_not_attach_mode() {
+        // THE r21 regression: UiConfig.rpc_addr defaults to Some(19114) — the
+        // weld's first cut keyed attach off rpc_addr.is_some(), so EVERY
+        // default user was attach-mode and the in-process node NEVER started
+        // (live-caught on sami-laptop: GUI polled 19114 forever, SYN_SENT).
+        // The default must be attach_external=false (the node runs inside).
+        let cfg = tri7_core::gui::state::UiConfig::default();
+        assert!(
+            !cfg.attach_external,
+            "default config must run the node in-process (the weld)"
+        );
+    }
+
+    #[test]
     fn attach_external_never_starts_in_process() {
         let port = free_dead_port();
         let dir = std::env::temp_dir().join(format!("nsext{}", std::process::id()));

@@ -18,6 +18,8 @@ fn usage() -> ! {
          \x20                      [--wallet PATH] [--state-dir PATH] [--dump PATH]\n\
          \x20                      [--tipstate PATH] [--archive PATH] [--index-dir PATH]\n\
          \x20                      [--stake-dryrun PATH] [--rpc ADDR|none] [--profile-dir PATH]\n\
+         \x20                      [--attach-external]  attach to an external daemon\n\
+         \x20                      instead of running the node in-process (fleet mode)\n\
          \x20                      [-min | --min]  start minimized (the login-autostart flag)\n\
          \x20                      --autostart-check  roundtrip the login registration (headless)\n\
          defaults: wallet /root/.triangles/wallet.dat, state-dir /var/lib/tri7,\n\
@@ -99,6 +101,9 @@ fn main() {
     }
     if let Some(v) = get("--rpc", &args) {
         cfg.rpc_addr = if v == "none" { None } else { Some(v) };
+    }
+    if args.iter().any(|a| a == "--attach-external") {
+        cfg.attach_external = true;
     }
     if history_probe {
         // headless: construct the app state, load the wallet exactly like the
