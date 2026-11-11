@@ -3326,6 +3326,13 @@ fn advance_with_block(
     }
     st.tip_height = h;
     st.tip_hash = hash;
+    // event push: tip block accepted (legacy zmq hashblock parity; try_send
+    // — a slow SSE consumer can never stall the accept path)
+    tri7_core::events::publish_block(
+        h,
+        &tri7_core::p2p::internal_to_display(&hash),
+        block.time as u64,
+    );
     st.trim();
     Ok(())
 }
@@ -6106,6 +6113,9 @@ struct OpsAdapter {
     /// block store for the pool's deep-coin prevout fallback
     /// (WalletThenStoreUtxoView); None keeps the wallet-only view
     store: Option<Arc<BlockStore>>,
+    /// live event fan-out hub — GET /events (SSE) serves this same hub the
+    /// producers (tip advance / mempool accept / staking toggle) publish to
+    events: Arc<tri7_core::events::EventHub>,
 }
 
 /// The live block store: height-lookup consumers deep in the follow loops
@@ -6516,6 +6526,7 @@ impl OpsAdapter {
         let rep = pool
             .accept(&raw, &view, now_secs() as i64)
             .map_err(|e| (-25, e))?;
+        tri7_core::events::publish_tx(&rep.txid, now_secs());
         let peers_n = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
         self.announce
             .lock()
@@ -6571,6 +6582,10 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
         self.wl.lock().map(|w| w.is_some()).unwrap_or(false)
     }
 
+    fn event_hub(&self) -> Option<Arc<tri7_core::events::EventHub>> {
+        Some(Arc::clone(&self.events))
+    }
+
     fn call(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, (i64, String)> {
         let p = |i: usize| params.get(i);
         let ps = |i: usize| p(i).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -6605,6 +6620,7 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "BROADCAST: tx {} accepted for relay ({} inputs, fee {} sats) — inv to {} peer(s)",
                     rep.txid, rep.inputs, rep.fee_sats, peers_n
                 ));
+                tri7_core::events::publish_tx(&rep.txid, now_secs());
                 Ok(serde_json::json!({
                     "txid": rep.txid,
                     "fee_sats": rep.fee_sats,
@@ -6848,6 +6864,7 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                             ));
                             resent += 1;
                             survivors.push(e.clone());
+                            tri7_core::events::publish_tx(&rep.txid, now_secs());
                         }
                         Err(err) => {
                             // NOT mined (the gate above ran): a rejection here
@@ -7549,6 +7566,7 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                             if want { "1" } else { "0" },
                             self.conf_path.display()
                         ));
+                        tri7_core::events::publish_staking(want);
                         Ok(serde_json::json!({
                             "staking": want,
                             "persisted_to": self.conf_path.display().to_string(),
@@ -8585,6 +8603,7 @@ fn handle_message(
                         .unwrap()
                         .push_back(tri7_core::p2p::display_to_internal(&rep.txid).unwrap_or([0u8; 32]));
                     pending_tx_getdata.remove(&tx.hash());
+                    tri7_core::events::publish_tx(&rep.txid, now_secs());
                     log(&format!(
                         "tx relay accepted: {} ({} inputs, fee {} sats) from {} — announcing",
                         rep.txid, rep.inputs, rep.fee_sats, peer.label
@@ -10341,6 +10360,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                 wallet_path: cfg.wallet_path.clone(),
                 state_dir: cfg.state_dir.clone(),
                 store: Some(Arc::clone(&store)),
+                events: tri7_core::events::live_hub_or_init(),
             })),
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,

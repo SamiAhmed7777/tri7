@@ -14,6 +14,7 @@ pub mod blkfile;
 pub mod blockindex;
 pub mod consensus;
 pub mod difficulty;
+pub mod events;
 pub mod forkchoice;
 pub mod history;
 pub mod gui;
