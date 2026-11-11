@@ -116,38 +116,74 @@ fn main() {
     }
 
     let store = BlockStore::new(Some(store_path.clone()), None);
-    store.spawn_build(None);
     // The chain tip must come from the tipstate oracle BEFORE the wait: the
     // store's threaded tip starts near genesis and a naive "any value" break
     // fired at h11229, leaving 2.19M blocks unindexed (the whole point of the
     // tool). Wait until threading has reached the tip, with a generous
     // deadline for slow boards.
-    let oracle: std::collections::HashMap<String, u64> = {
-        let mut m = std::collections::HashMap::new();
+    //
+    // The BUILDER needs the same window as a BuildOracle: spawn_build(None)
+    // chains POSITIONALLY and stalls at the first stale fork frame — live
+    // 2026-11-11 on DNS2, where three runs froze at h2208645 (need h2209332)
+    // for a full hour each while the SAME file threaded to the tip
+    // oracle-first (store_gapfix passes the oracle; hash-first authority
+    // skips stale frames by hash). Refuse rather than stall.
+    let expected: Vec<(u64, String)> = {
+        let mut v: Vec<(u64, String)> = Vec::new();
         if let Ok(raw) = std::fs::read_to_string(state_dir.join("tipstate.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(entries) = val.get("entries").and_then(|e| e.as_array()) {
                     for e in entries {
                         if let (Some(h), Some(hash)) = (
                             e.get("height").and_then(|x| x.as_u64()),
                             e.get("hash").and_then(|x| x.as_str()),
                         ) {
-                            m.insert(hash.to_string(), h);
+                            v.push((h, hash.to_string()));
                         }
                     }
                 }
             }
         }
-        m
+        v.sort_by_key(|(h, _)| *h);
+        v.dedup_by_key(|(h, _)| *h);
+        v
     };
+    let oracle: std::collections::HashMap<String, u64> =
+        expected.iter().map(|(h, s)| (s.clone(), *h)).collect();
     println!("tipstate oracle: {} hashes", oracle.len());
-    let chain_tip = oracle.values().copied().max().unwrap_or(0);
-    if oracle.is_empty() || chain_tip == 0 {
+    let chain_tip = expected.last().map(|(h, _)| *h).unwrap_or(0);
+    if expected.is_empty() || chain_tip == 0 {
         eprintln!(
             "tipstate oracle is empty or has no positive height — cannot determine the chain tip; refusing to index"
         );
         std::process::exit(2);
     }
+    let build_oracle = {
+        let base = expected[0].0;
+        let mut hashes = Vec::with_capacity(expected.len());
+        for (i, (h, hex)) in expected.iter().enumerate() {
+            if *h != base + i as u64 {
+                eprintln!(
+                    "tipstate window non-contiguous at h{h} (expected h{}) — threading without a contiguous oracle stalls at the first stale frame; refusing to index",
+                    base + i as u64
+                );
+                std::process::exit(2);
+            }
+            match tri7_core::p2p::display_to_internal(hex) {
+                Ok(b) => hashes.push(b),
+                Err(e) => {
+                    eprintln!("tipstate hash {hex} unusable: {e} — refusing to index");
+                    std::process::exit(2);
+                }
+            }
+        }
+        tri7_core::blockindex::BuildOracle {
+            base,
+            tip: base + hashes.len() as u64 - 1,
+            hashes,
+        }
+    };
+    store.spawn_build(Some(build_oracle));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
     let tip = loop {
         match store.status() {
