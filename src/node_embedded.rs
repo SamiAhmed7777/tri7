@@ -271,6 +271,26 @@ fn keypool_maintainer_loop(
 const STALE_LINK_SECS: u64 = 90;
 const MAX_OUTSTANDING_GETDATA: usize = 64;
 const GETDATA_BATCH: usize = 32;
+// (item 23, live-caught on DNS2 2026-11-11) A body request the target never
+// answers used to sit in `outstanding` FOREVER: at the 64-entry cap the
+// dispatch gate closed permanently and the node re-fired identical
+// "rolling back … adopting N block(s)" verdicts every 60-90s while NO
+// getdata was ever dispatched again (DNS2 pinned at the fork for 2h+ with
+// its own mints abandoned each cycle). Cure, same shape as the seed path's
+// deadline: age unanswered requests out, requeue them in chain order, and
+// rotate to peers that have not already ignored the request.
+const GETDATA_TIMEOUT_SECS: u64 = 45;
+const MAX_BODY_ATTEMPTS: u32 = 6; // attempts before the stall line goes loud
+const BODY_TRIES_WASHOUT: u32 = 12; // attempts before rotation memory resets
+
+/// (item 23) Rotation memory for one in-flight body request: when it was
+/// sent, how many attempts it has consumed, and which peers already
+/// ignored it (the next dispatch must rotate off those).
+struct BodyTries {
+    sent_at: Instant,
+    attempts: u32,
+    tried: Vec<String>,
+}
 const EXIT_USAGE: i32 = 2;
 const EXIT_VALIDATE: i32 = 3;
 const EXIT_PROTOCOL: i32 = 4;
@@ -773,28 +793,47 @@ fn claim_from_extending_batch(tip_height: u64, headers: &[Block]) -> (u64, Hash)
 /// NONE of the adopted bodies — that is exactly how it won fork choice),
 /// then any outbound peer (relay topology unchanged), then any live peer.
 /// Returns the label to dial; the caller resolves it against live sessions.
+/// (item 23) `avoid` carries the labels that already ignored this request —
+/// each preference tier skips them first so a retry lands on a FRESH peer.
+/// When every live peer has been tried, the original order is restored
+/// (retrying a tried peer beats starving the adoption forever).
 fn choose_body_source_label(
     recon_source: Option<&str>,
     live: &[(bool, String)], // (outbound, label) of live peers
+    avoid: &[String],
 ) -> Option<String> {
+    let untried = |l: &str| !avoid.iter().any(|a| a == l);
+    if let Some(src) = recon_source {
+        if untried(src) {
+            if let Some((_, l)) = live.iter().find(|(_, l)| l == src) {
+                return Some(l.clone());
+            }
+        }
+    }
+    if let Some((_, l)) = live.iter().find(|(out, l)| *out && untried(l)) {
+        return Some(l.clone());
+    }
+    if let Some((_, l)) = live.iter().find(|(_, l)| untried(l)) {
+        return Some(l.clone());
+    }
+    // rotation exhausted: retry the advertiser, then the first live peer
     if let Some(src) = recon_source {
         if let Some((_, l)) = live.iter().find(|(_, l)| l == src) {
             return Some(l.clone());
         }
     }
-    if let Some((_, l)) = live.iter().find(|(out, _)| *out) {
-        return Some(l.clone());
-    }
     live.first().map(|(_, l)| l.clone())
 }
 
 /// (item 21, r2) The exact selection the main loop performs for a pending
-/// body batch: resolve the label (advertiser → outbound → any live) against
-/// the LIVE sessions and return that peer. Shared with the socket-level
-/// regression so the test observes the same control flow the loop runs.
+/// body batch: resolve the label (advertiser → outbound → any live, skipping
+/// already-tried peers first) against the LIVE sessions and return that
+/// peer. Shared with the socket-level regression so the test observes the
+/// same control flow the loop runs.
 fn resolve_body_send_target<'a>(
     recon_source: Option<&str>,
     peers: &'a mut [Peer],
+    avoid: &[String],
 ) -> Option<&'a mut Peer> {
     if peers.is_empty() {
         return None;
@@ -804,8 +843,143 @@ fn resolve_body_send_target<'a>(
         .filter(|p| p.sess_ok())
         .map(|p| (p.outbound, p.label.clone()))
         .collect();
-    let label = choose_body_source_label(recon_source, &live)?;
+    let label = choose_body_source_label(recon_source, &live, avoid)?;
     peers.iter_mut().find(|p| p.label == label && p.sess_ok())
+}
+
+/// (item 23) Age out body requests the target never answered and return
+/// them in CHAIN ORDER (ascending height) with their attempt counts, so the
+/// caller can requeue them at the FRONT of the pending queue without
+/// reshuffling the fetch order. Rotation memory (`tried`, `attempts`) is
+/// intentionally KEPT across the age-out — it only washes out at
+/// BODY_TRIES_WASHOUT so a brand-new adoption era starts clean.
+fn age_out_unanswered_bodies(
+    outstanding: &mut HashMap<Hash, u64>,
+    body_tries: &mut HashMap<Hash, BodyTries>,
+    timeout: Duration,
+) -> Vec<(Hash, u64, u32)> {
+    let now = Instant::now();
+    let mut aged: Vec<(Hash, u64, u32)> = outstanding
+        .iter()
+        .filter(|(h, _)| {
+            body_tries
+                .get(*h)
+                .map(|t| now.duration_since(t.sent_at) >= timeout)
+                .unwrap_or(true) // sent before the fix: no metadata = old
+        })
+        .map(|(h, ht)| {
+            let attempts = body_tries.get(h).map(|t| t.attempts).unwrap_or(0);
+            (*h, *ht, attempts)
+        })
+        .collect();
+    aged.sort_by_key(|(_, ht, _)| *ht);
+    for (h, _, _) in &aged {
+        outstanding.remove(h);
+        if let Some(t) = body_tries.get(h) {
+            if t.attempts >= BODY_TRIES_WASHOUT {
+                body_tries.remove(h);
+            }
+        }
+    }
+    aged
+}
+
+/// (item 23, r2 judge) A REQUESTED block that does not extend the tip is
+/// NOT dropped: with per-history groups a higher-height group can answer
+/// before its predecessor has landed. The caller keeps the hash in
+/// `outstanding` and refreshes its age-out clock here — the block either
+/// extends once its predecessor arrives, or re-dispatches after
+/// GETDATA_TIMEOUT_SECS (going loud via the STALL line if it never does).
+/// Returns false for a hash we never requested (the caller keeps its
+/// existing "ignoring non-extending block" path for those).
+fn refresh_body_request_clock(
+    body_tries: &mut HashMap<Hash, BodyTries>,
+    hash: &Hash,
+) -> bool {
+    match body_tries.get_mut(hash) {
+        Some(t) => {
+            t.sent_at = Instant::now();
+            true
+        }
+        None => false,
+    }
+}
+
+/// (item 23, r4 judge) prev_hash of a serialized block payload: the header
+/// is version u32-LE (4 bytes) followed by prev_hash (32 bytes).
+fn raw_prev_hash(raw: &[u8]) -> Option<Hash> {
+    if raw.len() < 36 {
+        return None;
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&raw[4..36]);
+    Some(h)
+}
+
+/// (item 23, r3/r4 judge) The successor of the NEW tip, if we already hold
+/// its body: candidates are ALL outstanding requests at tip+1 (sorted for
+/// determinism — HashMap order is arbitrary), and a candidate counts only
+/// if its cached payload is present (height 0) AND its prev_hash matches
+/// the current tip (a same-height entry can belong to another branch).
+fn find_cached_successor(
+    outstanding: &HashMap<Hash, u64>,
+    recent: &RecentBlocks,
+    tip_height: u64,
+    tip_hash: &Hash,
+) -> Option<Hash> {
+    let mut candidates: Vec<Hash> = outstanding
+        .iter()
+        .filter(|(_, ht)| **ht == tip_height + 1)
+        .map(|(h, _)| *h)
+        .collect();
+    candidates.sort_unstable();
+    for h in candidates {
+        if let Some((0, raw)) = recent.get(&h) {
+            if raw_prev_hash(raw).as_ref() == Some(tip_hash) {
+                return Some(h);
+            }
+        }
+    }
+    None
+}
+
+/// (item 23, r1 judge) Split a built batch into history groups: hashes that
+/// share the same sorted tried-peer signature form ONE getdata batch whose
+/// target avoids exactly that history — so no hash is ever re-sent to a
+/// peer that ignored IT. Chain-adjacent hashes dispatched together share a
+/// history, so the common case is one group and batching is unchanged.
+fn group_batch_by_history(
+    batch: Vec<(u32, Hash, u64)>,
+    body_tries: &HashMap<Hash, BodyTries>,
+) -> Vec<(Vec<String>, Vec<(u32, Hash, u64)>)> {
+    let mut groups: Vec<(Vec<String>, Vec<(u32, Hash, u64)>)> = Vec::new();
+    for entry in batch {
+        let mut sig: Vec<String> = body_tries
+            .get(&entry.1)
+            .map(|t| t.tried.clone())
+            .unwrap_or_default();
+        sig.sort();
+        match groups.iter_mut().find(|(s, _)| *s == sig) {
+            Some((_, g)) => g.push(entry),
+            None => groups.push((sig, vec![entry])),
+        }
+    }
+    groups
+}
+
+/// (item 23) Push a built-but-unsent body batch back to the FRONT of the
+/// pending queue in GLOBALLY chain order (r2 judge: concatenated history
+/// groups need not be ascending — group F can hold h90,h92 while group T
+/// holds h91 — so the list is height-SORTED first; reversed push_front then
+/// restores ascending at the front, ahead of anything queued later).
+/// Nothing may enter `outstanding` until a send SUCCEEDS — an unsent request
+/// that pins is the wedge this fixes.
+fn requeue_unsent_batch(pending: &mut VecDeque<(Hash, u64)>, batch: &[(Hash, u64)]) {
+    let mut sorted: Vec<(Hash, u64)> = batch.to_vec();
+    sorted.sort_by_key(|(_, ht)| *ht);
+    for (h, ht) in sorted.iter().rev() {
+        pending.push_front((*h, *ht));
+    }
 }
 
 #[derive(Debug)]
@@ -2472,6 +2646,7 @@ struct Stats {
     getheaders_served: u64,  // headers ranges served to peers
     inbound_accepted: u64,   // inbound peers that completed the handshake
     inbound_polls: u64,      // (item 21) tip polls successfully sent to INBOUND peers
+    adoption_body_stalls: u64, // (item 23) age-out scans that requeued unanswered body requests
     // ---- phase 7 milestone 2: tx relay ----
     txs_received: u64,
     txs_accepted: u64,
@@ -2526,6 +2701,7 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "getheaders_served": s.getheaders_served,
         "inbound_accepted": s.inbound_accepted,
         "inbound_polls": s.inbound_polls,
+        "adoption_body_stalls": s.adoption_body_stalls,
         "txs_received": s.txs_received,
         "txs_accepted": s.txs_accepted,
         "txs_rejected": s.txs_rejected,
@@ -8973,6 +9149,8 @@ fn handle_message(
     cfg: &Config,
     msg: tri7_core::p2p::RawMessage,
     outstanding: &mut HashMap<Hash, u64>,
+    body_tries: &mut HashMap<Hash, BodyTries>,
+    reinject: &mut Vec<tri7_core::p2p::RawMessage>,
     pending_from_headers: &mut VecDeque<(Hash, u64)>,
     store: &Arc<BlockStore>,
     recent: &mut RecentBlocks,
@@ -9208,7 +9386,16 @@ fn handle_message(
             }
             Ok(())
         }
-        "block" => {
+        "block" | "block-reinject" => {
+            // (item 23, r4 judge) "block-reinject" is a cached payload our
+            // own loop re-injected after a tip advance (see the successor
+            // reinjection below) — it is NEVER attributed to the peer whose
+            // drain triggered it: a validation failure drops the cached
+            // payload and never attributed to a peer: a validation failure
+            // drops the cached payload and refreshes the request clock (the
+            // hash stays outstanding for the age-out re-dispatch), so it
+            // cannot disconnect anyone
+            let is_reinject = msg.command == "block-reinject";
             stats.blocks_received += 1;
             let mut r = Reader::new(&msg.payload);
             let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
@@ -9291,7 +9478,7 @@ fn handle_message(
             if height_abs > 0 {
                 let prev_entry = st.entries.last().cloned().unwrap();
                 let header = st.pending_headers.remove(&hash);
-                let paths = validate_block(
+                let paths = match validate_block(
                     st,
                     rpc,
                     stats,
@@ -9302,16 +9489,45 @@ fn handle_message(
                         prev_entry,
                         live: true,
                     },
-                )?;
+                ) {
+                    Ok(p) => p,
+                    // (item 23, r5 judge) a reinjected cached payload is our
+                    // own cache artifact — never peer-fatal. The request
+                    // STAYS in flight: the hash remains outstanding with a
+                    // refreshed clock, so the age-out re-dispatches it (peer
+                    // rotation fetches a fresh copy) unless it keeps failing,
+                    // in which case the STALL line goes loud.
+                    Err(e) if is_reinject => {
+                        log(&format!(
+                            "cached reinject for h{} failed validation: {} — payload dropped, request stays in flight (re-dispatches after the age-out)",
+                            height_abs, e
+                        ));
+                        refresh_body_request_clock(body_tries, &hash);
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
                 // The chain advances FIRST: the index may only be applied
                 // once the block is part of the chain this node serves. The
                 // index records the hash of the block it applied, so the
                 // wallet is served from it only when that hash matches the
                 // chain's own tip hash.
-                advance_with_block(st, rpc, stats, &b, &paths)?;
+                let applied = advance_with_block(st, rpc, stats, &b, &paths);
+                if let Err(e) = applied {
+                    if is_reinject {
+                        log(&format!(
+                            "cached reinject for h{} failed to apply: {} — payload dropped, request stays in flight (re-dispatches after the age-out)",
+                            height_abs, e
+                        ));
+                        refresh_body_request_clock(body_tries, &hash);
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
                 addrindex_apply(&b, height_abs);
                 stats.blocks_validated_live += 1;
                 outstanding.remove(&hash);
+                body_tries.remove(&hash); // (item 23) rotation memory done
                 // DURABILITY: append the accepted block to the store so the
                 // tip body survives restarts (the memory-only recent cache
                 // already lost one tip body and froze fleet minting until gap
@@ -9340,11 +9556,45 @@ fn handle_message(
                     } else {
                         "seeded"
                     },
-                    peer.label
+                    if is_reinject {
+                        "cached-reinject".to_string()
+                    } else {
+                        peer.label.clone()
+                    }
                 ));
+                // (item 23, r3/r4 judge) a successor that arrived BEFORE its
+                // predecessor is already cached (recent holds the payload at
+                // height 0) — re-inject it into the message queue so it takes
+                // the FULL validated path now instead of waiting out the
+                // 45 s age-out and a re-fetch (cascade: each applied block
+                // can re-inject the next). The candidate must be cached AND
+                // its prev_hash must match the new tip (r4: same-height
+                // candidates are checked deterministically).
+                if let Some(succ) = find_cached_successor(
+                    outstanding,
+                    recent,
+                    st.tip_height,
+                    &st.tip_hash,
+                ) {
+                    if let Some((0, raw)) = recent.get(&succ) {
+                        log(&format!(
+                            "re-injecting cached successor for h{} (arrived before its predecessor)",
+                            st.tip_height + 1
+                        ));
+                        reinject.push(tri7_core::p2p::RawMessage {
+                            command: "block-reinject".to_string(),
+                            payload: raw.clone(),
+                        });
+                    }
+                }
             } else if outstanding.contains_key(&hash) {
-                // requested block that no longer extends the tip — skip
-                outstanding.remove(&hash);
+                // (item 23, r2 judge) a requested block that does not extend
+                // the tip is NOT dropped — its predecessor may still be in
+                // flight (per-history groups can answer out of chain order).
+                // Keep it requested and refresh its age-out window; if the
+                // predecessor never lands it re-dispatches after
+                // GETDATA_TIMEOUT_SECS and goes loud via the STALL line.
+                refresh_body_request_clock(body_tries, &hash);
             } else {
                 log(&format!(
                     "ignoring non-extending block {} (prev {})",
@@ -11119,6 +11369,9 @@ pub fn main_args(argv: &[String]) -> i32 {
     let mut last_poll = Instant::now() - Duration::from_secs(POLL_SECS);
     let mut poll_parity = false;
     let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+    // (item 23) rotation memory for the body-request pipeline (age-out +
+    // peer rotation); keyed by the same hashes as `outstanding`
+    let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
     let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
     // (item 17b) competing-branch accumulator for the reconciliation judge
     let mut recon_acc = ReconAcc::default();
@@ -11406,6 +11659,55 @@ pub fn main_args(argv: &[String]) -> i32 {
         // getdata that has been SENT but not yet validated keeps its
         // advertiser preference for a re-request) / source drop, and
         // resolved advertiser-first (then outbound, then any live peer).
+        // (item 23) a request the target never answers now ages out after
+        // GETDATA_TIMEOUT_SECS, requeues in chain order, and ROTATES to a
+        // peer that has not already ignored it — the old path let one
+        // silently-unserved getdata pin `outstanding` until the cap closed
+        // the dispatch gate forever (live: DNS2 sat 2h+ at the fork
+        // re-firing identical adoption verdicts with zero getdata moving).
+        let aged = age_out_unanswered_bodies(
+            &mut outstanding,
+            &mut body_tries,
+            Duration::from_secs(GETDATA_TIMEOUT_SECS),
+        );
+        if !aged.is_empty() {
+            stats.adoption_body_stalls += 1;
+            // requeue in chain order at the FRONT (entries came back ascending)
+            for (h, ht, _) in aged.iter().rev() {
+                pending_from_headers.push_front((*h, *ht));
+            }
+            // (r1 judge) the loud gate reads the batch MAX, not one entry's
+            // count — mixed-attempt batches must not suppress the stall line
+            let attempts = aged.iter().map(|(_, _, a)| *a).max().unwrap_or(0);
+            if attempts >= MAX_BODY_ATTEMPTS
+                && (attempts == MAX_BODY_ATTEMPTS || (attempts - MAX_BODY_ATTEMPTS) % 4 == 0)
+            {
+                let mut tried: Vec<String> = Vec::new();
+                for (h, _, _) in &aged {
+                    if let Some(t) = body_tries.get(h) {
+                        for l in &t.tried {
+                            if !tried.contains(l) {
+                                tried.push(l.clone());
+                            }
+                        }
+                    }
+                }
+                let lo = aged.first().map(|(_, ht, _)| *ht).unwrap_or(0);
+                let hi = aged.last().map(|(_, ht, _)| *ht).unwrap_or(0);
+                log(&format!(
+                    "adoption body STALL: {} body request(s) h{}..h{} unfetched after {} attempt(s), peers tried [{}] — requeued, rotating targets (the peer set may not hold the adopted branch)",
+                    aged.len(),
+                    lo,
+                    hi,
+                    attempts,
+                    if tried.is_empty() {
+                        "?".to_string()
+                    } else {
+                        tried.join(", ")
+                    }
+                ));
+            }
+        }
         if pending_from_headers.is_empty()
             && outstanding.is_empty()
             && recon_acc.branch_source.is_some()
@@ -11416,35 +11718,92 @@ pub fn main_args(argv: &[String]) -> i32 {
             && outstanding.len() < MAX_OUTSTANDING_GETDATA
             && peers.iter().any(|p| p.sess_ok())
         {
-            let mut batch: Vec<(u32, Hash)> = Vec::new();
-            while batch.len() < GETDATA_BATCH {
+            // (r1 judge) the batch may not exceed the REMAINING outstanding
+            // capacity — the gate plus a full batch would overflow the cap
+            let capacity = MAX_OUTSTANDING_GETDATA - outstanding.len();
+            let want = GETDATA_BATCH.min(capacity);
+            let mut batch: Vec<(u32, Hash, u64)> = Vec::new();
+            while batch.len() < want {
                 match pending_from_headers.pop_front() {
                     Some((hash, height)) => {
-                        if !outstanding.contains_key(&hash) {
-                            outstanding.insert(hash, height);
-                            batch.push((tri7_core::p2p::MSG_BLOCK, hash));
+                        if !outstanding.contains_key(&hash)
+                            && !batch.iter().any(|(_, h, _)| *h == hash)
+                        {
+                            batch.push((tri7_core::p2p::MSG_BLOCK, hash, height));
                         }
                     }
                     None => break,
                 }
             }
             if !batch.is_empty() {
-                let body = tri7_core::p2p::build_getdata(&batch);
-                let body_peer = resolve_body_send_target(
-                    recon_acc.branch_source.as_deref(),
-                    &mut peers,
-                );
-                if let Some(p) = body_peer {
-                    if let Err(e) = p.sess.send("getdata", &body, &mut stats) {
-                        log(&format!(
-                            "send getdata to {} (transport {}) failed: {} — dropping (send failure)",
-                            p.label,
-                            p.transport.as_str(),
-                            e
-                        ));
-                        p.dead = true;
-                        p.sess.shutdown();
+                // (r1 judge) per-hash freshness with one send per history
+                // group (see group_batch_by_history): the common case is one
+                // group, so batching behavior is unchanged
+                let groups = group_batch_by_history(batch, &body_tries);
+                // (r2 judge) failed groups accumulate and requeue ONCE, in
+                // group-encounter order (= the batch's chain order): pushing
+                // each group to the queue front independently would put later
+                // groups ahead of earlier ones
+                let mut unsent: Vec<(Hash, u64)> = Vec::new();
+                for (avoid, group) in &groups {
+                    let inv: Vec<(u32, Hash)> =
+                        group.iter().map(|(t, h, _)| (*t, *h)).collect();
+                    let body = tri7_core::p2p::build_getdata(&inv);
+                    let body_peer = resolve_body_send_target(
+                        recon_acc.branch_source.as_deref(),
+                        &mut peers,
+                        avoid,
+                    );
+                    match body_peer {
+                        Some(p) => {
+                            let target = p.label.clone();
+                            match p.sess.send("getdata", &body, &mut stats) {
+                                Ok(()) => {
+                                    // (item 23) pin ONLY on a successful send —
+                                    // an unsent request must stay in the queue
+                                    let now = Instant::now();
+                                    for (_, hash, height) in group {
+                                        outstanding.insert(*hash, *height);
+                                        let t = body_tries
+                                            .entry(*hash)
+                                            .or_insert(BodyTries {
+                                                sent_at: now,
+                                                attempts: 0,
+                                                tried: Vec::new(),
+                                            });
+                                        t.sent_at = now;
+                                        t.attempts += 1;
+                                        if !t.tried.contains(&target) {
+                                            t.tried.push(target.clone());
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log(&format!(
+                                        "send getdata to {} (transport {}) failed: {} — dropping (send failure); batch requeued (no pin)",
+                                        p.label,
+                                        p.transport.as_str(),
+                                        e
+                                    ));
+                                    p.dead = true;
+                                    p.sess.shutdown();
+                                    unsent.extend(
+                                        group.iter().map(|(_, h, ht)| (*h, *ht)),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            log(&format!(
+                                "adoption body dispatch: no live peer can take {} body request(s) — requeued (no pin)",
+                                group.len()
+                            ));
+                            unsent.extend(group.iter().map(|(_, h, ht)| (*h, *ht)));
+                        }
                     }
+                }
+                if !unsent.is_empty() {
+                    requeue_unsent_batch(&mut pending_from_headers, &unsent);
                 }
                 peers.retain(|p| p.sess_ok());
             }
@@ -11479,8 +11838,14 @@ pub fn main_args(argv: &[String]) -> i32 {
             {
                 let mut stg = st_shared.lock().unwrap();
                 stg.last_peer_utc = Some(now_iso());
-                let mut msgs = msgs;
-                for msg in msgs.drain(..) {
+                // (item 23, r3 judge) a queue, not a drain: a tip advance can
+                // RE-INJECT a cached successor (a block that arrived before
+                // its predecessor) so it takes the validated path in this
+                // same pass instead of a 45 s age-out + re-fetch
+                let mut reinject_q: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+                let mut queue = msgs;
+                while !queue.is_empty() {
+                    let msg = queue.remove(0);
                     stats.note_recv(&msg.command);
                     peers[pi].msgs_in += 1;
                     let res = handle_message(
@@ -11491,6 +11856,8 @@ pub fn main_args(argv: &[String]) -> i32 {
                         &cfg,
                         msg,
                         &mut outstanding,
+                        &mut body_tries,
+                        &mut reinject_q,
                         &mut pending_from_headers,
                         &store,
                         &mut recent_shared.lock().unwrap(),
@@ -11506,6 +11873,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                         fatal = Some(e);
                         break;
                     }
+                    queue.extend(reinject_q.drain(..));
                 }
             }
             if let Some(e) = fatal {
@@ -14973,27 +15341,117 @@ mod tests {
         ];
         // THE blocker scenario: live advertiser beats the healthy outbound set
         assert_eq!(
-            choose_body_source_label(Some("in:pc.i2p"), &live).as_deref(),
+            choose_body_source_label(Some("in:pc.i2p"), &live, &[]).as_deref(),
             Some("in:pc.i2p")
         );
         // advertiser gone (disconnect) → outbound fallback
         assert_eq!(
-            choose_body_source_label(Some("in:gone"), &live).as_deref(),
+            choose_body_source_label(Some("in:gone"), &live, &[]).as_deref(),
             Some("out:dns3.onion")
         );
         // no recon source (normal tip-advance pendings) → outbound first
         assert_eq!(
-            choose_body_source_label(None, &live).as_deref(),
+            choose_body_source_label(None, &live, &[]).as_deref(),
             Some("out:dns3.onion")
         );
         // inbound-only peer set → the sole live peer
         let inbound_only = vec![(false, "in:pc.i2p".to_string())];
         assert_eq!(
-            choose_body_source_label(None, &inbound_only).as_deref(),
+            choose_body_source_label(None, &inbound_only, &[]).as_deref(),
             Some("in:pc.i2p")
         );
         // nobody live → None (the dispatch no-ops)
-        assert_eq!(choose_body_source_label(None, &[]), None);
+        assert_eq!(choose_body_source_label(None, &[], &[]), None);
+        // (item 23) rotation: a tried label is skipped in every tier first
+        assert_eq!(
+            choose_body_source_label(Some("in:pc.i2p"), &live, &["in:pc.i2p".to_string()])
+                .as_deref(),
+            Some("out:dns3.onion"),
+            "a tried advertiser is skipped for an untried outbound"
+        );
+        assert_eq!(
+            choose_body_source_label(None, &live, &["out:dns3.onion".to_string()]).as_deref(),
+            Some("in:pc.i2p"),
+            "a tried outbound is skipped for an untried live peer"
+        );
+        let all_tried = [
+            "out:dns3.onion".to_string(),
+            "in:pc.i2p".to_string(),
+        ];
+        // rotation exhausted → retry anyway (starving the adoption forever is
+        // exactly the wedge this fixes; retrying a tried peer is the cure's
+        // last tier, and a recovered tunnel answers on retry)
+        assert_eq!(
+            choose_body_source_label(None, &live, &all_tried).as_deref(),
+            Some("out:dns3.onion")
+        );
+        assert_eq!(
+            choose_body_source_label(Some("in:pc.i2p"), &live, &all_tried).as_deref(),
+            Some("in:pc.i2p"),
+            "exhausted rotation retries the advertiser"
+        );
+    }
+
+    /// (item 23) Age-out: requests the target never answered leave
+    /// `outstanding` and come back in CHAIN ORDER with their attempt counts;
+    /// rotation memory survives until the washout cap.
+    #[test]
+    fn unanswered_bodies_age_out_in_chain_order_and_keep_rotation_memory() {
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let now = Instant::now();
+        // deliberately out of order: heights 101, 100, 102
+        for (ht, age, att) in [(101u64, 60u64, 2u32), (100, 60, 2), (102, 5, 1)] {
+            let h = [0xA0u8; 32];
+            let mut hash = h;
+            hash[0] = ht as u8;
+            outstanding.insert(hash, ht);
+            body_tries.insert(
+                hash,
+                BodyTries {
+                    sent_at: now - Duration::from_secs(age),
+                    attempts: att,
+                    tried: vec!["out:stale.onion".to_string()],
+                },
+            );
+        }
+        let aged = age_out_unanswered_bodies(
+            &mut outstanding,
+            &mut body_tries,
+            Duration::from_secs(GETDATA_TIMEOUT_SECS),
+        );
+        // ONLY the requests older than the timeout age out, ascending
+        assert_eq!(
+            aged.iter().map(|(_, ht, _)| *ht).collect::<Vec<_>>(),
+            vec![100, 101],
+            "aged entries return in chain order"
+        );
+        assert_eq!(aged.iter().map(|(_, _, a)| *a).sum::<u32>(), 4);
+        assert_eq!(outstanding.len(), 1, "the fresh (5s) request stays");
+        // rotation memory SURVIVES the age-out (the re-dispatch must rotate
+        // off the peer that ignored the request)
+        let h100 = {
+            let mut h = [0xA0u8; 32];
+            h[0] = 100;
+            h
+        };
+        assert_eq!(body_tries[&h100].attempts, 2);
+        assert_eq!(body_tries[&h100].tried, vec!["out:stale.onion".to_string()]);
+    }
+
+    /// (item 23) Requeue: an unsent batch returns to the FRONT of the
+    /// pending queue in chain order — ahead of anything queued later — so
+    /// the re-dispatch fetches bodies in ascending height order.
+    #[test]
+    fn requeued_unsent_batch_lands_in_chain_order_at_the_front() {
+        let mut pending: VecDeque<(Hash, u64)> = VecDeque::new();
+        let h0 = [0x10u8; 32];
+        let h1 = [0x11u8; 32];
+        let h2 = [0x12u8; 32];
+        pending.push_back((h0, 90));
+        requeue_unsent_batch(&mut pending, &[(h1, 91), (h2, 92)]);
+        let popped: Vec<u64> = pending.drain(..).map(|(_, ht)| ht).collect();
+        assert_eq!(popped, vec![91, 92, 90], "chain order restored at the front");
     }
 
     /// (item 21, r2) The WIRING test: recon_dispatch — the exact function the
@@ -15084,7 +15542,8 @@ mod tests {
         );
         // and the body-fetch resolution still targets A
         let mut peers = vec![b, a]; // A second in the list: choice, not order
-        let target = resolve_body_send_target(recon.branch_source.as_deref(), &mut peers).unwrap();
+        let target =
+            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[]).unwrap();
         assert_eq!(target.label, "in:pc.i2p");
     }
 
@@ -15139,7 +15598,8 @@ mod tests {
         );
         // ...and A is still the resolved getdata target
         let mut peers = vec![b, a];
-        let target = resolve_body_send_target(recon.branch_source.as_deref(), &mut peers).unwrap();
+        let target =
+            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[]).unwrap();
         assert_eq!(target.label, "in:pc.i2p");
 
         // the ONLY erasure path: the SOURCE peer itself reaching DropPeer —
@@ -15182,8 +15642,9 @@ mod tests {
         let mut peers = vec![out, adv]; // advertiser second: choice, not order
         let mut stats = Stats::default();
 
-        let target = resolve_body_send_target(Some("in:pc.i2p"), peers.as_mut_slice())
-            .expect("advertiser is live");
+        let target =
+            resolve_body_send_target(Some("in:pc.i2p"), peers.as_mut_slice(), &[])
+                .expect("advertiser is live");
         assert_eq!(target.label, "in:pc.i2p");
         let batch = vec![(tri7_core::p2p::MSG_BLOCK, [0xA1u8; 32])];
         target
@@ -15213,6 +15674,275 @@ mod tests {
                 assert_eq!(n, 0, "the {name} socket must stay silent");
             }
         }
+    }
+
+    /// (item 23) THE rotation wiring, at the socket level: a peer whose
+    /// label is in the `avoid` list (it already ignored the request) is
+    /// skipped even when it is the recorded advertiser — the re-dispatch
+    /// must land on a DIFFERENT peer's socket, or the age-out requeue would
+    /// re-send to the same silent target forever.
+    #[test]
+    fn aged_body_requeue_rotates_off_the_silent_advertisers_socket() {
+        let l_adv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let l_out = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut adv =
+            i2p_test_peer(std::net::TcpStream::connect(l_adv.local_addr().unwrap()).unwrap());
+        let mut out =
+            i2p_test_peer(std::net::TcpStream::connect(l_out.local_addr().unwrap()).unwrap());
+        adv.label = "in:pc.i2p".into();
+        adv.outbound = false;
+        out.label = "out:dns3.onion".into();
+        out.outbound = true;
+        let mut peers = vec![out, adv];
+
+        // the advertiser already ignored this batch once
+        let avoid = vec!["in:pc.i2p".to_string()];
+        let target = resolve_body_send_target(
+            Some("in:pc.i2p"),
+            peers.as_mut_slice(),
+            &avoid,
+        )
+        .expect("rotation must still find a live target");
+        assert_eq!(
+            target.label, "out:dns3.onion",
+            "the silent advertiser is skipped for the untried outbound"
+        );
+        let batch = vec![(tri7_core::p2p::MSG_BLOCK, [0xB2u8; 32])];
+        target
+            .sess
+            .send("getdata", &tri7_core::p2p::build_getdata(&batch), &mut Stats::default())
+            .expect("send ok");
+
+        l_out.set_nonblocking(true).unwrap();
+        let (mut sock, _) = l_out.accept().expect("accept ok");
+        sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = [0u8; 4096];
+        let n = sock.read(&mut buf).unwrap_or(0);
+        assert!(n > 0, "the rotated target's socket must receive the getdata");
+        l_adv.set_nonblocking(true).unwrap();
+        let (mut adv_sock, _) = l_adv.accept().expect("accept ok");
+        adv_sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let n_adv = adv_sock.read(&mut buf).unwrap_or(0);
+        assert_eq!(n_adv, 0, "the avoided advertiser must stay silent");
+    }
+
+    /// (item 23, r1 judge) Mixed retry histories SPLIT the batch: each group
+    /// carries its own sorted tried-peer signature, so the dispatch can
+    /// never re-send a hash to a peer that ignored THAT hash (a flat union
+    /// across the batch would have allowed exactly that). Shared histories
+    /// still join into one group (batching preserved).
+    #[test]
+    fn mixed_retry_histories_split_the_batch_per_hash() {
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let hx = [0x01u8; 32];
+        let hy = [0x02u8; 32];
+        let hz = [0x03u8; 32];
+        body_tries.insert(
+            hx,
+            BodyTries {
+                sent_at: Instant::now(),
+                attempts: 1,
+                tried: vec!["out:p".to_string()],
+            },
+        );
+        body_tries.insert(
+            hy,
+            BodyTries {
+                sent_at: Instant::now(),
+                attempts: 2,
+                tried: vec!["out:q".to_string(), "out:p".to_string()],
+            },
+        );
+        let batch = vec![
+            (tri7_core::p2p::MSG_BLOCK, hx, 100u64),
+            (tri7_core::p2p::MSG_BLOCK, hy, 101),
+            (tri7_core::p2p::MSG_BLOCK, hz, 102),
+        ];
+        let groups = group_batch_by_history(batch, &body_tries);
+        assert_eq!(groups.len(), 3, "three distinct histories = three groups");
+        // group 0 = hx alone, avoided set exactly hx's own ignorer
+        assert_eq!(groups[0].0, vec!["out:p".to_string()]);
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].1, hx);
+        // group 1 = hy alone, both its ignorers avoided (sorted)
+        assert_eq!(
+            groups[1].0,
+            vec!["out:p".to_string(), "out:q".to_string()]
+        );
+        assert_eq!(groups[1].1[0].1, hy);
+        // group 2 = fresh hz, empty avoid (never sent before)
+        assert!(groups[2].0.is_empty());
+        assert_eq!(groups[2].1[0].1, hz);
+        // shared history JOINS: two fresh hashes are one group
+        let ha = [0x04u8; 32];
+        let hb = [0x05u8; 32];
+        let joined = group_batch_by_history(
+            vec![
+                (tri7_core::p2p::MSG_BLOCK, ha, 200u64),
+                (tri7_core::p2p::MSG_BLOCK, hb, 201),
+            ],
+            &body_tries,
+        );
+        assert_eq!(joined.len(), 1, "fresh hashes share one history group");
+        assert_eq!(joined[0].1.len(), 2);
+    }
+
+    /// (item 23, r2 judge) The out-of-order arrival contract: a requested
+    /// block that arrives BEFORE its predecessor must NOT be dropped — the
+    /// refresh keeps it requested with a fresh age-out clock, so it either
+    /// extends once the predecessor lands or re-dispatches (loudly) later.
+    #[test]
+    fn out_of_order_requested_block_is_kept_and_refreshed_not_dropped() {
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let h = [0x07u8; 32];
+        body_tries.insert(
+            h,
+            BodyTries {
+                sent_at: Instant::now() - Duration::from_secs(GETDATA_TIMEOUT_SECS * 2),
+                attempts: 1,
+                tried: vec!["out:slow.onion".to_string()],
+            },
+        );
+        assert!(refresh_body_request_clock(&mut body_tries, &h));
+        assert!(
+            body_tries[&h].sent_at.elapsed() < Duration::from_secs(5),
+            "the clock is fresh: the aged-out scan must NOT requeue it yet"
+        );
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        outstanding.insert(h, 205);
+        let aged = age_out_unanswered_bodies(
+            &mut outstanding,
+            &mut body_tries,
+            Duration::from_secs(GETDATA_TIMEOUT_SECS),
+        );
+        assert!(
+            aged.is_empty(),
+            "a refreshed (in-flight) request stays outstanding"
+        );
+        // never-requested hashes take the legacy "ignoring non-extending" path
+        assert!(!refresh_body_request_clock(&mut body_tries, &[0x08u8; 32]));
+    }
+
+    /// (item 23, r2 judge) Multiple FAILED history groups requeue in ONE
+    /// globally chain-ordered operation: group encounter order follows the
+    /// batch order, so a single requeue of the concatenated unsent list
+    /// restores ascending heights at the queue front (independent per-group
+    /// front-pushes would have put later groups ahead of earlier ones).
+    #[test]
+    fn failed_groups_requeue_in_one_globally_chain_ordered_operation() {
+        let mut pending: VecDeque<(Hash, u64)> = VecDeque::new();
+        pending.push_back(([0x20u8; 32], 89));
+        // three failed groups in encounter order: [91], [92], [90]
+        let mut unsent: Vec<(Hash, u64)> = Vec::new();
+        unsent.push(([0x21u8; 32], 91));
+        unsent.push(([0x22u8; 32], 92));
+        unsent.push(([0x23u8; 32], 90));
+        requeue_unsent_batch(&mut pending, &unsent);
+        let popped: Vec<u64> = pending.drain(..).map(|(_, ht)| ht).collect();
+        assert_eq!(
+            popped,
+            vec![90, 91, 92, 89],
+            "one reversed push restores global chain order"
+        );
+    }
+
+    /// (item 23, r3/r4 judge) The cached-successor lookup: an out-of-order
+    /// arrival is cached at height 0 while its request stays outstanding at
+    /// tip+1 — after the predecessor lands, exactly that hash is found for
+    /// re-injection. r4: MULTIPLE same-height candidates are scanned in a
+    /// deterministic order and a candidate only counts when its cached
+    /// payload's prev_hash matches the current tip (an uncached first
+    /// candidate or another-branch entry must not suppress the real
+    /// successor).
+    #[test]
+    fn cached_successor_is_found_after_the_predecessor_lands() {
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut recent = RecentBlocks::new();
+        let tip_hash = [0x40u8; 32];
+        let mk_raw = |prev: Hash| {
+            let mut raw = vec![0u8; 4]; // version u32-LE
+            raw.extend_from_slice(&prev);
+            raw.extend_from_slice(&[0u8; 44]); // merkle+time+bits+nonce
+            raw
+        };
+        let h_succ = [0x31u8; 32];
+        let h_uncached = [0x39u8; 32];
+        // three same-height requests: an another-branch cached entry sorted
+        // BEFORE the real successor (0x30 < 0x31) must not suppress it
+        let h_other_branch = [0x30u8; 32];
+        outstanding.insert(h_succ, 103);
+        outstanding.insert(h_other_branch, 103); // same height, other branch
+        outstanding.insert(h_uncached, 103); // same height, never arrived
+        recent.insert(h_succ, 0, &mk_raw(tip_hash));
+        recent.insert(h_other_branch, 0, &mk_raw([0xEE; 32])); // wrong prev
+        assert_eq!(
+            find_cached_successor(&outstanding, &recent, 102, &tip_hash),
+            Some(h_succ),
+            "the first sorted candidate is wrong-branch; the real cached successor is still found"
+        );
+        // nothing requested at tip+1 → no successor
+        assert_eq!(
+            find_cached_successor(&outstanding, &recent, 998, &tip_hash),
+            None
+        );
+        // no candidate's prev matches (tip moved on) → none reinjected
+        let moved_tip = [0x41u8; 32];
+        assert_eq!(
+            find_cached_successor(&outstanding, &recent, 102, &moved_tip),
+            None,
+            "a cached body whose prev is not the tip is not a successor"
+        );
+        // requested at tip+1 but the body never arrived → not reinjectable
+        outstanding.clear();
+        outstanding.insert(h_uncached, 103);
+        assert_eq!(
+            find_cached_successor(&outstanding, &recent, 102, &tip_hash),
+            None,
+            "no cached body for the successor height"
+        );
+    }
+
+    /// (item 23, r5 judge) A FAILED reinjection must be re-dispatched: the
+    /// failure handler refreshes the clock (the hash stays outstanding), and
+    /// once the age-out elapses the aged-out scan requeues it — the
+    /// dispatch then re-requests it with peer rotation. Nothing is lost.
+    #[test]
+    fn failed_reinjection_stays_in_flight_and_redispatches_after_timeout() {
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let h = [0x51u8; 32];
+        outstanding.insert(h, 104);
+        body_tries.insert(
+            h,
+            BodyTries {
+                sent_at: Instant::now(),
+                attempts: 1,
+                tried: vec!["out:cached-src.onion".to_string()],
+            },
+        );
+        // the failure handler: refresh the clock, keep the request
+        assert!(refresh_body_request_clock(&mut body_tries, &h));
+        assert_eq!(outstanding.len(), 1, "the request is NOT de-registered");
+        // ...time passes (backdate the clock past the timeout)...
+        body_tries.get_mut(&h).unwrap().sent_at =
+            Instant::now() - Duration::from_secs(GETDATA_TIMEOUT_SECS + 1);
+        // ...and the aged-out scan requeues it for re-dispatch
+        let aged = age_out_unanswered_bodies(
+            &mut outstanding,
+            &mut body_tries,
+            Duration::from_secs(GETDATA_TIMEOUT_SECS),
+        );
+        assert_eq!(
+            aged.iter().map(|(hh, _, _)| *hh).collect::<Vec<_>>(),
+            vec![h],
+            "the failed reinjection is requeued — redispatch guaranteed"
+        );
+        assert_eq!(aged[0].2, 1, "attempt count carried for rotation");
+        assert_eq!(
+            body_tries[&h].tried,
+            vec!["out:cached-src.onion".to_string()],
+            "rotation memory survives: the retry goes to a FRESH peer"
+        );
     }
 
     /// (item 21) A batch that chains onto our tip claims its last served
