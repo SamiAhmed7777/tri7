@@ -13902,6 +13902,11 @@ mod tests {
             ),
         )));
         let ops = OpsAdapter {
+            events: Arc::new(tri7_core::events::EventHub::new()),
+            peer_ctl: Arc::new(std::sync::Mutex::new(Default::default())),
+            seeds: Vec::new(),
+            socks: ("127.0.0.1".to_string(), 9050),
+            i2p_socks: ("127.0.0.1".to_string(), 4447),
             st: Arc::clone(&st_shared),
             mirror: TipMirror::new(110, "absent-phantom-tip"),
             wl: Arc::clone(&wl_shared),
