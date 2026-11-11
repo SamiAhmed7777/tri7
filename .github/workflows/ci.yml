@@ -115,7 +115,7 @@ jobs:
       # Updater release-asset shapes (src/updater.rs resolves exactly these
       # names on GitHub Releases):
       #   CryptographicTriangles-<ver>-win64-setup.exe        (NSIS /S)
-      #   CryptographicTriangles-<ver>-win64-gui-portable.exe (portable exe)
+      #   CryptographicTriangles-<ver>-win64-gui-portable-tor.zip (portable, tor included)
       # plus SHA256SUMS — the digest-pinning source the release body quotes.
       # The node is WELDED INTO tri7_wallet_gui.exe (src/node_embedded.rs):
       # no follow_tip.exe / tri7.exe / txhistory.exe in user payloads.
@@ -129,13 +129,12 @@ jobs:
             $mk = "$env:ChocolateyInstall\bin\makensis.exe"
           }
           & "$mk" "-DVERSION=${{ steps.ver.outputs.version }}" deploy\windows\tri7-wallet.nsi
-          Copy-Item target\release\tri7_wallet_gui.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe"
           # portable WITH tor (Sami 2026-11-11): exe + tor\tor.exe + the
           # attribution note, zipped so an unzip-and-run folder works with
           # zero install steps (the supervisor finds tor\tor.exe beside the
-          # GUI exe). The updater's portable shape
-          # (CryptographicTriangles-<ver>-win64-gui-portable.exe,
-          # src/updater.rs) is unchanged.
+          # GUI exe). This zip is THE portable artifact (Sami 2026-11-11:
+          # "Remove the no-tor version") — the updater's tolerant fallback
+          # (pick_asset prefix match) resolves it for portable installs.
           $stage = Join-Path $env:RUNNER_TEMP 'portable-tor-stage'
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tor') | Out-Null
           Copy-Item target\release\tri7_wallet_gui.exe $stage\
@@ -148,15 +147,13 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           $names = @(
             "CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe",
             "CryptographicTriangles-$v-win64-gui-portable-tor.zip"
           )
           $files = @(
             "deploy\windows\CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe",
             "CryptographicTriangles-$v-win64-gui-portable-tor.zip"
           )
-          $lines = 0..2 | ForEach-Object {
+          $lines = 0..1 | ForEach-Object {
             $h = (Get-FileHash $files[$_] -Algorithm SHA256).Hash.ToLower()
             "$h  $($names[$_])"
           }
@@ -170,7 +167,6 @@ jobs:
         with:
           name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-portable-and-digests
           path: |
-            CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe
             CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable-tor.zip
             SHA256SUMS
 
