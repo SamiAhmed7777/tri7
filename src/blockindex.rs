@@ -2376,6 +2376,114 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Kernel-evidence class (2026-11-11 laptop): the wallet live view is
+    /// seeded by scanning block_by_height, so WHICHEVER height resolution
+    /// decides — the build-time height map, the first-arrival appendix, or
+    /// the chain-slot overlay — the wallet must see the CHAIN's body (its
+    /// coins' containing-block evidence then matches what
+    /// check_proof_of_stake reconstructs). A raced body served to the seed
+    /// is exactly the phantom-coin acquisition the stake loop's evidence
+    /// resolver exists to flag — the copied-store shape.
+    #[test]
+    fn wallet_seed_height_resolutions_serve_the_chain_body() {
+        // --- HEIGHT-MAP layer decides: a raced frame appended into the
+        // appendix must NOT shadow a height the build threaded canonically
+        // (no overlay registered — legacy read-only consumers).
+        {
+            let (frames, hashes, _, _) = synthetic_chain();
+            let dir = tmpdir("seedres-hmap");
+            let path = dir.join("blk.dat");
+            std::fs::write(&path, &frames).unwrap();
+            let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+            store.spawn_build(Some(BuildOracle {
+                base: 0,
+                hashes: hashes.clone(),
+                tip: 3,
+            }));
+            wait_ready(&store);
+            let raced_h2 = block(hashes[1], vec![coin_tx(vec![0xee], 7_777_777, vec![])]);
+            store
+                .append_block(&frame_bytes(&raced_h2)[8..], Some(2))
+                .unwrap();
+            let hit = store.block_by_height(2).unwrap().unwrap();
+            assert_eq!(
+                hit.hash, hashes[2],
+                "height map beats the appendix: the wallet seeds the chain's body"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // --- APPENDIX layer decides (arrival order = chain order): a
+        // canonical body appended at an unthreaded height serves as truth.
+        {
+            let (frames, hashes, _, _) = synthetic_chain();
+            // b3's frame is the LAST frame of the synthetic file (the same
+            // identity trick the overlay test uses)
+            let b3_frame = frame_bytes(&block(
+                hashes[2],
+                vec![coin_tx(vec![0xcc], 7_777_777, vec![])],
+            ));
+            assert!(frames.ends_with(&b3_frame));
+            let dir = tmpdir("seedres-appendix");
+            let path = dir.join("blk.dat");
+            std::fs::write(&path, &frames[..frames.len() - b3_frame.len()]).unwrap();
+            let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+            store.spawn_build(Some(BuildOracle {
+                base: 0,
+                hashes: hashes[..3].to_vec(),
+                tip: 2,
+            }));
+            wait_ready(&store);
+            store.append_block(&b3_frame[8..], Some(3)).unwrap();
+            let hit = store.block_by_height(3).unwrap().unwrap();
+            assert_eq!(
+                hit.hash, hashes[3],
+                "appendix serves the chain's body when it arrived in chain order"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // --- RACED-FIRST ACQUISITION (no overlay): the raced body wins the
+        // appendix — the phantom-evidence seed the stake loop's resolver
+        // flags. Registering the chain's slot (what the boot does before any
+        // consumer runs) heals every height lookup.
+        {
+            let (frames, hashes, _, _) = synthetic_chain();
+            let b3_frame = frame_bytes(&block(
+                hashes[2],
+                vec![coin_tx(vec![0xcc], 7_777_777, vec![])],
+            ));
+            let raced_frame = frame_bytes(&block(
+                hashes[2],
+                vec![coin_tx(vec![0xdd], 6_666_666, vec![])],
+            ));
+            let dir = tmpdir("seedres-raced");
+            let path = dir.join("blk.dat");
+            std::fs::write(&path, &frames[..frames.len() - b3_frame.len()]).unwrap();
+            let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+            store.spawn_build(Some(BuildOracle {
+                base: 0,
+                hashes: hashes[..3].to_vec(),
+                tip: 2,
+            }));
+            wait_ready(&store);
+            store.append_block(&raced_frame[8..], Some(3)).unwrap();
+            store.append_block(&b3_frame[8..], Some(3)).unwrap();
+            let acquired = store.block_by_height(3).unwrap().unwrap();
+            assert_ne!(
+                acquired.hash, hashes[3],
+                "the raced body is what a seed-copy store would feed the wallet seed"
+            );
+            store.set_chain_slot(3, hashes[3]);
+            let hit = store.block_by_height(3).unwrap().unwrap();
+            assert_eq!(
+                hit.hash, hashes[3],
+                "the chain-slot overlay decides: wallet evidence matches the validator"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
     /// No height above the registered chain tip is served from ANY
     /// resolution — even one the frozen height map holds (post-rollback the
     /// abandoned branch must reach no peer until the adopted branch
