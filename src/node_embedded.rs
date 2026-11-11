@@ -14329,6 +14329,7 @@ addnode=host:notaport
                 sent_msgs: 0,
             },
             last_traffic: Instant::now(),
+            connected_at: Instant::now(),
             buffered: VecDeque::new(),
             dead: false,
             transport: Transport::I2p,
