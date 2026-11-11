@@ -142,7 +142,9 @@ impl TxIndex {
 // Frame walking + tx range walker (allocation-free hot path)
 // ---------------------------------------------------------------------------
 
-const FRAME_MAGIC: u32 = 0x0522_3570; // LE [70 35 22 05]
+/// Wire frame magic shared with the embedded node's data-truth store check
+/// (`store_has_bodies`): [u32 LE magic][u32 LE len][body] frames.
+pub const FRAME_MAGIC: u32 = 0x0522_3570; // LE [70 35 22 05]
 
 /// On-disk frame envelope for a raw block body (magic + len + body). Public
 /// so the follow_tip tests and ops tooling can synthetically build stores
@@ -155,7 +157,10 @@ pub fn encode_frame(body: &[u8]) -> Vec<u8> {
     f
 }
 
-const MAX_FRAME: usize = 8 << 20;
+/// Writer/reader frame-length bound, shared with the embedded node's
+/// data-truth store check (`store_has_bodies`): no real block is anywhere
+/// near 8 MiB, and no plausible corruption deserves the benefit of the doubt.
+pub const MAX_FRAME: usize = 8 << 20;
 
 /// Walk the transactions of a serialized block, invoking `cb(start, end)`
 /// with each tx byte range. Structure walk only — no per-tx allocation.

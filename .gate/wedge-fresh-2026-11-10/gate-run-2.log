@@ -1,0 +1,26 @@
+=== [1] targeted (final names) ===
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+error: could not compile `tri7-core` (lib test) due to 1 previous error; 52 warnings emitted
+=== [2] full lib (debug) ===
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+error: could not compile `tri7-core` (lib test) due to 1 previous error; 52 warnings emitted
+=== [3] GUI featureful check ===
+warning: tri7-core@7.0.2:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 1 previous error; 124 warnings emitted
+=== [4] release lib ===
+=== [5] windows-gnu all-bins ===
+warning: tri7-core@7.0.2:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 1 previous error; 34 warnings emitted

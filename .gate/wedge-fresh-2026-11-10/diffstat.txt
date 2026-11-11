@@ -1,0 +1,5 @@
+ src/blockindex.rs          |   9 +-
+ src/gui/node_supervisor.rs | 271 +++++++++++++++++++++++++++++++++++++++++----
+ src/node_embedded.rs       | 218 ++++++++++++++++++++++++++++++++++--
+ src/spend.rs               |  60 ++++++++++
+ 4 files changed, 525 insertions(+), 33 deletions(-)

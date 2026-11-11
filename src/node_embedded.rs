@@ -51,7 +51,7 @@
 //! failure · 5 seeding failure.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -9424,10 +9424,75 @@ fn insert_default_key(path: &Path, pubkey: &[u8]) {
     .unwrap_or_else(|e| die(EXIT_USAGE, &format!("defaultkey insert: {}", e)));
 }
 
-/// Embedded-weld entry point: identical to the former bin main(), but the
-/// argument vector is a parameter (the thin follow_tip bin shim passes
-/// std::env::args().skip(1)) and termination returns i32 instead of exiting
-/// the process when embedded (see node_exit).
+/// DATA-TRUTH store check (the 2026-11-10 laptop wedge incident): a
+/// genesis-only store — tipstate h0 plus the single 208-byte first frame
+/// (8-byte magic+len header + 200-byte genesis body) — passes a bare
+/// `len() > 0` check, so `have_state` stayed true and a fresh portable
+/// install wedged at h0 forever instead of syncing.
+///
+/// CONTRACT (exact): usable iff frames 1 AND 2 are each COMPLETE and VALID
+/// (intact magic, nonzero length bounded by `blockindex::MAX_FRAME`, body
+/// fully inside the file). A partial or malformed frame at positions 1 or 2
+/// — or trailing bytes that leave frame 2 unfinished — reads as BARE (fail
+/// toward progress: re-fetch from peers, never trust half-written
+/// leftovers). Bytes beyond frame 2's end are the STORE's own concern
+/// (appendix frames, compaction, a longer chain) and are NOT this gate's
+/// subject: a store with more frames past a valid frame 2 is a real store.
+/// The hollow-state rule stands underneath: a state FILE's existence is
+/// never the data-truth.
+pub fn store_has_bodies(blocks_file: &Path) -> bool {
+    let Ok(md) = std::fs::metadata(blocks_file) else {
+        return false;
+    };
+    let file_len = md.len();
+    if file_len <= 8 {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(blocks_file) else {
+        return false;
+    };
+    // A frame is [u32 LE magic][u32 LE len][body]; the len must name a frame
+    // that completely fits the file.
+    let max_frame = tri7_core::blockindex::MAX_FRAME as u64;
+    let complete_frame_len = |hdr: &[u8; 8], body_off: u64, file_len: u64| -> Option<u64> {
+        let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        if magic != tri7_core::blockindex::FRAME_MAGIC {
+            return None;
+        }
+        let len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        if len == 0 || len > max_frame {
+            return None;
+        }
+        if body_off + 8 + len > file_len {
+            return None;
+        }
+        Some(len)
+    };
+    let mut hdr = [0u8; 8];
+    if f.read_exact(&mut hdr).is_err() {
+        return false;
+    }
+    // frame 1 (genesis): must be a complete, valid frame
+    let Some(first_len) = complete_frame_len(&hdr, 0, file_len) else {
+        return false;
+    };
+    let second_off = 8 + first_len;
+    if second_off + 8 > file_len {
+        return false; // genesis-only, or a truncated/padded tail: bare
+    }
+    // frame 2: must EXIST as a complete, valid frame — the proof a real body
+    // landed. A header-only or partially-written second frame reads as bare.
+    if f.seek(std::io::SeekFrom::Start(second_off)).is_err()
+        || f.read_exact(&mut hdr).is_err()
+    {
+        return false;
+    }
+    complete_frame_len(&hdr, second_off, file_len).is_some()
+}
+
+/// Entry point whose argument vector is a parameter (the thin follow_tip bin
+/// shim passes std::env::args().skip(1)) and termination returns i32 instead
+/// of exiting the process when embedded (see node_exit).
 pub fn main_args(argv: &[String]) -> i32 {
     let mut cfg = parse_args(argv);
     FULL_VALIDATE.store(cfg.full_validate, Ordering::Relaxed);
@@ -9494,15 +9559,16 @@ pub fn main_args(argv: &[String]) -> i32 {
     // tick. Seeding (no state) still requires a live peer.
     let path = state_path(&cfg);
     let blocks_file = resolve_blocks_file(&cfg);
-    // A state that knows only genesis (tip h0) with no block bodies on disk is
-    // not usable state — treat it as a bare machine so the from-zero path
-    // starts the body fetch on its own. Anyone who downloads the wallet must
-    // be able to sync from zero without any flag or manual step (Sami).
+    // A store whose data cannot serve any body beyond genesis (the genesis-
+    // frame-only 208-byte file a bare machine starts with) is NOT usable
+    // state — treat it as a bare machine so the from-zero path starts the
+    // body fetch on its own. Anyone who downloads the wallet must be able
+    // to sync from zero without any flag or manual step (Sami). The check
+    // reads the STORE's data, never just a state file's existence (the
+    // hollow-state rule; this `len() > 0` gate wedged the laptop at h0).
     let store_usable = blocks_file
         .as_ref()
-        .map(|bf| {
-            bf.exists() && std::fs::metadata(bf).map(|m| m.len() > 0).unwrap_or(false)
-        })
+        .map(|bf| store_has_bodies(bf))
         .unwrap_or(false);
     let have_state = path.exists() && !cfg.reseed && store_usable;
     // FROM-ZERO: explicit flag, or AUTOMATIC on a bare machine (no state
@@ -14118,4 +14184,132 @@ addnode=host:notaport
         let loc3 = tip_poll_locator(&st2, false);
         assert_eq!(loc3, vec![st2.tip_hash]);
     }
+
+    #[test]
+    fn genesis_frame_only_store_is_not_usable_state() {
+        let dir = std::env::temp_dir().join(format!("tri7-gns{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blk = dir.join("blk0001.dat");
+        // exactly what a bare machine's first write leaves: the genesis frame
+        // (8-byte magic+len header + 200-byte genesis body)
+        let gen = tri7_core::blockindex::encode_frame(&[0u8; 200]);
+        std::fs::write(&blk, &gen).unwrap();
+        assert!(
+            !store_has_bodies(&blk),
+            "a genesis-only store must count as bare (from-zero must fire)"
+        );
+        // one complete body frame beyond genesis = a real store
+        let body_frame = tri7_core::blockindex::encode_frame(&[0xab; 10]);
+        let two = [&gen[..], &body_frame[..]].concat();
+        std::fs::write(&blk, &two).unwrap();
+        assert!(
+            store_has_bodies(&blk),
+            "a store with a complete body frame is usable state"
+        );
+        // empty / foreign / missing files are all NOT usable
+        std::fs::write(&blk, [0u8; 0]).unwrap();
+        assert!(!store_has_bodies(&blk));
+        std::fs::write(&blk, b"not-a-blockstore-at-all...............").unwrap();
+        assert!(!store_has_bodies(&blk));
+        assert!(!store_has_bodies(&dir.join("missing.dat")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_or_malformed_tails_are_bare_too() {
+        // Every shape below passes a naive "file is bigger than frame 1"
+        // check and would have preserved the wedge class; each must read as
+        // bare (fail toward progress).
+        let dir = std::env::temp_dir().join(format!("tri7-gns2{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blk = dir.join("blk0001.dat");
+        let gen = tri7_core::blockindex::encode_frame(&[0u8; 200]);
+        let bare = |why: &str| {
+            assert!(
+                !store_has_bodies(&blk),
+                "expected bare: {why}"
+            );
+        };
+        // trailing byte after genesis
+        std::fs::write(&blk, [&gen[..], &[0x00][..]].concat()).unwrap();
+        bare("trailing byte");
+        // partial second HEADER (4 bytes, no length field)
+        std::fs::write(
+            &blk,
+            [&gen[..], &tri7_core::blockindex::FRAME_MAGIC.to_le_bytes()[..]].concat(),
+        )
+        .unwrap();
+        bare("partial header");
+        // header-only second frame (claims a body that is not there)
+        let mut hdr_only = Vec::new();
+        hdr_only.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        hdr_only.extend_from_slice(&100u32.to_le_bytes());
+        std::fs::write(&blk, [&gen[..], &hdr_only[..]].concat()).unwrap();
+        bare("header-only second frame");
+        // partial second BODY (claims 100, has 40)
+        std::fs::write(&blk, [&gen[..], &hdr_only[..], &[0u8; 40][..]].concat()).unwrap();
+        bare("partial second body");
+        // malformed FIRST length: claims 500, only 200 present
+        let mut bad_first = Vec::new();
+        bad_first.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        bad_first.extend_from_slice(&500u32.to_le_bytes());
+        bad_first.extend_from_slice(&[0u8; 200]);
+        std::fs::write(&blk, &bad_first).unwrap();
+        bare("malformed first length");
+        // zero first length
+        let mut zero_first = Vec::new();
+        zero_first.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        zero_first.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&blk, &zero_first).unwrap();
+        bare("zero first length");
+        // oversize first length (> MAX_FRAME)
+        let mut big_first = Vec::new();
+        big_first.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        big_first.extend_from_slice(&((tri7_core::blockindex::MAX_FRAME as u32) + 1).to_le_bytes());
+        big_first.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&blk, &big_first).unwrap();
+        bare("oversize first length");
+        // bad magic on the second frame
+        let mut bad_magic2 = gen.clone();
+        bad_magic2.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+        bad_magic2.extend_from_slice(&10u32.to_le_bytes());
+        bad_magic2.extend_from_slice(&[0u8; 10]);
+        std::fs::write(&blk, &bad_magic2).unwrap();
+        bare("bad magic second frame");
+        // TAIL CONTRACT (explicit, pinned): bytes beyond a complete, valid
+        // frame 2 are the store's own concern — appendix frames, compaction,
+        // a longer chain. A real store commonly has MORE than two frames, so
+        // the gate must NOT read a longer store as bare. Two valid frames
+        // followed by anything (a trailing byte, a partial third header, a
+        // partial third body) stays USABLE — while a partial SECOND frame is
+        // bare (covered above).
+        let body2 = tri7_core::blockindex::encode_frame(&[0xcd; 12]);
+        let two = [&gen[..], &body2[..]].concat();
+        std::fs::write(&blk, [&two[..], &[0x00][..]].concat()).unwrap();
+        assert!(
+            store_has_bodies(&blk),
+            "two valid frames + a trailing byte is a real store (tail is not this gate's subject)"
+        );
+        let mut p3h = two.clone();
+        p3h.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        std::fs::write(&blk, &p3h).unwrap();
+        assert!(
+            store_has_bodies(&blk),
+            "two valid frames + a partial third header is a real store"
+        );
+        let mut p3b = two.clone();
+        p3b.extend_from_slice(&tri7_core::blockindex::FRAME_MAGIC.to_le_bytes());
+        p3b.extend_from_slice(&500u32.to_le_bytes());
+        p3b.extend_from_slice(&[0u8; 9]);
+        std::fs::write(&blk, &p3b).unwrap();
+        assert!(
+            store_has_bodies(&blk),
+            "two valid frames + a partial third body is a real store"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
 }

@@ -3336,4 +3336,64 @@ mod tests {
         connect_inputs_check(&plan.tx, &shape.selected, 200)
             .expect("connect_inputs_check passes");
     }
+
+    #[test]
+    fn multi_input_spend_writes_vin_in_sorted_order_and_verifiers_follow() {
+        // The ordering class (live bug 2026-11-09): build_spend_outputs writes
+        // tx.vin in (txid, n) SORTED order, and every verifier must iterate
+        // that SAME order — a verifier fed the unsorted selection list zips
+        // misaligned and self-rejects every multi-input spend with
+        // "prevout map misaligned with vin" while 1-input spends pass. Pin
+        // BOTH parities: the builder's vin contract and the verifier's
+        // loud-failure contract.
+        let (_, dest_pk) = synthetic_key("multi/dest");
+        let (_, change_pk) = synthetic_key("multi/change");
+        let dest = script_pubkey_p2pk(&dest_pk).unwrap();
+        let change = script_pubkey_p2pk(&change_pk).unwrap();
+        let mut a = make_prevout("multi/in-a", vec![], 1_000_000);
+        a.script_pubkey = script_pubkey_p2pk(&a.pubkey).unwrap();
+        let mut b = make_prevout("multi/in-b", vec![], 2_000_000);
+        b.script_pubkey = script_pubkey_p2pk(&b.pubkey).unwrap();
+        let mut c = make_prevout("multi/in-c", vec![], 3_000_000);
+        c.script_pubkey = script_pubkey_p2pk(&c.pubkey).unwrap();
+        // distinct outpoints, handed to the builder in a deliberately
+        // non-vin-order rotation
+        let unsorted = vec![b.clone(), c.clone(), a.clone()];
+        assert!(
+            unsorted.windows(2).all(|w| w[0].outpoint() != w[1].outpoint()),
+            "fixture inputs must be distinct outpoints"
+        );
+        let plan = build_spend(
+            &unsorted,
+            dest,
+            4_000_000,
+            Some(change),
+            0,
+            1_400_003_600,
+            107,
+        )
+        .unwrap();
+        assert_eq!(plan.tx.vin.len(), 3, "all three inputs must ride the tx");
+        let mut sorted = unsorted.clone();
+        sorted.sort_by(|x, y| x.txid.cmp(&y.txid).then(x.n.cmp(&y.n)));
+        assert_ne!(
+            unsorted.iter().map(|i| i.outpoint()).collect::<Vec<_>>(),
+            sorted.iter().map(|i| i.outpoint()).collect::<Vec<_>>(),
+            "fixture rotation must differ from vin order or the test is vacuous"
+        );
+        // builder contract: vin is the inputs in (txid, n) sorted order
+        for (txin, entry) in plan.tx.vin.iter().zip(sorted.iter()) {
+            assert_eq!(txin.prev_hash, entry.txid);
+            assert_eq!(txin.prev_n, entry.n);
+        }
+        // verifier contract: fed the SAME vin order, the spend connects
+        connect_inputs_check(&plan.tx, &sorted, 107).unwrap();
+        // and the regression class stays real: the unsorted list STILL fails
+        // the zip loudly (a caller that skips the sort self-rejects — exactly
+        // the live bug — never silently passes)
+        let err = connect_inputs_check(&plan.tx, &unsorted, 107).unwrap_err();
+        assert!(err.contains("misaligned"), "unexpected error: {err}");
+    }
+
+
 }
