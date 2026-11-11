@@ -15527,6 +15527,7 @@ addnode=host:notaport
         wallet_path: Option<std::path::PathBuf>,
     ) -> OpsAdapter {
         OpsAdapter {
+            events: Arc::new(tri7_core::events::EventHub::new()),
             st: Arc::new(std::sync::Mutex::new(synthetic_chain(0, 1))),
             mirror: TipMirror::new(1, &"00".repeat(32)),
             wl: Arc::new(std::sync::Mutex::new(None)),
