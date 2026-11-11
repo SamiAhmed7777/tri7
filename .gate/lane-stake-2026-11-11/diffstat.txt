@@ -1,0 +1,4 @@
+ src/blockindex.rs    | 108 +++++++
+ src/node_embedded.rs | 843 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ src/stake.rs         | 175 ++++++++++-
+ 3 files changed, 1087 insertions(+), 39 deletions(-)

@@ -236,9 +236,21 @@ pub fn create_coinstake(
     // wallet.cpp:2264-2364 — per-coin loop; the first solving coin wins.
     for coin in candidates {
         rep.coins_considered += 1;
+
+        // THE CONTAINING BLOCK TIME COMES FROM THE CHAIN INDEX — the exact
+        // expression check_proof_of_stake evaluates (kernel.rs
+        // `idx.entries[meta.height]`); see the solver↔validator agreement
+        // property below for why a wallet-side block_time must never enter
+        // the hash. An unresolvable height is the wallet.cpp:2269-2271
+        // ReadTxIndex failure: skip the coin.
+        let block_from_time = match idx.entries.get(coin.block_height) {
+            Some(e) => e.time,
+            None => continue,
+        };
+
         // wallet.cpp:2282-2283 — only count coins meeting min age requirement
         // (measured against the worst-case probe time search_time - 60).
-        if coin.block_time as i64 + STAKE_MIN_AGE as i64
+        if block_from_time as i64 + STAKE_MIN_AGE as i64
             > search_time as i64 - MAX_STAKE_SEARCH_INTERVAL
         {
             continue;
@@ -258,11 +270,12 @@ pub fn create_coinstake(
         for n in 0..interval {
             // wallet.cpp:2292 — search backward in time: nTimeTx = nTime - n.
             let tx_time = (search_time as i64 - n) as u32;
-            // CheckStakeKernelHash guards (kernel.cpp:314-318).
+            // CheckStakeKernelHash guards (kernel.cpp:314-318) — block time
+            // from the chain index (see block_from_time above).
             if tx_time < coin.tx_time {
                 continue;
             }
-            if coin.block_time as i64 + STAKE_MIN_AGE as i64 > tx_time as i64 {
+            if block_from_time as i64 + STAKE_MIN_AGE as i64 > tx_time as i64 {
                 continue;
             }
             rep.attempts += 1;
@@ -272,7 +285,7 @@ pub fn create_coinstake(
             let target = U512::from(coin_day_weight as u128) * U512::from(target_per_coin_day);
             let hash = crate::consensus::stake_kernel_hash(
                 modifier,
-                coin.block_time,
+                block_from_time,
                 coin.tx_offset,
                 coin.tx_time,
                 coin.n,
@@ -394,10 +407,18 @@ pub fn create_coinstake(
             return Ok((None, rep));
         }
 
-        // wallet.cpp:2403-2414 — coin age + reward.
+        // wallet.cpp:2403-2414 — coin age + reward. GetCoinAge reads each
+        // input's CONTAINING BLOCK time from the chain index (the same
+        // resolution check_proof_of_stake's min-age guard uses); an input
+        // whose height is outside the index is the C++ txindex fallback
+        // failure — skipped (coin_age_of's documented `continue`).
         let age_inputs: Vec<(i64, u32, u32)> = inputs
             .iter()
-            .map(|i| (i.value, i.tx_time, i.block_time))
+            .filter_map(|i| {
+                idx.entries
+                    .get(i.block_height)
+                    .map(|e| (i.value, i.tx_time, e.time))
+            })
             .collect();
         let coin_age = coin_age_of(&age_inputs, tx_time)?;
         let reward = stake_reward(coin_age, fees);
@@ -990,21 +1011,157 @@ mod tests {
         assert_eq!(rep.attempts, MAX_STAKE_SEARCH_INTERVAL as u64);
     }
 
+    /// THE SOLVER↔VALIDATOR AGREEMENT PROPERTY (2026-11-11 laptop defect).
+    ///
+    /// create_coinstake must derive the kernel EXACTLY as
+    /// check_proof_of_stake does: the containing-block time comes from the
+    /// CHAIN INDEX (`idx.entries[height]`), never from the candidate's
+    /// wallet-side `block_time` field. A fork adoption leaves wallet coins
+    /// whose `block_time` describes the ABANDONED block at their height
+    /// (rollback_tip rolls the entries back but never the wallet live view);
+    /// hashing that stale time made the solver accept blocks the validator
+    /// computed against the chain slot and rejected — the forever
+    /// solve→KERNEL TARGET FAIL loop on the seed-copied laptop node.
+    ///
+    /// Pin: two coins with IDENTICAL chain facts, one carrying a lying
+    /// `block_time`, must solve to the SAME kernel hash and the solved
+    /// candidate must pass the full validator (validate_dryrun_block).
+    #[test]
+    fn solver_and_validator_share_one_kernel_path_despite_stale_wallet_block_time() {
+        use crate::kernel::check_proof_of_stake;
+
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = synthetic_index();
+        let t1 = BLOCK_TIME; // the chain's truth at h1 (idx.entries[1].time)
+        let (secret, pubkey) = synth_key("stale-wallet");
+        // mature vs the CHAIN's block time (t1 + 3600)
+        let probe = BLOCK_TIME + 12 * 3600;
+
+        let mut healthy = make_coin("stale-wallet", 0xB1, 50 * COIN, secret, &pubkey);
+        healthy.tx_time = t1;
+        // identical chain facts; the wallet's block_time describes a
+        // REPLACED block at the same height (the fork-adoption shape —
+        // ~4h newer on the live node)
+        let mut phantom = healthy.clone();
+        phantom.txid = [0xB2; 32];
+        phantom.block_time = t1 + 4 * 3600;
+
+        // Solver: both must solve with the SAME kernel — the lying
+        // block_time must not influence hash, modifier, weight or reward.
+        let balance = 60 * COIN;
+        let next_height = 41; // capped-weight era (>= V6_RESTART_HEIGHT)
+        let (plan_h, rep_h) = create_coinstake(
+            &idx, &[healthy.clone()], EASY_BITS, 0, probe,
+            MAX_STAKE_SEARCH_INTERVAL, balance, next_height,
+        )
+        .expect("search healthy");
+        let (plan_p, rep_p) = create_coinstake(
+            &idx, &[phantom.clone()], EASY_BITS, 0, probe,
+            MAX_STAKE_SEARCH_INTERVAL, balance, next_height,
+        )
+        .expect("search phantom-evidence");
+        let plan_h = plan_h.expect("healthy coin must solve");
+        let plan_p = plan_p.expect(
+            "phantom-evidence coin must solve IDENTICALLY: its kernel \
+             facts are the chain's, its stale block_time is bookkeeping",
+        );
+        assert_eq!(rep_h.coins_meeting_min_age, 1);
+        assert_eq!(rep_p.coins_meeting_min_age, 1);
+        assert_eq!(
+            plan_h.kernel.hash_proof_of_stake, plan_p.kernel.hash_proof_of_stake,
+            "kernel hash must be block_time-independent (chain-index derived)"
+        );
+        assert_eq!(plan_h.kernel.modifier, plan_p.kernel.modifier);
+        assert_eq!(plan_h.coin_age, plan_p.coin_age, "GetCoinAge must read the chain's containing-block times");
+        assert_eq!(plan_h.reward, plan_p.reward);
+
+        // Validator: the solver-accepted candidate must PASS — check first
+        // the kernel predicate, then the full acceptance path, resolving the
+        // prevout the way validate_block does (chain meta).
+        let outputs = point_outputs_for(&[healthy, phantom]);
+        let tip = idx.entries.len() - 1;
+        let mut block = assemble_pos_block(
+            idx.tip().unwrap(),
+            median_of_last_11(&idx),
+            &plan_p.tx,
+            &[],
+            EASY_BITS,
+        )
+        .expect("assemble");
+        sign_block(&mut block, &plan_p.signer.secret).expect("sign");
+        let kernel = check_proof_of_stake(&idx, &block, &outputs, EASY_BITS, tip)
+            .expect("validator kernel");
+        assert!(
+            kernel.meets_target,
+            "a candidate the solver accepted must pass the validator"
+        );
+        assert_eq!(kernel.hash_proof_of_stake, plan_p.kernel.hash_proof_of_stake);
+        assert_eq!(kernel.block_from_height, 1, "the coin's chain slot is h1");
+        assert_eq!(kernel.coin_day_weight, plan_p.kernel.coin_day_weight);
+        let val = validate_dryrun_block(&idx, &outputs, &block, i64::MAX / 2).expect("validate");
+        assert!(val.link_ok && val.structure_ok && val.merkle_ok && val.time_ok);
+        assert!(val.n_bits_ok && val.kernel_meets_target && val.signature_ok);
+        assert!(val.finality_ok && val.reward_ok && val.size_ok);
+    }
+
+    /// The kernel min-age guard reads the CHAIN's containing-block time.
+    /// A coin whose WALLET block_time claims maturity but whose chain slot
+    /// is genuinely young must be filtered (coins_meeting_min_age == 0) —
+    /// under the pre-fix behavior the wallet's stale time let it into the
+    /// probe loop, where it solved kernels the validator then rejected with
+    /// "min age violation".
+    #[test]
+    fn kernel_min_age_reads_the_chain_block_time_not_the_wallets() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = synthetic_index();
+        let (secret, pubkey) = synth_key("minage-chain");
+        // chain truth at h2 = t0 + 240 = 1_400_000_640; the wallet claims a
+        // block 4000s OLDER (its replaced predecessor).
+        let chain_h2_time = 1_400_000_400u32 + 240;
+        let probe = chain_h2_time + 3_000; // young by the chain, old by the lie
+        let mut coin = make_coin("minage-chain", 0xC1, 50 * COIN, secret, &pubkey);
+        coin.block_height = 2;
+        coin.block_time = chain_h2_time - 4_000;
+        coin.tx_time = coin.block_time;
+        let (plan, rep) = create_coinstake(
+            &idx,
+            &[coin],
+            EASY_BITS,
+            0,
+            probe,
+            MAX_STAKE_SEARCH_INTERVAL,
+            60 * COIN,
+            41,
+        )
+        .expect("search");
+        assert!(plan.is_none(), "chain-young coin must not solve");
+        assert_eq!(
+            rep.coins_meeting_min_age, 0,
+            "min-age must be measured against the chain's block time"
+        );
+        assert_eq!(rep.attempts, 0);
+    }
+
     #[test]
     fn min_age_filter_skips_young_coins() {
         let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let idx = synthetic_index();
         let (secret, pubkey) = synth_key("young");
-        // containing block 10 s old: below the worst-case min-age filter
+        // the coin's CHAIN slot (h1, time = BLOCK_TIME) is 10 s old at the
+        // probe: below the worst-case min-age filter. The wallet's
+        // block_time agrees — min age is a chain fact now (see
+        // kernel_min_age_reads_the_chain_block_time_not_the_wallets for the
+        // lying-wallet variant).
+        let probe = BLOCK_TIME + 10;
         let mut coin = make_coin("young", 0xCC, 50 * COIN, secret, &pubkey);
-        coin.block_time = BLOCK_TIME + 12 * 3600 - 10;
+        coin.block_time = probe - 10;
         coin.tx_time = coin.block_time;
         let (_, rep) = create_coinstake(
             &idx,
             &[coin],
             EASY_BITS,
             0,
-            BLOCK_TIME + 12 * 3600,
+            probe,
             MAX_STAKE_SEARCH_INTERVAL,
             60 * COIN,
             41,
