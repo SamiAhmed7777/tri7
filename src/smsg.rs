@@ -797,6 +797,19 @@ pub fn smsg_encrypt(
     message: &str,
     timestamp: i64,
 ) -> Result<Vec<u8>, String> {
+    smsg_encrypt_ex(from, to_pubkey, message, timestamp).map(|(w, _, _)| w)
+}
+
+/// smsg_encrypt plus the derived message keys (key_e, key_m): the SENDER
+/// keeps a sealed copy in its outbox row (seal_outbox_keys) because the
+/// ephemeral secret r is destroyed here — the packet alone (cpk_r) does not
+/// let the sender re-derive x(r·K), that is ECDLP-hard.
+pub fn smsg_encrypt_ex(
+    from: Option<&SmsgKey>, // None = anonymous ("anon")
+    to_pubkey: &[u8],
+    message: &str,
+    timestamp: i64,
+) -> Result<(Vec<u8>, [u8; 32], [u8; 32]), String> {
     let msg = message.as_bytes();
     if msg.len() > SMSG_MAX_MSG_BYTES {
         return Err(format!(
@@ -864,7 +877,7 @@ pub fn smsg_encrypt(
     let mac = hmac_sha256(&key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
     m.mac = mac;
     smsg_set_hash(&mut m)?;
-    Ok(m.to_wire())
+    Ok((m.to_wire(), key_e, key_m))
 }
 
 #[derive(Clone, Debug)]
@@ -884,7 +897,31 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
     let m = SecureMessage::from_wire(wire)?;
     smsg_validate_ne(&m)?;
     let (key_e, key_m) = derive_keys(&key.secret, &m.cpk_r)?;
-    let mac = hmac_sha256(&key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
+    decrypt_message(&m, &key_e, &key_m)
+}
+
+/// Decrypt with already-derived message keys — the SENDER-side path: the
+/// outbox row's sealed keys are opened with the sending private key
+/// (unseal_outbox_keys) and fed here, since the sender cannot re-derive the
+/// shared secret from the packet alone. MAC-first parity with smsg_decrypt.
+pub fn smsg_decrypt_with_keys(
+    wire: &[u8],
+    key_e: &[u8; 32],
+    key_m: &[u8; 32],
+) -> Result<DecryptedMessage, String> {
+    let m = SecureMessage::from_wire(wire)?;
+    smsg_validate_ne(&m)?;
+    decrypt_message(&m, key_e, key_m)
+}
+
+/// Shared body of both decrypt paths: MAC check, AES decrypt, payload
+/// parse, sender recovery (SecureMsgDecrypt after the key derivation).
+fn decrypt_message(
+    m: &SecureMessage,
+    key_e: &[u8; 32],
+    key_m: &[u8; 32],
+) -> Result<DecryptedMessage, String> {
+    let mac = hmac_sha256(key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
     if mac != m.mac {
         return Err("MAC does not match (message not addressed to this key)".into());
     }
@@ -944,6 +981,61 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
         from_address,
         plaintext: text.trim_end_matches('\0').to_string(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Outbox sender-side recovery. The wire's shared secret x(r·K) dies with the
+// ephemeral key r (SecureMsgEncrypt parity), so a SENT message cannot be
+// re-decrypted from the packet alone: ECDH(sender_priv, cpk_r) equals the
+// receiver secret only for self-addressed mail — otherwise that is ECDLP.
+// tri7 therefore seals the derived (key_e, key_m) under the SENDING private
+// key at send time and stores the 64-byte seal in the outbox row
+// (messages.ekey). Opening the seal requires the sending secret, so the
+// smsg store on disk alone leaks nothing. Rows without a usable seal
+// (anonymous sends, rows written before this column existed) keep the
+// honest empty from/text placeholders in the listing.
+// ---------------------------------------------------------------------------
+
+/// Seal the message keys for one outbox row: XOR against an HMAC-SHA256
+/// keystream keyed by the sending secret and bound to the 18-byte row key.
+pub fn seal_outbox_keys(
+    sender_secret: &[u8; 32],
+    row_key: &[u8],
+    key_e: &[u8; 32],
+    key_m: &[u8; 32],
+) -> Vec<u8> {
+    let h_e = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-e", row_key]);
+    let h_m = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-m", row_key]);
+    let mut out = Vec::with_capacity(64);
+    for i in 0..32 {
+        out.push(key_e[i] ^ h_e[i]);
+    }
+    for i in 0..32 {
+        out.push(key_m[i] ^ h_m[i]);
+    }
+    out
+}
+
+/// Inverse of seal_outbox_keys. None when the seal is absent or malformed —
+/// a wrong sending secret still yields keys here, but the MAC check in
+/// smsg_decrypt_with_keys then rejects them (never a crash, never a fake).
+pub fn unseal_outbox_keys(
+    sender_secret: &[u8; 32],
+    row_key: &[u8],
+    sealed: &[u8],
+) -> Option<([u8; 32], [u8; 32])> {
+    if sealed.len() != 64 {
+        return None;
+    }
+    let h_e = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-e", row_key]);
+    let h_m = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-m", row_key]);
+    let mut key_e = [0u8; 32];
+    let mut key_m = [0u8; 32];
+    for i in 0..32 {
+        key_e[i] = sealed[i] ^ h_e[i];
+        key_m[i] = sealed[32 + i] ^ h_m[i];
+    }
+    Some((key_e, key_m))
 }
 
 fn smsg_validate_ne(m: &SecureMessage) -> Result<(), String> {
@@ -1058,6 +1150,10 @@ pub struct StoredMessage {
     pub status: u8, // bit0 = unread
     pub addr_to: String,
     pub addr_outbox: String,
+    /// Outbox rows only: the message keys sealed under the sending secret
+    /// (seal_outbox_keys, 64 bytes) so the sender view can decrypt. Empty
+    /// (NULL) for inbox/relay rows and anonymous/pre-existing outbox rows.
+    pub ekey: Vec<u8>,
     pub data: Vec<u8>, // raw wire bytes (header+payload)
 }
 
@@ -1084,6 +1180,7 @@ impl MessageStore {
                status INTEGER NOT NULL,
                addr_to TEXT NOT NULL,
                addr_outbox TEXT NOT NULL,
+               ekey BLOB,
                data BLOB NOT NULL,
                PRIMARY KEY (folder, key)
              );
@@ -1098,6 +1195,15 @@ impl MessageStore {
              );",
         )
         .map_err(|e| format!("smsg schema: {}", e))?;
+        // Migration: stores created before the sender-side outbox view lack
+        // the ekey column — ALTER for them, tolerate "duplicate" on fresh
+        // stores (rows written before the column keep NULL seals and show
+        // the honest placeholders in the outbox listing).
+        if let Err(e) = conn.execute("ALTER TABLE messages ADD COLUMN ekey BLOB", []) {
+            if !format!("{}", e).contains("duplicate column") {
+                return Err(format!("smsg schema migrate: {}", e));
+            }
+        }
         Ok(MessageStore { conn: std::sync::Mutex::new(conn) })
     }
 
@@ -1122,11 +1228,16 @@ impl MessageStore {
         };
         let _ = t;
         let conn = self.conn.lock().unwrap();
+        let ekey_param: Option<&[u8]> = if msg.ekey.is_empty() {
+            None
+        } else {
+            Some(&msg.ekey[..])
+        };
         let n = conn
             .execute(
                 "INSERT OR IGNORE INTO messages
-                 (folder, key, time_received, status, addr_to, addr_outbox, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (folder, key, time_received, status, addr_to, addr_outbox, ekey, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     folder as i64,
                     msg.key,
@@ -1134,6 +1245,7 @@ impl MessageStore {
                     msg.status as i64,
                     msg.addr_to,
                     msg.addr_outbox,
+                    ekey_param,
                     msg.data
                 ],
             )
@@ -1145,7 +1257,7 @@ impl MessageStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT key, time_received, status, addr_to, addr_outbox, data
+                "SELECT key, time_received, status, addr_to, addr_outbox, ekey, data
                  FROM messages WHERE folder = ?1 ORDER BY time_received DESC, key",
             )
             .map_err(|e| format!("smsg list: {}", e))?;
@@ -1157,7 +1269,8 @@ impl MessageStore {
                     status: r.get::<_, i64>(2)? as u8,
                     addr_to: r.get(3)?,
                     addr_outbox: r.get(4)?,
-                    data: r.get(5)?,
+                    ekey: r.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+                    data: r.get(6)?,
                 })
             })
             .map_err(|e| format!("smsg list: {}", e))?;
@@ -1569,6 +1682,7 @@ mod tests {
             status: SMSG_MASK_UNREAD,
             addr_to: bob.address.clone(),
             addr_outbox: String::new(),
+            ekey: Vec::new(),
             data: wire.clone(),
         };
         assert!(store.insert(FOLDER_INBOX, &msg).unwrap());
@@ -1614,6 +1728,89 @@ mod tests {
         let h2 = sha256d(b"other message");
         let pk2 = recover_compact(&sig, &h2).unwrap();
         assert_ne!(pk2, k.pubkey);
+    }
+
+    #[test]
+    fn outbox_seal_roundtrip_sender_decrypt_matches_receiver() {
+        let alice = make_key("ob-seal-a");
+        let bob = make_key("ob-seal-b");
+        let (wire, key_e, key_m) = smsg_encrypt_ex(
+            Some(&alice),
+            &bob.pubkey,
+            "sender sees it too",
+            1_700_000_700,
+        )
+        .unwrap();
+        // receiver path unchanged: the packet alone works for the recipient
+        let dm_r = smsg_decrypt(&wire, &bob).unwrap();
+        assert_eq!(dm_r.plaintext, "sender sees it too");
+        assert_eq!(dm_r.from_address, alice.address);
+        // sender path: seal -> unseal -> decrypt with the recovered keys
+        let row_key = [9u8; 18];
+        let sealed = seal_outbox_keys(&alice.secret, &row_key, &key_e, &key_m);
+        assert_eq!(sealed.len(), 64);
+        assert_ne!(sealed, key_e.iter().chain(key_m.iter()).copied().collect::<Vec<u8>>());
+        let (ke, km) = unseal_outbox_keys(&alice.secret, &row_key, &sealed).unwrap();
+        assert_eq!(ke, key_e);
+        assert_eq!(km, key_m);
+        let dm_s = smsg_decrypt_with_keys(&wire, &ke, &km).unwrap();
+        assert_eq!(dm_s.plaintext, dm_r.plaintext);
+        assert_eq!(dm_s.from_address, alice.address);
+        // a different sending secret "unseals" to garbage keys — the MAC
+        // check rejects them (honest failure, no fake plaintext)
+        let eve = make_key("ob-seal-eve");
+        let (ke2, km2) = unseal_outbox_keys(&eve.secret, &row_key, &sealed).unwrap();
+        assert!(smsg_decrypt_with_keys(&wire, &ke2, &km2).is_err());
+        // malformed seals unseal to None, never a panic
+        assert!(unseal_outbox_keys(&alice.secret, &row_key, &sealed[..32]).is_none());
+        assert!(unseal_outbox_keys(&alice.secret, &row_key, &[]).is_none());
+    }
+
+    #[test]
+    fn outbox_store_roundtrips_the_sealed_keys_column() {
+        let dir = std::env::temp_dir().join(format!("tri7-smsg-ekey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = MessageStore::open(&dir).unwrap();
+        let alice = make_key("ek-a");
+        let bob = make_key("ek-b");
+        let (wire, key_e, key_m) =
+            smsg_encrypt_ex(Some(&alice), &bob.pubkey, "sealed row", 1_700_000_800).unwrap();
+        let t = token_of(&wire).unwrap();
+        let row_key = MessageStore::key_of(FOLDER_OUTBOX, &t);
+        let sealed = seal_outbox_keys(&alice.secret, &row_key, &key_e, &key_m);
+        let out = StoredMessage {
+            key: row_key.clone(),
+            time_received: 1_700_000_801,
+            status: 0,
+            addr_to: bob.address.clone(),
+            addr_outbox: alice.address.clone(),
+            ekey: sealed.clone(),
+            data: wire.clone(),
+        };
+        assert!(store.insert(FOLDER_OUTBOX, &out).unwrap());
+        // inbox rows carry no seal (NULL -> empty vec on the way back)
+        let inbox_row = StoredMessage {
+            key: MessageStore::key_of(FOLDER_INBOX, &t),
+            time_received: 1_700_000_802,
+            status: SMSG_MASK_UNREAD,
+            addr_to: bob.address.clone(),
+            addr_outbox: String::new(),
+            ekey: Vec::new(),
+            data: wire,
+        };
+        assert!(store.insert(FOLDER_INBOX, &inbox_row).unwrap());
+        let out_rows = store.list(FOLDER_OUTBOX).unwrap();
+        assert_eq!(out_rows.len(), 1);
+        assert_eq!(out_rows[0].ekey, sealed);
+        // the persisted seal still opens to the same keys -> same plaintext
+        let (ke, km) = unseal_outbox_keys(&alice.secret, &out_rows[0].key, &out_rows[0].ekey)
+            .unwrap();
+        let dm = smsg_decrypt_with_keys(&out_rows[0].data, &ke, &km).unwrap();
+        assert_eq!(dm.plaintext, "sealed row");
+        let in_rows = store.list(FOLDER_INBOX).unwrap();
+        assert_eq!(in_rows.len(), 1);
+        assert!(in_rows[0].ekey.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
