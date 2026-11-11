@@ -443,3 +443,71 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
   tri7-update.bat wrapper executes) — registry EstimatedSize/DisplayVersion,
   bin payload hashes vs the CI artifacts, and the tri7gui-run relaunch all
   verified; see the workqueue PROGRESS line for the evidence.
+
+## 2026-11-11 PC onion publish partially recovered + DNS2 addnode hygiene (workqueue item 22, TICK)
+
+Ops-only tick, no code change. Bundle: `.gate/pc-endpoint-2026-11-11/`
+(BRIEF.md, evidence-timeline.md, evidence-window.md, torinfo logs, ControlPort
+probe scripts).
+
+- PC onion root cause (tuu7h65j…onion:24113 "dead" since before 05:4xZ): NOT
+  the suspected torrc-vs-bind mismatch — `HiddenServicePort 24113
+  100.85.236.10:24113` matches the daemon's `--listen-bind 100.85.236.10`
+  exactly, and the backend path works (i2pd, also SYSTEM, dials the same
+  IP:port for the live i2p bridge; tor's service side established the backend
+  connection and tri7 accepted it during the tick's verify window). The
+  MEASURED tor-side failure: the descriptor was unfetchable for ~40h+ (0
+  INTRODUCE2 cells across the previous session's heartbeats = no connection
+  ever accepted; dials from two independent clients 404'd/timed out), and
+  tor's directory fetch volume had collapsed ~20x since Nov 9 (both
+  measured). The pre-reset upload-path behavior and the causal chain from
+  the weakened directory-cache/guards are a HYPOTHESIS (pre-reset
+  info-level upload logs were not captured); the measured fix lever is the
+  reset: fresh cache (`tor\data` renamed to `data.bak-item22`; HS keys in
+  `tor\hs` untouched — the onion address must never change without a fleet
+  conf update) + tri7tor restart → descriptor upload succeeded (status 200,
+  09:18:37Z), DNS2 dials went from unbounded SOCKS timeouts to
+  `SOCKS5 request granted` in ~4 s, and the tor path delivered a connection
+  into tri7's own listener (`inbound handshake 100.85.236.10:50070` on the
+  PC). An OBSERVED RESIDUAL REACHABILITY DEFECT remains: dialing failed again
+  at 10:11Z after the 09:56 restart rebuilt the intro set, and recovered by
+  10:16-10:19Z (INTRODUCE_ACK + granted dial) and at 10:38Z (fresh dial into
+  the production listener) — one full failure/recovery interval observed;
+  the periodicity and long-term stability are UNPROVEN. Successful grant +
+  backend accept proves reachability AT THOSE TIMESTAMPS, not continuous
+  availability. Dial evidence file (labeled reconstructed vs raw — the key
+  early observations are RECONSTRUCTED summaries; the 10:37-10:38Z pair is
+  raw): `.gate/pc-endpoint-2026-11-11/evidence-dials.txt`.
+- DNS2 addnode hygiene on the REAL path `/etc/tri7/triangles.conf` (backup
+  `.bak-20261111-item22`): retired the 3 cleartext addnodes (tri7d ignores
+  them with a journal line every boot — "only .onion / .b32.i2p accepted"),
+  the dead samihost onion i6tk7…:24112 (SOCKS reply 1, zero connections ever)
+  and the legacy i2p lfuojj…:24112 (SOCKS reply 4 host unreachable, zero
+  connections ever; the same destination was already retired in the PC conf
+  on 2026-11-07), each behind a dated evidence-bearing comment; kept
+  `mb3ox52u…b32.i2p:24113` (the live PC i2p bridge). Post-restart: the raw
+  boot-scoped journal for the latest post-hygiene boot shows exactly ONE
+  addnode line, zero addnode ignore-warnings ("ignored: only …" count 0) and
+  zero dead-dial failures (evidence-dns2-journal.txt); staking enabled with
+  attempts advancing in two complete raw RPC captures 180 s apart
+  (evidence-dns2-status.txt); peers returned. The sibling lane's same-day
+  one-line port fix
+  (`.gate/dns2-addnode-port-fix-2026-11-11/`) had edited this same addnode
+  line; the line is now retired-as-cleartext with the history in comments.
+  Decoy banner added to `/root/.triangles/triangles.conf` (tri7d reads and
+  persists /etc/tri7/triangles.conf only — the trap that cost a judge round
+  earlier today).
+- ITEM 23'S CHRONIC PC RESTART SOURCE IDENTIFIED: task `tri7watch`
+  (`watchdog.bat` → `watchdog6.ps1`) — "if nothing listens on 19114, kill
+  stray state2 follow_tip instances + Start-ScheduledTask tri7d2, log to
+  watchdog.log". Its log shows fires every 5-20 min through the 07:20-08:56Z
+  window (the exact "~1 boot per 10 min" churn); it is now Disabled (external
+  hand — this tick never toggled it). The disabled tri7d2 made every fire
+  fail silently (v6 does not check the enabled state).
+- PC state at tick close: tri7d2 Running again (re-enabled/started 10:16:06Z
+  by an external hand — operator/sibling lane activity; disclosed as found),
+  GUI running, tri7tor + i2pd running, the one-off tri7d2-verify task and all
+  probe temp files removed. The PC's disconnected-window solo branch
+  (h2209617..24, heavier by work) is being reconciled by the deployed judges
+  themselves (claim-divergence recons live in both journals) — the designed
+  reorg-world behavior, no manual surgery.
