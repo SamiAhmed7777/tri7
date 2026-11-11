@@ -76,6 +76,35 @@ jobs:
         run: cargo build --release --bins
       - name: Build GUI wallet (egui, node welded in)
         run: cargo build --release --features gui --bin tri7_wallet_gui
+      # Sami 2026-11-11: the wallet SHIPS the REAL tor daemon ("work on the
+      # laptop as well"). The official Tor Expert Bundle is fetched from
+      # dist.torproject.org, PINNED by version AND sha256 — the job FAILS on
+      # any digest mismatch (supply-chain gate). tor.exe lands in
+      # deploy\windows\tor-bundle\ where the NSIS script picks it up
+      # ($INSTDIR\tor\tor.exe) and the portable zip packs it beside the GUI
+      # exe. Bump = change $ver + $want here AND deploy/windows/tor-bundle/
+      # README.md, verified against the release's signed
+      # sha256sums-signed-build.txt.
+      - name: Fetch bundled tor (pinned 16.0.1 + SHA256 gate)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '16.0.1'
+          $url = "https://dist.torproject.org/torbrowser/$ver/tor-expert-bundle-windows-x86_64-$ver.tar.gz"
+          $want = '9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b'
+          $tgz = Join-Path $env:RUNNER_TEMP 'tor-expert-bundle.tar.gz'
+          Invoke-WebRequest -Uri $url -OutFile $tgz
+          $got = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) {
+            throw "tor bundle SHA256 MISMATCH for $url : got $got want $want"
+          }
+          Write-Host "tor bundle digest OK: $got"
+          $src = Join-Path $env:RUNNER_TEMP 'tor-eb'
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          tar -xzf $tgz -C $src
+          New-Item -ItemType Directory -Force -Path deploy\windows\tor-bundle | Out-Null
+          Copy-Item (Join-Path $src 'tor\tor.exe') deploy\windows\tor-bundle\tor.exe
+          Write-Host "tor.exe sha256:" (Get-FileHash deploy\windows\tor-bundle\tor.exe -Algorithm SHA256).Hash
       - name: Run tests
         run: cargo test --release --lib
       - uses: actions/upload-artifact@v4
@@ -101,19 +130,33 @@ jobs:
           }
           & "$mk" "-DVERSION=${{ steps.ver.outputs.version }}" deploy\windows\tri7-wallet.nsi
           Copy-Item target\release\tri7_wallet_gui.exe "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe"
+          # portable WITH tor (Sami 2026-11-11): exe + tor\tor.exe + the
+          # attribution note, zipped so an unzip-and-run folder works with
+          # zero install steps (the supervisor finds tor\tor.exe beside the
+          # GUI exe). The updater's portable shape
+          # (CryptographicTriangles-<ver>-win64-gui-portable.exe,
+          # src/updater.rs) is unchanged.
+          $stage = Join-Path $env:RUNNER_TEMP 'portable-tor-stage'
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tor') | Out-Null
+          Copy-Item target\release\tri7_wallet_gui.exe $stage\
+          Copy-Item deploy\windows\tor-bundle\tor.exe (Join-Path $stage 'tor\tor.exe')
+          Copy-Item deploy\windows\tor-bundle\README.md (Join-Path $stage 'tor\TOR-LICENSE.txt')
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable-tor.zip" -Force
       - name: SHA256SUMS (digest pinning for the updater)
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
           $names = @(
             "CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe"
+            "CryptographicTriangles-$v-win64-gui-portable.exe",
+            "CryptographicTriangles-$v-win64-gui-portable-tor.zip"
           )
           $files = @(
             "deploy\windows\CryptographicTriangles-$v-win64-setup.exe",
-            "CryptographicTriangles-$v-win64-gui-portable.exe"
+            "CryptographicTriangles-$v-win64-gui-portable.exe",
+            "CryptographicTriangles-$v-win64-gui-portable-tor.zip"
           )
-          $lines = 0..1 | ForEach-Object {
+          $lines = 0..2 | ForEach-Object {
             $h = (Get-FileHash $files[$_] -Algorithm SHA256).Hash.ToLower()
             "$h  $($names[$_])"
           }
@@ -128,6 +171,7 @@ jobs:
           name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-portable-and-digests
           path: |
             CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable.exe
+            CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable-tor.zip
             SHA256SUMS
 
   macos-build:

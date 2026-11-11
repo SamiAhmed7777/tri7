@@ -740,6 +740,49 @@ impl Tri7App {
                             "Your Tor and I2P addresses, with copy — toggles the drawer right here",
                         );
                     }
+                    // 5c. Tor transport status (Sami 2026-11-11: the wallet
+                    // SHIPS tor — the status bar shows the HONEST tor state:
+                    // the bundled child running, the user's own system tor on
+                    // 9050, or unavailable. NEVER a phantom "tor on": amber
+                    // means onion peers are unreachable this session.)
+                    let tor = self.node.as_ref().map(|n| n.tor_status());
+                    let (tor_label, tor_color, tor_hover) = match &tor {
+                        Some(t) => {
+                            let hover = match t.socks_port() {
+                                Some(p) => format!(
+                                    "tor SOCKS endpoint for .onion peers: {} (127.0.0.1:{p})",
+                                    t.label()
+                                ),
+                                None => format!(
+                                    "tor SOCKS endpoint for .onion peers: {}",
+                                    t.label()
+                                ),
+                            };
+                            (
+                                t.label(),
+                                if t.socks_port().is_some() {
+                                    th::TEXT_MUTED
+                                } else {
+                                    th::WARNING
+                                },
+                                hover,
+                            )
+                        }
+                        None => (
+                            "Tor: unavailable".to_string(),
+                            th::WARNING,
+                            "tor is not running — onion peers unreachable this session \
+                             (clearnet bootstrap only)"
+                                .to_string(),
+                        ),
+                    };
+                    ui.separator();
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(tor_label).size(11.0).strong().color(tor_color),
+                        ),
+                    )
+                    .on_hover_text(tor_hover);
                     // 6. refresh — 28 px icon-only ghost button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);

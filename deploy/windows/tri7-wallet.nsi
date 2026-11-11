@@ -80,6 +80,20 @@ Section "Install"
   ; disk (the GUI ignores them — harmless); the uninstaller removes them.
   File "${EXEDIR}\tri7_wallet_gui.exe"
 
+  ; Tor — the wallet SHIPS the REAL tor daemon (Sami 2026-11-11: "I want
+  ; tor Fully integrated into the wallet so that it should work on the
+  ; laptop as well"). CI fetches the PINNED Tor Expert Bundle with a
+  ; SHA256 gate (.github/workflows/ci.yml) into tor-bundle\; it is
+  ; installed under the app dir and the node supervisor
+  ; (src/gui/node_supervisor.rs) runs tor\tor.exe as a hidden child with a
+  ; generated client-only torrc — zero user steps. A machine whose own
+  ; system tor already answers on 9050 uses that instead (never two). No
+  ; tor-bundle\ payload (local manual builds) → comment these two File
+  ; lines out; the wallet then runs WITHOUT tor (honest status bar).
+  SetOutPath "$INSTDIR\tor"
+  File "tor-bundle\tor.exe"
+  File /oname=TOR-LICENSE.txt "tor-bundle\README.md"
+
   ; the chain store + config live beside the wallet: the GUI's node
   ; supervisor uses <wallet folder>\node\state and
   ; <wallet folder>\node\triangles.conf (verified in src/gui/app.rs +
@@ -141,6 +155,10 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\follow_tip.exe"
   Delete "$INSTDIR\bin\tri7.exe"
   Delete "$INSTDIR\bin\txhistory.exe"
+  ; the bundled tor payload (re-downloadable, no user data inside)
+  Delete "$INSTDIR\tor\tor.exe"
+  Delete "$INSTDIR\tor\TOR-LICENSE.txt"
+  RMDir "$INSTDIR\tor"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR\bin"
   RMDir /r "$INSTDIR\node\state"

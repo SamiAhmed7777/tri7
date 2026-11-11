@@ -1811,6 +1811,7 @@ fn parse_args(argv: &[String]) -> Config {
     let args: Vec<String> = argv.to_vec();
     let mut i = 0;
     let mut explicit_peers = false; // first --daemon/--onion replaces the default
+    let mut socks_from_argv = false; // --socks overrides the conf socks= line
     while i < args.len() {
         let need = |i: &mut usize, args: &[String]| -> String {
             *i += 1;
@@ -1872,7 +1873,10 @@ fn parse_args(argv: &[String]) -> Config {
                 }
                 cfg.peers.push(t);
             }
-            "--socks" => cfg.socks = parse_sock_addr(&need(&mut i, &args)),
+            "--socks" => {
+                cfg.socks = parse_sock_addr(&need(&mut i, &args));
+                socks_from_argv = true;
+            }
             "--i2psocks" => cfg.i2p_socks = parse_sock_addr(&need(&mut i, &args)),
             "--stake" => cfg.stake = Some(true),
             "--no-stake" => cfg.stake = Some(false),
@@ -1982,6 +1986,35 @@ fn parse_args(argv: &[String]) -> Config {
                     EXIT_USAGE,
                     "Invalid amount for -reservebalance=<amount>",
                 ),
+            }
+        }
+    }
+    // conf-file `socks=<ip>:<port>` — the tor SOCKS5 listener `.onion` peers
+    // dial through (PeerTarget::parse attaches it to every .onion target,
+    // argv and addnode alike). The GUI node supervisor writes this line when
+    // its bundled tor child is live (src/gui/node_supervisor.rs). The CLI
+    // --socks flag overrides; a malformed line is IGNORED with a log line —
+    // unlike an invalid reservebalance (money) this must never block the
+    // boot, the default 127.0.0.1:9050 stands.
+    {
+        let mut conf_socks: Option<(String, u16)> = None;
+        if let Ok(text) = std::fs::read_to_string(&cfg.conf_path) {
+            for line in text.lines() {
+                if let Some(v) = line.trim().strip_prefix("socks=") {
+                    let s = v.trim();
+                    match s
+                        .rsplit_once(':')
+                        .and_then(|(h, p)| p.parse::<u16>().ok().map(|port| (h.to_string(), port)))
+                    {
+                        Some((h, port)) => conf_socks = Some((h, port)),
+                        None => log(&format!("conf socks={s} ignored (not ip:port)")),
+                    }
+                }
+            }
+        }
+        if let Some((h, port)) = conf_socks {
+            if !socks_from_argv {
+                cfg.socks = (h, port);
             }
         }
     }
@@ -11924,6 +11957,54 @@ mod tests {
         assert_eq!(t.port, 24113);
         assert!(t.socks.is_none());
         assert_eq!(t.endpoint(), "100.85.236.10:24113");
+    }
+
+    /// conf-file `socks=<ip>:<port>` — the tor SOCKS listener the GUI
+    /// supervisor writes when its bundled tor child is live; applies unless
+    /// the CLI --socks flag overrides. A conf `addnode=<...>.onion` target
+    /// dials through exactly this socks endpoint.
+    #[test]
+    fn conf_socks_key_sets_socks_cli_flag_wins() {
+        let dir = std::env::temp_dir().join(format!("peersocks{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("triangles.conf");
+        std::fs::write(
+            &conf,
+            "rpcuser=u\nrpcpassword=p\nsocks=127.0.0.1:9150\n\
+             addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "--state-dir".to_string(),
+            dir.display().to_string(),
+            "--conf".to_string(),
+            conf.display().to_string(),
+            "--daemon".to_string(),
+            "46.62.249.20:443".to_string(),
+        ];
+        let cfg = parse_args(&argv);
+        assert_eq!(
+            cfg.socks,
+            ("127.0.0.1".to_string(), 9150u16),
+            "conf socks= must set the tor SOCKS listener"
+        );
+        // the conf onion seed joined the attach list through that endpoint
+        assert!(
+            cfg.peers.iter().any(|p| p.host.ends_with(".onion")),
+            "addnode .onion must be accepted"
+        );
+        // CLI --socks overrides the conf line
+        let mut argv2 = argv.clone();
+        argv2.push("--socks".into());
+        argv2.push("127.0.0.1:9151".into());
+        let cfg2 = parse_args(&argv2);
+        assert_eq!(cfg2.socks, ("127.0.0.1".to_string(), 9151u16));
+        // a malformed conf socks= line is ignored (default 9050 stands)
+        std::fs::write(&conf, "rpcuser=u\nrpcpassword=p\nsocks=not-a-socks\n").unwrap();
+        let cfg3 = parse_args(&argv);
+        assert_eq!(cfg3.socks, ("127.0.0.1".to_string(), 9050u16));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
