@@ -1,6 +1,6 @@
 [package]
 name = "tri7-core"
-version = "7.0.2"
+version = "7.0.3"
 edition = "2021"
 description = "Modern full-node core for the Triangles chain — replays the legacy chain byte-for-byte"
 

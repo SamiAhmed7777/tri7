@@ -4,7 +4,7 @@ You do **not** need a pre-built binary. Everything the wallet and daemon need
 is in this repository — build it yourself in one command per platform.
 
 Repository: <https://github.com/SamiAhmed7777/tri7>
-Version in this tree: **7.0.2** (see `Cargo.toml`)
+Version in this tree: **7.0.3** (see `Cargo.toml`)
 
 ---
 

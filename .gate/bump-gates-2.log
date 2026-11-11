@@ -1,0 +1,8 @@
+=== release lib ===
+test result: ok. 714 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 23.55s
+=== GUI featureful check ===
+warning: `tri7-core` (lib) generated 146 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.81s
+=== windows-gnu all-bins ===
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.34s

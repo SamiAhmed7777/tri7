@@ -1,0 +1,6 @@
+ BUILDING.md      |  2 +-
+ Cargo.lock       |  2 +-
+ Cargo.toml       |  2 +-
+ src/gui/tests.rs | 10 +++++-----
+ src/updater.rs   | 52 +++++++++++++++++++++++++++-------------------------
+ 5 files changed, 35 insertions(+), 33 deletions(-)

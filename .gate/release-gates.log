@@ -1,0 +1,6 @@
+=== GUI featureful check ===
+warning: `tri7-core` (lib) generated 146 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.46s
+=== windows-gnu all-bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 02s

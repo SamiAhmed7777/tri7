@@ -1,0 +1,10 @@
+### COMMAND: cargo test --lib updater::  (updater subset on the final tree)
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 685 filtered out; finished in 0.07s
+### COMMAND: cargo test --lib  (FULL)
+test result: ok. 714 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 75.30s
+### COMMAND: cargo test --release --lib
+test result: ok. 714 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 37.44s
+### COMMAND: CARGO_TARGET_DIR=/root/tri7-target-gate cargo check --bin tri7_wallet_gui --features gui
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.09s
+### COMMAND: cargo build --release --target x86_64-pc-windows-gnu --bins
+    Finished `release` profile [optimized] target(s) in 2m 52s
