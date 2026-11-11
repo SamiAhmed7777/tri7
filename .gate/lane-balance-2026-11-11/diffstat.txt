@@ -1,0 +1,7 @@
+ src/gui/app.rs        |   82 ++--
+ src/gui/app_state.rs  |  159 ++++++-
+ src/gui/i18n.rs       |   24 +-
+ src/gui/rpc_client.rs |   10 +
+ src/gui/tests.rs      |  318 +++++++++++++-
+ src/rpc.rs            | 1099 +++++++++++++++++++++++++++++++++++++++++--------
+ 6 files changed, 1479 insertions(+), 213 deletions(-)
