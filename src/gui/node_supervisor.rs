@@ -333,6 +333,18 @@ impl TorSupervisor {
     /// generated client-only torrc (minimal + hardened: no exit node usage —
     /// `ClientOnly 1`, `SafeLogging 1`, NO ControlPort line at all — the
     /// control socket stays disabled by omission)
+    ///
+    /// Paths are rendered with FORWARD slashes inside quoted values: tor's
+    /// quoted-string parser treats a backslash as an escape introducer, so a
+    /// Windows `Path::display()` ("C:\a\b") fails the whole config with
+    /// "Invalid escape sequence in quoted string" and bundled tor exits 1
+    /// during startup (live-caught 2026-11-11 on the laptop GUI; the wallet
+    /// then silently degrades to clearnet-only bootstrap). Tor accepts
+    /// forward slashes on Windows, so conversion is lossless for it.
+    fn tor_path(data_dir: &Path) -> String {
+        data_dir.to_string_lossy().replace('\\', "/")
+    }
+
     fn write_torrc(path: &Path, data_dir: &Path, socks_port: u16) -> std::io::Result<()> {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -345,7 +357,7 @@ impl TorSupervisor {
              DataDirectory \"{}\"\n\
              ClientOnly 1\n\
              SafeLogging 1\n",
-            data_dir.display()
+            Self::tor_path(data_dir)
         );
         std::fs::write(path, text)
     }
@@ -1442,7 +1454,10 @@ mod tests {
         let text = std::fs::read_to_string(&torrc).unwrap();
         assert!(text.contains("SocksPort 127.0.0.1:31551"), "{text}");
         assert!(
-            text.contains(&format!("DataDirectory \"{}\"", data.display())),
+            text.contains(&format!(
+                "DataDirectory \"{}\"",
+                TorSupervisor::tor_path(&data)
+            )),
             "DataDirectory must name the state-dir data path: {text}"
         );
         assert!(text.contains("ClientOnly 1"), "client-only: {text}");
@@ -1454,6 +1469,45 @@ mod tests {
         assert!(
             !text.to_lowercase().contains("exitrelay") && !text.contains("ORPort"),
             "no relay/exit lines in a client-only torrc: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (b2) regression: a Windows backslash path must come out forward-slashed
+    /// inside the quoted DataDirectory — tor's quoted-string parser rejects
+    /// backslash escapes ("Invalid escape sequence in quoted string"), which
+    /// killed bundled tor at startup on the laptop (exit 1) and silently
+    /// degraded the wallet to clearnet-only bootstrap (master's write_torrc
+    /// emitted display() directly; laptop node.log 2026-11-11 captured the
+    /// rejection verbatim). Platform-independent: a Windows-style Path OBJECT
+    /// renders backslashes via to_string_lossy on every host.
+    #[test]
+    fn torrc_data_directory_never_carries_backslashes() {
+        let data = std::path::PathBuf::from("C:\\Coins\\TRI-LAPTOP\\node\\state\\tor");
+        let rendered = TorSupervisor::tor_path(&data);
+        assert_eq!(
+            rendered, "C:/Coins/TRI-LAPTOP/node/state/tor",
+            "windows path must render forward-slashed for tor"
+        );
+        assert!(
+            !rendered.contains('\\'),
+            "no backslash may survive inside a quoted tor value: {rendered}"
+        );
+        // And the written torrc carries the converted form, never the raw
+        // display() form (covers write_torrc -> tor_path wiring).
+        let dir = std::env::temp_dir().join(format!("torrcbs{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = dir.join("state");
+        let torrc = state.join("torrc");
+        TorSupervisor::write_torrc(&torrc, &state.join("tor"), 31552).unwrap();
+        let text = std::fs::read_to_string(&torrc).unwrap();
+        let quoted_line = text
+            .lines()
+            .find(|l| l.starts_with("DataDirectory "))
+            .expect("DataDirectory line present");
+        assert!(
+            !quoted_line.contains('\\'),
+            "written torrc quoted value must not carry backslashes: {quoted_line}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
