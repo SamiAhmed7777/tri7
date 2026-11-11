@@ -1,0 +1,886 @@
+# Full test evidence — lane-drawer (drawer overlay + attach-mode sync display)
+
+## State identity (UNCOMMITTED working tree)
+worktree: /root/tri7-lanes/lane-drawer
+branch: lane/drawer @ abb13e11fd78b2945e086b4e70fa150616252631 (= abb13e1, origin/master)
+state under test: branch base abb13e1 + the UNCOMMITTED working-tree modifications in drawer-sync.diff (no resulting revision exists yet — the parent commits it post-grade as one commit)
+changed files: src/gui/app.rs, src/gui/app_state.rs, src/gui/tests.rs
+
+## Exact command
+CARGO_TARGET_DIR=/root/tri7-lanes/target-drawer cargo test --lib
+date: 2026-11-10T03:18:12Z
+
+## COMPLETE unfiltered output (warnings included)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: unused import: `super::*`
+    --> src/rpc.rs:6121:5
+     |
+6121 | use super::*;
+     |     ^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src/spend.rs:1006:5
+     |
+1006 |     /// Version, nTime, the two CompactSize counts, and nLockTime.
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1007 |     let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+     |     -------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/blockindex.rs:1664:13
+     |
+1664 |         let mut cur = g;
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hashes`
+    --> src/blockindex.rs:1878:22
+     |
+1878 |         let (frames, hashes, _, _) = synthetic_chain();
+     |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hashes`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `peers_arg`
+   --> src/gui/node_supervisor.rs:141:13
+    |
+141 |         let peers_arg = peers.join(" --daemon ");
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_peers_arg`
+
+warning: value assigned to `idle` is never read
+   --> src/gui/tests.rs:232:21
+    |
+232 |                     idle = 0;
+    |                     ^^^^^^^^ this value is reassigned later and never used
+...
+291 |                     idle = 0;
+    |                     -------- `idle` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/legacy_rows.rs:348:38
+    |
+348 |         let (mut sp, mut st, mut un, mut im) = (0i64, 0i64, 0i64, 0i64);
+    |                                      ----^^
+    |                                      |
+    |                                      help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:1800:17
+     |
+1800 |             let mut push_group = |addrs: Vec<String>,
+     |                 ----^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: unused variable: `entries`
+    --> src/rpc.rs:2192:32
+     |
+2192 |                     let (base, entries) = deps.tip.window();
+     |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entries`
+
+warning: unused variable: `deps`
+    --> src/rpc.rs:3221:30
+     |
+3221 | fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+     |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_deps`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:4592:13
+     |
+4592 |         let mut idx = TempIndex::new("wins");
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:4641:13
+     |
+4641 |         let mut idx = TempIndex::new("lag");
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:4664:13
+     |
+4664 |         let mut idx2 = TempIndex::new("fork");
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:4689:13
+     |
+4689 |         let mut idx = TempIndex::new("building");
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `b`
+    --> src/rpc.rs:4744:13
+     |
+4744 |         let b = StubBlocks { ready: true, chain_hash: None };
+     |             ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:5004:13
+     |
+5004 |         let mut idx = TempIndex::new("nosnapshot");
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `d`
+    --> src/rpc.rs:5623:13
+     |
+5623 |         let d = deps(&t, &w, &b, Some(&p));
+     |             ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:6668:9
+     |
+6668 |     let mut w = StubWallet::default();
+     |         ----^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:6674:9
+     |
+6674 |     let mut w0 = StubWallet::default();
+     |         ----^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:553:13
+    |
+553 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:301:13
+    |
+301 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/spend.rs:1152:5
+     |
+1152 |     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: value assigned to `p` is never read
+   --> src/wallet_encrypt.rs:106:5
+    |
+106 |     p += 4;
+    |     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `gen`
+   --> src/stake.rs:846:18
+    |
+846 |             let (gen, m) = if h > 0 && h % 5 == 0 {
+    |                  ^^^ help: if this is intentional, prefix it with an underscore: `_gen`
+
+warning: unused variable: `e`
+    --> src/wallet.rs:2506:13
+     |
+2506 |         let e = WalletHandle::open_readwrite(&missing).unwrap_err();
+     |             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1911:8
+     |
+1911 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1917:8
+     |
+1917 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1927:4
+     |
+1927 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1936:4
+     |
+1936 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: method `count_unspent` is never used
+    --> src/rpc.rs:6267:8
+     |
+6216 | impl TempIndex {
+     | -------------- method in this implementation
+...
+6267 |     fn count_unspent(&self, addr: &str) -> i64 {
+     |        ^^^^^^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: fields `pubkey`, `label`, and `encrypted` are never read
+   --> src/bdb_import.rs:318:9
+    |
+316 |     struct KeyRow {
+    |            ------ fields in this struct
+317 |         secret: Option<[u8; 32]>,
+318 |         pubkey: Vec<u8>,
+    |         ^^^^^^
+319 |         label: String,
+    |         ^^^^^
+320 |         encrypted: bool,
+    |         ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: `tri7-core` (lib test) generated 34 warnings (run `cargo fix --lib -p tri7-core --tests` to apply 23 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.80s
+     Running unittests src/lib.rs (/root/tri7-lanes/target-drawer/debug/deps/tri7_core-3ef8f751d893dd95)
+
+running 554 tests
+test address::tests::malformed_and_nonstandard_scripts_rejected ... ok
+test address::tests::p2sh_extraction_uses_script_version_28 ... ok
+test address::tests::bare_pubkey_extraction_compressed_and_uncompressed ... ok
+test address::tests::p2pkh_extraction_matches_daemon_address ... ok
+test balances_build::tests::incomplete_replay_fails_coverage ... ok
+test balances_build::tests::stale_branch_requires_allow_stale_flag ... ok
+test addrindex::tests::insert_spend_and_query ... ok
+test balances_build::tests::builds_snapshot_and_reaches_end_height ... ok
+test bdb_import::tests::civil_date_matches_known_epochs ... ok
+test bdb_import::tests::split_key_reads_section ... ok
+test balances_build::tests::write_is_atomic_no_tmp_left_behind ... ok
+test bdb_import::tests::parse_dump_pairs_body_lines_only ... ok
+test bdb_import::tests::unescape_handles_hex_and_short_forms ... ok
+test blockindex::tests::build_threads_live_chain_past_stale_seam_and_anchors ... ok
+test blockindex::tests::anchor_failure_disables_heights ... ok
+test blockindex::tests::duplicate_truncated_keys_return_all_candidates ... ok
+test blockindex::tests::cache_roundtrip_preserves_indexes ... ok
+test blockindex::tests::genesis_guard_rejects_short_first_frame ... ok
+test blockindex::tests::oracleless_build_trusts_file_order ... ok
+test bdb_import::tests::bdb_magic_is_detected_and_sqlite_is_not ... ok
+test blockindex::tests::tx_range_walk_matches_block_read ... ok
+test difficulty::tests::ema_era_clamp_at_low_heights ... ok
+test blockindex::tests::append_during_index_build_buffers_and_flushes_on_ready ... ok
+test difficulty::tests::set_get_compact_bitcoin_vectors ... ok
+test forkchoice::tests::equal_tip_is_never_a_switch ... ok
+test difficulty::tests::genesis_target_roundtrip ... ok
+test forkchoice::tests::equal_work_and_height_keeps_our_block_deterministically ... ok
+test forkchoice::tests::heavier_branch_wins_even_at_equal_height ... ok
+test forkchoice::tests::longer_branch_wins_on_equal_work ... ok
+test forkchoice::tests::work_matches_difficulty_for_the_chains_real_bits ... ok
+test gui::autostart::tests::linux_set_remove_roundtrip_in_a_temp_dir ... ok
+test gui::autostart::tests::plist_carries_the_v5_get_markers ... ok
+test gui::autostart::tests::program_args_carries_the_legacy_min_flag ... ok
+test gui::autostart::tests::desktop_file_matches_the_v5_lines ... ok
+test gui::autostart::tests::supported_matches_the_shipped_platforms ... ok
+test gui::explorer::tests::classify_search_kinds ... ok
+test gui::explorer::tests::endpoint_probe_falls_back_to_second_port ... ok
+test gui::explorer::tests::fee_and_stake_credit_from_prevouts ... ok
+test gui::explorer::tests::parse_block_from_live_rpc_shape ... ok
+test gui::explorer::tests::parse_tx_from_live_rpc_shape_and_attribute_addresses ... ok
+test gui::explorer::tests::rich_list_parses_balances_snapshot_and_sorts ... ok
+test gui::explorer::tests::rich_list_parses_the_live_daemon_verb_response ... ok
+test gui::node_supervisor::tests::conf_written_once ... ok
+test gui::node_supervisor::tests::decision_node_exe_somewhere ... ok
+test gui::node_supervisor::tests::supervisor_starts_disconnected ... ok
+test gui::notify::tests::decrease_never_fires ... ok
+test gui::notify::tests::disabled_suppresses_everything ... ok
+test gui::notify::tests::first_observation_never_fires ... ok
+test gui::notify::tests::increase_while_synced_fires ... ok
+test gui::notify::tests::increase_while_syncing_is_suppressed ... ok
+test gui::notify::tests::subdust_increase_ignored ... ok
+test gui::rpc_client::tests::rpc_call_parses_canned_response_and_enforces_allowlist ... ok
+test gui::rpc_client::tests::rpc_call_unreachable_is_clean_error ... ok
+test gui::seed_flow::tests::abandon_scrubs_everything ... ok
+test gui::explorer::tests::backward_scan_pages_and_caches_with_injected_fetcher ... ok
+test gui::seed_flow::tests::execute_rejects_bad_targets_and_counts ... ok
+test blockindex::tests::store_serves_blocks_and_txs_from_disk_frames ... ok
+test blockindex::tests::gap_recovery_missing_tip_frame_append_restores_serving ... ok
+test gui::sweep_flow::tests::abandon_scrubs_everything ... ok
+test gui::sweep_flow::tests::complete_carries_txid_and_scrubs_the_phrase ... ok
+test bdb_import::tests::bdb_script_section_carries_redeem_scripts_into_the_new_wallet ... ok
+test gui::sweep_flow::tests::lock_to_stored_seed_refuses_a_corrupt_row_and_jumps_to_verified ... ok
+test gui::sweep_flow::tests::prepare_refuses_an_already_migrated_wallet ... ok
+test gui::seed_flow::tests::restore_refuses_to_overwrite_a_seeded_wallet ... ok
+test gui::seed_flow::tests::restore_flow_whitespace_insensitive_with_passphrase ... ok
+test gui::sweep_flow::tests::wizard_create_state_machine_full ... ok
+test gui::sweep_flow::tests::wizard_restore_whitespace_and_checksum_gates ... ok
+test gui::sweep_flow::tests::wrong_step_is_refused ... ok
+test gui::tests::a_changed_fee_that_fails_is_retried_when_the_node_returns ... ok
+test gui::tests::a_tray_exit_request_is_not_swallowed_by_the_keep_running_behaviour ... ok
+test gui::tests::amount_roundtrip ... ok
+test gui::tests::appstate_starts_with_quiet_updater ... ok
+test gui::tests::attach_mode_sync_display_is_daemon_only ... ok
+test gui::tests::base58_decode_roundtrips_the_encoder ... ok
+test gui::tests::base64_known_vectors ... ok
+test gui::tests::close_behaviour_flags_cover_every_combination ... ok
+test gui::tests::coin_control_manual_pool_is_respected ... ok
+test gui::tests::compute_balances_totals_and_sorts ... ok
+test gui::tests::console_line_parsing_matches_legacy_syntax ... ok
+test gui::tests::default_options_carry_the_legacy_default_fee ... ok
+test gui::tests::derivation_falls_back_to_snapshot_without_index ... ok
+test gui::tests::derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds ... ok
+test gui::tests::displayed_estimate_tracks_the_operator_fee_setting ... ok
+test gui::tests::displayed_validated_and_built_fees_are_the_same_number ... ok
+test gui::tests::format_tri_matches_legacy_6dp ... ok
+test gui::tests::gui_send_builds_the_fee_the_form_showed_above_1000_bytes ... ok
+test gui::tests::gui_send_bytes_equal_direct_spend_rs_construction ... ok
+test gui::tests::gui_send_rejects_insufficient_and_immature_coinbase ... ok
+test gui::tests::gui_sync_progress_drives_status_bar_and_fraction ... ok
+test gui::tests::keystore_side_files_persist_new_addresses ... ok
+test gui::tests::legacy_identity_is_carried_over_exactly ... ok
+test gui::tests::load_tipstate_parses_and_reports_tip_fields ... ok
+test gui::tests::locked_wallet_falls_back_to_keystore ... ok
+test gui::tests::merged_rows_collapse_coinstake_txs_and_dedupe_live_coins ... ok
+test bdb_import::tests::encrypted_bdb_carries_a_working_master_key_and_all_ckey_rows ... ok
+test gui::tests::merged_rows_use_the_session_stake_net_cache_for_pre_field_and_live_rows ... ok
+test gui::tests::message_sign_roundtrip_and_tamper_detection ... ok
+test gui::tests::net_chip_toggles_the_drawer_without_navigating ... ok
+test gui::tests::new_address_writes_into_wallet_dat_and_survives_restart ... ok
+test gui::tests::options_apply_persists_even_when_the_node_fee_push_fails ... ok
+test gui::tests::options_fee_notice_is_cleared_by_a_later_successful_apply ... ok
+test gui::tests::parse_tri_accepts_legacy_strings_and_rejects_junk ... ok
+test gui::tests::payment_uri_matches_legacy_scheme_and_params ... ok
+test gui::tests::plan_is_none_until_the_form_is_usable ... ok
+test gui::tests::probe_row_plan_samples_then_the_dump_covers_the_rest_exactly_once ... ok
+test gui::tests::qr_matrix_renders_and_png_bytes_are_wellformed ... ok
+test gui::tests::receive_page_no_longer_renders_the_tor_i2p_drawer_block ... ok
+test gui::tests::reconcile_tail_applies_spends_and_wallet_additions ... ok
+test gui::tests::merged_rows_collapse_live_only_stake_tx_outputs_to_one_row ... ok
+test gui::tests::remembered_wallet_roundtrip_and_first_open_logic ... ok
+test gui::tests::reserve_field_validates_before_persisting_and_persists ... ok
+test gui::tests::rpc_allowlist_refuses_writes_before_any_io ... ok
+test gui::tests::saved_fee_is_pushed_when_the_node_appears ... ok
+test gui::tests::script_to_dest_classifies_the_gui_p2pkh_scripts ... ok
+test gui::tests::refresh_resolves_live_stake_nets_from_the_daemon_tx_index ... ok
+test gui::tests::seed_migration_entry_guards_refuse_before_any_value_moves ... ok
+test gui::sweep_flow::tests::prepare_retry_path_is_idempotent_on_a_partially_migrated_wallet ... ok
+test gui::tests::settxfee_is_on_the_gui_allow_list ... ok
+test gui::tests::signed_size_forcing_a_higher_fee_is_refused_not_silently_paid ... ok
+test gui::tests::stake_status_parses_dryrun_and_counts_mature_weight ... ok
+test gui::tests::the_detach_databases_row_and_the_unused_tray_icon_field_are_gone ... ok
+test gui::tests::the_fee_notice_survives_the_ok_path_for_the_overview_banner ... ok
+test gui::tests::the_status_bar_transport_chip_follows_the_onion_option_and_persists ... ok
+test gui::tests::the_transaction_address_column_follows_the_display_addresses_option ... ok
+test gui::tests::the_window_tab_choices_persist_and_survive_a_reload ... ok
+test gui::tests::tx_date_order_flips_and_reverses ... ok
+test gui::tests::tx_row_view_net_unknown_stake_keeps_fallback_and_names_the_principal ... ok
+test gui::tests::tx_row_view_renders_stake_net_send_sign_and_legacy_tooltip ... ok
+test gui::tests::typed_fee_above_the_estimate_is_actually_paid_by_the_signed_send ... ok
+test gui::tests::updater_banner_line_pins_the_offered_jump ... ok
+test gui::tests::updater_install_gate_refuses_busy_and_flushes_wallet_rw ... ok
+test gui::tests::updater_options_line_reports_state ... ok
+test gui::tests::updater_skip_persists_across_appstate_rebuild ... ok
+test gui::tests::validate_address_accepts_real_wallet_vector ... ok
+test gui::tests::validate_address_rejects_tamper_and_foreign_versions ... ok
+test gui::tests::wallet_label_edit_writes_name_row_when_writable ... ok
+test history::tests::backfill_recomputes_pre_field_stake_rows_to_the_legacy_net ... ok
+test history::tests::backfill_stake_nets_fills_from_the_store_and_keeps_unknown_rows_none ... ok
+test history::tests::cache_roundtrip ... ok
+test history::tests::coinstake_rows_carry_the_legacy_net_reward ... ok
+test history::tests::hex_roundtrip_is_display_order ... ok
+test history::tests::history_rows_without_input_addresses_still_load ... ok
+test history::tests::out_owner_matches_p2pkh_and_p2pk ... ok
+test history::tests::save_cache_refuses_empty_scan_over_a_non_empty_file ... ok
+test history::tests::spend_rows_carry_the_input_addresses ... ok
+test kernel::tests::check_proof_of_stake_guard_failures ... ok
+test kernel::tests::compute_modifier_bucket_reuse_and_full_generation ... ok
+test kernel::tests::entropy_bit_is_low_bit_of_first_serialized_byte ... ok
+test kernel::tests::kernel_hash_known_vector ... ok
+test kernel::tests::kernel_modifier_walk_fixed_window ... ok
+test kernel::tests::modifier_interval_section_math ... ok
+test kernel::tests::sparse_modifier_window_selects_candidates_beyond_stop ... ok
+test kernel::tests::stake_modifier_checksum_stream_and_genesis_constant ... ok
+test kernel::tests::utxo_address_payloads_track_spends ... ok
+test kernel::tests::utxo_apply_block_reported_counts_anomalies ... ok
+test kernel::tests::utxo_spend_tracking ... ok
+test gui::sweep_flow::tests::prepare_proves_roundtrip_inserts_keys_and_builds_the_plan ... ok
+test keytool::tests::dump_string_escapes_roundtrip ... ok
+test keytool::tests::dump_privkey_and_checkwallet ... ok
+test keytool::tests::encrypted_wallet_refuses_export ... ok
+test keytool::tests::dump_then_import_roundtrip_into_fresh_wallet ... ok
+test keytool::tests::iso8601_utc_known_vectors_and_rejections ... ok
+test keytool::tests::parse_dump_lines_accepts_iso8601_created ... ok
+test keytool::tests::parse_dump_lines_grammar_matches_rpcdump ... ok
+test keytool::tests::import_is_idempotent_and_counts_skips ... ok
+test keytool::tests::wif_matches_independent_vector_and_roundtrips ... ok
+test legacy::tests::block_serialize_roundtrips_through_read ... ok
+test legacy_rows::chain_membership_tests::no_generated_row_at_or_below_tip_can_be_not_accepted ... ok
+test legacy_rows::chain_membership_tests::not_accepted_requires_being_outside_the_chain ... ok
+test legacy_rows::chain_membership_tests::rows_below_the_tip_are_in_the_chain ... ok
+test legacy_rows::csv_tests::csv_escapes_commas_and_quotes ... ok
+test legacy_rows::csv_tests::csv_matches_legacy_columns_and_date_format ... ok
+test legacy_rows::glyph_tests::conflicted_has_its_own_glyph ... ok
+test legacy_rows::glyph_tests::glyph_fills_as_confirmations_arrive ... ok
+test legacy_rows::glyph_tests::immature_stake_walks_the_clock_sequence ... ok
+test legacy_rows::legacy_balance_tests::mature_stake_becomes_spendable ... ok
+test legacy_rows::legacy_balance_tests::maturing_stakes_are_not_counted_as_spendable ... ok
+test legacy_rows::legacy_balance_tests::spendable_requires_four_confirmations_like_the_legacy_wallet ... ok
+test legacy_rows::live_split_tests::deep_coins_are_spendable_never_zero ... ok
+test legacy_rows::live_split_tests::fresh_stakes_are_stake_not_spendable ... ok
+test legacy_rows::live_split_tests::one_confirmation_receipt_is_unconfirmed ... ok
+test legacy_rows::stake_row_tests::matured_stake_leaves_the_stake_row ... ok
+test legacy_rows::stake_row_tests::maturing_stake_row_is_the_whole_transaction_value ... ok
+test legacy_rows::stake_row_tests::unmined_stake_counts_because_depth_is_positive ... ok
+test legacy_rows::tests::constants_match_the_legacy_client ... ok
+test legacy_rows::tests::depth_matches_height_and_tip ... ok
+test legacy_rows::tests::generated_matures_in_matches_legacy_formula ... ok
+test legacy_rows::tests::generated_rows_are_immature_until_seven_confirmations ... ok
+test legacy_rows::tests::receive_states_follow_update_status ... ok
+test legacy_rows::tests::status_text_is_verbatim_legacy ... ok
+test legacy_rows::tests::type_labels_match_the_qt_table ... ok
+test multisig::tests::known_answer_vectors_privkeys_1_2_3 ... ok
+test keytool::tests::uncompressed_wif_import_is_refused_loudly ... ok
+test multisig::tests::redeem_script_rejects_bad_parameters ... ok
+test multisig::tests::t1_redeem_script_two_of_three_exact_bytes ... ok
+test multisig::tests::t2_p2sh_address_is_version_28_and_stable ... ok
+test multisig::tests::t9_parse_multisig_roundtrips ... ok
+test onion::tests::announcement_verifies_and_rejects_tamper ... ok
+test onion::tests::bootstrap_announcement_window_is_non_empty ... ok
+test onion::tests::auth_source_precedence_explicit_cookie_then_password_then_auto_then_bare ... ok
+test onion::tests::control_port_line_protocol ... ok
+test onion::tests::cookie_auth_is_rebuilt_per_connection_after_tor_rotates_it ... ok
+test onion::tests::due_tick_rotates_in_process_without_exiting ... ok
+test onion::tests::grace_expiry_retires_previous_and_clears_its_key ... ok
+test onion::tests::grace_window_selects_two_then_one ... ok
+test onion::tests::holder_serves_marks_what_is_actually_live ... ok
+test onion::tests::hostname_file_addresses_are_read_not_derived ... ok
+test onion::tests::cookie_auth_line_hex_encodes_the_32_byte_cookie ... ok
+test onion::tests::private_key_from_reply_and_keyed_add_onion_line ... ok
+test onion::tests::onion_state_keys_roundtrip_and_old_files_load ... ok
+test onion::tests::rotation_gate_enforces_period_and_utc_date_renders ... ok
+test onion::tests::rotation_promotes_current_key_into_previous_key ... ok
+test onion::tests::startup_plan_reestablishes_both_services_with_their_own_keys ... ok
+test onion::tests::state_grace_helper_agrees ... ok
+test onion::tests::unreadable_auto_cookie_falls_back_to_bare_but_explicit_cookie_is_fatal ... ok
+test onion::tests::rotation_due_at_59_60_61_days ... ok
+test p2p::tests::base32_encode_rfc4648_vectors_and_roundtrip ... ok
+test p2p::tests::checksum_matches_double_sha256_vectors ... ok
+test p2p::tests::checksum_mismatch_and_bad_magic_rejected ... ok
+test p2p::tests::compactsize_paths_in_version_and_locator ... ok
+test p2p::tests::encode_addr_roundtrips_through_parse_addr ... ok
+test p2p::tests::build_inv_roundtrips_through_parse_inv ... ok
+test p2p::tests::encode_headers_roundtrips_through_parse_headers ... ok
+test p2p::tests::frame_roundtrip_version_message ... ok
+test p2p::tests::from_onion_label_rejects_checksum_and_version_tamper ... ok
+test p2p::tests::genesis_display_hash_converts_to_internal_order ... ok
+test p2p::tests::headers_parse_reads_header_only_entries ... ok
+test p2p::tests::inv_and_ping_roundtrip ... ok
+test p2p::tests::i2p_implied_by_garlicat_prefix_not_a_wire_byte ... ok
+test p2p::tests::isfinal_height_vs_time_locks_and_sequence_override ... ok
+test p2p::tests::onion_hostname_reconstructs_the_live_seed_exactly ... ok
+test p2p::tests::legacy_caddress_fixture_parses ... ok
+test p2p::tests::onion_label_parses_to_wire_key_and_store_key_roundtrips ... ok
+test p2p::tests::parse_addr_errors_never_panics ... ok
+test p2p::tests::oversized_and_nonprintable_commands_rejected ... ok
+test p2p::tests::tri7_shape_parses ... ok
+test p2p::tests::split_feed_decodes_one_message_across_chunks ... ok
+test p2p::tests::unknown_trailing_fields_do_not_drop_the_peer ... ok
+test p2p::tests::twelve_byte_full_command_accepted ... ok
+test p2p::tests::wireaddr_encodes_the_fleet_shapes_and_roundtrips ... ok
+test p2p::tests::wireaddr_ipv4_mapped_layout_is_60_bytes ... ok
+test p2p::tests::version_message_parses_both_shapes ... ok
+test peers::tests::corrupt_file_gives_empty_store_and_log ... ok
+test peers::tests::dial_order_best_seen_first_then_seeds_with_backoff ... ok
+test peers::tests::discovery_end_to_end_addr_payload_yields_dialable_onion ... ok
+test peers::tests::merge_addr_skips_self_and_cleartext_and_serves_back ... ok
+test peers::tests::peer_store_roundtrips ... ok
+test rawtx::tests::asm_matches_standard_p2pkh ... ok
+test rawtx::tests::create_raw_refuses_garbage_and_builds_outputs ... ok
+test rawtx::tests::round_trip_hex_and_json_shape ... ok
+test rawtx::tests::trailing_bytes_are_refused ... ok
+test rpc::tests::a_capped_snapshot_below_its_replay_target_stays_flagged_partial ... ok
+test peers::tests::store_cap_enforced ... ok
+test rpc::tests::a_proven_whole_snapshot_behind_the_moving_tip_is_not_partial ... ok
+test rpc::tests::a_snapshot_without_a_replay_count_proof_stays_flagged_partial ... ok
+test rpc::tests::an_at_tip_snapshot_fallback_is_not_flagged_partial ... ok
+test rpc::tests::an_at_tip_snapshot_on_a_different_chain_stays_flagged_partial ... ok
+test rpc::tests::batch_request_yields_array_of_envelopes ... ok
+test rpc::tests::bind_loopback_refuses_non_loopback ... ok
+test rpc::tests::coverage_accepts_consistent_snapshot_pair ... ok
+test rpc::tests::coverage_accepts_zero_utxo_snapshot ... ok
+test rpc::tests::coverage_rejects_hash_mismatch ... ok
+test rpc::tests::coverage_rejects_height_mismatch ... ok
+test rpc::tests::coverage_rejects_missing_coverage_hash ... ok
+test rpc::tests::coverage_rejects_unloaded_balances ... ok
+test rpc::tests::coverage_rejects_unloaded_utxos ... ok
+test rpc::tests::a_mid_apply_failure_rolls_the_block_back ... ok
+test rpc::tests::createmultisig_creates_without_touching_the_wallet_file ... ok
+test rpc::tests::decoderawtransaction_refuses_garbage ... ok
+test rpc::tests::decoderawtransaction_round_trips_a_built_tx ... ok
+test rpc::tests::decodescript_reports_asm_type_and_p2sh ... ok
+test rpc::tests::empty_batch_is_invalid_request ... ok
+test rpc::tests::fmt_utc_timestamp_matches_the_legacy_format ... ok
+test rpc::tests::estimatefee_tracks_settxfee_and_uses_the_chain_coin ... ok
+test rpc::tests::format_tx_json_verbose_and_hex_agree ... ok
+test rpc::tests::format_block_json_fields ... ok
+test rpc::tests::getbalance_matches_replay_total ... ok
+test rpc::tests::getbestblockhash_native_from_tipstate ... ok
+test rpc::tests::getblockbynumber_aliases_getblock_height ... ok
+test rpc::tests::getblockchaininfo_and_getnetworkinfo_from_tip_and_snapshot ... ok
+test rpc::tests::getblockheader_is_the_block_json_without_body_fields ... ok
+test rpc::tests::getblockheader_raw_form_is_the_80_byte_header_hex ... ok
+test rpc::tests::getcheckpoint_reports_the_compiled_anchor_strict_policy ... ok
+test rpc::tests::getdifficulty_uses_daemon_arithmetic_and_shape ... ok
+test rpc::tests::getinfo_composite_fields ... ok
+test rpc::tests::getcheckpoint_refuses_params_and_warming_index ... ok
+test rpc::tests::getmininginfo_composes_ops_stats_and_nulls_when_engine_down ... ok
+test rpc::tests::getreceivedbyaddress_known_and_unknown ... ok
+test rpc::tests::getstakemodifier_in_and_out_of_window ... ok
+test rpc::tests::getsubsidy_and_estimatefee_are_static_legacy_policy ... ok
+test rpc::tests::gettip_and_getblockcount_from_tipstate ... ok
+test rpc::tests::gettransaction_counts_a_multi_address_output_once ... ok
+test rpc::tests::getwalletinfo_reports_the_real_keypool_census ... ok
+test rpc::tests::health_carries_peer_detail_and_node_ops_flags ... ok
+test rpc::tests::getwalletinfo_serves_snapshot_and_errors_without_one ... ok
+test rpc::tests::health_reports_all_subsystems ... ok
+test rpc::tests::help_lists_every_native_and_proxy_method ... ok
+test rpc::tests::incomplete_index_is_never_served_as_authoritative ... ok
+test rpc::tests::legacy_format_money_matches_legacy_formatmoney ... ok
+test rpc::tests::legacy_parse_money_matches_v5_parsemoney ... ok
+test rpc::tests::legacy_post_preserves_non_200_status_and_body ... ok
+test rpc::tests::interleaved_index_advance_never_tears_a_wallet_read ... ok
+test rpc::tests::listaddressgroupings_coinstake_and_receive_are_singletons_with_balances ... ok
+test rpc::tests::listaddressgroupings_empty_history_is_an_empty_array ... ok
+test rpc::tests::listaddressgroupings_merges_transitively_across_txs ... ok
+test rpc::tests::listaddressgroupings_old_file_rows_contribute_singletons_only ... ok
+test rpc::tests::listaddressgroupings_spend_groups_inputs_with_change ... ok
+test rpc::tests::listreceivedbyaddress_uses_the_same_map_as_getreceivedbyaddress ... ok
+test rpc::tests::listtransactions_windows_newest_first_then_returns_ascending ... ok
+test rpc::tests::listunspent_filters_by_confirmations ... ok
+test rpc::tests::listunspent_gates_on_real_snapshot_coverage ... ok
+test rpc::tests::listwalletaddresses_reports_entries ... ok
+test rpc::tests::live_index_answers_without_a_replay_snapshot ... ok
+test rpc::tests::live_index_must_match_the_served_chain_exactly ... ok
+test rpc::tests::live_index_wins_over_the_replay_snapshot ... ok
+test rpc::tests::multisig_address_verbs_store_redeem_scripts_in_the_wallet_file ... ok
+test rpc::tests::native_miss_falls_back_to_proxy_while_warming ... ok
+test rpc::tests::native_miss_is_forwarded_and_marked ... ok
+test rpc::tests::native_miss_without_proxy_is_a_clear_error ... ok
+test rpc::tests::new_parity_verbs_are_in_native_and_routed ... ok
+test rpc::tests::no_view_at_all_is_an_error_not_zero ... ok
+test rpc::tests::not_found_when_index_ready_is_native_error ... ok
+test rpc::tests::ops_methods_route_to_the_engine_and_never_to_the_proxy ... ok
+test rpc::tests::ops_not_wired_is_a_clear_native_error_and_getstakinginfo_is_never_proxied ... ok
+test rpc::tests::parse_error_returns_32700 ... ok
+test rpc::tests::pow_subsidy_schedule_matches_legacy_getproofowreward ... ok
+test rpc::tests::proxy_transport_error_is_reported ... ok
+test gui::sweep_flow::tests::prepare_refuses_zero_inputs_and_all_on_destinations ... ok
+test rpc::tests::read_request_rejects_oversized_body ... ok
+test rpc::tests::repairwallet_and_resendtx_are_native_and_ops_routed ... ok
+test rpc::tests::reservebalance_is_native_and_ops_routed ... ok
+test rpc::tests::rich_list_cache_re_reads_when_the_file_changes_and_errors_when_missing ... ok
+test rpc::tests::rich_list_json_caps_ranks_and_converts_units ... ok
+test rpc::tests::rich_list_parses_sorts_tiebreaks_and_filters ... ok
+test rpc::tests::richlist_routes_passively_with_default_count_and_errors ... ok
+test rpc::tests::settxfee_accepts_the_operator_range_and_refuses_outside_it ... ok
+test rpc::tests::smsg_readside_verbs_are_routed ... ok
+test rpc::tests::smsg_sendpath_verbs_are_native_and_ops_routed ... ok
+test rpc::tests::snapshot_fallback_is_flagged_partial ... ok
+test rpc::tests::read_request_parses_simple_post ... ok
+test rpc::tests::unknown_method_rejected_and_not_forwarded ... ok
+test rpc::tests::validateaddress_decodes_and_flags_mine ... ok
+test rpc::tests::verifymessage_signs_and_verifies_in_legacy_param_order ... ok
+test rpc::tests::walletinfo_reports_fee_and_lock_state_from_the_published_extras ... ok
+test seed::tests::bip32_vector1_master_and_children ... ok
+test seed::tests::bip32_vector2_master ... ok
+test seed::tests::check_mnemonic_official_vectors_and_rejections ... ok
+test seed::tests::check_mnemonic_rejects_garbage ... ok
+test rpc::tests::the_index_position_survives_a_restart ... ok
+test gui::tests::seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry ... ok
+test seed::tests::generated_mnemonics_are_valid ... ok
+test seed::tests::hmac_sha512_rfc4231_vectors ... ok
+test seed::tests::mnemonic_from_entropy_official_vectors ... ok
+test seed::tests::mnemonic_to_seed_legacy_oracle_vectors ... ok
+test seed::tests::derivation_is_deterministic_and_index_sensitive ... ok
+test seed::tests::normalized_whitespace_derives_canonical_keys ... ok
+test seed::tests::secret_string_zeroizes_contents ... ok
+test seed::tests::wordlist_is_canonical ... ok
+test seed::tests::raw_string_quirk_matches_legacy ... ok
+test sent_txs::tests::corrupt_record_is_an_error_not_a_silent_empty ... ok
+test sent_txs::tests::path_for_sits_beside_the_wallet ... ok
+test sent_txs::tests::record_load_roundtrip_and_missing_file_is_empty ... ok
+test sent_txs::tests::rerecording_same_txid_replaces_not_duplicates ... ok
+test shutdown::tests::request_is_sticky ... ok
+test smsg::tests::aes256_cbc_nist_sp800_38a_f25 ... ok
+test smsg::tests::aes256_fips197_vector ... ok
+test gui::tests::seed_migration_full_path_prepare_broadcast_marker ... ok
+test smsg::tests::bucket_hash_depends_on_samples_and_order ... ok
+test smsg::tests::compact_sig_header_convention ... ok
+test smsg::tests::anonymous_format_roundtrip ... ok
+test smsg::tests::hmac_sha256_rfc4231_case1 ... ok
+test smsg::tests::hmac_sha256_rfc4231_multi_part ... ok
+test rpc::tests::legacy_post_times_out_against_hung_server ... ok
+test smsg::tests::lz4_bound_matches_legacy_formula ... ok
+test smsg::tests::lz4_compress_is_valid_block_for_repeating_data ... ok
+test smsg::tests::lz4_debug_n128_bytes ... ok
+test smsg::tests::lz4_roundtrip_small_and_large ... ok
+test smsg::tests::message_too_long_rejected ... ok
+test seed::tests::derive_triangles_matches_legacy_oracle ... ok
+test sent_txs::tests::cap_drops_the_oldest_entries ... ok
+test smsg::tests::token_ordering_is_legacy_shape ... ok
+test smsg::tests::long_message_is_lz4_compressed_and_roundtrips ... ok
+test smsg::tests::xxh32_matches_spec_reference ... ok
+test smsg_net::tests::add_address_rejects_mismatched_pubkey ... ok
+test smsg_net::tests::addkey_legacy_reason_codes_and_getpubkey_failures ... ok
+test smsg_net::tests::addkey_then_getpubkey_roundtrip_on_temp_store ... ok
+test smsg::tests::pow_actually_grinds ... ok
+test smsg_net::tests::anon_message_roundtrip ... ok
+test smsg_net::tests::bad_pow_and_duplicates_dropped_but_peer_stays ... ok
+test smsg_net::tests::bucket_lock_blocks_have_then_releases_on_tick ... ok
+test smsg_net::tests::bucket_time_and_fs_readable_match_legacy_formats ... ok
+test smsg_net::tests::broadcast_signs_each_copy_and_verifies_with_store_keys ... ok
+test smsg::tests::store_roundtrip_buckets_and_pubkeys ... ok
+test smsg::tests::validate_rejects_bad_version_and_size ... ok
+test gui::seed_flow::tests::create_flow_full_state_machine ... ok
+test smsg_net::tests::learn_pubkey_validates_and_dedupes ... ok
+test smsg_net::tests::enable_rebuilds_buckets_and_rehandshakes_peers ... ok
+test smsg_net::tests::option_value_tokens_match_legacy ... ok
+test smsg_net::tests::options_roundtrip_through_the_store ... ok
+test smsg_net::tests::full_roundtrip_a_to_b_over_engine_pair ... ok
+test smsg_net::tests::disable_stops_data_and_notifies_each_enabled_peer_once ... ok
+test smsg_net::tests::outbox_rows_show_the_recipient_and_decrypt_with_the_sender_key ... ok
+test smsg::tests::encrypt_decrypt_roundtrip_and_pow ... ok
+test smsg_net::tests::scan_buckets_redelivers_relay_messages_to_inbox ... ok
+test smsg_net::tests::smsg_disable_and_ignore_paths ... ok
+test smsg_net::tests::reply_path_b_to_a_uses_learned_pubkey ... ok
+test smsg_net::tests::purge_drops_expired_and_keeps_fresh ... ok
+test smsg_net::tests::vch_frame_roundtrip ... ok
+test smsg_net::tests::ping_pong_enables_peer_then_inventory_flows ... ok
+test smsg_net::tests::wire_body_shapes_match_legacy_layouts ... ok
+test spend::tests::build_spend_end_to_end_and_connect_inputs ... ok
+test smsg_net::tests::lz4_large_message_roundtrip_over_wire ... ok
+test spend::tests::connect_inputs_rejects_maturity_timestamp_and_underfee ... ok
+test spend::tests::der_encode_decode_roundtrips_and_matches_libsecp ... ok
+test spend::tests::der_strict_rejects_lax_accepts_noncanonical ... ok
+test spend::tests::estimate_charges_a_three_byte_prefix_once_the_scriptsig_crosses_252 ... ok
+test spend::tests::find_and_delete_op_is_byte_exact ... ok
+test spend::tests::built_transaction_fee_equals_the_converged_fee_above_1000_bytes ... ok
+test spend::tests::money_range_and_constants_match_cpp ... ok
+test spend::tests::oracle_vector_two_of_three_matches_the_independent_implementation ... ok
+test spend::tests::p2pkh_estimate_unchanged_and_per_input_matches ... ok
+test spend::tests::parse_pushes_walks_data_pushes_only ... ok
+test spend::tests::script_builders_match_solver_templates ... ok
+test spend::tests::select_utxos_covering_picks_largest_first_and_validates ... ok
+test spend::tests::mixed_p2pkh_p2sh_pool_converges_and_builds ... ok
+test spend::tests::select_with_fee_is_idempotent_and_stable ... ok
+test spend::tests::select_with_fee_reports_insufficiency_honestly ... ok
+test spend::tests::select_with_fee_converges_and_crosses_the_1000_byte_boundary ... ok
+test spend::tests::sighash_none_and_anyonecanpay_verify_after_unbound_mutations ... ok
+test spend::tests::signature_hash_binds_every_transaction_field ... ok
+test spend::tests::sign_and_verify_roundtrip_p2pk_and_p2pkh ... ok
+test spend::tests::signature_hash_is_the_one_input_script_pattern ... ok
+test spend::tests::signature_hash_none_single_anyonecanpay_branches_match_cpp ... ok
+test spend::tests::signature_hash_out_of_range_paths ... ok
+test spend::tests::t10_one_of_one_p2sh_spend_verifies ... ok
+test spend::tests::t3_solver_type_recognizes_p2sh_scripthash ... ok
+test spend::tests::t5_scriptsig_without_the_op0_dummy_fails ... ok
+test spend::tests::t4_two_of_three_p2sh_spend_signs_and_verifies ... ok
+test spend::tests::t6_wrong_redeem_script_fails_hash_mismatch ... ok
+test spend::tests::t8_partial_signing_with_one_key_cannot_assemble ... ok
+test spend::tests::t7_signatures_out_of_pubkey_order_fail ... ok
+test spend::tests::tb_book_with_one_key_cannot_build_multisig_spend ... ok
+test spend::tests::tc_ownership_bookless_refuses_with_book_accepts ... ok
+test spend::tests::ta_book_builder_spends_multisig_end_to_end ... ok
+test spend::tests::td_can_spend_distinguishes_our_and_unrelated_p2sh ... ok
+test spend::tests::te_assemble_derives_m_and_validates_slot_count ... ok
+test spend::tests::tf_pool_with_unrelated_p2sh_skips_and_builds_p2pkh ... ok
+test spend::tests::two_of_three_estimate_matches_real_signed_size_within_5_bytes ... ok
+test spend::tests::two_of_three_holding_all_three_keys_emits_exactly_m_and_never_undercounts ... ok
+test spend::tests::verify_input_rejects_tampering ... ok
+test stake::tests::coin_age_cent_second_semantics ... ok
+test stake::tests::coinbase_height_prefix_minimal_push ... ok
+test stake::tests::coinstake_structure_gates ... ok
+test stake::tests::block_signature_roundtrip_and_tamper ... ok
+test stake::tests::kernel_search_exhausts_on_impossible_target ... ok
+test stake::tests::combine_pass_adds_same_key_inputs_under_threshold ... ok
+test stake::tests::kernel_solve_loop_finds_solution_on_easy_target ... ok
+test stake::tests::min_age_filter_skips_young_coins ... ok
+test stake::tests::reserve_balance_gates_staking_like_nreservebalance ... ok
+test stake::tests::split_stake_rule_three_outputs_when_weight_young ... ok
+test stake::tests::stake_reward_matches_cbig_num_division_order ... ok
+test stake::tests::timestamp_protocol_rejects_stale_coinstake ... ok
+test smsg_net::tests::smsgsendanon_envelope_roundtrip_and_layout ... ok
+test sweep::tests::destinations_deterministic_across_calls ... ok
+test sweep::tests::plan_sweep_consolidates_multi_utxo_with_exact_fee_math ... ok
+test sweep::tests::plan_sweep_fee_floor_is_raised_not_trusted ... ok
+test sweep::tests::plan_sweep_output_scripts_pay_exactly_the_destinations ... ok
+test sweep::tests::derive_sweep_destinations_matches_wallet_derivation ... ok
+test smsg_net::tests::buckets_stats_shape_matches_legacy_and_dump_clears ... ok
+test sweep::tests::plan_sweep_refuses_empty_and_below_fee_balances ... ok
+test smsg_net::tests::tampered_identity_rejected_by_decrypt ... ok
+test sweep::tests::split_amount_respects_per_output_cap ... ok
+test sweep::tests::split_amount_sums_exact_remainder_to_first ... ok
+test sweep::tests::split_residue_skip_leaves_sub_floor_coins_behind ... ok
+test sweep::tests::plan_sweep_refuses_short_destination_sets ... ok
+test sweep::tests::sweep_spendable_gates_coinbase_and_coinstake_maturity ... ok
+test sync_progress::tests::phase_strings ... ok
+test sync_progress::tests::snapshot_set_get_clear_roundtrip ... ok
+test txpool::tests::accept_valid_tx_and_dedupe ... ok
+test txpool::tests::pool_double_spend_guard_and_bounded_eviction ... ok
+test txpool::tests::prune_and_confirm_spend ... ok
+test txpool::tests::reject_bad_signature ... ok
+test txpool::tests::reject_coinbase_relay ... ok
+test txpool::tests::reject_fee_below_relay_floor ... ok
+test txpool::tests::reject_out_of_range_and_over_spend ... ok
+test txpool::tests::reject_unknown_prevout ... ok
+test txpool::tests::txs_for_block_oldest_first_and_size_cap ... ok
+test updater::tests::asset_names_match_live_release_convention ... ok
+test updater::tests::background_check_failure_stays_quiet ... ok
+test updater::tests::check_payload_enforces_size_floor_and_flavor_magic ... ok
+test updater::tests::current_version_is_cargo_pkg_version ... ok
+test updater::tests::extract_digest_from_all_documented_shapes ... ok
+test updater::tests::flavor_for_matches_platform_and_portability ... ok
+test updater::tests::parse_release_json_reads_live_shape ... ok
+test updater::tests::parse_release_json_rejects_garbage ... ok
+test updater::tests::pe_header_sanity_accepts_minimal_pe_and_rejects_truncation ... ok
+test updater::tests::persist_roundtrip_preserves_skip ... ok
+test updater::tests::pick_asset_exact_and_per_platform ... ok
+test updater::tests::pick_asset_tolerant_fallback_on_renamed_asset ... ok
+test updater::tests::posix_plan_renames_over_target_with_backup ... ok
+test updater::tests::restore_previous_plan_requires_a_backup ... ok
+test updater::tests::state_machine_dismiss_available_comes_back_next_check ... ok
+test updater::tests::state_machine_double_request_refused ... ok
+test updater::tests::state_machine_download_and_install_flow ... ok
+test updater::tests::state_machine_failure_and_retry_paths ... ok
+test updater::tests::state_machine_idle_to_available_on_newer_release ... ok
+test updater::tests::state_machine_skips_persist_and_stays_quiet ... ok
+test updater::tests::state_machine_up_to_date_and_equal_version ... ok
+test updater::tests::tarball_extraction_enforces_floor_and_magic_and_lands_the_binary ... ok
+test updater::tests::update_guard_refuses_while_broadcast_in_flight ... ok
+test updater::tests::verify_digest_matches_or_rejects ... ok
+test updater::tests::version_comparison_semver ... ok
+test updater::tests::version_parses_basic_v_prefixed_and_prerelease ... ok
+test updater::tests::version_rejects_junk ... ok
+test updater::tests::windows_install_script_pins_the_documented_flow ... ok
+test updater::tests::windows_portable_script_backs_up_stages_then_moves ... ok
+test wallet::seed_tests::bad_mnemonics_never_touch_the_file ... ok
+test sweep::tests::plan_sweep_signs_p2pk_prevouts_too ... ok
+test sweep::tests::plan_sweep_small_balance_still_splits_and_keeps_every_sat ... ok
+test sweep::tests::sweep_source_inputs_excludes_destination_addresses ... ok
+test wallet::seed_tests::create_wallet_file_refuses_existing ... ok
+test wallet::seed_tests::hd_record_bytes_match_legacy_serialization ... ok
+test wallet::seed_tests::key_row_is_exact_legacy_214b_der_shape ... ok
+test wallet::seed_tests::generate_hd_key_continues_counter_and_refuses_duplicates ... ok
+test wallet::seed_tests::create_then_reread_matches_legacy_derivation ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test sweep::tests::roundtrip_through_a_fresh_wallet_file_reproduces_addresses ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+
+test result: ok. 553 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 51.77s
+
+## GUI-feature build (compiles src/gui/app.rs incl. net_drawer_overlay)
+command: CARGO_TARGET_DIR=/root/tri7-lanes/target-drawer cargo check --bin tri7_wallet_gui --features gui
+320 |         encrypted: bool,
+
+   --> src/updater.rs:536:4
+536 | fn current_unix_flavor() -> UpdateFlavor {
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 42s
+
+## captured git evidence (read-only commands, verbatim)
+$ git rev-parse HEAD
+abb13e11fd78b2945e086b4e70fa150616252631
+$ git rev-parse --abbrev-ref HEAD
+lane/drawer
+$ git status --short
+ M src/gui/app.rs
+ M src/gui/app_state.rs
+ M src/gui/tests.rs
+?? TASK.md
+$ git diff --stat (vs base)
+ 3 files changed, 335 insertions(+), 125 deletions(-)

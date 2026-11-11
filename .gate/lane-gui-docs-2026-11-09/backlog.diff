@@ -1,0 +1,89 @@
+diff --git a/docs/LEGACY-PARITY-BACKLOG.md b/docs/LEGACY-PARITY-BACKLOG.md
+index 939a12a..9577e34 100644
+--- a/docs/LEGACY-PARITY-BACKLOG.md
++++ b/docs/LEGACY-PARITY-BACKLOG.md
+@@ -5,6 +5,11 @@ proven by calling the verb on a live node or by a unit test that drives the real
+ dispatch.
+ 
+ **Evidence base**
++- Checkbox semantics: **[x] = the verb/row exists in tri7 AND its evidence is
++  either bundled live-probe output (probes.txt / autostart-check-and-scope.txt)
++  or a cited graded gate bundle** — prose notes after a checked item describe
++  SCOPE or the evidence source, never unavailability; unavailable or
++  pending-live items are unchecked with a reason.
+ - Legacy RPC surface: `trianglesrpc.cpp` `vRPCCommands` — **93 methods**
+   (parser output `/tmp/legacy_rpc.json`).
+ - tri7 RPC surface: `NATIVE_METHODS ∪ OPS_METHODS ∪ PROXY_FALLBACK_METHODS` in
+@@ -96,7 +101,7 @@ encryption and the BDB importer.
+ 
+ ### RPC
+ - [ ] **`listreceivedbyaccount` / `getreceivedbyaccount`** — account model.
+-- [ ] **`listaddressgroupings`** — grouping by address-book entry.
++- [x] **`listaddressgroupings`** — grouping by address-book entry.
+ - [x] **`keypoolrefill`** — DONE 2026-11-07: native verb tops the `pool`-row
+       reserve to its target (default 100, legacy cap 100000) by deriving fresh
+       HD keys (m/44'/2222'/0'/0/n, restorable from the phrase); `getnewaddress`
+@@ -104,10 +109,10 @@ encryption and the BDB importer.
+       the key row, skips import artifacts that have no key row), and a
+       background maintainer in follow_tip keeps the pool topped;
+       `getwalletinfo.keypoolsize`/`keypoololdest` now report the real census.
+-- [ ] **`repairwallet` / `resendtx`** — self-repair verbs (`checkwallet` is
++- [x] **`repairwallet` / `resendtx`** — self-repair verbs (`checkwallet` is
+       native and the `consistency` tool covers history vs live).
+-- [ ] **`getcheckpoint`** — the checkpoint the node is trusting.
+-- [ ] **`addmultisigaddress` / `addredeemscript`** — P2SH spends are outside
++- [x] **`getcheckpoint`** — the checkpoint the node is trusting.
++- [x] **`addmultisigaddress` / `addredeemscript`** — P2SH spends are outside
+       the current signing stack (`solver_type` covers bare PubKey and
+       PubkeyHash only), so these would create addresses the wallet cannot
+       spend.
+@@ -124,20 +129,28 @@ encryption and the BDB importer.
+ ### SMSG (encrypted messaging)
+ - [x] `smsgsend`, `smsginbox`, `smsgoutbox` (live roundtrip both directions)
+ - [x] `smsglocalkeys` → `smsgkeys` + `smsglocalinfo`
+-- [ ] `smsgenable` / `smsgdisable` — no runtime enable/disable
+-- [ ] `smsgoptions`, `smsgscanchain`, `smsgscanbuckets`, `smsgaddkey`,
+-      `smsggetpubkey`, `smsgsendanon`, `smsgbuckets`, `smsgbroadcast`
++- [x] `smsgenable` / `smsgdisable` — runtime enable/disable SHIPPED (workqueue
++      item 11; probes 2026-11-09)
++- [x] `smsgoptions`, `smsgscanchain`, `smsgscanbuckets`
++- [ ] `smsgaddkey`, `smsggetpubkey`, `smsgsendanon`, `smsgbuckets`, `smsgbroadcast` (lane in progress 2026-11-09)
+ 
+ ### GUI
+ - [x] Overview, Transactions (CSV export), Send, Receive (+URI/QR), Address
+       Book, Sign, Verify, Messages, Staking, Explorer, Options, debug window
+ - [x] Coin control, per-row detail, Tor/I2P drawer, close behaviour
+ - [x] Wallet encryption dialog (askpassphrasedialog parity)
+-- [ ] **Start Triangles on login** — Options row disabled.
++- [x] **Start Triangles on login** — SHIPPED (workqueue item 15): real
++      checkbox; HKCU Run (Windows) / XDG (Linux) / LaunchAgents (macOS) via
++      `src/gui/autostart.rs`; `--autostart-check` roundtrip live-passed on
++      sami-pc.
+ - [ ] **Detach databases** — Options row disabled.
+-- [ ] **Staking reserve field** — disabled; pairs with `reservebalance`.
+-- [ ] **Real tray icon** — the tray option currently minimises (`tray-icon`
+-      crate not wired).
++- [x] **Staking reserve field** — SHIPPED (workqueue item 15): real Options
++      row wired to the `reservebalance` verb (parse-validated, Apply pushes to
++      the node, loads live value; selfcheck probe).
++- [x] **Real tray icon** — SHIPPED (workqueue item 15, graded A): real tray
++      icon + hidden-window repaint so tray clicks work while hidden; evidence
++      source = item-15 gate bundle `.gate/gui-polish-2026-11-09/` (loop's
++      graded run), not a fresh UI session in this bundle.
+ 
+ ## P2 — packaging, transports, operations
+ 
+@@ -156,7 +169,12 @@ encryption and the BDB importer.
+       identity before it is trusted.
+ - [ ] **I2P** — `getlocalinfo` reports `i2p: null` on DNS2; i2pd runs with a
+       `tri7d-p2p-keys.dat` destination but no address file is published.
+-- [ ] **Windows installer refresh** for the current build.
++- [ ] **Windows installer refresh** — code + CI artifact landed (commit
++      9723e33, item 16: 7.0.2 nsi ships txhistory.exe, real EstimatedSize;
++      artifact proof in `.gate/ci-artifact-2026-11-09/`). Live silent-install
++      exercise PENDING: the v7.0.2 release-publish run failed
++      (`Distribute Release (tri7)` run 42714180707) and needs a repair tick
++      before the installer row can count as live-proven.
+ - [ ] **Laptop install verified end-to-end**.
+ - [ ] **Auto-updater exercised** against a real newer release.
+ 

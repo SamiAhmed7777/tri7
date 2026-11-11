@@ -1,0 +1,21 @@
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 658d7f5..642955d 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -254,3 +254,16 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
+ - Era boundaries in archive: stale branch starts at 2201091.
+ - Judge (codex) requires: bins in src/bin, coverage-contract exits, no hand-math assertions. Cycle D→D→C→C→B pattern per phase; expect ~2-3 iterations.
+ - The 12 ghost labels + 9003-era sigs are ROOT-CAUSED (vestigial labels ismine-false on daemon; CRAPCHAIN-era pre-strict-ECDSA). Do not re-open.
++
++## 2026-11-07 i2p landing on sami-pc (workqueue item 2, TICK)
++- i2pd 3.0.0 win64 on sami-pc, SYSTEM task `i2pd` (onstart, `--datadir` ONLY — conf-path flags hang this build; configs in %APPDATA%\i2pd default paths, user + systemprofile). Server tunnel [tri7d-p2p] -> 100.85.236.10:24113; sami-pc i2p identity `mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113`, published via state2\i2p_destination.txt (getlocalinfo.i2p non-null). Keys persisted at datadir root.
++- Grade-A commits f613f3e (conf addnode accepts .b32.i2p) + 47d7b94 (peer-store i2p hosts dialable), both DEPLOYED to sami-pc (CI 42365585206 / 42367654568, hash-verified swaps; backups follow_tip.exe.bak-20261107-i2p / .bak2-f613f3e). ft_state2.bat dials i2p first (--i2p ztj5… before --onion), tor fallback intact; ztj5 seeded in peers.json answered-newest.
++- Proven: DNS2→sami-pc SOCKS-4447 dial code 0 + real tri7 handshake over i2p (state2.log 11:32:31Z, peer version 70206, start height 2207088). OPEN: that session left getpeerinfo ~2 min later with no drop log — i2p session lifetime needs investigation before calling the i2p link stable. DNS2's OWN getlocalinfo still lacks its i2p destination file (workqueue item 3 covers onion+i2p publication on DNS2).
++
++## 2026-11-07 fleet-wide onion/i2p publication (workqueue item 3, TICK)
++- NO code change: `getlocalinfo` (src/rpc.rs getlocalinfo arm) already reads the state dir per CALL — onion from `onion_address.txt`/`hidden_service/hostname`/`tor/hostname`, i2p from `i2p_destination.txt`/`i2p/hostname`. Publication is pure ops: put the files in the state dir; NO daemon restart needed.
++- DNS2 (/var/lib/tri7, tri7:tri7 0644): `onion_address.txt` ← copy of `/var/lib/tor/triangles/hostname` (gxvrhv3q…onion; HS 24113→127.0.0.1:24113); `i2p_destination.txt` = `ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113` — taken from i2pd webconsole `?page=i2p_tunnels` (server tunnel [tri7d-p2p]), cross-checked: the same address the PC handshook last tick. getlocalinfo: onion+i2p non-null, note cleared.
++- Pi/hetzner: published `ra32xf5og…onion` (from /var/lib/tor/tri7pi/hostname) to /var/lib/tri7/onion_address.txt. FIXED a dead HS mapping FIRST: torrc mapped `HiddenServicePort 24112 → 127.0.0.1:24112` while follow_tip listens on 443 — the onion existed but nothing answered behind it (backup /etc/tor/torrc.bak-20261107-tri7). After tor@default restart, DNS2's own persistent addnode `ra32…onion:24112` dialed and established a REAL tri7 peer: getpeerinfo transport "tor", version 70206, start_height 2207107, msgs flowing.
++- DNS3: tor installed but OFF, no HS at all → wrote tri7 HS into /etc/tor/torrc (backup torrc.bak-20261107-tri7): HiddenServiceDir /var/lib/tor/tri7/, HS 24113→127.0.0.1:24113, v3; started tor@default; NEW onion brudzmft5…onion published to /var/lib/tri7/onion_address.txt (tri7:tri7 0644).
++- Proofs: socks5 dials from DNS2 through 127.0.0.1:9050 to BOTH Pi:24112 and DNS3:24113 onions → "SOCKS5 request granted" + far-end accept (curl 52 empty reply — tri7 is not HTTP, expected). sami-pc re-verified non-null (onion tuu7h65j…, i2p mb3ox52u…:24113). Parity untouched: DNS2 h2207108 eb5e471a == Pi h2207108 eb5e471a; DNS3 ~118 behind (pre-existing tailscale-relay lag); PC 6 ahead (own staking). DNS2 staking enabled throughout (attempts 5.67M). Zero daemon restarts anywhere this tick.
++- Fleet getlocalinfo now: DNS2 onion+i2p · Pi onion · DNS3 onion · PC onion+i2p. Pi/DNS3 i2p still null — no i2pd on those hosts (future item if wanted). DNS3's onion is not yet in any peer's addnode list (publication ≠ advertisement); wiring it into a dialer is a later tick.

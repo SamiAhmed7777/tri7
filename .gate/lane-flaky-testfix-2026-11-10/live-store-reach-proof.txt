@@ -1,0 +1,14 @@
+== LIVE_STORE reach analysis (mechanical, v2) ==
+test/helper fns scanned: 89
+reach DIRECT (accessor/LIVE_STORE text in slice): ['chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip', 'gap_find_missing_satisfied_by_recent_cache', 'lock_live_store_tests']
+reach INDIRECT (calls a helper that touches accessors): []
+GUARDED (lock_live_store_tests() in slice): ['chain_slot_wiring_seed_rollback_and_window_slide_follow_the_threaded_tip', 'fork_choice_refuses_lighter_and_adopts_heavier', 'gap_find_missing_satisfied_by_recent_cache', 'lock_live_store_tests', 'recon_accumulates_cap_sized_batches_before_judging', 'recon_empty_reply_judges_and_closes_a_cap_sized_branch', 'recon_heavier_branch_switches_and_queues_the_validated_body_path', 'recon_lighter_branch_is_ignored_and_the_reconciliation_closes', 'recon_linkage_guard_stops_the_batch_when_the_chain_breaks', 'recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches', 'recon_unknown_fork_point_escalates_then_drops_the_peer', 'rollback_tip_drops_the_phantom_and_truncates', 'rollback_tip_refuses_at_window_base']
+UNGUARDED REACHERS: NONE — reach set fully guarded
+
+Manual audit of the v1 false-positive + the real gap:
+- gap_find_missing_satisfied_by_recent_cache: gap_find_missing() (production,
+  defined outside the tests module) consults live_store() as a cache tier —
+  a READ reach the v1 substring scan missed; NOW GUARDED (guard = first stmt).
+- lock_live_store_tests appears in GUARDED because its own definition text
+  contains its name; it is the guard helper itself, not a test.
+verdict: PASS

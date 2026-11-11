@@ -1,0 +1,53 @@
+    cfg
+}
+
+/// Parse `addnode=<host>:<port>` lines (last one wins per host, like the
+/// legacy client's repeated-flag handling). Dual-network rule: `.onion`
+/// (tor SOCKS) and `.b32.i2p`/`.i2p` (i2pd SOCKS) hosts are accepted; a
+/// cleartext IP/hostname is dropped AND logged. The
+/// companion file `addnode=` targets must never crash on junk lines — a
+/// malformed entry is ignored with a log line too. Returns the accepted
+/// targets plus the ignored `host:port` strings (each already logged).
+fn addnode_targets_from_conf(
+    conf_text: &str,
+    socks: &(String, u16),
+    i2p_socks: &(String, u16),
+) -> (Vec<PeerTarget>, Vec<String>) {
+    let mut targets = Vec::new();
+    let mut ignored = Vec::new();
+    for line in conf_text.lines() {
+        let Some(spec) = line.trim().strip_prefix("addnode=") else {
+            continue;
+        };
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let host = spec.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+        // Dual-network fleet (standing directive): `.onion` dials through the
+        // tor SOCKS, `.b32.i2p`/`.i2p` through the i2pd SOCKS — both are
+        // overlay hosts and join the attach list; only cleartext IP/hostname
+        // is rejected (no clearnet P2P).
+        if host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p") {
+            match PeerTarget::parse(spec, socks, i2p_socks) {
+                Ok(t) => {
+                    let tr = if t.transport == Transport::I2p { "i2p" } else { "tor" };
+                    log(&format!("addnode={} accepted ({})", t.endpoint(), tr));
+                    targets.push(t);
+                }
+                Err(e) => log(&format!("addnode={} ignored ({})", spec, e)),
+            }
+        } else {
+            log(&format!(
+                "addnode={} ignored: only .onion / .b32.i2p addnode hosts are accepted — no cleartext P2P",
+                spec
+            ));
+            // `ignored` carries rejected host:port specs (the function doc's
+            // contract): the shape check mirrors what the accepted path needs,
+            // so junk with or without a colon never enters the list.
+            if is_host_port_shape(spec) {
+                ignored.push(spec.to_string());
+            }
+        }
+    }
+    (targets, ignored)

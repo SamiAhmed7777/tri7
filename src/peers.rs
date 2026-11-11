@@ -298,6 +298,23 @@ impl PeerStore {
         }
     }
 
+    /// Drop the (host, port) entry — the `addnode <node> remove` verb (the
+    /// legacy client erased the string from mapMultiArgs["-addnode"]; tri7's
+    /// persistent equivalent is this store). Returns whether it was present
+    /// (the legacy verb errors on remove of an unknown node).
+    pub fn remove(&mut self, host: &str, port: u16) -> bool {
+        let before = self.peers.len();
+        self.peers
+            .retain(|e| !(e.host == host && e.port == port));
+        self.peers.len() != before
+    }
+
+    /// Whether a (host, port) entry exists — the `addnode <node> add`
+    /// duplicate check ("Node already added.").
+    pub fn contains(&self, host: &str, port: u16) -> bool {
+        self.peers.iter().any(|e| e.host == host && e.port == port)
+    }
+
     /// Merge `addr` gossip into the store (net.cpp ProcessMessage "addr"
     /// relay). Tor-only: only tor_v3 entries are stored, keyed by their
     /// reconstructed `.onion` HOSTNAME (see `WireAddr::store_key` /
@@ -647,5 +664,24 @@ mod tests {
         store.record_ok(&format!("{:064x}", 5), 24113, 1000);
         let served = store.addr_entries(2000, 1000);
         assert!(served.len() <= 1000);
+    }
+
+    /// addnode add/remove semantics over the store: `contains` drives the
+    /// legacy "Node already added." check, `remove` drops ONLY the named
+    /// endpoint and reports whether it was present ("Node not found in
+    /// addnode list.").
+    #[test]
+    fn addnode_add_remove_on_the_store() {
+        let mut store = PeerStore::default();
+        store.upsert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24113, 1, "addnode", 100);
+        store.upsert("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb7777.onion", 24113, 1, "addr", 100);
+        // add of an existing endpoint is the legacy duplicate error
+        assert!(store.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24113));
+        assert!(!store.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24000));
+        // remove is per host AND port, and reports presence
+        assert!(store.remove("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24113));
+        assert!(!store.remove("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24113));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.peers()[0].host, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb7777.onion");
     }
 }

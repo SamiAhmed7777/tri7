@@ -1,0 +1,9 @@
+GRADE=B urn=urn:ump:o4rmdvknvaf5c26qbdgcn3sls4n5du7g5edtncvfezonhkbj34pa
+{
+  "blocking": [],
+  "polish": [
+    "Include the literal verification transcript lines (grep staking /etc/tri7/triangles.conf, systemctl restart, grep again) to close the loop on restart persistence.",
+    "Optionally note whether tri7d rewrites triangles.conf wholesale on other settings changes, since a read-write conf under a strict sandbox is a standing write surface worth one sentence in blast radius.",
+    "Consider pinning the chmod 770 /etc/tri7 fix into the same delta (tmpfiles.d entry or unit-level Owner/Group note) so the permissions leg of the fix isn't lost on host rebuild."
+  ]
+}

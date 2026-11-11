@@ -1,0 +1,58 @@
+# Full test evidence — lane-i18n (round 3 tree)
+
+## State identity (UNCOMMITTED working tree)
+worktree: /root/tri7-lanes/lane-i18n
+branch: lane/i18n @ abb13e11fd78b2945e086b4e70fa150616252631 (base abb13e1)
+state under test: base + the UNCOMMITTED modifications in i18n.diff (parent commits post-grade)
+changed files:
+ M src/gui/app.rs
+ M src/gui/app_state.rs
+ M src/gui/tests.rs
+?? src/gui/i18n.rs
+
+## Exact commands
+CARGO_TARGET_DIR=/root/tri7-lanes/target-i18n cargo test --lib
+CARGO_TARGET_DIR=/root/tri7-lanes/target-i18n cargo check --bin tri7_wallet_gui --features gui   # COMPILES the feature-gated src/gui/app.rs
+date: 2026-11-10T04:03:32Z
+
+## COMPLETE cargo test --lib output
+test sweep::tests::roundtrip_through_a_fresh_wallet_file_reproduces_addresses ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test smsg_net::tests::ping_pong_enables_peer_then_inventory_flows ... ok
+
+test result: ok. 555 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 72.81s
+
+
+## GUI-FEATURE check output (app.rs compiled, incl. balance Grid + closures)
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 3 previous errors; 101 warnings emitted

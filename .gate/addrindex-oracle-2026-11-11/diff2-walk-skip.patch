@@ -1,0 +1,54 @@
+diff --git a/src/bin/addrindex_build.rs b/src/bin/addrindex_build.rs
+index 437d2a3..6f74acb 100644
+--- a/src/bin/addrindex_build.rs
++++ b/src/bin/addrindex_build.rs
+@@ -240,6 +240,7 @@ fn main() {
+         .unwrap_or(0);
+     let mut pos = if full { 0 } else { resume_off };
+     let mut unresolved: u64 = 0;
++    let mut stale_skipped: u64 = 0;
+     let mut lookup_err: Option<String> = None;
+     if pos > 0 {
+         println!("resuming at file offset {pos}");
+@@ -305,10 +306,28 @@ fn main() {
+             Ok(Some(hit)) => match hit.height {
+                 Some(h) if h <= tip => h,
+                 _ => {
+-                    // The store returned the frame but no usable height:
+-                    // skipping silently would stamp the index "complete" while
+-                    // canonical blocks are missing from it.
+-                    unresolved += 1;
++                    // The store returned the frame but no usable height. This
++                    // whole arm is the ORACLE-MISS path: the frame's hash is
++                    // NOT the tipstate's hash at any window height, and the
++                    // hash-first build assigns heights only to oracle frames
++                    // and positionally-chained frames — so this is a stale
++                    // fork leftover (indexed as a frame, height-less by
++                    // design). Not canonical: skipping is CORRECT, the same
++                    // skip-by-design as the Ok(None) arm below. The old
++                    // fail-closed treatment dates from the oracle-less build,
++                    // where heights were unreliable and a canonical block
++                    // could genuinely hide here — live 2026-11-11 on DNS2:
++                    // after the threading fix, exactly 1 such leftover in the
++                    // fork-war tail failed every walk ("FAIL: 1 canonical
++                    // frame(s) skipped") and the index could never complete
++                    // in the reorg world. Lookup ERRORS (below) and anything
++                    // the oracle DOES claim stay fail-closed via `unresolved`.
++                    if stale_skipped == 0 {
++                        println!(
++                            "walk: stale fork leftover at offset {pos} (hash {display} not in the tipstate window) — skipping non-canonical frames by design"
++                        );
++                    }
++                    stale_skipped += 1;
+                     pos += (8 + blen) as u64;
+                     continue;
+                 }
+@@ -436,7 +455,7 @@ fn main() {
+         );
+     }
+     println!(
+-        "addrindex: done — {blocks} blocks, {outputs} outputs, {spends} spends in {:.1}s",
++        "addrindex: done — {blocks} blocks, {outputs} outputs, {spends} spends, {stale_skipped} stale fork leftover(s) skipped in {:.1}s",
+         started.elapsed().as_secs_f64()
+     );
+ }

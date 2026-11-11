@@ -1,0 +1,12 @@
+===DEBUG-TIMELINE=== 
+===DISCOVERED=== 
+===FAILED-MARKER-CONTENT=== 
+update-install-failed rc=16
+===RELAUNCH=== 
+relaunched 
+===DIR=== 
+fake-setup.exe
+install-failed.marker
+relaunch.cmd
+relaunch.marker
+===DAEMON=== 

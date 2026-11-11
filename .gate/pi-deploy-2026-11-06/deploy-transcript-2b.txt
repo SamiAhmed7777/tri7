@@ -1,0 +1,47 @@
+=== PART 2b EXECUTION: wallet-less launcher ===
+[1] install launcher + bash -n on the Pi:
+INSTALLED-OK
+[2] stop follow_tip + builder, restart wallet-less, relaunch builder:
+stopping 2043417 2043653
+commit: 5629b1718911395374bb27dbed0dc3d43fadf127+judged-diff
+mode: full node, no wallet
+started pid 2046588 (Tor-only, no wallet)
+RPC up after 58s
+[3] relaunch the index builder:
+builder-pid=2046760
+[4] remove archived-verified wallet files:
+total 8
+drwxr-xr-x  2 root root 4096 Nov  7 00:28 .
+drwx------ 24 root root 4096 Nov  6 23:56 ..
+[5] running process has NO --wallet argument:
+0
+(count of wallet-mentioning args above)
+[6] no-wallet RPC error + first look:
+{"error":{"code":-1,"message":"node ops engine still warming up"},"id":null,"result":null,"source":"tri7"}
+{"error":{"code":-1,"message":"node ops engine still warming up"},"id":null,"result":null,"source":"tri7"}
+[2026-11-07T00:28:50Z] p2p: inbound listener on 127.0.0.1:24112 (getdata/getheaders/push-block)
+[2026-11-07T00:28:51Z] smsg message ignored (engine not wired): "smsgPing"
+[2026-11-07T00:29:09Z] inbound peer connected: in:127.0.0.1:39040 (/tri7:7.0.0/ h2206802)
+
+=== APPENDIX: the FINAL zero-key restart at 00:51Z (session-captured transcript, verbatim) ===
+[2] stop follow_tip + builder, restart with the zero-key wallet, relaunch builder:
+stopping 2046588 2046760
+commit: 5629b1718911395374bb27dbed0dc3d43fadf127+judged-diff
+mode: full node, zero-key wallet (no coins)
+started pid 2049276 (Tor-only, no wallet)
+RPC up after 24s
+[3] relaunch the index builder:
+builder=2049356
+[4] remove archived-verified wallet files: (executed at 00:28 cycle; tri7-wallet now holds only wallet-empty.dat)
+[acceptance at 00:52]
+[2026-11-07T00:52:04Z] wallet live view ready: window h2202213..h2206812 - 0 outputs (0 owned) balance 0 sats
+getpeerinfo -> count:2 (tor:1, inbound via the Pi's Tor hidden service:1)
+staking enabled: False attempts: 0
+dumpwallet log line: [2026-11-07T00:52:23Z] dumpwallet: 0 keys -> /var/lib/tri7/empty-dump.txt
+Pi tip 2206812 == DNS2 tip 2206812
+NOTE: the launcher file was later updated to v4 (self-contained zero-key wallet
+creation + validation guard); installing it is a FILE-ONLY swap - the running
+process (pid 2049276, started 00:51Z with the identical arguments) is
+unaffected. sha256 of installed /root/start_tri7.sh:
+cbe7488a2bf941b3a18813c37e5018b08ad9ec13a05e1879ab41e5c19e7ebe2e
+(equal to the brief's start_tri7.sh.new bundle copy).

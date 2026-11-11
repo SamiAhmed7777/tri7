@@ -1,0 +1,134 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 177e883..bce3423 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -4674,6 +4674,36 @@ impl RebuildSchedule {
+     }
+ }
+ 
++
++/// THE STARTUP SEEDING RULE: an on-disk snapshot that covers LESS than the
++/// tip its replay chased is an OUTSTANDING short walk — the previous daemon
++/// run's rebuild was capped (a hole stopped it), and the ordinary staleness
++/// check cannot see it (a 14-block shortfall is not "stale by 5760"), so
++/// the scheduler has to be seeded by hand or the daemon would serve the
++/// capped figure forever without ever retrying.
++///
++/// `snap_target` is the snapshot's published replay_target_height (None
++/// when it publishes none); `snap_h` is its coverage. Returns true when the
++/// scheduler was seeded by THIS call.
++fn seed_short_snapshot(
++    sched: &mut RebuildSchedule,
++    snap_target: Option<u64>,
++    snap_h: u64,
++    already_seeded: &mut bool,
++) -> bool {
++    if *already_seeded {
++        return false;
++    }
++    match snap_target {
++        Some(target) if target > snap_h && sched.streak == 0 => {
++            sched.record(false);
++            *already_seeded = true;
++            true
++        }
++        _ => false,
++    }
++}
++
+ /// The wallet's own outputs as the LIVE view knows them (the ones it
+ /// replayed in its window). A pure function of the live view so the merge
+ /// below can be tested without a live node.
+@@ -8412,6 +8442,8 @@ fn main() {
+                 let mut blk_missing_logged = false;
+                 let mut sched = RebuildSchedule::new();
+                 let mut last_attempt: Option<std::time::Instant> = None;
++                // logged-once guard for the startup seeding
++                let mut short_seeded = false;
+                 loop {
+                     let blk = match b_blk.as_ref() {
+                         Some(p) if p.exists() => p.clone(),
+@@ -8430,12 +8462,33 @@ fn main() {
+                         }
+                     };
+                     blk_missing_logged = false;
+-                    // snapshot coverage height (missing/unparseable → 0)
+-                    let snap_h = std::fs::read_to_string(&b_out)
++                    // snapshot coverage height (missing/unparseable → 0),
++                    // and the tip its replay was chasing
++                    let snap_doc = std::fs::read_to_string(&b_out)
+                         .ok()
+-                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
++                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
++                    let snap_h = snap_doc
++                        .as_ref()
+                         .and_then(|v| v["height"].as_u64())
+                         .unwrap_or(0);
++                    let snap_target = snap_doc
++                        .as_ref()
++                        .and_then(|v| v["replay_target_height"].as_u64());
++                    // a snapshot whose coverage is BELOW the tip its replay
++                    // chased was CAPPED (a hole stopped the walk). At startup
++                    // that fact has to seed the scheduler, or the daemon
++                    // would serve the capped figure forever without ever
++                    // retrying: the ordinary staleness check cannot see it
++                    // (14 blocks short of the tip is not "stale by 5760").
++                    // THE RULE: an on-disk snapshot that covers less than
++                    // the tip its replay chased is an OUTSTANDING short walk.
++                    if seed_short_snapshot(&mut sched, snap_target, snap_h, &mut short_seeded) {
++                        log(&format!(
++                            "balances-build: the loaded snapshot covers h{} but its replay chased h{} — retrying",
++                            snap_h,
++                            snap_target.unwrap_or_default()
++                        ));
++                    }
+                     // chain tip (try_lock only — never block on the loop)
+                     let tip = b_st
+                         .try_lock()
+@@ -10254,6 +10307,46 @@ mod tests {
+         assert!(!merged.iter().any(|r| r.txid == "zz"));
+     }
+ 
++    /// THE STARTUP SEEDING: a snapshot on disk that covers less than the
++    /// tip its replay chased is an outstanding short walk, and the
++    /// scheduler must be seeded by it exactly once.
++    #[test]
++    fn a_short_snapshot_on_disk_seeds_the_scheduler_once() {
++        let mut sched = RebuildSchedule::new();
++        let mut seeded = false;
++
++        // the snapshot covers h2208050 but its replay chased h2208064:
++        // capped, so the scheduler must be seeded
++        assert!(
++            seed_short_snapshot(&mut sched, Some(2_208_064), 2_208_050, &mut seeded),
++            "a capped snapshot must seed the scheduler"
++        );
++        assert_eq!(sched.streak, 1);
++        assert!(sched.due(false, 30), "and the retry must become due");
++
++        // a second pass must NOT seed again (the retry is already running)
++        assert!(
++            !seed_short_snapshot(&mut sched, Some(2_208_064), 2_208_050, &mut seeded),
++            "seeding happens once"
++        );
++
++        // a HEALTHY snapshot (coverage == target) never seeds
++        let mut sched2 = RebuildSchedule::new();
++        let mut seeded2 = false;
++        assert!(
++            !seed_short_snapshot(&mut sched2, Some(2_208_050), 2_208_050, &mut seeded2),
++            "a whole-chain snapshot needs no seeding"
++        );
++        assert_eq!(sched2.streak, 0);
++
++        // no published target: fail closed is the RPC's business; the
++        // scheduler stays untouched here
++        let mut sched3 = RebuildSchedule::new();
++        let mut seeded3 = false;
++        assert!(!seed_short_snapshot(&mut sched3, None, 2_208_050, &mut seeded3));
++        assert_eq!(sched3.streak, 0);
++    }
++
+     // ---- wallet balance ownership ----
+ 
+     /// build a WalletLive from a synthetic wallet + live map, no store needed

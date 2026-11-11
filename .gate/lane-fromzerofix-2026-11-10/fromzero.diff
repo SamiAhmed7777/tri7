@@ -1,0 +1,198 @@
+diff --git a/src/blockindex.rs b/src/blockindex.rs
+index c4b452e..f9b2731 100644
+--- a/src/blockindex.rs
++++ b/src/blockindex.rs
+@@ -1428,6 +1428,28 @@ impl BlockStore {
+         None
+     }
+ 
++    /// The ORACLE-canonical hash at a height: only the build-time height_off
++    /// map answers (chain slots and runtime appendix arrivals never do). This
++    /// is the ancestry proof for below-window serving anchors — a runtime-
++    /// appended stale fork at a gap height (or anywhere) can never pass it,
++    /// because height_off is frozen at build time and only the build-verified
++    /// frames occupy it.
++    pub fn canonical_hash_at_height(&self, h: u64) -> Option<Hash> {
++        let inner = self.inner()?;
++        if !inner.heights_ok {
++            return None;
++        }
++        let off = inner.blocks.offset_by_height(h)?;
++        if off == HEIGHT_GAP {
++            return None;
++        }
++        // offsets are FRAME starts (magic u32 + len u32, then the body):
++        // skip the 8-byte frame prefix before hashing the header
++        let mut hdr = [0u8; 80];
++        read_exact_at(&inner.file, &mut hdr, off + 8).ok()?;
++        header_hash(&hdr).ok()
++    }
++
+     /// The main-chain block hash at a height (display hex). The live chain's
+     /// registered slot answers first — getblockhash must never contradict
+     /// what serving hands out at the same height; no answer above the chain
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 5cc1f4c..af4bfaf 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -684,6 +684,21 @@ enum ReconOutcome {
+ /// ancestor and serve the branch from there — the tip-only locator forced it
+ /// to serve from genesis (or answer nothing), which is how reconciliation
+ /// wedged.
++/// Live tip-poll locator: at tip h0 (fresh genesis state) there is no h(-1),
++/// so the two-hash form is impossible — return tip-hash-only (r-lapstop fix;
++/// the inline `tip_height - 1` underflowed u64 and panicked the main thread).
++fn tip_poll_locator(stg: &ChainState, poll_parity: bool) -> Vec<Hash> {
++    if poll_parity && stg.tip_height > 0 {
++        let prev_hash = stg
++            .entry_abs(stg.tip_height - 1)
++            .map(|e| e.hash)
++            .unwrap_or(stg.tip_hash);
++        vec![prev_hash, stg.tip_hash]
++    } else {
++        vec![stg.tip_hash]
++    }
++}
++
+ fn build_recon_locator(st: &ChainState) -> Vec<Hash> {
+     let mut loc = vec![st.tip_hash];
+     let tip_idx = (st.tip_height - st.base) as usize;
+@@ -4795,6 +4810,22 @@ fn collect_headers(
+         let height = match hit {
+             Some(hit) => match hit.height {
+                 Some(hgt) if !chain_armed || store.chain_slot_hash(hgt) == Some(*h) => Some(hgt),
++                // BELOW-WINDOW HISTORY (from-zero serving): the slot map
++                // covers only the live window; a STORED body at a height
++                // with NO slot at all is off-window history. The anchor
++                // additionally requires ORACLE-CANONICAL ancestry: the
++                // build-time height_off map must place THIS hash at this
++                // height (canonical_hash_at_height) — runtime-appended
++                // bodies (raced or stale-fork, at gap heights or anywhere)
++                // can never anchor because height_off is frozen at build
++                // time. Within-window races keep the stronger guard above.
++                // Without this anchor a fresh install's genesis locator got
++                // an empty serve and from-zero could never walk
++                // (live-caught 2026-11-10: fleet peers answered "nothing
++                // after this locator" to h0).
++                Some(hgt) if store.chain_slot_hash(hgt).is_none()
++                    && hgt < store.chain_slot_tip().unwrap_or(0)
++                    && store.canonical_hash_at_height(hgt) == Some(*h) => Some(hgt),
+                 _ => None, // raced / unthreaded / unknown body: not an anchor
+             },
+             None => match recent.get(h) {
+@@ -10442,15 +10473,7 @@ pub fn main_args(argv: &[String]) -> i32 {
+                 {
+                     let mut stg = st_shared.lock().unwrap();
+                     poll_parity = !poll_parity;
+-                    let locator: Vec<Hash> = if poll_parity {
+-                        vec![stg.tip_hash]
+-                    } else {
+-                        let prev_hash = stg
+-                            .entry_abs(stg.tip_height - 1)
+-                            .map(|e| e.hash)
+-                            .unwrap_or(stg.tip_hash);
+-                        vec![prev_hash, stg.tip_hash]
+-                    };
++                    let locator: Vec<Hash> = tip_poll_locator(&stg, poll_parity);
+                     let stop = [0u8; 32];
+                     let body = tri7_core::p2p::build_getheaders(&locator, &stop);
+                     for p in peers.iter_mut().filter(|p| p.outbound) {
+@@ -14001,4 +14024,98 @@ addnode=host:notaport
+         // the embedded flag is restored by the guard even on the trap path
+         assert!(!EMBEDDED.load(Ordering::SeqCst));
+     }
++
++    // THE below-window anchor: a chain-armed store whose slots cover only a
++    // high window must still serve headers anchored at OFF-WINDOW stored
++    // bodies (a fresh install's genesis locator) — the exact serve the
++    // from-zero walk needs; and a raced body INSIDE the window stays refused.
++    #[test]
++    fn below_window_stored_body_can_anchor_the_serve_for_fresh_installs() {
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-bw-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        std::fs::create_dir_all(&dir).unwrap();
++        let path = dir.join("blk.dat");
++        // the fleet shape: the full consecutive chain g → h1 → h2 → w3 → w4
++        // in the store, and LIVE WINDOW slots threaded only near the tip
++        // (h3..h4) — heights 0..2 are BELOW-WINDOW history (no slots)
++        let g = bin_block([0u8; 32], 0x11);
++        let h1 = bin_block(g.hash(), 0x22);
++        let h2 = bin_block(h1.hash(), 0x33);
++        let w3 = bin_block(h2.hash(), 0x44);
++        let w4 = bin_block(w3.hash(), 0x55);
++        let mut frames = Vec::new();
++        let mut all_hashes = Vec::new();
++        for b in [&g, &h1, &h2, &w3, &w4] {
++            frames.extend_from_slice(&bin_frame(b));
++            all_hashes.push(b.hash());
++        }
++        std::fs::write(&path, &frames).unwrap();
++        let store = tri7_core::blockindex::BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
++            base: 0,
++            hashes: all_hashes.clone(),
++            tip: 4,
++        }));
++        wait_store_ready(&store);
++        // thread ONLY the top window (the live chain shape): h3..h4
++        store.set_chain_slot(3, w3.hash());
++        store.set_chain_slot(4, w4.hash());
++        let mut recent = RecentBlocks::new();
++
++        // a fresh install's locator (genesis hash) now anchors: the serve
++        // walks the store consecutively from the anchor — h1, h2, then the
++        // window (w3, w4), stopping at the first missing height (h5)
++        let served = collect_headers(&store, &recent, &[g.hash()], &[0u8; 32]);
++        assert_eq!(served.len(), 4, "below-window anchor must serve the walk");
++        assert_eq!(served[0].hash(), h1.hash());
++        assert_eq!(served[1].hash(), h2.hash());
++        assert_eq!(served[2].hash(), w3.hash());
++        assert_eq!(served[3].hash(), w4.hash());
++
++        // ...and the within-window raced guard still holds: append a raced
++        // child of w3 at height 4 (the slot holds the live w4)
++        let raced = bin_block(w3.hash(), 0x77);
++        store.append_block(&bin_frame(&raced)[8..], Some(4)).unwrap();
++        let served_raced = collect_headers(&store, &recent, &[raced.hash()], &[0u8; 32]);
++        assert!(served_raced.is_empty(), "within-window race must stay refused");
++
++        // ...and a STALE FORK appended below the window (a slotless gap
++        // height, oracle-canonical map does not own it) stays refused too:
++        // canonical_hash_at_height must be the ancestry proof
++        let stalefork = bin_block(h1.hash(), 0x88); // a second child of h1
++        store
++            .append_block(&bin_frame(&stalefork)[8..], Some(2))
++            .unwrap();
++        let served_fork = collect_headers(&store, &recent, &[stalefork.hash()], &[0u8; 32]);
++        assert!(served_fork.is_empty(), "below-window stale fork must stay refused");
++    }
++
++    // THE r-lapstop regression: a fresh genesis state has tip_height 0; the
++    // old inline locator built `tip_height - 1` and PANICKED the main thread
++    // on the first tip-poll (u64 underflow), killing every fresh-install
++    // from-zero sync before it could fetch a single header segment.
++    #[test]
++    fn tip_poll_locator_at_genesis_tip_never_underflows() {
++        let st = synthetic_chain(0, 0); // h0 only
++        assert_eq!(st.tip_height, 0);
++        // both parities, repeatedly: must not panic and must be tip-only
++        for parity in [true, false] {
++            let loc = tip_poll_locator(&st, parity);
++            assert_eq!(loc, vec![st.tip_hash]);
++        }
++        // tip >= 1 keeps the two-hash form on the odd parity
++        let st2 = synthetic_chain(0, 2);
++        assert_eq!(st2.tip_height, 2);
++        let loc2 = tip_poll_locator(&st2, true);
++        assert_eq!(loc2.len(), 2);
++        assert_eq!(loc2[1], st2.tip_hash);
++        let loc3 = tip_poll_locator(&st2, false);
++        assert_eq!(loc3, vec![st2.tip_hash]);
++    }
+ }

@@ -1,0 +1,12 @@
+GRADE=B urn=urn:ump:md4fqcg6piuyz5clsm3hfrexcptejsvxjhnp6idqaiac6677oioq
+{
+  "blocking": [],
+  "polish": [
+    "write_atomic uses path.with_extension(\"tmp\") \u2014 a fixed sibling tmp name can collide if two builders (daemon thread + standalone bin) write the same destination concurrently; a pid/uuid-suffixed tmp is safer.",
+    "A failed build retries on the 6h cycle, not the 10min cycle; a transient failure (disk full, torn blk read) leaves the snapshot stale for up to 6h \u2014 consider a shorter retry after errors.",
+    "builder tip sample falls back to snap_h on try_lock failure, which makes the staleness check a no-op under contention; sampling the last-known tip via an atomic would be more robust.",
+    "RichListCache sig (mtime nanos, len): filesystems with coarse mtime granularity plus an equal-length rewrite could serve a stale parse; including a cheap content probe (e.g., first-byte hash or height field) would harden it.",
+    "parse_rich_list_rpc silently drops malformed entries via filter_map and only errors when ALL entries are unusable; a partially-corrupt response renders a short list without warning.",
+    "The rebuild reads the entire snapshot JSON twice per cycle (staleness probe + cache miss); a shared parse would be marginally cheaper, though the 6h cadence makes it negligible."
+  ]
+}

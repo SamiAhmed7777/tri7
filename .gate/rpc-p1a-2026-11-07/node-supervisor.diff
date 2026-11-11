@@ -1,0 +1,24 @@
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index e6cdce5..bed0f30 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -133,6 +133,11 @@ impl EmbeddedNode {
+         let conf = node_dir.join("triangles.conf");
+         Self::ensure_conf(&conf, self.rpc_port);
+         let _ = std::fs::create_dir_all(&state_dir);
++        // fresh machine (no chain store yet): the full-body from-zero fetch
++        // must be requested explicitly, otherwise the node anchors genesis but
++        // never downloads bodies and the wallet's live seed stalls forever
++        // (Sami laptop: stuck at "store missing block body at h0" for hours)
++        let fresh = !state_dir.join("blk0001.dat").exists();
+         let peers_arg = peers.join(" --daemon ");
+         let log = std::fs::OpenOptions::new()
+             .create(true)
+@@ -172,6 +177,7 @@ impl EmbeddedNode {
+             .arg(state_dir.join("balances.json"))
+             .arg("--backfill")
+             .arg("6000")
++            .args(fresh.then_some("--sync-from-zero").into_iter())
+             .arg("--wallet")
+             .arg(wallet_path)
+             .arg("--forever")

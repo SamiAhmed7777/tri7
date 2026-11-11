@@ -1,0 +1,14 @@
+GRADE=C urn=urn:ump:j4cf3d4ghvnnlkcbiuvp5phwpvpua7mtmvl5rbnqkzwft5eo2ymq
+{
+  "blocking": [
+    "Section H's selection command is mangled: `awk -F'[][]' ' >= ... && <= ...'` is missing the `$2` field references entirely and would not run as written, yet the header claims the command is quoted 'verbatim'. Round 5 explicitly demanded the selection command verbatim.",
+    "Section H is labeled '### line count: 61' and the brief claims a 'COMPLETE unfiltered 67-line window slice' \u2014 61 \u2260 67. Either the count or the 'complete' claim is wrong; this exact class of claim-vs-bytes mismatch was the basis of prior C verdicts.",
+    "The file manifest (manifest-sha256.txt) is referenced ('Regenerated below in manifest-sha256.txt') but is not present in the bundle bytes, so the sha256 verification path the brief defines cannot be executed."
+  ],
+  "polish": [
+    "Re-capture section H's selection command through a quoting-safe mechanism (e.g. single-quoted heredoc) so $2 survives, and reconcile the 61/67 count with the actual slice.",
+    "Resolve the residual echo inconsistency in deploy-transcript-2b.txt ('started pid 2049276 (Tor-only, no wallet)' vs launcher v5's zero-key echo) beyond the prose NOTE \u2014 annotate inline at the line.",
+    "Attach the manifest file itself rather than promising it 'below'.",
+    "parse_iso8601_utc accepts ss==60 (leap second) silently; either document or normalize it explicitly like the Feb-30 case is documented."
+  ]
+}

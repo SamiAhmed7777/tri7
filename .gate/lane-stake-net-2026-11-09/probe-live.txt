@@ -1,0 +1,22 @@
+merged rows: 23174 | newest row h2208636 (2026-11-10)
+wallet: /var/lib/tri7/wallet.dat
+state dir: /var/lib/tri7
+history rows: 30289
+oldest: 2021-02-21
+newest: 2026-11-05
+note: /var/lib/tri7/history.json - 30289 rows, scanned to h2205957
+split @ tip h2208636: spendable 1792.186556 | stake 104.095100 | unconfirmed 0.000000 | immature 0.000000 | total 1896.281656
+row h2208636 depth 1 -> Immature (1 confirmations, will be available after 7) | amt +0.001419 TRI | txid 7fe54ea16ba9d0052d8accae4415c76d33eea8a9de45bf168433b7ca8963cd9f | tooltip "Immature (1 confirmations, will be available after 7) / Mined"
+row h2208636 depth 1 -> Immature (1 confirmations, will be available after 7) | amt +0.001419 TRI | txid 7fe54ea16ba9d0052d8accae4415c76d33eea8a9de45bf168433b7ca8963cd9f | tooltip "Immature (1 confirmations, will be available after 7) / Mined"
+row h2208635 depth 2 -> Immature (2 confirmations, will be available after 7) | amt +0.001473 TRI | txid 6b3ee7e35350bd3ef57fb49c278cd000dca576f827257cd7605b987f1aefe34a | tooltip "Immature (2 confirmations, will be available after 7) / Mined"
+row h2208635 depth 2 -> Immature (2 confirmations, will be available after 7) | amt +0.001473 TRI | txid 6b3ee7e35350bd3ef57fb49c278cd000dca576f827257cd7605b987f1aefe34a | tooltip "Immature (2 confirmations, will be available after 7) / Mined"
+row h2208634 depth 3 -> Immature (3 confirmations, will be available after 7) | amt +0.002152 TRI | txid 02447b884b7241e32e4abe396da805df8fae56e6f31783cb4ebcdb5efd744e7a | tooltip "Immature (3 confirmations, will be available after 7) / Mined"
+row h2208634 depth 3 -> Immature (3 confirmations, will be available after 7) | amt +0.002152 TRI | txid 02447b884b7241e32e4abe396da805df8fae56e6f31783cb4ebcdb5efd744e7a | tooltip "Immature (3 confirmations, will be available after 7) / Mined"
+row h2208633 depth 4 -> Immature (4 confirmations, will be available after 7) | amt +0.002269 TRI | txid dbaf88de5c28acc6a457c69ac5328b7caf8646e56ceafb1e095198b5425d652c | tooltip "Immature (4 confirmations, will be available after 7) / Mined"
+row h2208633 depth 4 -> Immature (4 confirmations, will be available after 7) | amt +0.002269 TRI | txid dbaf88de5c28acc6a457c69ac5328b7caf8646e56ceafb1e095198b5425d652c | tooltip "Immature (4 confirmations, will be available after 7) / Mined"
+row h2204151 depth 4486 -> Confirmed (4486 confirmations) | amt -0.000100 TRI | txid d7f7a8db709125888e6a2d044b0ae38aa9573c857ab2580a6166a8e2fcdadc26 | tooltip "Confirmed (4486 confirmations) / Sent to TJWJVTStJc3FmCEwvsnMxP6aUo94WPYikG"
+row h2194871 depth 13766 -> Confirmed (13766 confirmations) | amt -10.000100 TRI | txid 1d13f3043922a897db33064add3d16ba88811a29e5393610d5f253c5b36065e0 | tooltip "Confirmed (13766 confirmations) / Sent to TTCf1Cvgsz4SaSk4HyZcpxYkzwfLHE26gs"
+row h2194871 depth 13766 -> Confirmed (13766 confirmations) | amt -10.000100 TRI | txid 547d96dceb65d46a7fe1356366426eef33a312a25209704c3cc461e4fb7a66af | tooltip "Confirmed (13766 confirmations) / Sent to TWzS5pC5NmRfeug9HwyXnF5JsWY7BxzTqy"
+newest stake: h2208636 (2026-11-10) | stake_net Some(1419) | amt +0.001419 TRI | tooltip "Immature (1 confirmations, will be available after 7) / Mined"
+--- what the page would print ---
+history: /var/lib/tri7/history.json | exists=true | rows=30289 | oldest=2021-02-21 | newest=2026-11-05 | /var/lib/tri7/history.json - 30289 rows, scanned to h2205957

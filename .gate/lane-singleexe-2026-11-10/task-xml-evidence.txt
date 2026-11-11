@@ -1,0 +1,5 @@
+=== COMMAND: hostname (provenance anchor for this transcript) ===
+SAMI-PC
+
+=== COMMAND: schtasks /query /tn tri7gui /xml (deployed task arguments) ===
+      <Arguments>--wallet E:\Coins\TRI\wallet.dat --state-dir C:\Users\hello\tri7\state2 --attach-external</Arguments>

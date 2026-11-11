@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Activate tri7 on the aarch64 box against a COPY of the legacy wallet.
+# TOR ONLY: .onion peers via the local SOCKS proxy; P2P listener bound to
+# loopback so no clearnet address is ever exposed or dialled.
+set -euo pipefail
+
+BIN=/root/tri7/target/release/follow_tip
+STATE=/var/lib/tri7
+WALLET_DIR=/root/tri7-wallet
+WALLET=$WALLET_DIR/wallet.dat
+ORIG=/root/.triangles/wallet.dat
+PIDFILE=$STATE/tri7d.pid
+LOG=$STATE/tri7d.log
+
+# onion peers from the legacy conf (Tor only). No clearnet, no Tailscale.
+# Tor-only peers. DNS2's LIVE onion (port 24113 -> its P2P listener).
+# The four legacy addnodes in the old conf are dead (host unreachable) and
+# DNS2's own systemd unit advertises a stale address, so use the verified one.
+ONIONS="gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+
+[[ -x $BIN ]] || { echo "FAIL: $BIN missing"; exit 1; }
+
+# Tor must actually be running — refuse to start without it rather than
+# silently falling back to clearnet.
+if ! (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null; then
+  echo "FAIL: Tor SOCKS is not listening on 127.0.0.1:9050 — start tor@default first"
+  exit 2
+fi
+
+mkdir -p "$STATE" "$WALLET_DIR"
+if [[ ! -f $WALLET ]]; then
+  cp -p "$ORIG" "$WALLET"
+  chmod 600 "$WALLET"
+  echo "wallet copied: $(stat -c%s "$WALLET") bytes"
+else
+  echo "wallet copy present: $(stat -c%s "$WALLET") bytes"
+fi
+
+if [[ -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "already running pid $(cat "$PIDFILE")"
+  exit 0
+fi
+
+echo "commit: $(cat /root/tri7/BUILD_COMMIT 2>/dev/null || echo unknown)"
+echo "binary: $(file -b "$BIN" | cut -c1-60)"
+nohup "$BIN" \
+  --socks 127.0.0.1:9050 \
+  --daemon "$ONIONS" \
+  --listen-port 24112 --listen-bind 127.0.0.1 \
+  --state-dir "$STATE" \
+  --blocks-file /root/.triangles/blk0001.dat \
+  --index-dir "$STATE/index" \
+  --wallet "$WALLET" \
+  --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy \
+  --backfill 0 --forever \
+  > "$LOG" 2>&1 &
+echo $! > "$PIDFILE"
+echo "started pid $(cat "$PIDFILE") (Tor-only)"
+
+for i in $(seq 1 120); do
+  if (exec 3<>/dev/tcp/127.0.0.1/19112) 2>/dev/null; then
+    echo "RPC up after $((i*2))s"
+    exit 0
+  fi
+  sleep 2
+done
+echo "RPC did not open within 240s; log tail:"
+tail -20 "$LOG"
+exit 1

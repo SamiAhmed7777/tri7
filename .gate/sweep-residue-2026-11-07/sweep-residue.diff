@@ -1,0 +1,126 @@
+diff --git a/src/bin/tri7_cli.rs b/src/bin/tri7_cli.rs
+index bc686c0..23296b0 100644
+--- a/src/bin/tri7_cli.rs
++++ b/src/bin/tri7_cli.rs
+@@ -157,6 +157,9 @@ enum Commands {
+         /// comma-separated addresses to leave untouched (e.g. pending-pool sources)
+         #[arg(long)]
+         exclude: Option<String>,
++        /// skip coins below this many sats (residue floor; default 5000 = 0.005 TRI, 0 sweeps everything)
++        #[arg(long, default_value_t = tri7_core::sweep::SWEEP_MIN_RESIDUE_SATS)]
++        min_sats: i64,
+         /// build and print without broadcasting
+         #[arg(long)]
+         dry_run: bool,
+@@ -286,8 +289,9 @@ fn run(cli: Cli) -> Result<(), String> {
+             rpc,
+             mnemonic_file,
+             exclude,
++            min_sats,
+             dry_run,
+-        } => sweep_cmd(&wallet, &rpc, &mnemonic_file, exclude, dry_run),
++        } => sweep_cmd(&wallet, &rpc, &mnemonic_file, exclude, min_sats, dry_run),
+         Commands::Send {
+             wallet,
+             rpc,
+@@ -429,6 +433,7 @@ fn sweep_cmd(
+     rpc: &str,
+     mnemonic_file: &str,
+     exclude: Option<String>,
++    min_sats: i64,
+     dry: bool,
+ ) -> Result<(), String> {
+     let m = std::fs::read_to_string(mnemonic_file)
+@@ -511,12 +516,27 @@ fn sweep_cmd(
+         });
+     }
+     let sources = tri7_core::sweep::sweep_source_inputs(&inputs, &dests);
++    let dest_skipped = inputs.len() - sources.len();
++    let (sources, residue) = tri7_core::sweep::split_residue_skip(sources, min_sats);
++    if !residue.is_empty() {
++        let residue_total: i64 = residue.iter().map(|s| s.value).sum();
++        println!(
++            "residue: left {} coins ({} TRI) below the {}-sat floor on their addresses",
++            residue.len(),
++            fmt_tri(residue_total),
++            min_sats
++        );
++    }
++    if sources.is_empty() {
++        println!("nothing to sweep above the residue floor — no transaction built");
++        return Ok(());
++    }
+     let total: i64 = sources.iter().map(|s| s.value).sum();
+     println!(
+         "sweep: {} coins, {} TRI (skipped: dest/excluded/immature/no-key = {}/{}/{}/{})",
+         sources.len(),
+         fmt_tri(total),
+-        inputs.len() - sources.len(),
++        dest_skipped,
+         sk_excl,
+         sk_imm,
+         sk_nokey
+diff --git a/src/sweep.rs b/src/sweep.rs
+index 6d10a7a..08b9b3f 100644
+--- a/src/sweep.rs
++++ b/src/sweep.rs
+@@ -92,6 +92,30 @@ pub fn sweep_spendable(prev_kind: &str, containing_height: u32, spend_height: u3
+     }
+ }
+ 
++/// Residue floor for sweep passes (workqueue SWEEP-RESIDUE rule): coins
++/// below this many sats stay where they are — chasing them grows the fee
++/// and re-fragments the wallet for no value. 0.005 TRI = 5_000 sats.
++pub const SWEEP_MIN_RESIDUE_SATS: i64 = 5_000;
++
++/// Partition sweep sources at the residue floor: everything worth sweeping
++/// (value >= min_sats) and the residue left behind (value < min_sats).
++/// Stable order preserved in both halves; `min_sats <= 0` keeps everything.
++pub fn split_residue_skip(
++    inputs: Vec<SpendInput>,
++    min_sats: i64,
++) -> (Vec<SpendInput>, Vec<SpendInput>) {
++    let mut keep = Vec::new();
++    let mut residue = Vec::new();
++    for i in inputs {
++        if min_sats <= 0 || i.value >= min_sats {
++            keep.push(i);
++        } else {
++            residue.push(i);
++        }
++    }
++    (keep, residue)
++}
++
+ /// The sweep source set: every input that is NOT one of the destination
+ /// addresses (coins already on the seed-derived addresses stay there).
+ /// Destination matching is payload-based (hash160 of the destination pubkey
+@@ -473,6 +497,28 @@ mod tests {
+         assert_eq!(src[0].pubkey, other_pubkey);
+     }
+ 
++    #[test]
++    fn split_residue_skip_leaves_sub_floor_coins_behind() {
++        // floor 5000: 4999 stays, 5000/5001 go; stable order preserved
++        let inputs = vec![
++            p2pkh_utxo("a", 0, 5_001, 100, 1_400_000_000),
++            p2pkh_utxo("b", 1, 4_999, 101, 1_400_000_001),
++            p2pkh_utxo("c", 0, 5_000, 102, 1_400_000_002),
++            p2pkh_utxo("d", 2, 1, 103, 1_400_000_003),
++        ];
++        let (keep, residue) = split_residue_skip(inputs, SWEEP_MIN_RESIDUE_SATS);
++        assert_eq!(keep.iter().map(|i| i.value).collect::<Vec<_>>(), vec![5_001, 5_000]);
++        assert_eq!(residue.iter().map(|i| i.value).collect::<Vec<_>>(), vec![4_999, 1]);
++        // floor 0 (or negative) sweeps everything — nothing becomes unspendable
++        let inputs = vec![p2pkh_utxo("a", 0, 1, 100, 1_400_000_000)];
++        let (keep, residue) = split_residue_skip(inputs, 0);
++        assert_eq!(keep.len(), 1);
++        assert!(residue.is_empty());
++        // empty input set is a clean no-op
++        let (keep, residue) = split_residue_skip(Vec::new(), SWEEP_MIN_RESIDUE_SATS);
++        assert!(keep.is_empty() && residue.is_empty());
++    }
++
+     // ---- plan_sweep: the money path ------------------------------------------
+ 
+     #[test]

@@ -1,0 +1,22 @@
+# Evidence — lane-singleexe ROUND 15 (merged onto current master)
+worktree /root/tri7-lanes/lane-singleexe @ lane/single-exe
+history: WIP weld commit -> MERGE of master (6c77603: updater-exit lifecycle + sync-bar) -> clean ort merge, no conflicts
+diff: singleexe.diff = git diff master..HEAD (weld + merged state)
+
+== exact commands ==
+CARGO_TARGET_DIR=/root/tri7-lanes/target-singleexe cargo test --lib
+CARGO_TARGET_DIR=/root/tri7-lanes/target-singleexe cargo check --bin tri7_wallet_gui --features gui
+
+== full lib suite ==
+
+test result: ok. 652 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 68.65s
+
+== the r1/r2-fix tests by name ==
+test gui::node_supervisor::tests::attach_external_never_starts_in_process ... ok
+test gui::node_supervisor::tests::in_process_node_answers_rpc ... ok
+test node_embedded::tests::exit_trap_returns_code ... ok
+== GUI-feature check ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.43s
+== wrapper lifecycle from THIS tree (dumped) ==
+4
+1

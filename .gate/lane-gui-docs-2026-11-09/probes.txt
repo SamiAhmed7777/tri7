@@ -1,0 +1,54 @@
+# Live probe evidence v2 — DNS2 tri7 127.0.0.1:19112, 2026-11-09T23:25:06Z
+
+## listaddressgroupings
+{"error":null,"id":null,"result":[[["TBiAuLPZwVM97JmJBBjEuRiCxeN9BqxyKB",0.0]],[["TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3",1073.054576]],[["TCxPe7sfqfJEqwbWR51eqoZ51uT4RejB25",0.0]],[["TEBDAcg46HL9mJXmCSeZnGH54vfonMGJvV",0.011102]],[["TEY4Wa2d4PTVBvRHmDoWRct2n1mEqUq6Vn",0.0]],[["TFUexruqsggjScyBtGWHprwtJEqwLoP7jR",100.609299]],[["THxrj4ziwF58qzTXoYLAtAZKD3nkNhHTPV",0.010704]],[["TJWJVTStJc3FmCEwvsnMxP6aUo94WPYikG",1.0]],[["TJjAen9tWUVswGmeSatLH2QuZe4rk6RDfC",0.0]],[["TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL",198.50145]],[["TNBWQNbrZeAJqx2GJpGLSRnv6ddMP39UbL",0.0]],[["TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7",0.0001]],[["TNpcZqHM1zFrxA3pSVowcSsfkJMUT8GYap",0.0]],[["TP5FfFT2o8mQjjGXPbsECqYF9xprUCcRW4",162.687692]],[["TPw5Z7neRj2B9hySevsxht7MJUEC6wz8u8",0.0]],[["TQu3v6vue6MhLSAbmFsDqDaVDFQNCaFDdv",0.0]],[["TSMjqomNrTWQ2MnGxMU5BwDGJVM1yTrdny",0.0]],[["TTCf1Cvgsz4SaSk4HyZcpxYkzwfLHE26gs",0.057892]],[["TV5C6CAobGaZP92Da6EPfzPEKjiJiFJeoj",297.485168]],[["TVwhHBJ6gc9c8aJkwin53LMDtmzyCVek7B",0.0]],[["TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL",974.472389]],[["TWzS5pC5NmRfeug9HwyXnF5JsWY7BxzTqy",0.0499]],[["TX8YeXumu1VvDRvDX8BLWTQB9AT65mumfw",0.379073]],[["TZ4ZrftdfK9MLCvo63uR3ZcPibFEG54WT7",12.64]]],"source":"tri7"}
+
+## getcheckpoint
+{"error":null,"id":null,"result":{"height":2203924,"policy":"strict","synccheckpoint":"a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14","timestamp":"2026-09-21 00:50:29 UTC"},"source":"tri7"}
+
+## keypoolrefill
+{"error":null,"id":null,"result":{"derived":0,"hdchain_next_index":125,"keypoololdest":null,"poolsize":103,"target":100},"source":"tri7"}
+
+## repairwallet
+{"error":null,"id":null,"result":{"wallet check passed":true},"source":"tri7"}
+
+## resendtx
+{"error":null,"id":null,"result":null,"source":"tri7"}
+
+## backupwallet
+{"error":{"code":-8,"message":"expected destination path"},"id":null,"result":null,"source":"tri7"}
+
+## importprivkey
+{"error":{"code":-8,"message":"expected WIF private key"},"id":null,"result":null,"source":"tri7"}
+
+## gettransaction
+{"error":{"code":-8,"message":"expected txid parameter"},"id":null,"result":null,"source":"tri7"}
+
+## addmultisigaddress
+{"error":{"code":-8,"message":"expected nrequired parameter"},"id":null,"result":null,"source":"tri7"}
+
+## addredeemscript
+{"error":{"code":-8,"message":"expected redeemScript parameter"},"id":null,"result":null,"source":"tri7"}
+
+## smsgoptions
+{"error":null,"id":null,"result":{"options":["newAddressRecv = true","newAddressAnon = true"],"result":"Success."},"source":"tri7"}
+
+## smsgscanchain
+{"error":null,"id":null,"result":{"duplicates":146,"from_height":2203989,"invalid":0,"keys_added":0,"result":"Scan Chain Completed.","scanned_blocks":4517,"to_height":2208588},"source":"tri7"}
+
+## reservebalance
+{"error":null,"id":null,"result":{"conf":"/etc/tri7/triangles.conf","reservebalance":"0.000000"},"source":"tri7"}
+
+## smsgenable / smsgdisable roundtrip (toggle, observe, restore)
+-- smsgenable:
+{"error":{"code":-1,"message":"Secure messaging is already enabled."},"id":null,"result":null,"source":"tri7"}
+-- smsgdisable:
+{"error":null,"id":null,"result":{"result":"Disabled secure messaging."},"source":"tri7"}
+-- smsgoptions after disable:
+{"error":{"code":-1,"message":"Secure messaging is disabled."},"id":null,"result":null,"source":"tri7"}
+-- smsgenable (restore):
+{"error":null,"id":null,"result":{"result":"Enabled secure messaging."},"source":"tri7"}
+-- smsgoptions after re-enable:
+{"error":null,"id":null,"result":{"options":["newAddressRecv = true","newAddressAnon = true"],"result":"Success."},"source":"tri7"}
+## smsgscanbuckets
+{"error":null,"id":null,"result":{"found":0,"result":"Scan Buckets Completed."},"source":"tri7"}

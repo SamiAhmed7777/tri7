@@ -1,0 +1,16 @@
+# Full test evidence — lane-sweepheight
+worktree: /root/tri7-lanes/lane-sweepheight @ branch lane/sweepheight (base 373e812b6b48 = master 373e812)
+state: base + uncommitted modifications in sweepheight.diff (parent commits post-grade)
+changed: src/gui/app_state.rs, src/gui/tests.rs
+command: CARGO_TARGET_DIR=/root/tri7-lanes/target-sweepheight cargo test --lib
+
+## full tail
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test smsg_net::tests::outbox_rows_show_the_recipient_and_decrypt_with_the_sender_key ... ok
+
+test result: ok. 567 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 72.21s
+
+
+## GUI-feature check
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.31s

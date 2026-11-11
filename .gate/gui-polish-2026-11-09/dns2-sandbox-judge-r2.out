@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:vah25rd3767rrkr5g6mrvon5ftyygsl6ldcuniogv232mrjal5ia
+{
+  "blocking": [],
+  "polish": [
+    "Consider an explicit allow-list drop (ReadWritePaths= alone, then re-add) in the drop-in to guard against future main-unit list changes silently diverging",
+    "Also exercise the `staking` verb persist path once in the transcript for completeness (same conf_set_flag path, but it's the cited pre-existing victim)",
+    "Record final /etc/tri7 dir mode/owner (755\u2192775 root:tri7) in the transcript tail for the ops record"
+  ]
+}

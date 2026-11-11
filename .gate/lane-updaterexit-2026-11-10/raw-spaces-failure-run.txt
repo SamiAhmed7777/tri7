@@ -1,0 +1,11 @@
+debug.log
+fake-setup.exe
+install-failed.marker
+relaunch.cmd
+relaunch.marker
+[FAILED-MARKER] 
+update-install-failed rc=2
+[RELAUNCH-MARKER] 
+relaunched 
+[DAEMON] 
+follow_tip.exe                6308 Services                   0    173,552 K

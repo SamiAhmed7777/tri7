@@ -1,0 +1,43 @@
+# Live Windows verification — FINAL bytes (wrapper-final.bat sha256 973a4ac4…)
+# Every claim below is backed by raw-final-run.txt (the verbatim command
+# outputs from the PC), sections numbered ===1..===8 there.
+
+## THE RUN (fleet PC sami-pc, C:\updtest, production wrapper as tri7-update.bat)
+- Harness: fake-setup.exe (where.exe copy) = the synthetic installer that
+  returns rc=2; relaunch.cmd (marker-writing fake relauncher); real task-
+  managed tri7d daemon running follow_tip.exe.
+- [raw ===2===] update-tasks.txt content = `\tri7d` — the Tasks-module
+  action-based discovery captured the daemon's OWNING TASK.
+- [raw ===3===] install-failed.marker = `update-install-failed rc=2` — the
+  installer rc captured and the failure surfaced with the VALUE.
+- [raw ===4===] relaunch.marker = `relaunched` — the relaunch executed on
+  the failure path (never masquerades as success).
+- [raw ===1===,===7===] tri7-update.bat ABSENT after the run — wrapper
+  self-deleted.
+- [raw ===5===] follow_tip.exe RUNNING at fresh PID 17148 — RESTORED
+  AUTONOMOUSLY by the wrapper's Start-ScheduledTask restoration (identity
+  read from update-tasks.txt), zero manual steps.
+- [raw ===6===] daemon RPC answering at fleet height (2208995) after
+  warmup; the task shows Status: Running.
+- [raw ===8===] C:\updtest removed post-verification.
+
+## PRIOR WITNESSES (same logic, earlier generations — terminal transcripts
+# in session history, summarized)
+- An earlier cycle of this exact wrapper generation also completed with the
+  daemon restored (fresh PID 11164) — confirming repeatability.
+- r4/r5-era runs: full timestamped anatomy + autonomous restoration
+  witnessed live.
+- rc=0 success path witnessed previously (no failure marker on success).
+
+## DESIGN NOTES observed live
+- The wrapper's restore step reads the persisted identity file; if the
+  wrapper is externally killed MID-RUN (as in one interrupted capture run),
+  the daemon stays down until manual/task restart — noted honestly; the
+  normal completion path always restores (two witnessed runs).
+- The relauncher in production is the real GUI exe; the test fake writes
+  the relaunch marker only.
+
+## SIDE FINDING (filed, out of scope)
+AVG quarantined the unsigned mingw test exe within one execution — unsigned
+user-facing installers risk the same on customers: code-sign released
+assets before wide distribution.

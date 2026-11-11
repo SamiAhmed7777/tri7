@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:ghwayju3x3vnoatntd5xwkenatjc6oo2icuskapb25edxpi3ynja
+{
+  "blocking": [],
+  "polish": [
+    "follow_tip builder tip sample: `.unwrap_or(snap_h.max(0))` makes the staleness check compare snap_h against itself when the state lock is contended, deferring a needed rebuild by up to 6h. Consider falling back to a try_lock retry on the short cycle (e.g. 10 min) instead of the 6h sleep, or logging when the tip sample was unavailable.",
+    "write_atomic via with_extension turns 'balances.json' into 'balances.tmp{pid}' \u2014 fine, but a comment or a '.tmp{pid}.json' suffix form would make the tmp files easier to spot/glob-clean if a process dies mid-write (no cleanup on write failure, only on rename failure).",
+    "RichListCache.get re-reads and re-parses the multi-MB snapshot on the RPC thread when the signature changes (first call after each 6h rebuild); consider logging the parse time or parsing in the builder thread and handing off the Arc.",
+    "parse_rich_list_rpc silently drops entries with non-i64 balances via filter_map; an entry-count-vs-arr.len() sanity check would surface malformed daemon responses more loudly.",
+    "The GUI live path treats a verb response with zero entries as 'unusable' and falls back to the snapshot; a genuinely empty chain (fresh regtest) would then always show the fallback label \u2014 harmless, but a dedicated message would be clearer."
+  ]
+}

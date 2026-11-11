@@ -1,0 +1,364 @@
+=== NATIVE_METHODS block (150-200) ===
+    "smsgoptions",
+    "smsgscanchain",
+    "smsgscanbuckets",
+    // ---- parity audit 2026-11-03: legacy info/util methods (rpcmining /
+    // rpcnet / rpcblockchain / rpcwallet surfaces servable from tri7's own
+    // providers — no ops/daemon needed) ----
+    "help",
+    "getblockheader",
+    "getblockbynumber",
+    "getblockchaininfo",
+    "getwalletinfo",
+    "getnetworkinfo",
+    "getmininginfo",
+    "getsubsidy",
+    "estimatefee",
+    "verifymessage",
+    // ---- legacy parity 2026-11-06: offline tx workflow + wallet bookkeeping
+    // (rpcrawtransaction / rpcwallet surfaces that need no daemon) ----
+    "decoderawtransaction",
+    "decodescript",
+    "createrawtransaction",
+    "settxfee",
+    "listreceivedbyaddress",
+    "getnewpubkey",
+    "addmultisigaddress",
+    "addredeemscript",
+    // createMultisig lane item: create-only sibling of addmultisigaddress —
+    // pure computation (no wallet file, no ops engine), so NATIVE_METHODS
+    // only; deliberately NOT in OPS_METHODS.
+    "createmultisig",
+    "signrawtransaction",
+    // ---- legacy parity 2026-11-07: address groupings (rpcwallet.cpp:394,
+    // privacy-cluster view over the wallet history) + the sync-checkpoint
+    // report (rpcblockchain.cpp:665, served from the compiled-in anchor) ----
+    "listaddressgroupings",
+    "getcheckpoint",
+    // ---- legacy parity 2026-11-08 (workqueue item 9 RPC-P1b): wallet repair
+    // + unconfirmed-send resend, both routed to the LIVE ops engine ----
+    "repairwallet",
+    "resendtx",
+    "stop",
+];
+
+/// Ops verbs with a passive implementation that needs no live wallet view.
+/// The passive layer answers these while the engine is warming up.
+pub const OPS_EARLY: &[&str] = &[
+    "stop",
+    "createrawtransaction",
+    "encryptwallet",
+    "walletpassphrasechange",
+    "decryptwallet",
+=== createmultisig handler + tests (3020-3140) ===
+                    wh.close();
+                    return NativeOutcome::Err(-1, format!("addredeemscript: {e}"));
+                }
+            }
+            wh.close();
+            NativeOutcome::Ok(json!(crate::multisig::p2sh_address(&script)))
+        }
+
+        "createmultisig" => {
+            // createMultisig lane item: the create-only sibling of
+            // addmultisigaddress (rpcwallet.cpp:836). Legacy v5 has NO
+            // createmultisig verb in vRPCCommands (trianglesrpc.cpp:244) —
+            // this is the standard create-only shape: every key must be a
+            // FULL hex-encoded public key, nothing is read from or written
+            // to the wallet/key store, and the reply is
+            // {address, redeemScript}. Validation order and error strings
+            // are legacy addmultisigaddress's byte-for-byte (runtime_error
+            // → -1 via the v5 dispatcher, trianglesrpc.cpp:1321; missing
+            // params → -8), including the LEADING SPACE in
+            // " Invalid public key: " and the documented 16-key refusal
+            // that replaces legacy SetMultisig's EncodeOP_N assert-abort.
+            // Duplicate keys are ACCEPTED: legacy SetMultisig (script.cpp)
+            // has no duplicate check and neither do we.
+            let n_required = match param_get(params, 0, "nrequired") {
+                // legacy get_int(): a negative nrequired parses and must fall
+                // into the "at least one key" check below
+                Some(Value::Number(n)) => n.as_i64(),
+                _ => None,
+            };
+            let Some(n_required) = n_required else {
+                return NativeOutcome::Err(-8, "expected nrequired parameter".into());
+            };
+            let keys_param = match param_get(params, 1, "keys") {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return NativeOutcome::Err(-8, "expected an array of keys".into()),
+            };
+            // legacy check order (rpcwallet.cpp:851): nrequired < 1 first
+            if n_required < 1 {
+                return NativeOutcome::Err(
+                    -1,
+                    "a multisignature address must require at least one key to redeem".into(),
+                );
+            }
+            // ... then the keys count (rpcwallet.cpp:855)
+            if (keys_param.len() as i64) < n_required {
+                return NativeOutcome::Err(
+                    -1,
+                    format!(
+                        "not enough keys supplied (got {} keys, but need at least {} to redeem)",
+                        keys_param.len(),
+                        n_required
+                    ),
+                );
+            }
+            // create-only: NO wallet read — every key must be a full hex
+            // pubkey (the legacy IsHex branch, rpcwallet.cpp:877). A
+            // Triangles address is base58, not hex, so it lands in the same
+            // " Invalid public key: " refusal legacy gives any string that
+            // is neither a resolvable address nor a hex pubkey.
+            let mut pubkeys: Vec<Vec<u8>> = Vec::with_capacity(keys_param.len());
+            for k in &keys_param {
+                let Some(ks) = k.as_str() else {
+                    // legacy keys[i].get_str() throws → -1 via the dispatcher
+                    return NativeOutcome::Err(-1, "Invalid public key".into());
+                };
+                match crate::p2p::hex_decode(ks) {
+                    Ok(pk) if secp256k1::PublicKey::from_slice(&pk).is_ok() => pubkeys.push(pk),
+                    // legacy throws " Invalid public key: "+ks — the LEADING
+                    // SPACE is in the v5 source (rpcwallet.cpp:882), keep it
+                    // byte-for-byte
+                    _ => return NativeOutcome::Err(-1, format!(" Invalid public key: {ks}")),
+                }
+            }
+            // The 16-key cap: legacy SetMultisig/EncodeOP_N is
+            // assert(n >= 0 && n <= 16) — it ABORTS the process. tri7 refuses
+            // instead (the same documented deviation as addmultisigaddress).
+            // Checked AFTER the legacy-ordered checks above so e.g.
+            // nrequired=17 with 2 keys still answers "not enough keys".
+            if n_required > 16 || pubkeys.len() > 16 {
+                return NativeOutcome::Err(
+                    -8,
+                    "a multisignature address must require between 1 and 16 keys".into(),
+                );
+            }
+            let redeem = match crate::multisig::redeem_script(n_required as u8, &pubkeys) {
+                Ok(r) => r,
+                Err(e) => return NativeOutcome::Err(-1, e),
+            };
+            NativeOutcome::Ok(json!({
+                "address": crate::multisig::p2sh_address(&redeem),
+                "redeemScript": hex_encode(&redeem),
+            }))
+        }
+
+        // Ops verbs that may run before the live wallet view is ready (a pure
+        // codec, the wallet FILE, or the process) answer from the passive
+        // layer, so "warming up" never blocks work that is already possible.
+        // Arms here RETURN: nothing re-enters the dispatch.
+        m if OPS_METHODS.contains(&m)
+            && OPS_EARLY.contains(&m)
+            && deps.ops.as_ref().map(|o| !o.ready()).unwrap_or(true) =>
+        {
+            match passive_fallback(m, deps, &params) {
+                NativeOutcome::Ok(v) => NativeOutcome::Ok(v),
+                NativeOutcome::Err(code, msg) => NativeOutcome::Err(code, msg),
+                NativeOutcome::Miss(w) => NativeOutcome::Miss(w),
+            }
+        }
+
+        m if OPS_METHODS.contains(&m) => match deps.ops {
+            Some(o) if o.ready() => match o.call(m, params) {
+                Ok(v) => NativeOutcome::Ok(v),
+                Err((code, msg)) => NativeOutcome::Err(code, msg),
+            },
+            Some(_) => NativeOutcome::Err(-1, "node ops engine still warming up".into()),
+            None => NativeOutcome::Err(
+                -1,
+                "node ops engine not wired — run tri7d with --wallet (staking/smsg/broadcast need wallet keys)".into(),
+            ),
+        },
+
+=== shared ENV_LOCK at tests module top ===
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// ONE shared lock for every test that mutates the process-global
+    /// TRI7_WALLET_PATH env var: function-local mutexes are independent
+    /// locks and do not exclude each other under parallel test threads
+    /// (judge blocker, lane-multisig round 2).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use std::sync::Mutex;
+
+    const TIP_H: u64 = 2_204_064;
+    /// a deterministic display hash for a height (the stub's chain)
+=== full new test fn ===
+
+/// createmultisig (createMultisig lane item): the create-only sibling of
+/// addmultisigaddress — canonical vector end-to-end, legacy error surfaces
+/// byte-for-byte, the wallet file never touched, and NATIVE_METHODS routing
+/// proven (a handler without membership would answer -32601 pre-dispatch).
+#[test]
+fn createmultisig_creates_without_touching_the_wallet_file() {
+    // routing assertions: gated into NATIVE_METHODS, and deliberately in
+    // NEITHER ops list (pure computation — no ops-engine state)
+    assert!(
+        NATIVE_METHODS.contains(&"createmultisig"),
+        "createmultisig missing from NATIVE_METHODS"
+    );
+    assert!(
+        !OPS_METHODS.contains(&"createmultisig"),
+        "createmultisig must not be in OPS_METHODS"
+    );
+    assert!(
+        !PROXY_FALLBACK_METHODS.contains(&"createmultisig"),
+        "createmultisig must not be in PROXY_FALLBACK_METHODS"
+    );
+
+    let t = T;
+    let w = StubWallet::default();
+    let b = StubBlocks { ready: true, chain_hash: None };
+    let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+
+    // canonical compressed pubkeys for privkeys 1..=3 — the published
+    // p2sh-multisig reference vector (proven live in multisig.rs against
+    // CJU8gKtn4aNBBovbywqPqZo6mjA1B1pLD1)
+    let pk = |n: u64| -> Vec<u8> {
+        let mut secret = [0u8; 32];
+        secret[31] = n as u8;
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let secp = secp256k1::Secp256k1::signing_only();
+        secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .serialize()
+            .to_vec()
+    };
+    assert_eq!(
+        hex_encode(&pk(1)),
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    );
+    let keys = [hex_encode(&pk(1)), hex_encode(&pk(2)), hex_encode(&pk(3))];
+
+    // a wallet file on disk — createmultisig must leave it untouched
+    let dir = std::env::temp_dir().join(format!("tri7rpc_cms_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("wallet.dat");
+    crate::wallet::create_wallet_file(&path).unwrap();
+    // NOTE: no TRI7_WALLET_PATH mutation here — the createmultisig handler is
+    // pure (never reads the env); the untouched-checks below read `path`
+    // directly. Keeps this test free of process-global state.
+
+    // canonical vector: 2-of-3 → the live-proven P2SH address + exact script
+    let v = call(&d, "createmultisig", json!([2, keys]));
+    assert_eq!(v["error"], Value::Null, "unexpected error: {v}");
+    assert_eq!(v["result"]["address"], "CJU8gKtn4aNBBovbywqPqZo6mjA1B1pLD1");
+    assert_eq!(
+        v["result"]["redeemScript"],
+        "52210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\
+         2102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\
+         2102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\
+         53ae"
+            .replace(char::is_whitespace, "")
+    );
+
+    // create-only: the wallet file carries NO redeem script and NO label row
+    {
+        let wf = crate::wallet::read_wallet(&path).unwrap();
+        assert!(
+            wf.scripts.is_empty(),
+            "createmultisig must not store scripts: {:?}",
+            wf.scripts
+        );
+        assert!(
+            wf.names.is_empty(),
+            "createmultisig must not write labels: {:?}",
+            wf.names
+        );
+    }
+
+    // duplicates are ACCEPTED — legacy SetMultisig (script.cpp) has no
+    // duplicate check and neither do we
+    let v = call(
+        &d,
+        "createmultisig",
+        json!([1, [keys[0].clone(), keys[0].clone()]]),
+    );
+    assert_eq!(v["error"], Value::Null, "duplicate keys must be accepted: {v}");
+    let dup = crate::multisig::redeem_script(1, &[pk(1), pk(1)]).unwrap();
+    assert_eq!(v["result"]["redeemScript"], hex_encode(&dup));
+
+    // 1-of-1 boundary works
+    let v = call(&d, "createmultisig", json!([1, [keys[2].clone()]]));
+    assert_eq!(v["error"], Value::Null, "1-of-1 must succeed: {v}");
+
+    // legacy error surfaces (byte-for-byte, same as addmultisigaddress)
+    let v = call(&d, "createmultisig", json!([]));
+    assert_eq!(v["error"]["code"], -8, "missing nrequired");
+    assert_eq!(v["error"]["message"], "expected nrequired parameter");
+    let v = call(&d, "createmultisig", json!([2]));
+    assert_eq!(v["error"]["code"], -8, "missing keys array");
+    assert_eq!(v["error"]["message"], "expected an array of keys");
+    let v = call(&d, "createmultisig", json!([0, keys]));
+    assert_eq!(v["error"]["code"], -1, "nrequired < 1");
+    assert_eq!(
+        v["error"]["message"],
+        "a multisignature address must require at least one key to redeem"
+    );
+    let v = call(&d, "createmultisig", json!([3, [keys[0], keys[1]]]));
+    assert_eq!(v["error"]["code"], -1, "not enough keys");
+    assert_eq!(
+        v["error"]["message"],
+        "not enough keys supplied (got 2 keys, but need at least 3 to redeem)"
+    );
+    // legacy check order: the count check fires BEFORE the 16-key refusal
+    let v = call(&d, "createmultisig", json!([17, [keys[0], keys[1]]]));
+    assert_eq!(
+        v["error"]["code"], -1,
+        "nrequired above the key count answers not-enough first"
+    );
+    let seventeen: Vec<String> = (10..27)
+        .map(|i| hex_encode(&pk(i as u64)))
+        .collect::<Vec<_>>();
+    let v = call(&d, "createmultisig", json!([1, seventeen]));
+    assert_eq!(
+        v["error"]["code"], -8,
+        "17 keys: legacy assert-aborts here, tri7 refuses"
+    );
+    assert_eq!(
+        v["error"]["message"],
+        "a multisignature address must require between 1 and 16 keys"
+    );
+    let v = call(&d, "createmultisig", json!([1, ["not-a-key-or-address"]]));
+    assert_eq!(v["error"]["code"], -1, "invalid key");
+    assert_eq!(
+        v["error"]["message"],
+        " Invalid public key: not-a-key-or-address"
+    );
+    let v = call(&d, "createmultisig", json!([1, [hex_encode(&[0x02, 0x55])]]));
+    assert_eq!(v["error"]["code"], -1, "hex but not a valid pubkey");
+    assert_eq!(v["error"]["message"], " Invalid public key: 0255");
+    // create-only: a Triangles ADDRESS is not a full pubkey — legacy gives
+    // any non-hex string the same refusal (base58 fails IsHex →
+    // rpcwallet.cpp:884)
+    let a1pk = pk(1);
+    let addr = crate::wallet::pubkey_to_address(&a1pk);
+    let v = call(&d, "createmultisig", json!([1, [addr]]));
+    assert_eq!(v["error"]["code"], -1, "an address is not a full pubkey here");
+    assert_eq!(v["error"]["message"], format!(" Invalid public key: {addr}"));
+    let v = call(&d, "createmultisig", json!([1, [42]]));
+    assert_eq!(v["error"]["code"], -1, "non-string key element");
+    assert_eq!(v["error"]["message"], "Invalid public key");
+
+    // and still, after every call above: the wallet file was never touched
+    let wf = crate::wallet::read_wallet(&path).unwrap();
+    assert!(
+        wf.scripts.is_empty() && wf.names.is_empty(),
+        "createmultisig must never write the wallet file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- richlist explorer verb (balances snapshot → ranked top addresses) ----
+
+#[test]
+fn rich_list_parses_sorts_tiebreaks_and_filters() {
+    let v = json!({
+=== evidence ===
+worktree: /root/tri7-lanes/lane-multisig (branch lane/multisig-create, base 9723e33 = origin/master)
+master baseline (own target /root/tri7/target): 531 tests
+lane total (private target /root/tri7-lanes/target-ms): 532 tests = 531 passed + 1 ignored, 0 failed

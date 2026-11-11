@@ -1,0 +1,12 @@
+GRADE=C urn=urn:ump:zuq23dtpcfmabnjbmuer3wfw7etiaq4guunfgud6oahdaqgojccq
+{
+  "blocking": [
+    "No post-apply verification evidence: SET 1.0 -> conf line appears -> SET 0.000000 -> conf line updates -> getstakinginfo reflects value. Attach the transcript (or executed results) before promotion.",
+    "No confirmation the drop-in is actually present on DNS2 (no `systemctl cat tri7d` output post-apply showing both ReadWritePaths entries)."
+  ],
+  "polish": [
+    "Also verify /var/lib/tri7 writes still succeed after restart (wallet/chain state), since the drop-in REPLACES the original list and a typo there would be a worse regression.",
+    "After restart, confirm staking enabled=true and tip advancing to rule out restart-side regressions.",
+    "Consider noting whether the DNS3 drop-in can be byte-copied to keep the two hosts' units identical."
+  ]
+}

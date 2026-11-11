@@ -1,0 +1,218 @@
+=== smsg_net.rs read-side impls (1005-1180) ===
+    /// smsgbuckets stats (rpcsmessage.cpp:793) — the per-bucket listing.
+    /// Legacy wraps each row in a duplicate "bucket" pair (json_spirit
+    /// vector-of-pairs; same duplicate-key collision as smsgoptions — a JSON
+    /// object can't carry it, so the rows ride under "buckets" like the
+    /// options under "options"). Legacy's "file size" reads the per-bucket
+    /// `<time>_01.dat`; tri7's store is SQLite, so the column reports the
+    /// summed wire bytes of the bucket's unique tokens, fsReadable-rendered.
+    pub fn buckets_stats_json(&self) -> Value {
+        let st = self.st.lock().unwrap();
+        // wire-byte size per bucket, deduped by token exactly like the
+        // in-memory token sets (a message stored in two folders counts once)
+        let mut bytes: HashMap<i64, u64> = HashMap::new();
+        let mut seen: std::collections::BTreeSet<crate::smsg::Token> = std::collections::BTreeSet::new();
+        for folder in [FOLDER_RELAY, FOLDER_INBOX, FOLDER_OUTBOX] {
+            let Ok(msgs) = self.store.list(folder) else {
+                continue;
+            };
+            for m in msgs {
+                let Ok(t) = token_of(&m.data) else {
+                    continue;
+                };
+                if seen.insert(t) {
+                    *bytes.entry(bucket_time_of(t.timestamp)).or_default() +=
+                        m.data.len() as u64;
+                }
+            }
+        }
+        let mut times: Vec<i64> = st.buckets.keys().copied().collect();
+        times.sort_unstable();
+        let mut n_messages = 0u64;
+        let mut n_bytes = 0u64;
+        let mut rows = Vec::new();
+        for bt in times {
+            let b = &st.buckets[&bt];
+            let n = b.tokens.len() as u64;
+            n_messages += n;
+            let nbytes = *bytes.get(&bt).unwrap_or(&0);
+            n_bytes += nbytes;
+            let (size_key, size_val) = if n == 0 {
+                ("file size, error", "Empty bucket.".to_string())
+            } else {
+                ("file size", fs_readable(nbytes))
+            };
+            rows.push(json!({
+                "bucket": bt.to_string(),
+                "time": fmt_bucket_time(bt),
+                "no. messages": n.to_string(),
+                "hash": b.hash.to_string(),
+                "last changed": fmt_bucket_time(b.time_changed),
+                size_key: size_val,
+            }));
+        }
+        json!({
+            "buckets": rows,
+            "total": {
+                "buckets": st.buckets.len().to_string(),
+                "messages": n_messages.to_string(),
+                "size": fs_readable(n_bytes),
+            },
+        })
+    }
+
+    /// smsgbuckets dump (rpcsmessage.cpp:864): wipe the relay mirror and the
+    /// in-memory bucket set. Legacy removes the `<time>_01.dat` files and
+    /// clears smsgBuckets; tri7's relay folder rows are the file equivalent.
+    /// Inbox/outbox are untouched (legacy keeps the wallet-db copies too).
+    pub fn buckets_dump(&self) {
+        let _ = self.store.clear_folder(FOLDER_RELAY);
+        self.st.lock().unwrap().buckets.clear();
+    }
+
+    /// smsggetpubkey (rpcsmessage.cpp:428): wallet-owned addresses answer
+    /// from the loaded keys ("address in wallet"), anything else falls to the
+    /// persistent key store ("peer address in DB"). Both return the base58
+    /// compressed pubkey; failures are the legacy soft result objects.
+    pub fn get_public_key_json(&self, address: &str) -> Value {
+        // SecureMsgGetLocalPublicKey cases 2/3 → "Invalid address."
+        if address_to_hash160(address).is_err() {
+            return json!({ "result": "Failed.", "message": "Invalid address." });
+        }
+        if let Some(k) = self.owned.iter().find(|k| k.address == address) {
+            return json!({
+                "result": "Success.",
+                "address in wallet": address,
+                "compressed public key": crate::address::base58(&k.pubkey_bytes()),
+            });
+        }
+        // case 4 → check the db (SecureMsgGetStoredKey)
+        let h160 = match address_to_hash160(address) {
+            Ok(h) => h,
+            Err(_) => return json!({ "result": "Failed.", "message": "Invalid address." }),
+        };
+        match self.store.lookup_pubkey(&h160) {
+            // legacy rejects !IsValid() || !IsCompressed() with "Invalid
+            // address." (IsValid = 33|65 bytes, IsCompressed = 33)
+            Ok(Some(pk)) if pk.len() == 33 => json!({
+                "result": "Success.",
+                "peer address in DB": address,
+                "compressed public key": crate::address::base58(&pk),
+            }),
+            Ok(Some(_)) => json!({ "result": "Failed.", "message": "Invalid address." }),
+            Ok(None) => json!({
+                "result": "Failed.",
+                "message": "Address not found in wallet or db.",
+            }),
+            Err(_) => json!({ "result": "Failed.", "message": "Error, GetStoredKey()." }),
+        }
+    }
+
+    /// smsgaddkey (rpcsmessage.cpp:394 / smessage.cpp:3014
+    /// SecureMsgAddAddress): import a peer key into the persistent store.
+    /// The key arrives base58 (legacy DecodeBase58, no checksum); the legacy
+    /// reason codes (2/3/4/5) ride inside the soft result object. Legacy's
+    /// match check at smessage.cpp:3062 compares the address to itself and
+    /// never fires; tri7 enforces the documented "publicKey does not match
+    /// address" intent instead.
+    pub fn add_key_json(&self, address: &str, public_key: &str) -> Value {
+        let fail = |reason: &str| {
+            json!({ "result": "Public key not added to db.", "reason": reason })
+        };
+        // rv 5: address is invalid (CTrianglesAddress::IsValid + GetKeyID)
+        let h160 = match address_to_hash160(address) {
+            Ok(h) => h,
+            Err(_) => return fail("address is invalid."),
+        };
+        // rv 2: publicKey is invalid (DecodeBase58 + CKey::SetPubKey's
+        // IsValid check; tri7 additionally requires an on-curve point, the
+        // same validation add_address / learn_pubkey already apply)
+        let pk = match crate::address::base58_decode(public_key) {
+            Ok(pk)
+                if pk.len() == 33
+                    && secp256k1::PublicKey::from_slice(&pk).is_ok() =>
+            {
+                pk
+            }
+            _ => return fail("publicKey is invalid."),
+        };
+        // rv 3: publicKey does not match address (hash160 check)
+        if crate::address::hash160(&pk) != h160 {
+            return fail("publicKey does not match address.");
+        }
+        match self.store.insert_pubkey(&h160, &pk, now_i64()) {
+            Ok(true) => json!({ "result": "Added public key to db." }),
+            // rv 4: address is already in db
+            Ok(false) => fail("address is already in db."),
+            Err(_) => fail("error."),
+        }
+    }
+
+    /// Inventory view of one folder, decrypted for display (RPC/GUI).
+    /// Decrypts with the owning key; rows that fail to decrypt (shouldn't
+    /// happen for inbox) show a placeholder.
+    pub fn list_folder_json(&self, folder: u16, unread_only: bool) -> Result<Value, String> {
+        let msgs = self.store.list(folder)?;
+        let mut rows = Vec::new();
+        for m in msgs {
+            if unread_only && m.status & crate::smsg::SMSG_MASK_UNREAD == 0 {
+                continue;
+            }
+            let key_hex = hex(&m.key);
+            let mut from = String::new();
+            let mut text = String::new();
+            let owner = if folder == FOLDER_INBOX {
+                Some(m.addr_to.clone())
+            } else {
+                Some(m.addr_outbox.clone())
+            };
+            if let Some(addr) = owner {
+                if let Some(k) = self.owned.iter().find(|k| k.address == addr) {
+                    if let Ok(dm) = smsg_decrypt(&m.data, k) {
+                        from = dm.from_address;
+                        text = dm.plaintext;
+                    }
+                }
+            }
+            rows.push(json!({
+
+=== rpc.rs list entries + routing test (150-165, 6800-6815) ===
+    "smsgoptions",
+    "smsgscanchain",
+    "smsgscanbuckets",
+    // ---- legacy parity 2026-11-09 (SMSG read-side): the bucket listing +
+    // the key-store read/write pair (rpcsmessage.cpp: smsgbuckets/
+    // smsggetpubkey/smsgaddkey) ----
+    "smsgbuckets",
+    "smsggetpubkey",
+    "smsgaddkey",
+    // ---- parity audit 2026-11-03: legacy info/util methods (rpcmining /
+    // rpcnet / rpcblockchain / rpcwallet surfaces servable from tri7's own
+    // providers — no ops/daemon needed) ----
+    "help",
+    "getblockheader",
+    "getblockbynumber",
+    "getblockchaininfo",
+    assert!(OPS_METHODS.contains(&"keypoolrefill"), "missing from OPS_METHODS");
+}
+
+/// SMSG read-side lane (2026-11-09): smsgbuckets / smsggetpubkey / smsgaddkey
+/// all need the live smsg store, so each must sit in BOTH routing lists —
+/// NATIVE_METHODS alone would still answer -32601 before dispatch.
+#[test]
+fn smsg_readside_verbs_are_routed() {
+    for m in ["smsgbuckets", "smsggetpubkey", "smsgaddkey"] {
+        assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+        assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+    }
+}
+
+/// addmultisigaddress / addredeemscript end to end against a REAL wallet
+/// file: bare-address reply, redeem script stored under its scriptID, the
+
+=== rpc.rs handler arms ===
+
+=== follow_tip.rs arms ===
+7380:            "smsgbuckets" => {
+7405:            "smsggetpubkey" => {
+7428:            "smsgaddkey" => {

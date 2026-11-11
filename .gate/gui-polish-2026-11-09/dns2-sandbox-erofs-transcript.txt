@@ -1,0 +1,9 @@
+DNS2, 127.0.0.1:19112, after the item-15 binary deploy (proc sha d4efa7c1...):
+$ curl -s -X POST http://127.0.0.1:19112 -d '{"method":"reservebalance","params":["1.0"]}'
+{"error":{"code":-1,"message":"write /etc/tri7/triangles.conf.tmp: Read-only file system (os error 30)"},"id":null,"result":null,"source":"tri7"}
+$ ls -la /etc/tri7/triangles.conf
+-rw-rw---- 1 root tri7 1243 Nov  2 20:43 /etc/tri7/triangles.conf
+$ systemctl cat tri7d | grep -E "ProtectSystem|ReadWritePaths"
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tri7
+(The global still applied live: getstakinginfo reservebalance == 1.000000.)

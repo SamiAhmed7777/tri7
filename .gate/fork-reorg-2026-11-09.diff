@@ -1,0 +1,769 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 35959c2..3c8895d 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -440,6 +440,276 @@ struct GapState {
+     rolled_back_to: Option<u64>,
+ }
+ 
++// ---------------------------------------------------------------------------
++// Reconciliation (workqueue item 17 FORK-REORG): a headers batch whose first
++// header does NOT chain to our tip is a competing branch — announce push or
++// the getheaders reply. The branch must be judged by TOTAL WORK above the
++// fork point, and our tip must SWITCH when theirs is strictly heavier. This
++// is the piece that was missing: try_adopt_heavier_branch only judges ONE
++// body against our whole branch (always loses), and the old reconciliation
++// re-requested getheaders from the tip-only locator forever — every multi-
++// block fork wedge in the fleet's history looped exactly there.
++// ---------------------------------------------------------------------------
++
++/// daemon getheaders serving cap (collect_headers: 2000 per response)
++const RECON_HEADERS_CAP: usize = 2000;
++/// give up reconciling after this many responses whose fork point lies
++/// outside our window — drop the peer (the supervisor reconnects) instead
++/// of looping forever (the DNS3 wedge shape)
++const RECON_MAX_UNRESOLVED: u32 = 2;
++/// window-locator stride: tip + every Nth entry down to the base, so a peer
++/// that never saw our tip can still find an in-window common ancestor
++const RECON_LOCATOR_STEP: u64 = 128;
++/// cap on locator anchors (protocol limit 512; we stay far below)
++const RECON_LOCATOR_MAX: usize = 40;
++
++/// In-flight reconciliation accumulator: headers of one competing branch,
++/// from the in-window fork point down to the peer's branch tip.
++#[derive(Default)]
++struct ReconAcc {
++    /// height where the branch diverges from our window (None = idle)
++    fork_height: Option<u64>,
++    /// sum of work_of(bits) over the accumulated branch headers
++    their_work: u128,
++    /// number of branch headers accumulated (their tip height = fork + n)
++    their_blocks: u64,
++    /// last accumulated header hash — the continuation anchor
++    last_hash: Option<Hash>,
++    /// headers accumulated so far (adopted as pending on a switch)
++    headers: Vec<Block>,
++    /// hashes already in `headers` (duplicate guard, O(1))
++    seen: std::collections::HashSet<Hash>,
++    /// consecutive reconciliations with no in-window fork point
++    unresolved: u32,
++}
++
++#[derive(Debug)]
++enum ReconOutcome {
++    /// the branch was judged LIGHTER than ours — tip untouched, and (this is
++    /// the anti-wedge property) the reconciliation ENDS instead of looping
++    Ignored,
++    /// more of a not-yet-judgeable branch accumulated (batch hit the serving
++    /// cap) — the caller continues from recon.last_hash
++    Extended,
++    /// no in-window fork point: retry once with the window locator
++    NeedAnchorLocator,
++    /// repeated unresolved reconciliations — drop the peer
++    DropPeer,
++    /// SWITCH executed: rolled back to the fork, their headers queued as
++    /// pending (bodies then flow through the normal validated getdata path)
++    Switched { fork: u64, adopted: usize },
++}
++
++/// getheaders locator spanning our whole window: the tip first, then every
++/// RECON_LOCATOR_STEP-th entry down to the base. A peer that never saw our
++/// tip (a fork we hold but it does not) can still find an in-window common
++/// ancestor and serve the branch from there — the tip-only locator forced it
++/// to serve from genesis (or answer nothing), which is how reconciliation
++/// wedged.
++fn build_recon_locator(st: &ChainState) -> Vec<Hash> {
++    let mut loc = vec![st.tip_hash];
++    let tip_idx = (st.tip_height - st.base) as usize;
++    let mut i = tip_idx;
++    while i > 0 && loc.len() < RECON_LOCATOR_MAX {
++        i = i.saturating_sub(RECON_LOCATOR_STEP as usize);
++        loc.push(st.entries[i].hash);
++        if i == 0 {
++            break;
++        }
++    }
++    loc
++}
++
++/// Walk a header batch that chains to our tip: insert each new header as
++/// pending (bodies are fetched by the rotation tick). Returns true when any
++/// header did NOT chain mid-batch (caller reconciles). The running-expected
++/// form accepts multi-block announcements in one pass (the old per-header
++/// tip comparison fired a spurious reconciliation on the second header of
++/// every 2+ block announcement).
++fn intake_header_batch(
++    st: &mut ChainState,
++    headers: &[Block],
++    pending_from_headers: &mut VecDeque<(Hash, u64)>,
++    stats: &mut Stats,
++) -> bool {
++    let mut prev_expected = st.tip_hash;
++    let mut next_h = st.tip_height + 1;
++    let mut any_unlinked = false;
++    for hdr in headers {
++        stats.headers_processed += 1;
++        let hash = hdr.hash();
++        if st.entry_by_hash(&hash).is_some() {
++            continue; // already have
++        }
++        if hdr.prev_hash == prev_expected {
++            stats.headers_new += 1;
++            st.pending_headers.insert(hash, hdr.clone());
++            pending_from_headers.push_back((hash, next_h));
++            prev_expected = hash;
++            next_h += 1;
++        } else {
++            any_unlinked = true;
++        }
++    }
++    any_unlinked
++}
++
++/// Judge a non-chaining headers batch as a competing branch (item 17b).
++///
++/// Accumulates the branch from its in-window fork point; when the batch is
++/// complete (under the serving cap) or their accumulated work already beats
++/// ours above the fork point, compare TOTAL branch work vs ours and — when
++/// strictly heavier — roll the window back to the fork and queue their
++/// headers as pending. Bodies then flow through the NORMAL getdata →
++/// validate_block (full consensus) path: a header-work switch never advances
++/// the chain past an unvalidated body.
++fn recon_intake(
++    st: &mut ChainState,
++    headers: &[Block],
++    recon: &mut ReconAcc,
++    pending_from_headers: &mut VecDeque<(Hash, u64)>,
++    stats: &mut Stats,
++) -> ReconOutcome {
++    let first = &headers[0];
++    // continuation vs fresh branch: a continuation chains onto the branch we
++    // are already accumulating; anything else (re)starts from its fork point
++    if recon.fork_height.is_none() || recon.last_hash != Some(first.prev_hash) {
++        match st.index_of_hash(&first.prev_hash) {
++            Some(idx) => {
++                let fork_h = st.base + idx as u64;
++                if fork_h >= st.tip_height {
++                    // extends our tip after all (tip advanced between the
++                    // gate and here): hand the batch to the normal walk
++                    intake_header_batch(st, headers, pending_from_headers, stats);
++                    return ReconOutcome::Ignored;
++                }
++                recon.fork_height = Some(fork_h);
++                recon.their_work = 0;
++                recon.their_blocks = 0;
++                recon.headers.clear();
++                recon.seen.clear();
++                recon.unresolved = 0;
++            }
++            None => {
++                // fork point outside our window (peer serves from below the
++                // base, or from genesis because it never saw our tip)
++                recon.unresolved += 1;
++                recon.fork_height = None;
++                recon.headers.clear();
++                recon.seen.clear();
++                if recon.unresolved > RECON_MAX_UNRESOLVED {
++                    recon.unresolved = 0;
++                    return ReconOutcome::DropPeer;
++                }
++                return ReconOutcome::NeedAnchorLocator;
++            }
++        }
++    }
++
++    // accumulate the NEW headers of this branch
++    for hdr in headers {
++        let hash = hdr.hash();
++        if st.entry_by_hash(&hash).is_some() || recon.seen.contains(&hash) {
++            continue;
++        }
++        recon.seen.insert(hash);
++        recon.headers.push(hdr.clone());
++        recon.their_work = recon.their_work.saturating_add(tri7_core::forkchoice::work_of(
++            hdr.bits,
++        ));
++        recon.their_blocks += 1;
++    }
++    recon.last_hash = Some(headers[headers.len() - 1].hash());
++
++    let fork_h = recon.fork_height.unwrap_or(st.tip_height);
++    let our_work: u128 = st.entries[(fork_h - st.base + 1) as usize..]
++        .iter()
++        .map(|e| tri7_core::forkchoice::work_of(e.bits))
++        .sum();
++
++    // a batch under the serving cap is COMPLETE (the peer served to its own
++    // branch tip); a cap-sized batch may continue. Judge early when their
++    // accumulated work already beats ours — branch work only grows.
++    let complete = headers.len() < RECON_HEADERS_CAP;
++    if !(complete || recon.their_work > our_work) {
++        return ReconOutcome::Extended;
++    }
++
++    let their_h = fork_h + recon.their_blocks;
++    let their_tip = recon
++        .headers
++        .last()
++        .map(|h| h.hash())
++        .unwrap_or([0u8; 32]);
++    let decision = tri7_core::forkchoice::choose(
++        st.tip_height,
++        &st.tip_hash,
++        our_work,
++        their_h,
++        &their_tip,
++        recon.their_work,
++    );
++    let branch = std::mem::take(&mut recon.headers);
++    let adopted = recon.their_blocks as usize;
++    recon.seen.clear();
++    recon.their_work = 0;
++    recon.their_blocks = 0;
++    recon.last_hash = None;
++    let fork = recon.fork_height.take();
++    match decision {
++        tri7_core::forkchoice::ForkChoice::KeepOurs => {
++            log(&format!(
++                "recon: competing branch h{}..h{} ({} blk, work {}) is NOT heavier than ours h{} (work {}) above the fork — ignored, reconciliation closed",
++                fork.unwrap_or(0),
++                their_h,
++                adopted,
++                recon.their_work,
++                st.tip_height,
++                our_work
++            ));
++            ReconOutcome::Ignored
++        }
++        tri7_core::forkchoice::ForkChoice::Switch { reason } => {
++            let fork_h = fork.unwrap_or(st.tip_height);
++            log(&format!(
++                "FORK CHOICE (reconciliation): {} — rolling back to h{}, adopting {} block(s) via the validated body path",
++                reason,
++                fork_h,
++                adopted
++            ));
++            while st.tip_height > fork_h {
++                if rollback_tip(st).is_err() {
++                    break;
++                }
++            }
++            for (i, hdr) in branch.iter().enumerate() {
++                let hash = hdr.hash();
++                st.pending_headers.insert(hash, hdr.clone());
++                pending_from_headers.push_back((hash, fork_h + 1 + i as u64));
++            }
++            stats.reorgs += 1;
++            ReconOutcome::Switched {
++                fork: fork_h,
++                adopted,
++            }
++        }
++    }
++}
++
++/// Evidence marker for the report: which gap branch fired, when, over which
++/// hash/height, with the peer that served (or the rollback height).
++fn write_gap_marker(cfg: &Config, payload: Value) {
++    let path = cfg.state_dir.join("gap_recovery.json");
++    let tmp = cfg.state_dir.join("gap_recovery.json.tmp");
++    let body = format!("{}\n", serde_json::to_string_pretty(&payload).unwrap_or_default());
++    if std::fs::write(&tmp, body)
++        .and_then(|_| std::fs::rename(&tmp, &path))
++        .is_err()
++    {
++        log("gap marker write failed (non-fatal)");
++    }
++}
++
+ /// Lowest window-tail height whose body is neither on disk (store, including
+ /// gap-recovery appends) nor in the recent cache. Returns (height, hash).
+ fn gap_find_missing(
+@@ -545,17 +815,6 @@ fn try_adopt_heavier_branch(
+     }
+ }
+ 
+-/// Evidence marker for the report: which gap branch fired, when, over which
+-/// hash/height, with the peer that served (or the rollback height).
+-fn write_gap_marker(cfg: &Config, payload: Value) {
+-    let path = cfg.state_dir.join("gap_recovery.json");
+-    let tmp = cfg.state_dir.join("gap_recovery.json.tmp");
+-    let body = format!("{}\n", serde_json::to_string_pretty(&payload).unwrap_or_default());
+-    if std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+-        log("gap marker write failed (non-fatal)");
+-    }
+-}
+-
+ /// Validate a gap-fill body the cheap-but-complete archival way: the wire
+ /// hash we requested IS the Hash9 of the body (header_hash in the store),
+ /// the body must chain to the window entry below it, and its merkle root
+@@ -3920,6 +4179,29 @@ fn seed_from_network(
+ // backfill: historical header sweep + block fetch (protocol evidence +
+ // independent re-validation of the daemon-served data)
+ // ---------------------------------------------------------------------------
++/// (item 17a) which served headers to deep-validate: a stride across the
++/// range, CLAMPED to the local window tip. The daemon serves headers up to
++/// ITS tip, so the tail can sit above our tip when the peer is ahead —
++/// bodies there have no local window entry to validate against and used to
++/// abort the boot. Extracted pure for tests.
++fn backfill_pick_indices(got_len: usize, k: usize, tip: u64, start_h: u64) -> Vec<usize> {
++    if got_len == 0 || k == 0 {
++        return Vec::new();
++    }
++    let step = ((got_len - 1) / k.max(1)) + 1;
++    let mut picks = Vec::new();
++    let mut i = 0usize;
++    while i < got_len && picks.len() < k {
++        let h = start_h + 1 + i as u64;
++        if h > tip {
++            break; // above the local window: the follow loop owns these
++        }
++        picks.push(i);
++        i += step;
++    }
++    picks
++}
++
+ fn run_backfill(
+     sess: &mut Session,
+     st: &ChainState,
+@@ -3928,6 +4210,12 @@ fn run_backfill(
+     cfg: &Config,
+ ) -> Result<Vec<Block>, String> {
+     let span = cfg.backfill_headers.min(WINDOW_ENTRIES as usize - 800);
++    if st.tip_height == 0 {
++        // genesis-only tipstate (a bare machine reaches backfill only if
++        // from-zero was skipped) — nothing to backfill into
++        return Ok(Vec::new());
++    }
++    let span = span.min(st.tip_height as usize);
+     let start_h = st.tip_height - span as u64;
+     let start_hash = st
+         .entry_abs(start_h)
+@@ -4010,12 +4298,29 @@ fn run_backfill(
+     if k == 0 {
+         return Ok(got);
+     }
+-    let step = ((got.len() - 1) / k.max(1)) + 1;
+-    let mut picks: Vec<(Hash, u64)> = Vec::new();
+-    let mut i = 0usize;
+-    while i < got.len() && picks.len() < k {
+-        picks.push((got[i].hash(), start_h + 1 + i as u64));
+-        i += step;
++    // (item 17a) the daemon serves headers up to ITS tip, so the tail of
++    // `got` can sit ABOVE our local window when the peer is ahead. Request
++    // bodies only for heights the local window can validate; the rest is the
++    // follow loop's business. This is the boot-crash-loop fix: any pick
++    // above the tip has no local prev entry and used to abort the whole
++    // process ("backfill block outside window" → exit(4) → systemd restart
++    // → same peer → same abort, 6+ cycles live on DNS3).
++    let indices = backfill_pick_indices(got.len(), k, st.tip_height, start_h);
++    if indices.len() < k {
++        log(&format!(
++            "backfill: peer serves {} headers but the local window ends at h{} — body requests clamped to {} (17a)",
++            got.len(),
++            st.tip_height,
++            indices.len()
++        ));
++    }
++    let picks: Vec<(Hash, u64)> = indices
++        .into_iter()
++        .map(|i| (got[i].hash(), start_h + 1 + i as u64))
++        .collect();
++    if picks.is_empty() {
++        log("backfill: no in-window bodies to fetch — the follow loop takes over");
++        return Ok(got);
+     }
+     log(&format!("backfill: requesting {} full blocks", picks.len()));
+     for chunk in picks.chunks(GETDATA_BATCH) {
+@@ -4043,10 +4348,21 @@ fn run_backfill(
+                         Some(h) => h,
+                         None => continue, // not requested (e.g. a live push)
+                     };
+-                    let prev_entry = st
+-                        .entry_abs(height - 1)
+-                        .cloned()
+-                        .ok_or("backfill block outside window")?;
++                    let prev_entry = match st.entry_abs(height - 1) {
++                        Some(e) => e.clone(),
++                        None => {
++                            // (item 17a) a served body with no local window
++                            // entry is SKIP+WARN, never fatal — the clamp
++                            // above keeps the picks in-window, this keeps
++                            // the door shut even if a peer serves something
++                            // odd: a boot must never crash-loop on it
++                            log(&format!(
++                                "backfill: served block h{} outside the local window — skipping (17a)",
++                                height
++                            ));
++                            continue;
++                        }
++                    };
+                     let header = got.iter().find(|hdr| hdr.hash() == hash);
+                     validate_block(
+                         st,
+@@ -7483,6 +7799,7 @@ fn handle_message(
+     wl: &SharedWalletLive,
+     announce: &TxAnnounce,
+     pending_tx_getdata: &mut std::collections::HashSet<Hash>,
++    recon: &mut ReconAcc,
+ ) -> Result<(), String> {
+     match msg.command.as_str() {
+         "version" => {
+@@ -7514,28 +7831,58 @@ fn handle_message(
+         "pong" => Ok(()),
+         "headers" => {
+             let headers = tri7_core::p2p::parse_headers(&msg.payload)?;
+-            for hdr in headers {
+-                stats.headers_processed += 1;
+-                let hash = hdr.hash();
+-                if st.entry_by_hash(&hash).is_some() {
+-                    continue; // already have
+-                }
+-                if hdr.prev_hash == st.tip_hash {
+-                    stats.headers_new += 1;
+-                    st.pending_headers.insert(hash, hdr);
+-                    pending_from_headers.push_back((hash, st.tip_height + 1));
+-                } else {
+-                    log(&format!(
+-                        "headers announcement does not chain to our tip — requesting reconciliation"
+-                    ));
+-                    let stop = [0u8; 32];
+-                    peer.sess.send(
+-                        "getheaders",
+-                        &tri7_core::p2p::build_getheaders(&[st.tip_hash], &stop),
+-                        stats,
+-                    )?;
+-                    break;
++            if headers.is_empty() {
++                return Ok(());
++            }
++            // (item 17b) A batch whose first header neither chains to our
++            // tip nor is already known is a COMPETING BRANCH (announce push
++            // or a getheaders reply): judge it by total work above the fork
++            // point and switch when strictly heavier — instead of the old
++            // tip-only-locator loop that wedged every fork forever.
++            let first_known = st.entry_by_hash(&headers[0].hash()).is_some()
++                || st.pending_headers.contains_key(&headers[0].hash());
++            if headers[0].prev_hash != st.tip_hash && !first_known {
++                match recon_intake(st, &headers, recon, pending_from_headers, stats) {
++                    ReconOutcome::Ignored | ReconOutcome::Extended | ReconOutcome::Switched { .. } => {}
++                    ReconOutcome::NeedAnchorLocator => {
++                        log(&format!(
++                            "headers announcement does not chain to our tip — requesting reconciliation with the window locator ({} anchor(s))",
++                            build_recon_locator(st).len()
++                        ));
++                        let stop = [0u8; 32];
++                        peer.sess.send(
++                            "getheaders",
++                            &tri7_core::p2p::build_getheaders(&build_recon_locator(st), &stop),
++                            stats,
++                        )?;
++                    }
++                    ReconOutcome::DropPeer => {
++                        // fork point outside our window on every retry — the
++                        // tip-only loop used to spin here forever; drop the
++                        // peer and let the supervisor reconnect (a fresh
++                        // version/discovery handshake re-runs resolution)
++                        log(&format!(
++                            "reconciliation: no in-window fork point after {} tries — dropping {} (supervisor reconnects)",
++                            RECON_MAX_UNRESOLVED, peer.label
++                        ));
++                        peer.dead = true;
++                        peer.sess.shutdown();
++                    }
+                 }
++                return Ok(());
++            }
++            let any_unlinked = intake_header_batch(st, &headers, pending_from_headers, stats);
++            if any_unlinked {
++                // mixed batch (extends the tip, then forks): reconcile from
++                // the window anchors — the reply re-enters this handler and
++                // takes the competing-branch path if it is one
++                log("headers batch partly unlinked to the tip — requesting window-locator reconciliation");
++                let stop = [0u8; 32];
++                peer.sess.send(
++                    "getheaders",
++                    &tri7_core::p2p::build_getheaders(&build_recon_locator(st), &stop),
++                    stats,
++                )?;
+             }
+             Ok(())
+         }
+@@ -7569,10 +7916,14 @@ fn handle_message(
+                 stats.tx_getdatas_sent += tx_want.len() as u64;
+             }
+             if unknown > 0 {
++                // (item 17b) window locator, not the tip-only locator: a fork
++                // inv from a peer that never saw our tip must give it an
++                // in-window ancestor to reconcile from — the reply re-enters
++                // the headers handler's competing-branch judge
+                 let stop = [0u8; 32];
+                 peer.sess.send(
+                     "getheaders",
+-                    &tri7_core::p2p::build_getheaders(&[st.tip_hash], &stop),
++                    &tri7_core::p2p::build_getheaders(&build_recon_locator(st), &stop),
+                     stats,
+                 )?;
+             }
+@@ -9418,6 +9769,8 @@ fn main() {
+     let mut poll_parity = false;
+     let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+     let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
++    // (item 17b) competing-branch accumulator for the reconciliation judge
++    let mut recon_acc = ReconAcc::default();
+     let mut last_state_write = Instant::now();
+     let mut relayed_tip: Option<Hash> = None;
+     let gap_shared: Arc<Mutex<GapState>> = Arc::new(Mutex::new(GapState::default()));
+@@ -9724,6 +10077,7 @@ fn main() {
+                         &wl_shared,
+                         &announce_shared,
+                         &mut pending_tx_getdata,
++                        &mut recon_acc,
+                     );
+                     if let Err(e) = res {
+                         fatal = Some(e);
+@@ -11313,6 +11667,243 @@ mod tests {
+         assert!(rollback_tip(&mut stg).is_err());
+     }
+ 
++    // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----
++
++    fn mk_header(prev: Hash, merkle_seed: u8, bits: u32) -> Block {
++        Block {
++            version: 1,
++            prev_hash: prev,
++            merkle_root: [merkle_seed; 32],
++            time: 1_700_001_000,
++            bits,
++            nonce: 0,
++            vtx: vec![],
++            block_sig: vec![],
++        }
++    }
++
++    #[test]
++    fn backfill_pick_indices_clamp_to_the_local_window_tip() {
++        // peer 100 blocks ahead: the served range (3000 + 100 headers) used
++        // to be picked stride-wise across its FULL length, landing picks
++        // above the local tip → "backfill block outside window" → exit(4)
++        // crash-loop on every boot while a peer led
++        let tip = 2_208_000u64;
++        let start_h = tip - 3000;
++        let picks = backfill_pick_indices(3100, 100, tip, start_h);
++        assert!(!picks.is_empty());
++        assert!(picks.len() < 100, "the tail above the tip must be dropped");
++        for i in &picks {
++            assert!(
++                start_h + 1 + *i as u64 <= tip,
++                "pick {} lands above the local window tip",
++                i
++            );
++        }
++        // in-window requests are unchanged
++        assert_eq!(backfill_pick_indices(100, 10, tip, tip - 100).len(), 10);
++        // degenerate inputs
++        assert!(backfill_pick_indices(0, 100, tip, 0).is_empty());
++        assert!(backfill_pick_indices(100, 0, tip, 0).is_empty());
++    }
++
++    #[test]
++    fn recon_heavier_branch_switches_and_queues_the_validated_body_path() {
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // a 4-block branch forking at h102 (same bits as ours → 4 blocks of
++        // work vs our 3 above the fork = strictly heavier)
++        let fork_hash = stg.entry_abs(102).unwrap().hash;
++        let mut prev = fork_hash;
++        let mut branch: Vec<Block> = Vec::new();
++        for i in 0..4u8 {
++            let hdr = mk_header(prev, 0x40 + i, 0x2000_ffff);
++            prev = hdr.hash();
++            branch.push(hdr);
++        }
++
++        match recon_intake(&mut stg, &branch, &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Switched { fork, adopted } => {
++                assert_eq!(fork, 102);
++                assert_eq!(adopted, 4);
++            }
++            other => panic!("expected Switched, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 102, "rolled back to the fork point");
++        assert_eq!(stg.tip_hash, fork_hash);
++        assert_eq!(stats.reorgs, 1);
++        // their headers are queued as pending with ABSOLUTE heights — bodies
++        // flow through the normal getdata → validate_block consensus path
++        for (i, hdr) in branch.iter().enumerate() {
++            assert!(stg.pending_headers.contains_key(&hdr.hash()));
++            assert_eq!(pend[i], (hdr.hash(), 103 + i as u64));
++        }
++        assert_eq!(pend.len(), 4);
++        // accumulator closed after the judge
++        assert!(recon.fork_height.is_none());
++        assert!(recon.headers.is_empty());
++    }
++
++    #[test]
++    fn recon_lighter_branch_is_ignored_and_the_reconciliation_closes() {
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // ONE fork block at h103 vs our two blocks above it: lighter
++        let fork_hash = stg.entry_abs(103).unwrap().hash;
++        let hdr = mk_header(fork_hash, 0x77, 0x2000_ffff);
++        match recon_intake(&mut stg, &[hdr.clone()], &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Ignored => {}
++            other => panic!("expected Ignored, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 105, "tip untouched");
++        assert_eq!(stats.reorgs, 0);
++        assert!(pend.is_empty());
++        assert!(stg.pending_headers.is_empty());
++        // accumulator closed: the reconciliation does NOT loop on this peer
++        assert!(recon.fork_height.is_none());
++        assert!(recon.headers.is_empty());
++
++        // the TIE case (2 vs 2 at the same height) keeps ours too
++        let fork_hash103 = stg.entry_abs(103).unwrap().hash;
++        let b1 = mk_header(fork_hash103, 0x78, 0x2000_ffff);
++        let b2 = mk_header(b1.hash(), 0x79, 0x2000_ffff);
++        match recon_intake(&mut stg, &[b1, b2], &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Ignored => {}
++            other => panic!("expected Ignored on the tie, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 105);
++        assert_eq!(stats.reorgs, 0);
++    }
++
++    #[test]
++    fn recon_unknown_fork_point_escalates_then_drops_the_peer() {
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // a batch whose first header descends from a hash outside our window
++        let mut alien_prev = [0xBBu8; 32];
++        alien_prev[0] = 0xEE;
++        let hdr = mk_header(alien_prev, 0x7A, 0x2000_ffff);
++        assert!(matches!(
++            recon_intake(&mut stg, &[hdr.clone()], &mut recon, &mut pend, &mut stats),
++            ReconOutcome::NeedAnchorLocator
++        ));
++        assert!(matches!(
++            recon_intake(&mut stg, &[hdr.clone()], &mut recon, &mut pend, &mut stats),
++            ReconOutcome::NeedAnchorLocator
++        ));
++        assert!(matches!(
++            recon_intake(&mut stg, &[hdr], &mut recon, &mut pend, &mut stats),
++            ReconOutcome::DropPeer
++        ));
++        // the drop resets the counter (fresh start after reconnect)
++        assert_eq!(recon.unresolved, 0);
++        assert_eq!(stg.tip_height, 105);
++    }
++
++    #[test]
++    fn recon_accumulates_cap_sized_batches_before_judging() {
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // a full 2000-header batch (the daemon serving cap) may continue —
++        // judge deferred, branch accumulated. The headers carry EASY bits
++        // (65536x lighter than ours) so 2000 of them still weigh less than
++        // our 4 blocks above h101: the accumulated work has NOT beaten ours.
++        let fork_hash = stg.entry_abs(101).unwrap().hash;
++        let mut mk_chain = |prev: Hash, n: usize, bits: u32| -> (Vec<Block>, Hash) {
++            let mut out = Vec::new();
++            let mut prev = prev;
++            for i in 0..n {
++                let mut merkle = [0u8; 32];
++                merkle[0..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
++                let hdr = Block {
++                    version: 1,
++                    prev_hash: prev,
++                    merkle_root: merkle,
++                    time: 1_700_001_000,
++                    bits,
++                    nonce: 0,
++                    vtx: vec![],
++                    block_sig: vec![],
++                };
++                prev = hdr.hash();
++                out.push(hdr);
++            }
++            (out, prev)
++        };
++        let (batch, last) = mk_chain(fork_hash, 2000, 0x2200_ffff);
++        match recon_intake(&mut stg, &batch, &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Extended => {}
++            other => panic!("expected Extended, got {:?}", other),
++        }
++        assert_eq!(recon.their_blocks, 2000);
++        assert_eq!(stg.tip_height, 105);
++
++        // the continuation (chaining onto the accumulated branch) carries
++        // HARD bits — the accumulated work now beats ours and the judge
++        // fires EARLY on the incomplete branch (work only grows)
++        let (tail, _) = mk_chain(last, 1, 0x1e00_ffff);
++        match recon_intake(&mut stg, &tail, &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Switched { fork, adopted } => {
++                assert_eq!(fork, 101);
++                assert_eq!(adopted, 2001);
++            }
++            other => panic!("expected Switched, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 101);
++        assert_eq!(pend.len(), 2001);
++    }
++
++    #[test]
++    fn recon_locator_spans_the_window_down_to_the_base() {
++        let stg = synthetic_chain(0, 4600);
++        let loc = build_recon_locator(&stg);
++        assert_eq!(loc[0], stg.tip_hash);
++        assert!(loc.len() <= RECON_LOCATOR_MAX);
++        assert_eq!(*loc.last().unwrap(), stg.entry_abs(0).unwrap().hash);
++        // anchors are strictly decreasing window entries
++        let mut heights: Vec<u64> = loc
++            .iter()
++            .map(|h| stg.index_of_hash(h).map(|i| stg.base + i as u64).unwrap())
++            .collect();
++        assert!(heights.windows(2).all(|w| w[0] > w[1]));
++    }
++
++    #[test]
++    fn intake_header_batch_accepts_multi_block_announcements_without_reconciling() {
++        let mut stg = synthetic_chain(100, 105);
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // a 2-block announcement used to fire a spurious reconciliation on
++        // the SECOND header (per-header tip comparison); the running-expected
++        // walk accepts the whole chain in one pass
++        let a = mk_header(stg.tip_hash, 0x01, 0x2000_ffff);
++        let b = mk_header(a.hash(), 0x02, 0x2000_ffff);
++        assert!(!intake_header_batch(&mut stg, &[a.clone(), b.clone()], &mut pend, &mut stats));
++        assert_eq!(stats.headers_new, 2);
++        assert_eq!(pend[0], (a.hash(), 106));
++        assert_eq!(pend[1], (b.hash(), 107));
++
++        // a later header with an unrelated prev is flagged for reconciliation
++        let mut alien = [0xCCu8; 32];
++        alien[0] = 0xDD;
++        let c = mk_header(alien, 0x03, 0x2000_ffff);
++        assert!(intake_header_batch(&mut stg, &[c], &mut pend, &mut stats));
++        assert_eq!(stats.headers_new, 2, "the unlinked header is not queued");
++    }
++
+     #[test]
+     fn gap_fill_valid_hash_link_merkle() {
+         use tri7_core::legacy::{Tx, Vin, Vout};

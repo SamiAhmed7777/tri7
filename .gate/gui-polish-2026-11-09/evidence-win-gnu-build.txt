@@ -1,0 +1,4 @@
+653bc86265b0111ac2106dc0c5ce88022ff96d79c8de8e0f9eb32f2d3b1cf80a  target/x86_64-pc-windows-gnu/release/follow_tip.exe
+8203ecbca3d556012c4141e19eb462bd7d97245f04a708907b31277cbfc8d49d  target/x86_64-pc-windows-gnu/release/tri7.exe
+87f4a96c8b0c68bd844ac4f82949f08d1b6f18f42183f51132ebd48b2d7a9edd  target/x86_64-pc-windows-gnu/release/tri7_wallet_gui.exe
+windows-gnu release build (3 bins, --features gui) completed 2026-11-09 10:0xZ, rc=0, warnings: pre-existing only

@@ -1,0 +1,207 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index ee76446..9e2f195 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -486,6 +486,11 @@ struct ReconAcc {
+     seen: std::collections::HashSet<Hash>,
+     /// consecutive reconciliations with no in-window fork point
+     unresolved: u32,
++    /// the prev-hash the next batch header must present to keep chaining
++    /// onto our window at the running height (anchor entry hash, advanced
++    /// per header). A header whose prev breaks the chain ends the batch —
++    /// heights may never drift from real linkage.
++    expected_prev: Option<Hash>,
+ }
+ 
+ #[derive(Debug)]
+@@ -580,8 +585,8 @@ fn recon_intake(
+     // continuation too — the peer answered with nothing because its branch
+     // ended, so the accumulated work is judged complete below); anything
+     // else (re)starts from its serve anchor
+-    let continuing =
+-        recon.fork_height.is_some() && headers.first().is_none_or(|h| Some(h.prev_hash) == recon.last_hash);
++    let continuing = recon.fork_height.is_some()
++        && headers.first().is_none_or(|h| Some(h.prev_hash) == recon.last_hash);
+     if !continuing {
+         let Some(first) = headers.first() else {
+             return ReconOutcome::Ignored; // nothing held, nothing received
+@@ -602,6 +607,9 @@ fn recon_intake(
+                 recon.headers.clear();
+                 recon.seen.clear();
+                 recon.unresolved = 0;
++                // the chain check starts at the ANCHOR ENTRY's own hash: the
++                // first served header must present it as prev
++                recon.expected_prev = Some(st.entries[anchor_h as usize - st.base as usize].hash);
+             }
+             None => {
+                 // serve anchor outside our window (peer serves from below
+@@ -618,6 +626,9 @@ fn recon_intake(
+                 return ReconOutcome::NeedAnchorLocator;
+             }
+         }
++    } else if recon.expected_prev.is_none() {
++        // mid-accumulation continuation across restarts of the accumulator
++        recon.expected_prev = recon.last_hash;
+     }
+ 
+     // accumulate the NEW headers of this branch (the anchor for the next
+@@ -635,11 +646,34 @@ fn recon_intake(
+     };
+     for hdr in headers {
+         let hash = hdr.hash();
++        // LINKAGE GUARD: every header must present the prev the running
++        // height implies. The moment the served chain diverges from our
++        // window's linkage the batch ENDS — heights may never drift from
++        // real linkage. (Live-caught 2026-11-10 on DNS3: a judge that
++        // trusts running heights alone adopted DNS2's 2208650-652 ON TOP
++        // of a race block at 2208649 whose slot DNS2 had already refilled
++        // — the "fork" it adopted was not connected to our window at all.)
++        if Some(&hdr.prev_hash) != recon.expected_prev.as_ref() {
++            log(&format!(
++                "recon: served header at h{} breaks the window chain (prev {} expected {}) — judging the chained prefix only",
++                running_h,
++                tri7_core::p2p::internal_to_display(&hdr.prev_hash),
++                recon
++                    .expected_prev
++                    .map(|p| tri7_core::p2p::internal_to_display(&p))
++                    .unwrap_or_else(|| "?".into())
++            ));
++            break;
++        }
+         if st.entry_by_hash(&hash).is_some() {
+-            running_h += 1; // our own prefix being re-served
++            // our own prefix being re-served: advance the linkage AND the
++            // height (the served header IS our entry)
++            recon.expected_prev = Some(hash);
++            running_h += 1;
+             continue;
+         }
+         if recon.seen.contains(&hash) {
++            recon.expected_prev = Some(hash);
+             continue; // already accumulated in an earlier batch
+         }
+         if recon.branch_base.is_none() {
+@@ -652,6 +686,7 @@ fn recon_intake(
+         ));
+         recon.their_blocks += 1;
+         recon.last_hash = Some(hash);
++        recon.expected_prev = Some(hash);
+         running_h += 1;
+     }
+ 
+@@ -659,8 +694,10 @@ fn recon_intake(
+         // the batch held nothing new (pure re-serve of our own prefix):
+         // nothing to judge, nothing to hold
+         recon.fork_height = None;
++        recon.branch_base = None;
+         recon.headers.clear();
+         recon.seen.clear();
++        recon.expected_prev = None;
+         recon.unresolved = 0;
+         return ReconOutcome::Ignored;
+     };
+@@ -704,6 +741,7 @@ fn recon_intake(
+     recon.their_blocks = 0;
+     recon.last_hash = None;
+     recon.branch_base = None;
++    recon.expected_prev = None;
+     recon.unresolved = 0; // any close resets the escalation counter
+     let fork = recon.fork_height.take();
+     match decision {
+@@ -4341,6 +4379,13 @@ fn run_backfill(
+     let mut got: Vec<Block> = Vec::new();
+     let mut expect_prev = start_hash;
+     let mut rounds = 0usize;
++    // (item 17) set when the served chain diverges from OUR window inside
++    // the backfill range — that is a FORK the reconciliation judge owns,
++    // not a protocol crime: keep the chained prefix and let the live loop
++    // resolve the divergence. The old code returned Err here, which made
++    // every boot with a race-fork in range exit(4) forever (observed live
++    // on DNS3 2026-11-10: its own race mint at h2208649 vs DNS2's chain).
++    let mut diverged = false;
+     while Instant::now() < deadline && rounds < 5 {
+         let mut progressed = false;
+         for msg in sess.pump()? {
+@@ -4353,11 +4398,15 @@ fn run_backfill(
+                         stats.headers_processed += 1;
+                         let hash = hdr.hash();
+                         if hdr.prev_hash != expect_prev {
+-                            return Err(format!(
+-                                "backfill header link mismatch: prev {} expected {}",
++                            log(&format!(
++                                "backfill: served header at h{} diverges from our window (prev {} expected {}) — keeping the chained prefix ({} header(s)); the live reconciliation judge owns the fork",
++                                start_h + 1 + got.len() as u64,
+                                 tri7_core::p2p::internal_to_display(&hdr.prev_hash),
+-                                tri7_core::p2p::internal_to_display(&expect_prev)
++                                tri7_core::p2p::internal_to_display(&expect_prev),
++                                got.len()
+                             ));
++                            diverged = true;
++                            break;
+                         }
+                         expect_prev = hash;
+                         stats.headers_backfilled += 1;
+@@ -4371,6 +4420,9 @@ fn run_backfill(
+                 _ => {}
+             }
+         }
++        if diverged {
++            break; // re-requesting cannot help: the divergence is structural
++        }
+         if got.len() >= span {
+             break;
+         }
+@@ -4386,7 +4438,13 @@ fn run_backfill(
+         std::thread::sleep(Duration::from_millis(40));
+     }
+     if got.is_empty() {
+-        return Err("backfill: no headers received".into());
++        // (item 17) an empty serve means the peer cannot answer our window
++        // start (it never saw that lineage, or it is at the same race-fork
++        // boundary) — skipping is honest and safe: the follow loop owns the
++        // chain from the persisted tip, and the reconciliation judge
++        // resolves any divergence. Never exit(4) from here.
++        log("backfill: peer served no headers for our window start — skipping (follow loop owns the chain)");
++        return Ok(Vec::new());
+     }
+     log(&format!(
+         "backfill: validated {} headers linking h{} → h{} (hash9 + linkage, daemon-served)",
+@@ -12126,6 +12184,38 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn recon_linkage_guard_stops_the_batch_when_the_chain_breaks() {
++        // DNS3's live wrong-adoption shape (2026-11-10): a served header
++        // whose prev does not chain onto our window must END the batch —
++        // heights may never drift from real linkage. Without the guard the
++        // judge adopted the peer's 2208650-652 ON TOP of a race block whose
++        // slot the peer had already refilled with its own hash.
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // anchor at h104: a1 chains onto it; a2's prev does NOT chain to a1
++        let anchor = stg.entry_abs(104).unwrap().hash;
++        let a1 = mk_header(anchor, 0x91, 0x2000_ffff);
++        let mut bogus_prev = a1.hash();
++        bogus_prev[0] ^= 0xFF;
++        let a2 = mk_header(bogus_prev, 0x92, 0x2000_ffff);
++
++        // the chained prefix is a1 only: 1 block vs our 1 block above h104
++        // — a tie the judge must KEEP (ours). Without the guard, a2 would
++        // accumulate at h106 and the branch would wrongly win.
++        match recon_intake(&mut stg, &[a1, a2], &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Ignored => {}
++            other => panic!("expected Ignored from the chained prefix, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 105, "tip untouched");
++        assert!(pend.is_empty(), "nothing queued from the broken chain");
++        assert!(recon.fork_height.is_none());
++        assert_eq!(stats.reorgs, 0);
++    }
++
+     #[test]
+     fn recon_serve_anchor_prefix_skips_to_the_real_fork_and_switches() {
+         // the PC's LIVE fork shape (2026-11-10): the peer re-serves our own

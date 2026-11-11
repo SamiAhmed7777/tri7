@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:ajaa3ulsqqufhap6ozxdveoiotastqvhac23w4s67vdncbdndmpq
+{
+  "blocking": [],
+  "polish": [
+    "smsgscanchain silently returns scanned_blocks=0 with from_height==tip if the store is absent; consider a distinct result string for that case",
+    "learn_pubkey binds the secp256k1 crate value only for validation (_pk dropped); a comment already notes this but the address-key mapping could be asserted in a test with a fixed vector",
+    "The disable_notices Vec could instead be a flag on the per-peer struct to keep peer state in one place"
+  ]
+}

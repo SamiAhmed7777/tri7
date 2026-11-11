@@ -1,0 +1,141 @@
+fn accepting_fee_node() -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::Mutex<String>>,
+    std::thread::JoinHandle<usize>,
+) {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // the server runs until the test stops it - an idle TIMEOUT was flaky on a
+    // loaded CI runner (the second call arrived after the server had exited)
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    // what the stand-in saw - the test asserts on it
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen_flag = seen.clone();
+    let handle = std::thread::spawn(move || {
+        listener.set_nonblocking(true).expect("nonblocking");
+        let mut served = 0usize;
+        let mut idle = 0usize;
+        while !stop_flag.load(Ordering::Relaxed) && idle < 2000 {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    idle = 0;
+                    served += 1;
+                    // On BSD/macOS an accepted socket INHERITS the listener's
+                    // O_NONBLOCK (Linux does not) - without this the read
+                    // below returns immediately with no data.
+                    s.set_nonblocking(false).expect("blocking socket");
+                    // Read the request properly: a single read() can return
+                    // a partial body (it happened on the macOS runner).
+                    // Each read is bounded by the socket read timeout (5s) and
+                    // the loop stops after 10s of wall clock, so it can neither
+                    // block indefinitely nor spin.
+                    let mut raw: Vec<u8> = Vec::new();
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(10);
+                    let complete = loop {
+                        // bound EVERY read by the time that is left, so the
+                        // 10s ceiling is really enforced
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
+                            break false;
+                        }
+                        s.set_read_timeout(Some(left.min(std::time::Duration::from_secs(5))))
+                            .expect("socket read timeout");
+                        let mut chunk = [0u8; 4096];
+                        match s.read(&mut chunk) {
+                            Ok(0) => break false,
+                            Ok(n) => {
+                                // the raw bytes are preserved across reads and
+                                // decoded for parsing - the buffer is never
+                                // mutated in place
+                                raw.extend_from_slice(&chunk[..n]);
+                                let text = String::from_utf8_lossy(&raw);
+                                let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                                if !body.is_empty()
+                                    && serde_json::from_str::<serde_json::Value>(body).is_ok()
+                                {
+                                    break true;
+                                }
+                            }
+                            Err(_) => break false,
+                        }
+                    };
+                    let acc = String::from_utf8_lossy(&raw).to_string();
+                    // record what the stand-in saw; the TEST asserts on it, so
+                    // a problem can never panic this thread and leave the
+                    // client hanging
+                    if let Ok(mut slot) = seen_flag.lock() {
+                        *slot = acc.clone();
+                    }
+                    let _ = complete;
+                    let body = r#"{"result":true,"error":null}"#;
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(http.as_bytes());
+                    idle = 0;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    idle += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        served
+    });
+    (format!("127.0.0.1:{}", port), stop, seen, handle)
+}
+fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
+    let (mut st, dir) = options_state_with_unreachable_node("stale");
+    // first apply: the node is unreachable -> the notice appears
+    st.save_options_action().expect("apply");
+    assert!(st.options_fee_notice.is_some(), "notice after the failed push");
+    let stale = st.options_fee_notice.clone().unwrap();
+    // the node refused the connection - the exact text differs by platform
+    // ("no node reachable" when no rpc_addr is set, a connect error when the
+    // address is set but nothing listens), so assert on the failure itself
+    assert!(
+        stale.contains("no node reachable") || stale.contains("settxfee:"),
+        "unexpected notice: {}",
+        stale
+    );
+
+    // point the GUI at a node that ACCEPTS settxfee, then apply again
+    let (addr, stop, seen, server) = accepting_fee_node();
+    st.cfg.rpc_addr = Some(addr);
+    st.save_options_action().expect("apply");
+    // the successful push must have CLEARED the stale notice
+    assert!(
+        st.options_fee_notice.is_none(),
+        "a successful push must clear the stale notice, got: {:?}",
+        st.options_fee_notice
+    );
+    // ...and the stale text must not survive anywhere
+    let again = st.options_fee_notice.clone().unwrap_or_default();
+    assert!(!again.contains("no node reachable"), "{}", again);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let served = server.join().unwrap();
+    assert!(served >= 1, "the mock node must have been called");
+    // the stand-in must have been answering a REAL settxfee request
+    let req = seen.lock().unwrap().clone();
+    let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    let method = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_string()));
+    assert_eq!(
+        method.as_deref(),
+        Some("settxfee"),
+        "the GUI must call settxfee, got {:?}; body: {}",
+        method,
+        body.chars().take(200).collect::<String>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

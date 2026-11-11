@@ -1,0 +1,91 @@
+commit 795a1e622306f1ffa3cde13731754fcb9545e8f1
+Author: Krystie <krystie@openclaw.local>
+Date:   Sat Nov 7 16:15:33 2026 -0800
+
+    [grade=A urn:ump:hvuizt5qmw6cqncpkznpqxmaqjelobzzay55um44vi22ooss5rla] tri7: legacy listaddressgroupings + getcheckpoint verbs (workqueue item 8 RPC-P1a) — grouping from history rows + input-side capture + address-book IsChange, checkpoint verb serves the compiled anchor strictly; +10 tests (484 lib)
+
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index f011bbf..5c7f419 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -2197,9 +2197,11 @@ fn rpc_seed_window(
+ ///
+ /// `--full-validate` restores the pre-assume-valid strict behavior for the
+ /// whole from-zero walk (slow: every historical kernel enforced).
+-const CHECKPOINT_HORIZON: u64 = 2_203_924; // = Checkpoints::GetTotalBlocksEstimate() on the deployed client
+-const CHECKPOINT_ANCHOR_DISPLAY: &str =
+-    "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14"; // getblockhash(2203924), daemon-verified
++/// CHECKPOINT_HORIZON / CHECKPOINT_ANCHOR_DISPLAY moved to tri7_core::consensus
++/// so the getcheckpoint RPC verb serves the SAME constant the validator
++/// enforces (lib + bin cannot drift). Semantics unchanged: h >= horizon is
++/// full-strict; the anchor binds the trusted history below.
++use tri7_core::consensus::{CHECKPOINT_ANCHOR_DISPLAY, CHECKPOINT_HORIZON};
+ const V6_RESTART_HEIGHT_U64: u64 = 2_200_900; // = consensus::V6_RESTART_HEIGHT; deployed index: real proofs from here up
+ 
+ /// Which kernel treatment applies to a historical block at height h.
+@@ -4528,6 +4530,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+         tri7_core::rpc::WalletProvider::pubkey_for_address(self.snap.as_ref(), addr)
+     }
+ 
++    fn labels(&self) -> std::collections::HashMap<String, String> {
++        tri7_core::rpc::WalletProvider::labels(self.snap.as_ref())
++    }
++
+     fn balance(&self) -> Option<BalanceView> {
+         if let Ok(g) = self.wl.lock() {
+             if let Some(w) = g.as_ref() {
+@@ -7457,7 +7463,18 @@ fn main() {
+     // when every target is unreachable — it retries the rotation each poll
+     // tick. Seeding (no state) still requires a live peer.
+     let path = state_path(&cfg);
+-    let have_state = path.exists() && !cfg.reseed;
++    let blocks_file = resolve_blocks_file(&cfg);
++    // A state that knows only genesis (tip h0) with no block bodies on disk is
++    // not usable state — treat it as a bare machine so the from-zero path
++    // starts the body fetch on its own. Anyone who downloads the wallet must
++    // be able to sync from zero without any flag or manual step (Sami).
++    let store_usable = blocks_file
++        .as_ref()
++        .map(|bf| {
++            bf.exists() && std::fs::metadata(bf).map(|m| m.len() > 0).unwrap_or(false)
++        })
++        .unwrap_or(false);
++    let have_state = path.exists() && !cfg.reseed && store_usable;
+     // FROM-ZERO: explicit flag, or AUTOMATIC on a bare machine (no state
+     // + explicit peers) — the fresh-install default path.
+     let from_zero = cfg.sync_from_zero || (!have_state && cfg.explicit_peers);
+@@ -7567,7 +7584,6 @@ fn main() {
+     // state to the peer tip through the normal acceptance gate. Resume-safe:
+     // a restart with a partial tipstate continues from its tip. When the
+     // rounds return 0, we ARE at the peer tip and normal follow takes over.
+-    let blocks_file = resolve_blocks_file(&cfg);
+     let store = BlockStore::new(blocks_file.clone(), Some(cfg.index_dir.clone()));
+     // FROM-ZERO durability prerequisite: the disk store must EXIST and be
+     // ready BEFORE the first block is accepted. A from-zero box has no
+@@ -8151,6 +8167,18 @@ fn main() {
+                 })
+                 .unwrap_or_default(),
+         ));
++    // Address book labels (legacy mapAddressBook name rows): consumed by
++    // listaddressgroupings for the IsChange decision + the label column.
++    let wallet_labels: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
++        Arc::new(std::sync::RwLock::new(
++            wl_shared
++                .lock()
++                .ok()
++                .and_then(|g| {
++                    g.as_ref().map(|w| w.wallet.names.iter().cloned().collect())
++                })
++                .unwrap_or_default(),
++        ));
+     // Operator fee setting persisted by settxfee (nTransactionFee). Restored
+     // BEFORE the RPC listener answers so estimatefee and every spend from
+     // second zero agree with the setting the operator last made.
+@@ -8184,6 +8212,7 @@ fn main() {
+                     utxos: utxos_snap,
+                     extra: Arc::clone(&wallet_extras),
+                     pubkeys: Arc::clone(&wallet_pubkeys),
++                    labels: Arc::clone(&wallet_labels),
+                 }),
+                 wl: Arc::clone(&wl_shared),
+                 st: Arc::clone(&st_shared),

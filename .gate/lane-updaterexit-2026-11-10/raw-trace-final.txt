@@ -1,0 +1,41 @@
+# RAW timestamped trace — the EXACT bundled production bytes
+# (wrapper-spaces.bat variant run in work dir "C:\upd test" — the quoting
+# stress case; prod wrapper = wrapper-final.bat, hashes.txt)
+# Verbatim debug.log from the machine:
+[ 2:04:31.45] IDENTITY-TRUNCATED
+[ 2:04:48.71] KILL
+[ 2:04:48.71] DISCOVERY+TASK-STOP
+[ 2:04:49.81] KILL
+[ 2:04:50.09] KILL
+[ 2:04:50.34] INSTALLER-START
+[ 2:04:50.37] INSTALLER-DONE rc=2
+[ 2:04:50.37] FAILURE-MARKER-WRITTEN
+[ 2:04:50.38] RELAUNCH-START
+[ 2:04:50.38] TASK-RESTORE-START
+[ 2:04:50.78] TASK-RESTORE-DONE
+[ 2:04:50.78] IDENTITY-REMOVED-AFTER-RESTORE
+[ 2:04:50.78] SELF-DEL
+("The batch file cannot be found." = the harmless EOF after self-del.)
+
+# READING (all phases of the shipped script, in order, timestamped):
+# 1. identity truncated ONCE before the wait loops
+# 2. bounded waits: 17.3s REAL 1s sleeps between truncation and the first
+#    kill (60/15-cap loop anatomy; real sleeps this run — no redirection)
+# 3. discovery + Stop-ScheduledTask (the Tasks-module line)
+# 4. kill -> settle -> re-kill
+# 5. installer EXECUTED, rc CAPTURED (rc=2 from the synthetic where.exe /S)
+# 6. failure marker written IMMEDIATELY AFTER the installer, BEFORE relaunch
+#    (post-run content: "update-install-failed rc=2" — the valued rc in the
+#    file; the redirect-first fix proven live)
+# 7. relaunch executed
+# 8. restoration: Start-ScheduledTask ran (0.4s) — SUCCESS witnessed in this
+#    session's r5-era run (fresh daemon PID 32372 with zero manual steps);
+#    KNOWN LIMITATION, witnessed this run: on this machine the restoration
+#    start can be lost when duplicate daemon instances from earlier manual
+#    /runs are still settling (port-bind self-exit cascade) — the daemon
+#    came back via the fleet task arrangement (manual /run used as the
+#    restore here: PID 25124 at fleet height 2208915, RPC verified). The
+#    operator-visible flow (install + GUI relaunch) is unaffected.
+
+# POST-RUN STATE (verbatim): install-failed.marker "update-install-failed
+# rc=2"; relaunch.marker "relaunched"; tri7-update.bat ABSENT (self-del).

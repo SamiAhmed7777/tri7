@@ -1,0 +1,3 @@
+Round 1: GRADE=B urn=urn:ump:lywatm7w6ziysapykpqnt2ox4i77j237vjp4k5ohndb7lmz4fala (zero blockers; polish: register_pool_key overwrite guard, census semantics doc, truncated-bundle note)
+Round 1 polish TAKEN: register_pool_key pre-scan + overwrite log; keypool_stats/WalletExtras census-semantics doc (qt GetKeyPoolSize parity; artifact-skip scoped to the issuance path).
+Round 2: GRADE=A urn=urn:ump:dwjzfsgvl6zfjzqb7lbkqskkdvra6pulp552j3avfrpozdhk564a (zero blockers; residual polish: usable-count field / shared SQL helper / full-source re-judge — non-blocking, future ticks)

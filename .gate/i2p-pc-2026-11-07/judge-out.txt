@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:flykldcs7quzcizzyq6k4hb23s5nfrlvi22aeyjbccfwjpk6hlsq
+{
+  "blocking": [],
+  "polish": [
+    "The `host.ends_with(\".b32.i2p\") || host.ends_with(\".i2p\")` check is redundant (.b32.i2p is subsumed by .i2p); simplify to one ends_with(\".i2p\")",
+    "The transport label for the accept log is derived from t.transport but the gate allows any host ending .onion \u2014 if PeerTarget::parse ever mis-classifies, the log could say tor for a non-onion host; consider asserting the gate and classification agree (or log the transport enum directly)",
+    "A dedicated unit test for a bare `.i2p` (non-b32) host would pin down the broader-suffix behavior explicitly"
+  ]
+}

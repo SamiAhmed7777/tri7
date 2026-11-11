@@ -1,0 +1,11 @@
+# Evidence — lane-updaterexit
+worktree /root/tri7-lanes/lane-updaterexit @ lane/updater-exit (base e42c79b = origin/master)
+state: base + uncommitted modifications in updaterexit.diff
+
+== full lib suite ==
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 567 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 48.12s
+
+== GUI-feature check (app.rs compiled) ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.44s

@@ -1,0 +1,121 @@
+--- a/start_tri7.sh
++++ b/start_tri7.sh
+@@ -1,40 +1,72 @@
+ #!/usr/bin/env bash
+-# Activate tri7 on the aarch64 box against a COPY of the legacy wallet.
++# Activate tri7 on the aarch64 box as a PURE FULL NODE: the attached wallet
++# is a freshly created ZERO-KEY container (no coins possible - the funded
++# keys live on sami-pc per the operator directive of 2026-11-07). The ops
++# RPC gate (follow_tip.rs OpsAdapter::ready) requires a wallet live view, so
++# the node runs with the empty container rather than no wallet file. The
++# former funded wallet copy is archived on DNS2:
++# /root/tri7-recovery/pi-wallet-archive/ (sha256 2de64382...).
+ # TOR ONLY: .onion peers via the local SOCKS proxy; P2P listener bound to
+ # loopback so no clearnet address is ever exposed or dialled.
+ set -euo pipefail
+ 
+ BIN=/root/tri7/target/release/follow_tip
+ STATE=/var/lib/tri7
+-WALLET_DIR=/root/tri7-wallet
+-WALLET=$WALLET_DIR/wallet.dat
+-ORIG=/root/.triangles/wallet.dat
+ PIDFILE=$STATE/tri7d.pid
+ LOG=$STATE/tri7d.log
++# fresh zero-key wallet container (created 2026-11-07; NEVER holds funds)
++WALLET_DIR=/root/tri7-wallet
++EMPTY_WALLET=$WALLET_DIR/wallet-empty.dat
+ 
+-# onion peers from the legacy conf (Tor only). No clearnet, no Tailscale.
+ # Tor-only peers. DNS2's LIVE onion (port 24113 -> its P2P listener).
+-# The four legacy addnodes in the old conf are dead (host unreachable) and
+-# DNS2's own systemd unit advertises a stale address, so use the verified one.
+ ONIONS="gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+ 
+ [[ -x $BIN ]] || { echo "FAIL: $BIN missing"; exit 1; }
+ 
+-# Tor must actually be running — refuse to start without it rather than
++# Tor must actually be running - refuse to start without it rather than
+ # silently falling back to clearnet.
+ if ! (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null; then
+-  echo "FAIL: Tor SOCKS is not listening on 127.0.0.1:9050 — start tor@default first"
++  echo "FAIL: Tor SOCKS is not listening on 127.0.0.1:9050 - start tor@default first"
+   exit 2
+ fi
+ 
+ mkdir -p "$STATE" "$WALLET_DIR"
+-if [[ ! -f $WALLET ]]; then
+-  cp -p "$ORIG" "$WALLET"
+-  chmod 600 "$WALLET"
+-  echo "wallet copied: $(stat -c%s "$WALLET") bytes"
+-else
+-  echo "wallet copy present: $(stat -c%s "$WALLET") bytes"
++
++# The zero-key wallet container must exist and be exactly that: tri7 schema,
++# zero rows. Create it if missing; refuse to start on any mismatch (the ops
++# RPC gate requires a wallet live view, and a funded container must never be
++# attached here - the funded wallet lives on sami-pc).
++if [[ ! -f $EMPTY_WALLET ]]; then
++  python3 - "$EMPTY_WALLET" <<'PYEOF'
++import sqlite3, sys
++con = sqlite3.connect(sys.argv[1])
++con.execute("PRAGMA application_id = 1414687095")
++con.execute("PRAGMA user_version = 1")
++con.execute("CREATE TABLE main (key BLOB, value BLOB)")
++con.commit()
++con.close()
++PYEOF
++  chmod 600 "$EMPTY_WALLET"
++  echo "created zero-key wallet: $EMPTY_WALLET"
+ fi
++WALLET_CHECK=$(python3 - "$EMPTY_WALLET" <<'PYEOF'
++import sqlite3, sys
++try:
++    con = sqlite3.connect(sys.argv[1])
++    app = con.execute("PRAGMA application_id").fetchone()[0]
++    uv = con.execute("PRAGMA user_version").fetchone()[0]
++    n = con.execute("SELECT COUNT(*) FROM main").fetchone()[0]
++    tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
++    print(f"{app}:{uv}:{n}:{sorted(tables)}")
++except Exception as e:
++    print(f"ERR:{e}")
++PYEOF
++)
++if [[ $WALLET_CHECK != "1414687095:1:0:['main']" ]]; then
++  echo "FAIL: $EMPTY_WALLET is not the expected zero-key container (got $WALLET_CHECK); refusing to start"
++  exit 3
++fi
++
+ 
+ if [[ -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+   echo "already running pid $(cat "$PIDFILE")"
+@@ -42,7 +74,7 @@
+ fi
+ 
+ echo "commit: $(cat /root/tri7/BUILD_COMMIT 2>/dev/null || echo unknown)"
+-echo "binary: $(file -b "$BIN" | cut -c1-60)"
++echo "mode: full node, zero-key wallet (no coins)"
+ nohup "$BIN" \
+   --socks 127.0.0.1:9050 \
+   --daemon "$ONIONS" \
+@@ -50,12 +82,12 @@
+   --state-dir "$STATE" \
+   --blocks-file /root/.triangles/blk0001.dat \
+   --index-dir "$STATE/index" \
+-  --wallet "$WALLET" \
++  --wallet "$EMPTY_WALLET" \
+   --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy \
+   --backfill 0 --forever \
+   > "$LOG" 2>&1 &
+ echo $! > "$PIDFILE"
+-echo "started pid $(cat "$PIDFILE") (Tor-only)"
++echo "started pid $(cat "$PIDFILE") (Tor-only, zero-key wallet)"
+ 
+ for i in $(seq 1 120); do
+   if (exec 3<>/dev/tcp/127.0.0.1/19112) 2>/dev/null; then
+@@ -66,4 +98,4 @@
+ done
+ echo "RPC did not open within 240s; log tail:"
+ tail -20 "$LOG"
+-exit 1
+\ No newline at end of file
++exit 1

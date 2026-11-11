@@ -1,0 +1,25 @@
+===0-ONPC-HASH-OF-EXECUTED-BYTES=== 
+SHA256 hash of C:\updtest\tri7-update.bat:
+973a4ac481ed1c824273474a856b5116891b7e11b01f35f80d42e54b346bdce2
+CertUtil: -hashfile command completed successfully.
+===1-DIR=== 
+fake-setup.exe
+install-failed.marker
+relaunch.cmd
+relaunch.marker
+update-tasks.txt
+===2-UPDATE-TASKS=== 
+\tri7d
+===3-FAILMARKER=== 
+update-install-failed rc=2
+===4-RELAUNCH=== 
+relaunched
+===5-DAEMON=== 
+follow_tip.exe               17148 Services                   0    165,728 K
+===6-RPC=== 
+{"error":null,"id":null,"result":2208995,"source":"tri7"} 
+===7-WRAPPER-SELF-DEL=== 
+SELF-DELETED
+===8-CLEANUP===
+REMOVED
+Status:        Running

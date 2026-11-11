@@ -1,0 +1,13 @@
+== gate run 2026-11-10T06:40:39Z on diff.patch (base 109db1dc45f2414f26a4ed0d7e65309e17cb6cc8)
+-- cargo test --release --lib
+test result: ok. 567 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.19s
+
+-- cargo test --release --bin follow_tip (full + empty_reply filter)
+test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+test tests::empty_reply_streak_fires_regardless_of_start_height ... ok
+test tests::empty_reply_streak_bookkeeping_counts_and_resets ... ok
+test tests::recon_empty_reply_judges_and_closes_a_cap_sized_branch ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.17s
+-- cargo build --release --target x86_64-pc-windows-gnu --bins
+    Finished `release` profile [optimized] target(s) in 3m 18s

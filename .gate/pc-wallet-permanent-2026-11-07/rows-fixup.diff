@@ -1,0 +1,16 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 8b001bd..a473005 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -2050,10 +2050,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                 // Stake/Unconfirmed/Immature rows keep the local split's
+                 // maturing-view figures (informational — the local coverage
+                 // trails the node during heavy staking churn).
+-                let (lstake, lunconf, limmature, _ltotal, _ltip) = {
+-                    let (_sp, sk, uc, im, _tot, _tp) = st.balance_split();
+-                    (sk, uc, im)
+-                };
++                let (_sp, lstake, lunconf, limmature, _ltotal, _ltip) = st.balance_split();
+                 let tri = s::format_tri(ds);
+                 let spend_tip = "Your current spendable balance (node getbalance — authoritative, live)";
+                 egui::Grid::new("balance_grid_daemon")

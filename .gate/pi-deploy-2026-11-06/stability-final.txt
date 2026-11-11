@@ -1,0 +1,9 @@
+window advances: 14
+window FAIL lines: 0
+first/last advance in window:
+[2026-11-07T00:57:40Z] TIP ADVANCE → h2206813 c4f768234abaa82cec2a1760a35c21aab3641b51038f67fd3867d0a12b9142d0 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:21:04Z] TIP ADVANCE → h2206826 e20c2557b5bb188c957146eb37d7c1ce554f187cc5bed1386b00d2ae1f1f402a (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+now: 2026-11-07T01:21:58Z
+tip: 2206826
+peers: "count":2
+staking: "attempts":0 "enabled":false

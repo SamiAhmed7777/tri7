@@ -1,0 +1,56 @@
+### 2026-11-08 fork (sami-pc solo branch) — read before ANY tip check
+
+A routine post-deploy tip check caught sami-pc at 2207544 while canonical
+DNS2+Pi sat at 2207452 — the PC had been peerless, staking its own branch
+since fork point h2206952 (~609 solo blocks, 2x heavier by work). Item 8's
+tick had even recorded the forked tip as a fact without comparing it to
+DNS2. **A tip read that is never cross-compared across nodes at the same
+moment proves nothing.** Repair + the isolated-minter work analysis (a
+peerless staker with shared coins out-paces the canonical branch):
+references/2026-11-08-fork-repair.md. Post-repair, repairwallet found and
+healed a 3-output live-view drift — the wallet live view does not roll
+back on fork-choice reorgs (repairwallet is the healing verb until
+rollback_tip learns to roll the map). Daemon swaps on DNS2/DNS3 must stop
+`tri7d-health.timer` FIRST (its 5-min run cancels `systemctl stop` jobs),
+and multi-line `powershell -Command` over ssh silently no-ops — one
+command per call.
+
+
+
+=== second addition (section 8 bullet) ===
+
+- **`repairwallet` / `resendtx` (2026-11-08, commits d48cf4b+3cd2afc):**
+  repairwallet rebuilds the live view from the store and diffs wallet-owned
+  outputs (the tri7 analogue of legacy FixSpentCoins — there are no persisted
+  spent flags); resendtx re-accepts + re-announces the wallet's recorded
+  unconfirmed sends (new `sent_txs.json` beside the wallet, appended by
+  relay_built under `sent_txs::record_lock` which is ALWAYS lock #1 before
+  pool/wl). **The mine-gate is fail-closed for a reason:** the pool's store
+  deep-coin fallback (WalletThenStoreUtxoView) resolves prevouts WITHOUT
+  spent-tracking, so a MINED tx re-validates on accept — a resend pass that
+  doesn't gate on `store.tx_by_id` before accept re-injects double-spends
+  into the staker's pool (live-caught on DNS2; the gate prunes mined entries
+  instead). The `staking` RPC takes the STRING "off"/"on" — a JSON boolean
+  is silently ignored (the arm reads params as strings).
+
+## 9. Windows file-lock discipline (daemon state and binaries)
+
+*Fleet-observed operational guidance (2026-09 to 2026-11); error strings are
+quoted from real log lines but no per-bullet captures are shipped here —
+treat as guidance, not test output. The 2026-11-05 incident record
+(references/2026-11-05-fork-repair.md) supports ONLY: the section 1 RPC-instance
+bullet, the section 2 copy recipe and section 3 PC exit-4 observation, section
+6's tri7gui-disable rationale, and section 7's two fork bullets (plus the DNS2
+override snapshot in its section 10).*
+
+Windows refuses to replace a file that any process has open, so two everyday
+actions behave differently than on Linux:
+
+- **Checkpoint writes must retry and must never be fatal.** `write_state_atomic`
+  writes `tipstate.json.tmp` then renames over `tipstate.json`; the GUI polling
+  tipstate or an AV filter holding the destination makes `MoveFileEx` return
+  `Access is denied (os error 5)`. Retry the rename ~12x with backoff, and on
+  the tip-advance path treat a failed write as a logged deferral — the block is
+  already applied in memory and appended to the store, so exiting only makes the
+  node fall behind and look "unsynchronized". Symptom of getting this wrong: a
+  `FAIL(

@@ -1,0 +1,1108 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index b65755a..a7360bf 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -81,6 +81,7 @@ jobs:
+           path: |
+             target/release/follow_tip.exe
+             target/release/tri7_wallet_gui.exe
++            target/release/txhistory.exe
+       # Updater release-asset shapes (src/updater.rs resolves exactly these
+       # names on GitHub Releases):
+       #   CryptographicTriangles-<ver>-win64-setup.exe        (NSIS /S)
+diff --git a/src/bin/tri7_wallet_gui.rs b/src/bin/tri7_wallet_gui.rs
+index d065367..abb2078 100644
+--- a/src/bin/tri7_wallet_gui.rs
++++ b/src/bin/tri7_wallet_gui.rs
+@@ -103,42 +103,56 @@ fn main() {
+             im as f64 / 1e6,
+             total as f64 / 1e6
+         );
+-        // sample row statuses exactly as the Transactions table renders them
++        // sample rows EXACTLY as the page renders them: the shared row view
++        // (page == CSV == probe), printing the rendered status sentence and
++        // amount string verbatim, plus the hover tooltip it would show
+         let (_, _, _, _, _, tip_h) = st.balance_split();
+-        for r in rows.iter().take(5) {
+-            let lk = if r.kind == "coinbase" || r.kind == "coinstake" {
+-                tri7_core::legacy_rows::LegacyKind::Generated
+-            } else if r.value_sats < 0 {
+-                tri7_core::legacy_rows::LegacyKind::SendToAddress
+-            } else {
+-                tri7_core::legacy_rows::LegacyKind::RecvWithAddress
+-            };
+-            let depth = tri7_core::legacy_rows::depth_of(r.height, tip_h);
+-            let (status, matures) =
+-                tri7_core::legacy_rows::status_for(lk, depth, tip_h, r.height);
+-            let row = tri7_core::legacy_rows::LegacyRow {
+-                txid: r.txid.clone(),
+-                idx: 0,
+-                time: r.time,
+-                height: r.height,
+-                kind: lk,
+-                address: r.address.clone(),
+-                debit: 0,
+-                credit: r.value_sats,
+-                status,
+-                depth,
+-                matures_in: matures,
+-            };
++        let mut stake_printed = 0usize;
++        let mut send_printed = 0usize;
++        for (i, r) in merged.iter().enumerate() {
++            let view = st.tx_row_view(r, tip_h as u32);
++            let is_stake = r.prev_kind == "coinstake" || r.legacy_kind == "mined";
++            let is_send = view.negative;
++            if i >= 5 {
++                if !(is_stake && stake_printed < 3) && !(is_send && send_printed < 3) {
++                    continue;
++                }
++                if is_stake {
++                    stake_printed += 1;
++                } else if is_send {
++                    send_printed += 1;
++                }
++            }
+             println!(
+-                "row h{} depth {} -> {}",
++                "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
+                 r.height,
+-                depth,
+-                row.status_text()
++                tri7_core::legacy_rows::depth_of(r.height as u64, tip_h),
++                view.status_text,
++                view.amount_text,
++                r.txid_display(),
++                view.tooltip.replace('\n', " / ")
+             );
+         }
+         println!("--- what the page would print ---");
+         println!("{}", st.history_status_line());
+-        std::process::exit(if rows.is_empty() { 1 } else { 0 });
++        // --history-probe-full: audit dump — EVERY merged row through the
++        // same shared view (the default samples 5 + 3 stake + 3 send)
++        if args.iter().any(|a| a == "--history-probe-full") {
++            println!("--- full dump: {} rows ---", merged.len());
++            for r in merged.iter() {
++                let view = st.tx_row_view(r, tip_h as u32);
++                println!(
++                    "row h{} depth {} -> {} | amt {} | txid {} | tooltip \"{}\"",
++                    r.height,
++                    tri7_core::legacy_rows::depth_of(r.height as u64, tip_h),
++                    view.status_text,
++                    view.amount_text,
++                    r.txid_display(),
++                    view.tooltip.replace('\n', " / ")
++                );
++            }
++        }
++        std::process::exit(if merged.is_empty() { 1 } else { 0 });
+     }
+     if selfcheck {
+         report = get("--report", &args);
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index e863aaf..8668c91 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -3467,25 +3467,8 @@ impl Tri7App {
+     // -----------------------------------------------------------------------
+     // §10.5 Transactions
+     // -----------------------------------------------------------------------
+-    fn tx_type_name(prev_kind: &str) -> &'static str {
+-        if prev_kind == "coinbase" {
+-            "Mined"
+-        } else if prev_kind == "coinstake" {
+-            "Stake reward"
+-        } else {
+-            "Received with"
+-        }
+-    }
+-
+-    fn tx_type_index(prev_kind: &str) -> usize {
+-        if prev_kind == "coinbase" {
+-            2
+-        } else if prev_kind == "coinstake" {
+-            3
+-        } else {
+-            1
+-        }
+-    }
++    // tx_type_name moved to AppState::tx_type_name (shared with the probe/CSV
++    // row view) — one implementation, no drift.
+ 
+     fn page_transactions(&mut self, ui: &mut egui::Ui) {
+         th::page_header(ui, "Transactions", "");
+@@ -3664,73 +3647,29 @@ impl Tri7App {
+             }
+             let sel_idx = self.tx_selected;
+             for (i, (orig_idx, u)) in rows.iter().enumerate() {
+-                let depth = tip.saturating_sub(u.height);
+-                let confirmed = depth >= 6;
+-                // legacy status machine (src/legacy_rows.rs) — "Confirmed (12
+-                // confirmations)", "Immature (3 confirmations, will be
+-                // available after 7)", "Confirming (2 of 4 confirmations)"
+-                let lk = if !u.legacy_kind.is_empty() {
+-                    match u.legacy_kind.as_str() {
+-                        "mined" => crate::legacy_rows::LegacyKind::Generated,
+-                        "send" => crate::legacy_rows::LegacyKind::SendToAddress,
+-                        "self" => crate::legacy_rows::LegacyKind::SendToSelf,
+-                        "recv_from" => crate::legacy_rows::LegacyKind::RecvFromOther,
+-                        _ => crate::legacy_rows::LegacyKind::RecvWithAddress,
+-                    }
+-                } else if u.prev_kind == "coinbase" || u.prev_kind == "coinstake" {
+-                    crate::legacy_rows::LegacyKind::Generated
+-                } else if u.value_sats < 0 {
+-                    crate::legacy_rows::LegacyKind::SendToAddress
+-                } else {
+-                    crate::legacy_rows::LegacyKind::RecvWithAddress
+-                };
+-                let depth_legacy = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
+-                let (lstatus, matures_in) =
+-                    crate::legacy_rows::status_for(lk, depth_legacy, tip as u64, u.height as u64);
+-                let lrow = crate::legacy_rows::LegacyRow {
+-                    txid: u.txid_display(),
+-                    idx: 0,
+-                    time: u.tx_time,
+-                    height: u.height as u64,
+-                    kind: lk,
+-                    address: u.address.clone(),
+-                    debit: if u.value_sats < 0 { u.value_sats } else { 0 },
+-                    credit: if u.value_sats > 0 { u.value_sats } else { 0 },
+-                    status: lstatus,
+-                    depth: depth_legacy,
+-                    matures_in,
+-                };
+-                let status_text = lrow.status_text();
+-                let glyph_key = crate::legacy_rows::status_glyph(
+-                    &lstatus,
+-                    depth_legacy,
+-                    !matches!(lstatus, crate::legacy_rows::LegacyStatus::Immature),
+-                    matures_in,
+-                )
+-                .unwrap_or("icons/tx_zero");
+-                let glyph = glyph_for(glyph_key);
++                // ONE shared render computation (page == CSV == probe)
++                let view = self.st.tx_row_view(u, tip);
++                let glyph = glyph_for(view.glyph_key);
+                 let tex = glyph.as_ref();
+-                // colour follows the glyph, exactly like the legacy column:
+-                // grey unconfirmed, amber while confirming, green when confirmed
+-                let color = match lstatus {
+-                    crate::legacy_rows::LegacyStatus::Confirmed => th::TX_IN_GREEN_BRIGHT,
+-                    crate::legacy_rows::LegacyStatus::Confirming
+-                    | crate::legacy_rows::LegacyStatus::Immature => th::TEXT_PRIMARY,
+-                    crate::legacy_rows::LegacyStatus::Conflicted => th::ERROR,
+-                    _ => th::TEXT_SECONDARY,
+-                };
+-                let type_label: String = if lk.label().is_empty() {
+-                    Self::tx_type_name(&u.prev_kind).to_string()
++                // colour follows the glyph ladder (grey unconfirmed, amber
++                // confirming, green confirmed) — but OUTGOING amounts keep
++                // the red family (palette rule: received deep green vs red)
++                let color = if view.negative {
++                    th::ERROR
+                 } else {
+-                    lk.label().to_string()
++                    match view.status {
++                        crate::legacy_rows::LegacyStatus::Confirmed => th::TX_IN_GREEN_BRIGHT,
++                        crate::legacy_rows::LegacyStatus::Confirming
++                        | crate::legacy_rows::LegacyStatus::Immature => th::TEXT_PRIMARY,
++                        crate::legacy_rows::LegacyStatus::Conflicted => th::ERROR,
++                        _ => th::TEXT_SECONDARY,
++                    }
+                 };
+-                let label = self
+-                    .st
+-                    .label_of(&u.address)
+-                    .map(|l| l.to_string())
+-                    .unwrap_or_else(|| u.address.clone());
+-                let amt = format!("+{} {}", s::format_tri(u.value_sats), s::TICKER);
+-                let conf_label = status_text.clone();
++                let type_label = view.type_label.clone();
++                let label = view.label.clone();
++                let amt = view.amount_text.clone();
++                // tooltip = legacy formatTooltip (status / type / address)
++                let conf_label = view.tooltip.clone();
+                 let date = fmt_unix(u.tx_time);
+                 let selected = sel_idx == Some(*orig_idx);
+                 let ir = th::table_row(ui, i, selected, w, |rui| {
+@@ -3771,22 +3710,40 @@ impl Tri7App {
+     }
+ 
+     fn tx_details(&mut self, ui: &mut egui::Ui, idx: usize) {
+-        let Some(derived) = self.st.derived.clone() else {
+-            return;
+-        };
+-        let Some(u) = derived.utxos.get(idx) else {
++        // The drawer MUST read the same list the table rendered (merged
++        // rows). It used to index derived.utxos — a different list — so the
++        // clicked row and the shown details could be entirely unrelated
++        // transactions, and it bailed out entirely on fresh installs with no
++        // local snapshot.
++        let merged = self.st.merged_transaction_rows();
++        let Some(u) = merged.get(idx) else {
+             self.tx_selected = None;
+             return;
+         };
+-        let tip = self.st.tip.as_ref().map(|x| x.height as u32).unwrap_or(0);
++        let tip = self
++            .st
++            .debug_info
++            .as_ref()
++            .filter(|d| d.reachable)
++            .and_then(|d| d.blocks)
++            .or_else(|| self.st.tip.as_ref().map(|x| x.height))
++            .unwrap_or(0) as u32;
++        let view = self.st.tx_row_view(u, tip);
+         let depth = tip.saturating_sub(u.height);
+         let confirmed = depth >= 6;
+         let txid = u.txid_display().clone();
++        let address = u.address.clone();
++        let status_sentence = view.status_text.clone();
++        let type_label = view.type_label.clone();
++        let amount_text = view.amount_text.clone();
++        let amount_neg = view.negative;
+         let label = self
+             .st
+-            .label_of(&u.address)
++            .label_of(&address)
+             .map(|l| l.to_string())
+             .unwrap_or_default();
++        let d = fmt_unix(u.tx_time);
++        let d = if d.is_empty() { "—".to_string() } else { d };
+         ui.add_space(8.0);
+         th::card_titled(ui, "Transaction details", |ui| {
+             egui::Grid::new("tx_detail_grid")
+@@ -3798,7 +3755,7 @@ impl Tri7App {
+                     ui.end_row();
+                     ui.label(egui::RichText::new("Status:").color(th::TEXT_SECONDARY));
+                     ui.label(
+-                        egui::RichText::new(if confirmed { "Confirmed" } else { "Pending" })
++                        egui::RichText::new(&status_sentence)
+                             .color(if confirmed { th::SUCCESS } else { th::WARNING }),
+                     );
+                     ui.end_row();
+@@ -3806,14 +3763,13 @@ impl Tri7App {
+                     ui.label(egui::RichText::new(depth.to_string()).monospace());
+                     ui.end_row();
+                     ui.label(egui::RichText::new("Date:").color(th::TEXT_SECONDARY));
+-                    let d = fmt_unix(u.tx_time);
+-                    ui.label(if d.is_empty() { "—".to_string() } else { d });
++                    ui.label(&d);
+                     ui.end_row();
+                     ui.label(egui::RichText::new("Type:").color(th::TEXT_SECONDARY));
+-                    ui.label(Self::tx_type_name(&u.prev_kind));
++                    ui.label(&type_label);
+                     ui.end_row();
+                     ui.label(egui::RichText::new("Address:").color(th::TEXT_SECONDARY));
+-                    ui.label(egui::RichText::new(&u.address).monospace());
++                    ui.label(egui::RichText::new(&address).monospace());
+                     ui.end_row();
+                     if !label.is_empty() {
+                         ui.label(egui::RichText::new("Label:").color(th::TEXT_SECONDARY));
+@@ -3822,13 +3778,9 @@ impl Tri7App {
+                     }
+                     ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
+                     ui.label(
+-                        egui::RichText::new(format!(
+-                            "+{} {}",
+-                            s::format_tri(u.value_sats),
+-                            s::TICKER
+-                        ))
+-                        .monospace()
+-                        .color(th::TX_IN_GREEN_BRIGHT),
++                        egui::RichText::new(&amount_text)
++                            .monospace()
++                            .color(if amount_neg { th::ERROR } else { th::TX_IN_GREEN_BRIGHT }),
+                     );
+                     ui.end_row();
+                 });
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index e6b3f52..3da7f94 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -97,6 +97,28 @@ pub struct ConsoleEntry {
+     pub error: Option<String>,
+ }
+ 
++/// One rendered Transactions row — everything the page (and the headless
++/// --history-probe) shows for it, produced by AppState::tx_row_view.
++#[derive(Debug, Clone)]
++pub struct TxRowView {
++    /// the confirmation sentence the tooltip leads with
++    pub status_text: String,
++    /// the Amount cell string, e.g. "+0.004058 TRI" / "-0.500000 TRI"
++    pub amount_text: String,
++    /// legacy formatTooltip(): status \n type [label/address]
++    pub tooltip: String,
++    /// status glyph asset key ("icons/tx_confirmed" ...)
++    pub glyph_key: &'static str,
++    /// Type column text
++    pub type_label: String,
++    /// Label/Address column text
++    pub label: String,
++    /// legacy status enum (the page maps it to a colour)
++    pub status: crate::legacy_rows::LegacyStatus,
++    /// outgoing (amount in the red family)
++    pub negative: bool,
++}
++
+ #[derive(Debug, Clone, Default)]
+ pub struct DebugInfo {
+     pub reachable: bool,
+@@ -1848,36 +1870,52 @@ impl AppState {
+     /// appeared even though the balance kept climbing.
+     pub fn merged_transaction_rows(&self) -> Vec<crate::gui::state::UtxoRec> {
+         let (hist, _) = self.load_history_file();
+-        let mut rows: Vec<crate::gui::state::UtxoRec> = hist
+-            .into_iter()
+-            .map(|h| {
+-                let mut txid = [0u8; 32];
+-                if h.txid.len() == 64 {
+-                    let bytes: Vec<u8> = (0..32)
+-                        .filter_map(|i| u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok())
+-                        .collect();
+-                    if bytes.len() == 32 {
+-                        txid.copy_from_slice(&bytes);
+-                        txid.reverse();
+-                    }
++        // legacy transactionrecord.cpp decomposeTransaction: a coinstake is
++        // ONE row (credit = nNet, the reward); its per-output history rows
++        // collapse here so the page never shows the same stake twice. The
++        // raw output rows stay in history.json for ownership tracking.
++        let mut collapsed: std::collections::HashSet<String> = std::collections::HashSet::new();
++        let mut rows: Vec<crate::gui::state::UtxoRec> = Vec::new();
++        for h in hist {
++            if h.coinstake {
++                if !collapsed.insert(h.txid.clone()) {
++                    continue; // hashPrev guard: skip extra our-outputs
+                 }
+-                crate::gui::state::UtxoRec {
+-                    txid,
+-                    n: 0,
+-                    value_sats: h.value_sats,
+-                    script: Vec::new(),
+-                    address: h.address,
+-                    height: h.height as u32,
+-                    tx_time: h.time,
+-                    prev_kind: h.kind,
+-                    legacy_kind: h.legacy_kind,
++            }
++            let mut txid = [0u8; 32];
++            if h.txid.len() == 64 {
++                let bytes: Vec<u8> = (0..32)
++                    .filter_map(|i| u8::from_str_radix(&h.txid[i * 2..i * 2 + 2], 16).ok())
++                    .collect();
++                if bytes.len() == 32 {
++                    txid.copy_from_slice(&bytes);
++                    txid.reverse();
+                 }
+-            })
+-            .collect();
++            }
++            rows.push(crate::gui::state::UtxoRec {
++                txid,
++                n: 0,
++                value_sats: h.value_sats,
++                script: Vec::new(),
++                address: h.address,
++                height: h.height as u32,
++                tx_time: h.time,
++                prev_kind: h.kind,
++                legacy_kind: h.legacy_kind,
++                stake_net: h.stake_net,
++            });
++        }
+         let mut seen: std::collections::HashSet<(String, i64)> = rows
+             .iter()
+             .map(|r| (r.txid_display(), r.value_sats))
+             .collect();
++        // collapsed coinstake txids: a live coin of a stake whose history row
++        // shows the NET would otherwise duplicate the tx (values differ)
++        let stake_txids: std::collections::HashSet<String> = rows
++            .iter()
++            .filter(|r| r.stake_net.is_some() || r.prev_kind == "coinstake")
++            .map(|r| r.txid_display())
++            .collect();
+         let live = self
+             .debug_info
+             .as_ref()
+@@ -1887,6 +1925,9 @@ impl AppState {
+             if u.value_sats <= 0 {
+                 continue;
+             }
++            if u.prev_kind == "coinstake" && stake_txids.contains(&u.txid_display()) {
++                continue;
++            }
+             if seen.insert((u.txid_display(), u.value_sats)) {
+                 rows.push(u);
+             }
+@@ -1895,6 +1936,111 @@ impl AppState {
+         rows
+     }
+ 
++    /// What the legacy type column shows (transactiontablemodel.cpp
++    /// formatTxType for Generated rows: "Mined" / "Stake reward").
++    pub fn tx_type_name(prev_kind: &str) -> &'static str {
++        if prev_kind == "coinbase" {
++            "Mined"
++        } else if prev_kind == "coinstake" {
++            "Stake reward"
++        } else {
++            "Received with"
++        }
++    }
++
++    /// One Transactions row exactly as the page renders it. ONE
++    /// implementation shared by the page, the CSV export and the headless
++    /// --history-probe so they cannot drift; the probe line prints
++    /// `status_text` + `amount_text` verbatim.
++    ///
++    /// Amount semantics (transactiontablemodel.cpp formatTxAmount +
++    /// decomposeTransaction): stake rows show the legacy net nNet
++    /// (GetCredit - GetDebit = the reward) via `stake_net`; sends render a
++    /// leading "-"; received rows keep the "+" the tri7 design adds.
++    pub fn tx_row_view(&self, u: &crate::gui::state::UtxoRec, tip: u32) -> TxRowView {
++        let lk = if !u.legacy_kind.is_empty() {
++            match u.legacy_kind.as_str() {
++                "mined" => crate::legacy_rows::LegacyKind::Generated,
++                "send" => crate::legacy_rows::LegacyKind::SendToAddress,
++                "self" => crate::legacy_rows::LegacyKind::SendToSelf,
++                "recv_from" => crate::legacy_rows::LegacyKind::RecvFromOther,
++                _ => crate::legacy_rows::LegacyKind::RecvWithAddress,
++            }
++        } else if u.prev_kind == "coinbase" || u.prev_kind == "coinstake" {
++            crate::legacy_rows::LegacyKind::Generated
++        } else if u.value_sats < 0 {
++            crate::legacy_rows::LegacyKind::SendToAddress
++        } else {
++            crate::legacy_rows::LegacyKind::RecvWithAddress
++        };
++        let depth_legacy = crate::legacy_rows::depth_of(u.height as u64, tip as u64);
++        let (lstatus, matures_in) =
++            crate::legacy_rows::status_for(lk, depth_legacy, tip as u64, u.height as u64);
++        let display_sats = u.stake_net.unwrap_or(u.value_sats);
++        let lrow = crate::legacy_rows::LegacyRow {
++            txid: u.txid_display(),
++            idx: 0,
++            time: u.tx_time,
++            height: u.height as u64,
++            kind: lk,
++            address: u.address.clone(),
++            debit: if display_sats < 0 { display_sats } else { 0 },
++            credit: if display_sats > 0 { display_sats } else { 0 },
++            status: lstatus,
++            depth: depth_legacy,
++            matures_in,
++        };
++        let status_text = lrow.status_text();
++        let glyph_key = crate::legacy_rows::status_glyph(
++            &lstatus,
++            depth_legacy,
++            !matches!(lstatus, crate::legacy_rows::LegacyStatus::Immature),
++            matures_in,
++        )
++        .unwrap_or("icons/tx_zero");
++        let type_label: String = if lk.label().is_empty() {
++            Self::tx_type_name(&u.prev_kind).to_string()
++        } else {
++            lk.label().to_string()
++        };
++        let label = self
++            .label_of(&u.address)
++            .unwrap_or_else(|| u.address.clone());
++        let amount_text = if display_sats < 0 {
++            format!(
++                "{} {}",
++                crate::gui::state::format_tri(display_sats),
++                crate::gui::state::TICKER
++            )
++        } else {
++            format!(
++                "+{} {}",
++                crate::gui::state::format_tri(display_sats),
++                crate::gui::state::TICKER
++            )
++        };
++        // formatTooltip(): status, newline, type — plus the (labeled)
++        // address for address-typed rows only
++        let tooltip = match lk {
++            crate::legacy_rows::LegacyKind::RecvWithAddress
++            | crate::legacy_rows::LegacyKind::RecvFromOther
++            | crate::legacy_rows::LegacyKind::SendToAddress => {
++                format!("{}\n{} {}", status_text, type_label, label)
++            }
++            _ => format!("{}\n{}", status_text, type_label),
++        };
++        TxRowView {
++            status_text,
++            amount_text,
++            tooltip,
++            glyph_key,
++            type_label,
++            label,
++            status: lstatus,
++            negative: display_sats < 0,
++        }
++    }
++
+     /// The Overview balance split, computed exactly like the page does:
+     /// (spendable, stake, unconfirmed, immature, total, tip_used).
+     ///
+@@ -2132,6 +2278,7 @@ impl AppState {
+                                     tx_time: r.get("tx_time").and_then(|x| x.as_i64()).unwrap_or(0) as u32,
+                                     prev_kind: r.get("prev_kind").and_then(|x| x.as_str()).unwrap_or("regular").to_string(),
+                                     legacy_kind: String::new(),
++                                    stake_net: None,
+                                 });
+                             }
+                             if !out.is_empty() {
+@@ -2181,6 +2328,7 @@ impl AppState {
+                                 legacy_kind: String::new(),
+                                 coinstake: r.get("kind").and_then(|x| x.as_str()) == Some("coinstake"),
+                                 stake_principal: 0,
++                                stake_net: r.get("stake_net").and_then(|x| x.as_i64()),
+                             };
+                             out.push(rec);
+                         }
+diff --git a/src/gui/state.rs b/src/gui/state.rs
+index 806c978..a6a79f8 100644
+--- a/src/gui/state.rs
++++ b/src/gui/state.rs
+@@ -566,6 +566,11 @@ pub struct UtxoRec {
+     /// legacy row kind from history.json ("mined" | "recv_with" | "send" | ...)
+     /// — empty for rows derived from the live/snapshot set
+     pub legacy_kind: String,
++    /// legacy transactionrecord.cpp stake amount: GetCredit - GetDebit (the
++    /// reward) for coinstake rows; None when unknown (old history files,
++    /// live rows). Render uses this instead of the raw principal+reward
++    /// value.
++    pub stake_net: Option<i64>,
+ }
+ 
+ impl UtxoRec {
+@@ -661,6 +666,7 @@ impl UtxoDump {
+                     tx_time: u.tx_time,
+                     legacy_kind: String::new(),
+                     prev_kind: u.prev_kind,
++                    stake_net: None,
+                 })
+             })
+             .collect()
+@@ -828,6 +834,7 @@ fn apply_tail_bookkeeping(
+                 tx_time,
+                 legacy_kind: String::new(),
+                 prev_kind: kind.into(),
++                stake_net: None,
+             });
+         }
+     }
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 989f82d..c9f05f6 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -51,6 +51,7 @@ fn many_coin_wallet(n: u8, value: i64) -> (DerivedWallet, std::collections::Hash
+             tx_time: 1_400_000_000,
+             prev_kind: "regular".into(),
+             legacy_kind: String::new(),
++            stake_net: None,
+         });
+     }
+     let balances = compute_balances(&utxos, &|_| None);
+@@ -338,6 +339,7 @@ fn compute_balances_totals_and_sorts() {
+         height: 100,
+         tx_time: 1_700_000_000,
+         legacy_kind: String::new(),
++        stake_net: None,
+         prev_kind: "regular".into(),
+     };
+     let utxos = vec![mk(&addr_a, 500), mk(&addr_b, 9_000), mk(&addr_a, 1_500)];
+@@ -391,6 +393,7 @@ fn funded_utxo(label: &str, value: i64, kind: &str, height: u32) -> (UtxoRec, [u
+         height,
+         tx_time: 1_700_000_000,
+         legacy_kind: String::new(),
++        stake_net: None,
+         prev_kind: kind.into(),
+     };
+     (utxo, secret, pubkey)
+@@ -633,6 +636,7 @@ fn reconcile_tail_applies_spends_and_wallet_additions() {
+         height: snapshot_height,
+         tx_time: 1_700_000_000,
+         legacy_kind: String::new(),
++        stake_net: None,
+         prev_kind: "regular".into(),
+     };
+     let mut tx_a = Tx {
+@@ -839,6 +843,7 @@ fn stake_status_parses_dryrun_and_counts_mature_weight() {
+         height: 2_203_769,
+         tx_time: 1_700_000_000 - 4000, // mature vs STAKE_MIN_AGE=3600 at tip_time
+         legacy_kind: String::new(),
++        stake_net: None,
+         prev_kind: "coinstake".into(),
+     };
+     let st = load_stake_status(&dry, &tip, &[utxo]);
+@@ -1620,6 +1625,7 @@ fn sweep_fixture_derived(funded_addr: &str, script: Vec<u8>) -> gs::DerivedWalle
+         height: 100,
+         tx_time: 1_400_000_000,
+         legacy_kind: String::new(),
++        stake_net: None,
+         prev_kind: "regular".into(),
+     };
+     gs::DerivedWallet {
+@@ -1922,6 +1928,154 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
+     assert!(!lbl2.contains("Syncing"), "{}", lbl2);
+ }
+ 
++/// transactiontablemodel.cpp amount/tooltip parity for the shared row view:
++/// stake rows render the legacy net (the reward, NOT principal+reward),
++/// sends render a leading "-", and the tooltip is formatTooltip() verbatim
++/// (status \n type, plus the address only for address-typed rows).
++#[test]
++fn tx_row_view_renders_stake_net_send_sign_and_legacy_tooltip() {
++    let st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
++    let tip = 2_207_233u32;
++    let mk = |value_sats: i64, prev_kind: &str, legacy_kind: &str, stake_net: i64| UtxoRec {
++        txid: [7u8; 32],
++        n: 0,
++        value_sats,
++        script: Vec::new(),
++        address: "TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL".into(),
++        height: tip - 100,
++        tx_time: 1_700_000_300,
++        prev_kind: prev_kind.into(),
++        legacy_kind: legacy_kind.into(),
++        stake_net: if stake_net == 0 { None } else { Some(stake_net) },
++    };
++
++    // stake: raw output 33.372923 TRI but net reward +0.039590 TRI
++    let stake = mk(33_372_923, "coinstake", "mined", 39_590);
++    let v = st.tx_row_view(&stake, tip);
++    assert_eq!(v.amount_text, "+0.039590 TRI", "{}", v.amount_text);
++    assert_eq!(v.type_label, "Mined");
++    assert_eq!(v.status_text, "Confirmed (101 confirmations)");
++    // Generated rows: status \n type, no address suffix (legacy formatTooltip)
++    assert_eq!(v.tooltip, "Confirmed (101 confirmations)\nMined");
++    assert!(!v.negative);
++
++    // old history files (stake_net 0): fall back to the raw output value
++    let old = mk(33_372_923, "coinstake", "mined", 0);
++    assert_eq!(st.tx_row_view(&old, tip).amount_text, "+33.372923 TRI");
++
++    // send: "-5.001000 TRI" — never "+-5.001000 TRI"
++    let send = mk(-5_000_100, "regular", "send", 0);
++    let v = st.tx_row_view(&send, tip);
++    assert_eq!(v.amount_text, "-5.000100 TRI", "{}", v.amount_text);
++    assert!(v.negative);
++    // SendToAddress rows DO get the address suffix in the tooltip
++    assert_eq!(
++        v.tooltip,
++        "Confirmed (101 confirmations)\nSent to TVyCQQPgp3zfsbgZHus1me64Xd6ULiuWPL"
++    );
++
++    // received row keeps the tri7 "+" prefix and gets the suffix too
++    let recv = mk(1_500_000, "regular", "recv_with", 0);
++    let v = st.tx_row_view(&recv, tip);
++    assert_eq!(v.amount_text, "+1.500000 TRI");
++    assert!(v.tooltip.starts_with("Confirmed (101 confirmations)\nReceived with "));
++}
++
++/// merged_transaction_rows is the page's ONE row source: coinstake history
++/// rows collapse to a single row per txid (legacy hashPrev guard, the net is
++/// preserved), a live coin of a collapsed stake never duplicates the tx, and
++/// ordinary (txid, value) dedupe still filters live recv coins already in the
++/// history file.
++#[test]
++fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
++    use crate::history::{save_cache, HistoryCache, HistoryRec};
++    let dir = std::env::temp_dir().join(format!("tri7-merged-{}", std::process::id()));
++    std::fs::create_dir_all(&dir).unwrap();
++    let wallet = dir.join("wallet.dat");
++    let rec = |txid: &str, value: i64, coinstake: bool, net: i64, addr: &str| HistoryRec {
++        txid: txid.into(),
++        height: 2_205_300,
++        time: 1_700_000_000,
++        value_sats: value,
++        address: addr.into(),
++        direction: "in".into(),
++        kind: if coinstake { "coinstake" } else { "regular" }.into(),
++        spent: false,
++        idx: 0,
++        legacy_kind: if coinstake { "mined" } else { "recv_with" }.into(),
++        coinstake,
++        stake_principal: 0,
++        stake_net: Some(net),
++    };
++    let cache = HistoryCache {
++        scanned_height: 2_205_300,
++        scanned_offset: 999,
++        rows: vec![
++            rec(&"aa".repeat(32), 14_260_000, true, 4_058, "TStake"),
++            rec(&"aa".repeat(32), 14_260_241, true, 4_058, "TStake"),
++            rec(&"bb".repeat(32), 2_000_000, false, 0, "TRecv"),
++        ],
++    };
++    save_cache(&dir, &cache).unwrap();
++
++    let mut cfg = gs::UiConfig::default();
++    cfg.wallet_path = wallet.display().to_string();
++    let mut st = crate::gui::app_state::AppState::new(cfg);
++    let hex_to_internal = |s: &str| -> [u8; 32] {
++        let mut out = [0u8; 32];
++        for i in 0..32 {
++            out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
++        }
++        out.reverse();
++        out
++    };
++    let utxo = |txid_hex: &str, value: i64, kind: &str| UtxoRec {
++        txid: hex_to_internal(txid_hex),
++        n: 0,
++        value_sats: value,
++        script: Vec::new(),
++        address: "TX".into(),
++        height: 2_205_301,
++        tx_time: 1_700_000_100,
++        prev_kind: kind.into(),
++        legacy_kind: String::new(),
++        stake_net: None,
++    };
++    st.debug_info = Some(crate::gui::app_state::DebugInfo {
++        reachable: true,
++        connections: Some(1),
++        blocks: Some(2_205_301),
++        sync: None,
++        daemon_balance_sats: None,
++        daemon_utxos: Some(vec![
++            // the collapsed stake's live coins (full values): must NOT duplicate
++            utxo(&"aa".repeat(32), 14_260_000, "coinstake"),
++            utxo(&"aa".repeat(32), 14_260_241, "coinstake"),
++            // recv already in the file: (txid, value) dedupe
++            utxo(&"bb".repeat(32), 2_000_000, "regular"),
++            // a genuinely new live coin: kept
++            utxo(&"cc".repeat(32), 500_000, "regular"),
++        ]),
++        wallet_history: None,
++        local_onion: None,
++        local_i2p: None,
++        error: None,
++    });
++
++    let merged = st.merged_transaction_rows();
++    let stakes: Vec<_> = merged.iter().filter(|r| r.prev_kind == "coinstake").collect();
++    assert_eq!(stakes.len(), 1, "one row per stake tx, got {}", stakes.len());
++    assert_eq!(stakes[0].value_sats, 14_260_000);
++    assert_eq!(stakes[0].stake_net, Some(4_058));
++    let recv_rows: Vec<_> = merged
++        .iter()
++        .filter(|r| r.txid_display().starts_with(&"bb".repeat(8)))
++        .collect();
++    assert_eq!(recv_rows.len(), 1, "live recv deduped against history");
++    assert!(merged.iter().any(|r| r.txid_display().starts_with(&"cc".repeat(8))));
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
+ #[test]
+ fn remembered_wallet_roundtrip_and_first_open_logic() {
+     use crate::gui::app_state::{remember_last_wallet, remembered_wallet_path};
+diff --git a/src/history.rs b/src/history.rs
+index 956b7ee..ce35190 100644
+--- a/src/history.rs
++++ b/src/history.rs
+@@ -55,6 +55,15 @@ pub struct HistoryRec {
+     /// row needs principal + reward, not the reward alone.
+     #[serde(default)]
+     pub stake_principal: i64,
++    /// legacy transactionrecord.cpp decomposition for a stake:
++    /// credit = nNet = GetCredit() - GetDebit() — the REWARD only, not the
++    /// whole stake output (one row per coinstake, subsequent our-outputs
++    /// skipped by the hashPrev guard). recv_total - spent_total here.
++    /// None on rows written before this field existed and on non-stake rows
++    /// (render falls back to the raw output value; a real net is > 0, and
++    /// Some distinguishes a known net from an unknown one).
++    #[serde(default)]
++    pub stake_net: Option<i64>,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+@@ -337,6 +346,7 @@ fn apply_block(
+         }
+ 
+         // outputs paying us
++        let rows_before_tx = rows.len();
+         let mut recv_total: i64 = 0;
+         let mut first_addr = String::new();
+         for (n, vout) in tx.vout.iter().enumerate() {
+@@ -384,11 +394,29 @@ fn apply_block(
+                     } else {
+                         0
+                     },
++                    // filled after the outputs loop (needs recv_total +
++                    // spent_total); None keeps old files loadable
++                    stake_net: None,
+                 });
+                 owned.insert((txid_internal, n as u32), rows.len() - 1);
+             }
+         }
+ 
++        // legacy nNet for every coinstake row of this tx: the reward, not the
++        // principal+reward output value (transactionrecord.cpp
++        // `sub.credit = nNet > 0 ? nNet : GetValueOut() - nDebit`). Both
++        // sides are known only after the outputs loop, so fill the rows this
++        // call pushed.
++        if is_coinstake {
++            let net = recv_total - spent_total;
++            let pushed = rows.len() - rows_before_tx;
++            for r in rows.iter_mut().rev().take(pushed) {
++                if r.coinstake {
++                    r.stake_net = Some(net);
++                }
++            }
++        }
++
+         // a spend where the received side is smaller than what left = an
+         // outgoing payment (legacy wallet lists it as a debit row)
+         if spent_total > 0 && recv_total < spent_total && !is_coinstake {
+@@ -405,6 +433,7 @@ fn apply_block(
+                 legacy_kind: "send".into(),
+                 coinstake: false,
+                 stake_principal: 0,
++                stake_net: None,
+             });
+         }
+     }
+@@ -501,6 +530,7 @@ mod tests {
+                 legacy_kind: "recv_with".into(),
+                 coinstake: false,
+                 stake_principal: 0,
++                stake_net: None,
+             }],
+         };
+         save_cache(&dir, &c).unwrap();
+@@ -510,4 +540,172 @@ mod tests {
+         assert_eq!(back.rows[0].value_sats, 500);
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    /// transactionrecord.cpp stake decomposition: the row's rendered amount
++    /// is nNet (GetCredit - GetDebit = the reward), never the principal+
++    /// reward output value; one net per tx shared by every coinstake row of
++    /// that tx; non-stake rows keep 0 (unknown net).
++    #[test]
++    fn coinstake_rows_carry_the_legacy_net_reward() {
++        use crate::legacy::{Block, Tx, Vin, Vout};
++        let secp = secp256k1::Secp256k1::new();
++        let sk = secp256k1::SecretKey::from_slice(&[11u8; 32]).unwrap();
++        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
++            .serialize()
++            .to_vec();
++        let payload = crate::address::pubkey_payload(&pubkey);
++        let addr = crate::address::payload_to_address(&payload);
++        let mut by_payload = HashMap::new();
++        by_payload.insert(payload.clone(), addr.clone());
++        let mut by_pubkey = HashMap::new();
++        by_pubkey.insert(pubkey.clone(), addr.clone());
++        let p2pkh = {
++            let mut s = vec![0x76, 0xa9, 0x14];
++            s.extend_from_slice(&payload[1..21]);
++            s.extend_from_slice(&[0x88, 0xac]);
++            s
++        };
++
++        let mut rows: Vec<HistoryRec> = Vec::new();
++        let mut owned: HashMap<([u8; 32], u32), usize> = HashMap::new();
++
++        // h100: a coinbase paying us 33_333_333
++        let coinbase = Tx {
++            version: 1,
++            time: 1_700_000_000,
++            vin: vec![Vin {
++                prev_hash: [0u8; 32],
++                prev_n: u32::MAX,
++                script_sig: Vec::new(),
++                sequence: u32::MAX,
++            }],
++            vout: vec![Vout {
++                value: 33_333_333,
++                script_pubkey: p2pkh.clone(),
++            }],
++            locktime: 0,
++        };
++        let cb_block = Block {
++            version: 1,
++            prev_hash: [1u8; 32],
++            merkle_root: [0u8; 32],
++            time: 1_700_000_000,
++            bits: 0x2000ffff,
++            nonce: 0,
++            vtx: vec![coinbase],
++            block_sig: Vec::new(),
++        };
++        apply_block(&cb_block, 100, &by_payload, &by_pubkey, &mut rows, &mut owned);
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0].stake_net, None, "non-stake rows have no net");
++
++        // h101: single-output stake — 33_333_333 in, 33_372_923 out => +39_590
++        let stake1 = Tx {
++            version: 1,
++            time: 1_700_000_300,
++            vin: vec![Vin {
++                prev_hash: cb_block.vtx[0].hash(),
++                prev_n: 0,
++                script_sig: Vec::new(),
++                sequence: u32::MAX,
++            }],
++            vout: vec![
++                Vout {
++                    value: 0,
++                    script_pubkey: Vec::new(),
++                },
++                Vout {
++                    value: 33_372_923,
++                    script_pubkey: p2pkh.clone(),
++                },
++            ],
++            locktime: 0,
++        };
++        let stake_block1 = Block {
++            version: 1,
++            prev_hash: [2u8; 32],
++            merkle_root: [0u8; 32],
++            time: 1_700_000_300,
++            bits: 0x2000ffff,
++            nonce: 0,
++            vtx: vec![empty_tx(), stake1],
++            block_sig: Vec::new(),
++        };
++        apply_block(
++            &stake_block1,
++            101,
++            &by_payload,
++            &by_pubkey,
++            &mut rows,
++            &mut owned,
++        );
++        let s1: Vec<&HistoryRec> = rows.iter().filter(|r| r.coinstake).collect();
++        assert_eq!(s1.len(), 1);
++        assert_eq!(s1[0].value_sats, 33_372_923, "raw output value preserved");
++        assert_eq!(s1[0].stake_net, Some(39_590), "rendered amount = the reward");
++
++        // h102: split stake — 33_372_923 in, two our-outputs 20_000_000 +
++        // 13_373_003 => recv 33_373_003, net +80 on BOTH rows
++        let stake2 = Tx {
++            version: 1,
++            time: 1_700_000_600,
++            vin: vec![Vin {
++                prev_hash: stake_block1.vtx[1].hash(),
++                prev_n: 1,
++                script_sig: Vec::new(),
++                sequence: u32::MAX,
++            }],
++            vout: vec![
++                Vout {
++                    value: 0,
++                    script_pubkey: Vec::new(),
++                },
++                Vout {
++                    value: 20_000_000,
++                    script_pubkey: p2pkh.clone(),
++                },
++                Vout {
++                    value: 13_373_003,
++                    script_pubkey: p2pkh.clone(),
++                },
++            ],
++            locktime: 0,
++        };
++        let stake_block2 = Block {
++            version: 1,
++            prev_hash: [3u8; 32],
++            merkle_root: [0u8; 32],
++            time: 1_700_000_600,
++            bits: 0x2000ffff,
++            nonce: 0,
++            vtx: vec![empty_tx(), stake2],
++            block_sig: Vec::new(),
++        };
++        apply_block(
++            &stake_block2,
++            102,
++            &by_payload,
++            &by_pubkey,
++            &mut rows,
++            &mut owned,
++        );
++        let s2: Vec<&HistoryRec> = rows.iter().filter(|r| r.coinstake).skip(1).collect();
++        assert_eq!(s2.len(), 2, "per-output rows preserved for ownership");
++        assert_eq!(s2[0].value_sats, 20_000_000);
++        assert_eq!(s2[1].value_sats, 13_373_003);
++        assert_eq!(s2[0].stake_net, Some(80));
++        assert_eq!(s2[1].stake_net, Some(80));
++    }
++
++    /// minimal non-coinbase filler for vtx[0] of test blocks (produces no
++    /// history rows)
++    fn empty_tx() -> crate::legacy::Tx {
++        crate::legacy::Tx {
++            version: 1,
++            time: 1_700_000_000,
++            vin: Vec::new(),
++            vout: Vec::new(),
++            locktime: 0,
++        }
++    }
+ }
+diff --git a/src/legacy_rows.rs b/src/legacy_rows.rs
+index 864cf67..cb7094c 100644
+--- a/src/legacy_rows.rs
++++ b/src/legacy_rows.rs
+@@ -593,6 +593,9 @@ pub fn row_from_history(u: &crate::history::HistoryRec, tip: u32) -> LegacyRow {
+     };
+     let depth = depth_of(u.height, tip as u64);
+     let (status, matures_in) = status_for(lk, depth, tip as u64, u.height);
++    // stake rows render the legacy net (the reward), not the whole output;
++    // None (old files, non-stake rows) falls back to the raw value
++    let amount_sats = u.stake_net.unwrap_or(u.value_sats);
+     LegacyRow {
+         txid: u.txid.clone(),
+         idx: u.idx as usize,
+@@ -600,8 +603,8 @@ pub fn row_from_history(u: &crate::history::HistoryRec, tip: u32) -> LegacyRow {
+         height: u.height,
+         kind: lk,
+         address: u.address.clone(),
+-        debit: if u.value_sats < 0 { u.value_sats } else { 0 },
+-        credit: if u.value_sats > 0 { u.value_sats } else { 0 },
++        debit: if amount_sats < 0 { amount_sats } else { 0 },
++        credit: if amount_sats > 0 { amount_sats } else { 0 },
+         status,
+         depth,
+         matures_in,
+@@ -680,6 +683,7 @@ mod csv_tests {
+             legacy_kind: String::new(),
+             coinstake: false,
+             stake_principal: 0,
++            stake_net: None,
+         };
+         let r = row_from_history(&u, 110);
+         assert_eq!(r.kind.label(), "Received with");
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 51cbcda..2300503 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -1698,6 +1698,9 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+                         "time": r.time,
+                         "amount": sats_to_tri(r.value_sats),
+                         "amount_sats": r.value_sats,
++                        // legacy stake decomposition: the reward (net), 0 on
++                        // rows written before the field existed
++                        "stake_net": r.stake_net,
+                         "address": r.address,
+                         "direction": r.direction,
+                         "category": r.direction,
+@@ -3968,6 +3971,7 @@ mod tests {
+             legacy_kind: String::new(),
+             coinstake: false,
+             stake_principal: 0,
++            stake_net: None,
+         }
+     }
+ 

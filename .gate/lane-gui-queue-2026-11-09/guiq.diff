@@ -1,0 +1,368 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 09ca6fe..47d2f65 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -722,22 +722,27 @@ impl Tri7App {
+                     // 5b. Tor/I2P handle: there is ONE drawer implementation
+                     // (net_drawer on the Receive page). This jumps there and
+                     // opens it, instead of growing a second copy that would
+-                    // drift out of sync.
+-                    let net_btn = ui.add(
+-                        egui::Button::new(
+-                            egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
+-                        )
+-                        .fill(egui::Color32::TRANSPARENT)
+-                        .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
+-                        .small(),
+-                    );
+-                    if net_btn.clicked() {
+-                        self.st.screen = crate::gui::state::Screen::Receive;
+-                        self.net_drawer_open = Some(std::time::Instant::now());
++                    // drift out of sync. The Display tab's "Show onion
++                    // address in status bar" option gates it (legacy
++                    // OptionsModel::ShowOnionAddress hid the status bar's
++                    // onion address when it was off).
++                    if self.st.transport_chip_visible() {
++                        let net_btn = ui.add(
++                            egui::Button::new(
++                                egui::RichText::new("⇗ Tor / I2P").size(11.0).color(th::TEXT_MUTED),
++                            )
++                            .fill(egui::Color32::TRANSPARENT)
++                            .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
++                            .small(),
++                        );
++                        if net_btn.clicked() {
++                            self.st.screen = crate::gui::state::Screen::Receive;
++                            self.net_drawer_open = Some(std::time::Instant::now());
++                        }
++                        net_btn.on_hover_text(
++                            "Your Tor and I2P addresses, with copy — opens on Receive Coins",
++                        );
+                     }
+-                    net_btn.on_hover_text(
+-                        "Your Tor and I2P addresses, with copy — opens on Receive Coins",
+-                    );
+                     // 6. refresh — 28 px icon-only ghost button
+                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                         ui.add_space(12.0);
+@@ -3891,7 +3896,7 @@ impl Tri7App {
+                     }
+                 };
+                 let type_label = view.type_label.clone();
+-                let label = view.label.clone();
++                let address_cell = view.address_cell.clone();
+                 let amt = view.amount_text.clone();
+                 // tooltip = legacy formatTooltip (status / type / address)
+                 let conf_label = view.tooltip.clone();
+@@ -3918,7 +3923,7 @@ impl Tri7App {
+                     }
+                     th::table_cell_text(rui, 24.0, cols[1].width, &date, false, th::TEXT_SECONDARY, false);
+                     th::table_cell_text(rui, 164.0, cols[2].width, &type_label, false, th::TEXT_PRIMARY, false);
+-                    th::table_cell_text(rui, 284.0, cols[3].width, &label, false, th::TEXT_PRIMARY, true);
++                    th::table_cell_text(rui, 284.0, cols[3].width, &address_cell, false, th::TEXT_PRIMARY, true);
+                     th::table_cell_text(rui, 284.0 + addr_w, cols[4].width, &amt, true, color, true);
+                     resp.clone().on_hover_text(conf_label.clone());
+                     resp.clicked()
+@@ -4998,9 +5003,6 @@ impl Tri7App {
+                             );
+                         }
+                         ui.end_row();
+-                        ui.label(egui::RichText::new("Detach databases:").color(th::TEXT_SECONDARY));
+-                        th::disabled_input(ui, 140.0, "—", "Requires daemon integration");
+-                        ui.end_row();
+                     });
+                 th::text_meta(
+                     ui,
+@@ -5198,12 +5200,21 @@ impl Tri7App {
+                 self.st.options.tray_on_close = false;
+                 let _ = quit;
+ 
+-                let mut off = false;
+-                ui.add_enabled(
+-                    false,
+-                    egui::Checkbox::new(&mut off, "Show onion address in status bar"),
++                // REAL now: the legacy "Show .onion address in status bar"
++                // checkbox (optionsdialog.ui:1510-1526) gates the status
++                // bar's Tor/I2P chip — the legacy client hid its onion
++                // address label in the status bar when this was off
++                // (trianglesgui.cpp:1791). The daemon already reports the
++                // onion/i2p addresses (debug_info.local_onion/local_i2p), so
++                // this only decides whether the chip is shown.
++                ui.checkbox(
++                    &mut self.st.options.show_onion_address,
++                    "Show onion address in status bar",
+                 )
+-                .on_disabled_hover_text("Requires daemon integration");
++                .on_hover_text(
++                    "Show the Tor / I2P transport chip in the status bar; \
++                     the addresses themselves come from the node",
++                );
+             }
+         });
+         if let Some(err) = self.st.options_save_error.clone() {
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index c185e55..129464c 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -80,8 +80,14 @@ pub struct OptionsState {
+     pub minimize_on_close: bool,
+     #[serde(default)]
+     pub tray_on_close: bool,
+-    #[serde(default)]
+-    pub tray_icon_only: bool,
++    /// Display tab: "Show onion address in status bar" — legacy
++    /// OptionsModel::ShowOnionAddress (optionsdialog.ui:1510-1526). The
++    /// legacy client hides the status bar's onion address when it is OFF
++    /// (trianglesgui.cpp:1791); the tri7 status bar carries the Tor/I2P
++    /// transport chip instead, so this is that chip's visibility
++    /// preference. Legacy default: ON.
++    #[serde(default = "default_true")]
++    pub show_onion_address: bool,
+     /// "Start Triangles on login" (optionsdialog Main tab; v5
+     /// StartAtStartup). The CHECKED state mirrors the OS registration
+     /// (src/gui/autostart.rs) at load and is applied to the OS on Apply.
+@@ -93,6 +99,29 @@ fn default_true() -> bool {
+     true
+ }
+ 
++/// The Label/Address COLUMN text of one transaction row, exactly as legacy
++/// `transactiontablemodel.cpp` renders it (`lookupAddress(address,
++/// tooltip=false)`, lines 370-383), honouring the Display tab's "Display
++/// addresses in transaction list" option (legacy `bDisplayAddresses`):
++///
++/// legacy truth table (byte-exact, incl. the trailing space quirk):
++/// - no label          -> `(address)`  (the address is ALWAYS parenthesized
++///    when there is no label — the second if fires on the empty label alone)
++/// - label + option ON  -> `label (address)`
++/// - label + option OFF -> `label ` (legacy appends the label + a trailing
++///    space, then the address append never fires — invisible in the cell,
++///    kept byte-exact; transactiontablemodel.cpp:372 `label + " "` and :378)
++///
++/// The TOOLTIP is a different legacy string (`lookupAddress(address,
++/// tooltip=true)`) and always carries the address — it is untouched here.
++pub fn legacy_address_cell(address: &str, label: Option<&str>, display_addresses: bool) -> String {
++    match label.filter(|l| !l.is_empty()) {
++        Some(l) if display_addresses => format!("{} ({})", l, address),
++        Some(l) => format!("{} ", l),
++        None => format!("({})", address),
++    }
++}
++
+ impl Default for OptionsState {
+     fn default() -> Self {
+         OptionsState {
+@@ -103,7 +132,7 @@ impl Default for OptionsState {
+             notifications: true,
+             minimize_on_close: true,
+             tray_on_close: false,
+-            tray_icon_only: false,
++            show_onion_address: true,
+             start_on_login: false,
+         }
+     }
+@@ -132,6 +161,10 @@ pub struct TxRowView {
+     pub type_label: String,
+     /// Label/Address column text
+     pub label: String,
++    /// The Label/Address COLUMN cell text, honouring the "Display addresses
++    /// in transaction list" option (legacy lookupAddress): ON shows
++    /// "Label (address)", OFF hides the address.
++    pub address_cell: String,
+     /// legacy status enum (the page maps it to a colour)
+     pub status: crate::legacy_rows::LegacyStatus,
+     /// outgoing (amount in the red family)
+@@ -2003,6 +2036,15 @@ impl AppState {
+         }
+     }
+ 
++    /// The status bar's Tor/I2P transport chip (the entry to the onion/i2p
++    /// drawer) is shown only while the Display tab's "Show onion address in
++    /// status bar" preference is on. Legacy `OptionsModel::ShowOnionAddress`
++    /// (optionsdialog.ui:1510-1526) hid the status bar's onion address when
++    /// it was off (trianglesgui.cpp:1791).
++    pub fn transport_chip_visible(&self) -> bool {
++        self.options.show_onion_address
++    }
++
+     /// One Transactions row exactly as the page renders it. ONE
+     /// implementation shared by the page, the CSV export and the headless
+     /// --history-probe so they cannot drift; the probe line prints
+@@ -2058,9 +2100,16 @@ impl AppState {
+         } else {
+             lk.label().to_string()
+         };
+-        let label = self
+-            .label_of(&u.address)
+-            .unwrap_or_else(|| u.address.clone());
++        let label_opt = self.label_of(&u.address);
++        let label = label_opt.clone().unwrap_or_else(|| u.address.clone());
++        // the COLUMN cell honours the "Display addresses in transaction list"
++        // option; the TOOLTIP below always carries the address (legacy
++        // lookupAddress(address, tooltip=true)).
++        let address_cell = legacy_address_cell(
++            &u.address,
++            label_opt.as_deref(),
++            self.options.display_addresses,
++        );
+         let amount_text = if display_sats < 0 {
+             format!(
+                 "{} {}",
+@@ -2091,6 +2140,7 @@ impl AppState {
+             glyph_key,
+             type_label,
+             label,
++            address_cell,
+             status: lstatus,
+             negative: display_sats < 0,
+         }
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 959f580..af29901 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -1493,6 +1493,146 @@ fn default_options_carry_the_legacy_default_fee() {
+     assert!(o.display_addresses);
+ }
+ 
++// ---------------------------------------------------------------------------
++// GUI-OPTIONS-AUDIT row 29 (display_addresses), row 31 (onion), row 18
++// (detach databases) — the three dead Options rows, made real or removed.
++// ---------------------------------------------------------------------------
++
++/// AUDIT row 29: "Display addresses in transaction list" was a persisted
++/// no-op — the tx table always rendered its Label/Address column. Legacy
++/// `lookupAddress()` (transactiontablemodel.cpp:370-383) puts the raw
++/// address next to the label ONLY when the option is on; with it off the
++/// cell follows legacy `lookupAddress(address, tooltip=false)`
++/// (transactiontablemodel.cpp:370-383) BYTE-EXACT: labeled + OFF -> the
++/// label + legacy's trailing space (the address append never fires); labeled
++/// + ON -> "label (address)"; NO label -> "(address)" ALWAYS parenthesized,
++/// in both option states (the second if fires on the empty label alone).
++#[test]
++fn the_transaction_address_column_follows_the_display_addresses_option() {
++    use crate::gui::app_state::legacy_address_cell;
++    let addr = "TVyCQQPgp3zfsbgZHus1me64Td6ULiuWPL";
++    // OFF: the label + legacy's trailing space (transactiontablemodel.cpp:372)
++    assert_eq!(legacy_address_cell(addr, Some("savings"), false), "savings ");
++    // ON: "Label (address)" — legacy's parenthesised form
++    assert_eq!(
++        legacy_address_cell(addr, Some("savings"), true),
++        format!("savings ({addr})")
++    );
++    // no label: ALWAYS parenthesized, both option states (legacy: the label
++    // is empty so the second if fires regardless of the option)
++    assert_eq!(legacy_address_cell(addr, None, false), format!("({addr})"));
++    assert_eq!(legacy_address_cell(addr, None, true), format!("({addr})"));
++
++    // and the shared row view reads the OPTION, not a hardcoded value
++    let mut st = crate::gui::app_state::AppState::new(gs::UiConfig::default());
++    st.keystore.push(AbEntry {
++        address: addr.into(),
++        label: "savings".into(),
++        secret: None,
++        source: "keystore",
++    });
++    let u = UtxoRec {
++        txid: [9u8; 32],
++        n: 0,
++        value_sats: 1_500_000,
++        script: Vec::new(),
++        address: addr.into(),
++        height: 100,
++        tx_time: 1_700_000_300,
++        prev_kind: "regular".into(),
++        legacy_kind: "recv_with".into(),
++        stake_net: None,
++    };
++    st.options.display_addresses = true;
++    assert_eq!(
++        st.tx_row_view(&u, 200).address_cell,
++        format!("savings ({addr})"),
++        "option ON: the address is shown next to the label"
++    );
++    st.options.display_addresses = false;
++    assert_eq!(
++        st.tx_row_view(&u, 200).address_cell,
++        "savings ",
++        "option OFF: the label + legacy's trailing space (the address append never fires)"
++    );
++
++    // and the unlabeled path: ALWAYS parenthesized, both option states
++    // (a DIFFERENT address — the one above has a keystore label)
++    let no_addr = "TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3";
++    let u_nolabel = UtxoRec {
++        txid: [10u8; 32],
++        n: 0,
++        value_sats: 1_500_000,
++        script: Vec::new(),
++        address: no_addr.into(),
++        height: 100,
++        tx_time: 1_700_000_300,
++        prev_kind: "regular".into(),
++        legacy_kind: "recv_with".into(),
++        stake_net: None,
++    };
++    st.options.display_addresses = true;
++    assert_eq!(
++        st.tx_row_view(&u_nolabel, 200).address_cell,
++        format!("({no_addr})"),
++        "unlabeled + ON: legacy parenthesizes the bare address"
++    );
++    st.options.display_addresses = false;
++    assert_eq!(
++        st.tx_row_view(&u_nolabel, 200).address_cell,
++        format!("({no_addr})"),
++        "unlabeled + OFF: still parenthesized (the empty label fires the second if)"
++    );
++}
++
++/// AUDIT row 31: "Show onion address in status bar" was a permanently
++/// disabled stub even though the daemon already reports the onion/i2p
++/// addresses. It is now a REAL preference for the status bar's Tor/I2P
++/// transport chip, persisted with the rest of the options file.
++#[test]
++fn the_status_bar_transport_chip_follows_the_onion_option_and_persists() {
++    let (mut st, dir) = options_state_with_unreachable_node("onionchip");
++    // legacy default: the onion address IS shown (optionsmodel.cpp:54)
++    assert!(st.transport_chip_visible(), "the chip is on by default");
++    st.options.show_onion_address = false;
++    assert!(
++        !st.transport_chip_visible(),
++        "turning the option off hides the status-bar chip"
++    );
++    st.save_options_action().expect("apply");
++    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
++    assert!(text.contains("\"show_onion_address\": false"), "{}", text);
++    // a fresh AppState over the same profile dir reads it back
++    let cfg = UiConfig {
++        profile_dir: dir.display().to_string(),
++        ..UiConfig::default()
++    };
++    let st2 = crate::gui::app_state::AppState::new(cfg);
++    assert!(!st2.options.show_onion_address, "the preference persists");
++    assert!(!st2.transport_chip_visible());
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++/// AUDIT row 18: the "Detach databases" row was permanently disabled
++/// ("Requires daemon integration"), but the tri7 wallet is SQLite-native
++/// and the daemon already ruled `-detachdb` superseded (docs/PARITY_AUDIT.md
++/// :207) — a permanently disabled control is a promise the wallet cannot
++/// keep. The row (and the unused `tray_icon_only` field it was paired with)
++/// are gone.
++#[test]
++fn the_detach_databases_row_and_the_unused_tray_icon_field_are_gone() {
++    let app = include_str!("app.rs");
++    assert!(
++        !app.contains("Detach databases"),
++        "the dead Detach databases row must be deleted"
++    );
++    let state = include_str!("app_state.rs");
++    assert!(
++        !state.contains("tray_icon_only"),
++        "the unread tray_icon_only field must be deleted"
++    );
++}
++
+ #[test]
+ fn legacy_identity_is_carried_over_exactly() {
+     // sidebar order — Overview FIRST (mainwindow.ui)

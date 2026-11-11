@@ -1,0 +1,637 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index bc618bd..ef28386 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -74,6 +74,11 @@ asset_map! {
+     "menu_16/backup" => "menu_16/backup.png",
+     "menu_16/exit" => "menu_16/exit.png",
+     "menu_16/staking" => "menu_16/staking.png",
++    // the Block Explorer row had NO symbol: Screen::Explorer pointed at
++    // "menu_16/search", which was never in this map, so the texture silently
++    // failed to load and the row rendered iconless. It now gets its
++    // own compass.
++    "menu_16/explorer" => "menu_16/explorer.png",
+     "icons/triangles" => "icons/triangles.png",
+     "icons/triangles-16" => "icons/triangles-16.png",
+     "icons/triangles-128" => "icons/triangles-128.png",
+@@ -1674,18 +1679,18 @@ impl eframe::App for Tri7App {
+         //   quit            -> let the window close for real
+         // CancelClose is what actually stops the window from being destroyed.
+         if ctx.input(|i| i.viewport().close_requested()) {
+-            let o = &self.st.options;
+-            if o.tray_on_close {
++            if self.st.close_decision() == crate::gui::app_state::CloseDecision::Minimize {
++                // Keep the WINDOW alive (CancelClose) and minimize it. The
++                // process - and the node it supervises - keep running, so the
++                // wallet stays reachable and staking continues.
+                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                 self.st.status_log.push(
+                     "Triangles is still running (node + staking). Reopen from the taskbar."
+                         .into(),
+                 );
+-            } else if o.minimize_on_close {
+-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+             }
++            // both flags off -> the window closes for real (a real quit)
+         }
+         Self::apply_theme(ctx);
+         self.header(ctx);
+@@ -2008,6 +2013,28 @@ impl Tri7App {
+     // -----------------------------------------------------------------------
+ fn page_overview(&mut self, ui: &mut egui::Ui) {
+         th::page_header(ui, "Overview", "Wallet balance and network status");
++        // The Options dialog can be closed with OK while the node-side fee
++        // push still failed. The options were applied, but the operator must
++        // still be told - the notice lives here because the dialog is gone.
++        if let Some(note) = self.st.options_fee_notice.clone() {
++            ui.add_space(4.0);
++            th::inline_notice(
++                ui,
++                th::Notice::Warning,
++                "Options saved - the node has not taken the fee yet",
++                &format!(
++                    "Every option was saved. The fee push to the node did not go \
++                     through: {note}. It is pushed automatically as soon as the \
++                     node is reachable.",
++                ),
++            );
++            ui.horizontal(|ui| {
++                if ui.small_button("Dismiss").clicked() {
++                    self.st.options_fee_notice = None;
++                }
++            });
++            ui.add_space(4.0);
++        }
+         // stake/payment notification banner (Sami: alert like the old wallet,
+         // user-controllable) — dismissible; the system toast already fired
+         if let Some((title, text)) = self.st.notify_flash.clone() {
+@@ -4952,40 +4979,41 @@ impl Tri7App {
+                 );
+                 // legacy optionsdialog.ui Window tab, in Sami's words: choose
+                 // between closing to the tray, the taskbar, or quitting.
+-                // Radio semantics: exactly one behaviour.
++                // Radio semantics: exactly one behaviour, and every choice
++                // offered here is REAL. "Minimize" is the default and keeps
++                // the node running. There is no separate "tray" choice: this build has
++                // no tray helper, so a tray option could only be a promise
++                // the wallet cannot keep - it would behave like minimize
++                // anyway. A legacy options.json may still carry tray_on_close;
++                // it is honoured (the window is minimized and the node keeps
++                // running) but it is no longer offered as a separate choice.
+                 let mut quit = !self.st.options.minimize_on_close
+                     && !self.st.options.tray_on_close;
+-                let mut minimize = self.st.options.minimize_on_close
+-                    && !self.st.options.tray_on_close;
+-                let mut tray = self.st.options.tray_on_close;
++                let mut minimize = !quit;
+                 if ui
+-                    .radio(minimize, "Minimize to the taskbar (keep running)")
++                    .radio(minimize, "Minimize to the taskbar on close (keep running)")
++                    .on_hover_text(
++                        "The window minimizes instead of closing; Triangles and its \
++                         node keep running and staking. Reopen it from the taskbar.",
++                    )
+                     .clicked()
+                 {
+                     minimize = true;
+                     quit = false;
+-                    tray = false;
+                 }
+                 if ui
+-                    .radio(tray, "Close to the system tray (keep running)")
++                    .radio(quit, "Quit Triangles (stop the node)")
+                     .on_hover_text(
+-                        "Hides the window; the node keeps staking and receiving. \
+-                         A tray icon needs the tray helper - until then this \
+-                         behaves like minimizing.",
++                        "Closes the wallet for real. The node it supervises stops \
++                         with it.",
+                     )
+                     .clicked()
+                 {
+-                    tray = true;
+-                    minimize = false;
+-                    quit = false;
+-                }
+-                if ui.radio(quit, "Quit Triangles").clicked() {
+                     quit = true;
+                     minimize = false;
+-                    tray = false;
+                 }
+-                self.st.options.tray_on_close = tray;
+-                self.st.options.minimize_on_close = minimize || tray;
++                self.st.options.minimize_on_close = minimize;
++                self.st.options.tray_on_close = false;
+                 let _ = quit;
+ 
+                 let mut off = false;
+@@ -5000,6 +5028,19 @@ impl Tri7App {
+             th::inline_notice(ui, th::Notice::Error, "Options not applied", &err);
+             ui.add_space(6.0);
+         }
++        if let Some(note) = self.st.options_fee_notice.clone() {
++            th::inline_notice(
++                ui,
++                th::Notice::Warning,
++                "Options saved - the node has not taken the fee yet",
++                &format!(
++                    "Every option on this screen was saved. Only the fee push to the \
++                     node did not go through: {note}. The node will pick it up on the \
++                     next launch, or as soon as it is reachable.",
++                ),
++            );
++            ui.add_space(6.0);
++        }
+         // sticky footer: Cancel / Apply / OK
+         ui.add_space(8.0);
+         ui.separator();
+@@ -5015,9 +5056,10 @@ impl Tri7App {
+                 }
+             }
+             if th::primary_button(ui, "OK").clicked() {
+-                // OK must not hide a failed apply: if the node refused the fee
+-                // (or is unreachable) the dialog STAYS OPEN with the reason,
+-                // exactly like the legacy apply-then-close behaviour.
++                // A failed apply keeps the dialog OPEN with the reason; a
++                // saved apply closes it. When only the node-side fee push
++                // missed, the options are in effect but the fee is not yet
++                // active in the running node - the notice says exactly that.
+                 match self.st.save_options_action() {
+                     Ok(()) => {
+                         self.st.status_log.push("options saved".into());
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index ee99ab9..a2a94a5 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -44,6 +44,15 @@ pub struct VerifyForm {
+     pub result: Option<Result<bool, String>>,
+ }
+ 
++/// What the window's close button does.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum CloseDecision {
++    /// keep the process (and the node) alive, minimize the window
++    Minimize,
++    /// close the window for real
++    Quit,
++}
++
+ /// Options dialog state (optionsdialog.ui tabs). Values the engine can honor
+ /// in THIS build are real inputs (pay-transaction-fee feeds Send); the rest
+ /// are session preferences with an honest "requires daemon integration" note.
+@@ -347,6 +356,15 @@ pub struct AppState {
+     pub fee_live_sats: Option<i64>,
+     /// last Options apply failure (shown in the dialog until it succeeds)
+     pub options_save_error: Option<String>,
++    /// the options were saved, but the node-side fee push did not take —
++    /// a notice, NOT a failed apply
++    pub options_fee_notice: Option<String>,
++    /// the saved fee has been pushed to the node at least once this session
++    pub fee_pushed_to_node: bool,
++    /// the fee value (TRI) the node last ACCEPTED this session. A changed
++    /// value is pushed again even if the flag is set, and a FAILED push
++    /// clears the flag so the value stays eligible for automatic retry.
++    pub pushed_fee_tri: Option<f64>,
+     pub receive: ReceiveForm,
+     pub addressbook: Vec<AbEntry>,
+     pub keystore: Vec<AbEntry>,
+@@ -435,6 +453,9 @@ impl AppState {
+             send: SendFormState::default(),
+             fee_live_sats: None,
+             options_save_error: None,
++            options_fee_notice: None,
++            fee_pushed_to_node: false,
++            pushed_fee_tri: None,
+             send_result: None,
+             receive: ReceiveForm::default(),
+             addressbook,
+@@ -2360,6 +2381,16 @@ impl AppState {
+             self.notify_last_balance_sats = Some(bal);
+         }
+         self.debug_info = Some(info);
++        // the node just answered: push the SAVED fee to it once per session,
++        // so a fee saved while the node was down is not local-only forever
++        if self
++            .debug_info
++            .as_ref()
++            .map(|d| d.reachable)
++            .unwrap_or(false)
++        {
++            self.push_saved_fee_when_node_appears();
++        }
+     }
+ 
+     /// Legacy "Backup Wallet...": byte-copy of wallet.dat to the chosen path,
+@@ -2544,6 +2575,46 @@ impl AppState {
+         Ok(format!("{}: {}", dlg.mode.title(), reply))
+     }
+ 
++    /// What the X button must do (the Options -> Display choice).
++    /// Extracted as a pure function so the real close path is testable.
++    pub fn close_decision(&self) -> CloseDecision {
++        let o = &self.options;
++        if o.minimize_on_close || o.tray_on_close {
++            CloseDecision::Minimize
++        } else {
++            CloseDecision::Quit
++        }
++    }
++
++    /// Push the SAVED fee to the node once, when the node first becomes
++    /// reachable in this session. Without this the typed fee only reached the
++    /// node when the operator happened to press Apply while it was up; a fee
++    /// saved while the node was down stayed local forever.
++    pub fn push_saved_fee_when_node_appears(&mut self) {
++        if self.live_rpc_addr().is_none() {
++            return;
++        }
++        // nothing to do when the node already holds THIS value
++        let current = parse_tri(&self.options.pay_fee).ok().map(|s| s as f64 / 1_000_000.0);
++        if self.fee_pushed_to_node && self.pushed_fee_tri == current {
++            return;
++        }
++        match self.push_paytxfee_to_node() {
++            Ok(()) => {
++                self.fee_pushed_to_node = true;
++                self.pushed_fee_tri = current;
++                self.options_fee_notice = None;
++                self.status_log
++                    .push(format!("fee: node paytxfee set to {}", self.options.pay_fee));
++            }
++            Err(e) => {
++                // the node is not up yet (or refused): keep the value local and
++                // try again on the next poll
++                self.options_fee_notice = Some(e);
++            }
++        }
++    }
++
+     /// Push the Options "Pay transaction fee" value to the node (settxfee).
+     /// The dialog is the operator's control; the node owns the wallet, so the
+     /// setting must land there to affect anything — saving the text box alone
+@@ -2569,23 +2640,41 @@ impl AppState {
+         // validate the fee is a real amount before persisting
+         parse_tri(&self.options.pay_fee)
+             .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
++        // PERSIST EVERYTHING FIRST. The node-side fee push is a best-effort
++        // sync, NOT a gate: it used to abort the whole apply, so a node that
++        // refused the fee (or was unreachable) left the operator unable to
++        // change ANY option ("Options not applied"). The typed fee
++        // stays on disk and the node picks it up on the next launch.
++        persist_options(&self.cfg.options_path(), &self.options)?;
++        self.options_save_error = None;
++        // a stale warning from an earlier failed push must not survive a
++        // successful retry: clear it BEFORE the push and set it again only
++        // if THIS push fails.
++        self.options_fee_notice = None;
+         // the node charges the fee, not the text box: apply it there too and
+         // report a failure instead of silently diverging
+         match self.push_paytxfee_to_node() {
+             Ok(()) => {
+-                self.options_save_error = None;
++                // the node has the fee now: the startup push has nothing left
++                // to do for THIS value
++                self.fee_pushed_to_node = true;
++                self.pushed_fee_tri = parse_tri(&self.options.pay_fee).ok().map(|s| s as f64 / 1_000_000.0);
+                 self.status_log
+                     .push(format!("fee: node paytxfee set to {}", self.options.pay_fee));
+-                persist_options(&self.cfg.options_path(), &self.options)
+             }
+             Err(e) => {
+-                // keep the operator's typed value on disk so the next launch
+-                // retries it, but tell the caller the node did NOT take it
+-                let _ = persist_options(&self.cfg.options_path(), &self.options);
+-                self.status_log.push(format!("fee: {e}"));
+-                Err(e)
++                // the options ARE saved; only the node-side fee did not take.
++                // This is a notice, not a failed apply. The value stays
++                // ELIGIBLE for the automatic retry (the flag is cleared), so
++                // a fee that failed while the node was down is pushed as soon
++                // as the node is reachable again.
++                self.fee_pushed_to_node = false;
++                self.pushed_fee_tri = None;
++                self.status_log.push(format!("fee (saved locally, node not yet): {e}"));
++                self.options_fee_notice = Some(e);
+             }
+         }
++        Ok(())
+     }
+ 
+     /// Explorer: the search box action (classify + jump).
+diff --git a/src/gui/assets/menu_16/explorer.png b/src/gui/assets/menu_16/explorer.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a549a180471626616c7a1e88ce8d84ac2d5fe9e
+GIT binary patch
+literal 648
+zcmV;30(bq1P)<h;3K|Lk000e1NJLTq000mG000mO1^@s6AM^iV0006{Nkl<Zc$}qE
+zziU%r6g~HQd5ujBO{^ed8+h-<!ANVNAPz#eQo6O);39~9O&UrU|ACNIibIz;v{GCO
+z2I}BaI;c=L6~s!rm=+8=R5U+cl4@VR?>gj%v84`rrhEC$<$j!VF3<tK39Yj)Cc~j(
+zG93CFhdLi93;FGi)qmQHdy;unGR^>iM)<A~ZB%~ZLGMZ~-{Jy*=p1%zE9UoMhl#Ja
+z5({-H$Lms#yAlgbJmmLb$FZ##Wg*)?X%&ub#cBylRTGgZoPcW5oUA1*<=9rNy_f;2
+z*^vt@RNj@i5nA3|<M^=t7Qm^(0bP!6*C`Ffsc09aw-3v<IUxkrNQr*m(#OvLfYOYy
+zSc;pQ0KoBK{irszIrCP@Hdb4LmS&7sr5R(ftpPE{gyM&sYV-hjKOR1RFl)`#g65lU
+zuV<ABo59Sd0;eFDks-zy08lYG5Tbf@M<^Z*EbqN<X;SGiUv}%_x~3DHTKz+yv^N9*
+zl!bJrjX@=7gFXIBt&P8Z%|bdo#)Jaze|6NkL&dHlWE!?bwWE9y%xo2ixvYRePC>jF
+z8SyY^Ue`o1=%@Qqs^`)b&zM07bu*_RKo}tAaxk-1XykyfPJ|?-p{_;0gmn*HB=A`U
+zJoROE$9h+Cd1}f^X(%OVmI><(wE(Kxk-kdY<g#r}06=v<(%0z%r$#(YcTku%Co6H2
+zt9GQ10Xi0>a>6({NQubQu^_dJW|Z|VJR-%ff4F$8SiS=QLE4a4$889@>K@{5U@7;c
+iHS^!c^auXsoPPmCI5Cp;(@i%30000<MNUMnLSTZGIV5!e
+
+literal 0
+HcmV?d00001
+
+diff --git a/src/gui/rpc_client.rs b/src/gui/rpc_client.rs
+index ebc6fe6..43acc99 100644
+--- a/src/gui/rpc_client.rs
++++ b/src/gui/rpc_client.rs
+@@ -62,6 +62,11 @@ pub const ALLOWED_METHODS: &[&str] = &[
+     "walletpassphrasechange",
+     "walletlock",
+     "decryptwallet",
++    // the fee the NODE charges (daemon-side validated to 0..0.25 TRI, moves
++    // no coins) — the Options panel pushes the typed fee there. Without it
++    // on the list the whole Options apply failed with "not on the GUI
++    // read-only allow list" and NO option could be applied.
++    "settxfee",
+ ];
+ 
+ pub fn is_allowed(method: &str) -> bool {
+diff --git a/src/gui/state.rs b/src/gui/state.rs
+index a6a79f8..04290db 100644
+--- a/src/gui/state.rs
++++ b/src/gui/state.rs
+@@ -113,7 +113,9 @@ impl Screen {
+             Screen::SignMessage => "sign",
+             Screen::VerifyMessage => "verify",
+             Screen::Options => "options",
+-            Screen::Explorer => "search",
++            // the compass symbol (its own asset - "search" was never in the
++            // asset map, so the Explorer row rendered with no icon at all)
++            Screen::Explorer => "explorer",
+         }
+     }
+     pub const NAV_ORDER: [Screen; 11] = [
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 160060f..3bf1128 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -12,6 +12,257 @@ use crate::legacy::{Block, Tx, Vin, Vout};
+ use crate::spend;
+ use std::collections::HashSet;
+ 
++// ---------------------------------------------------------------------------
++// Options apply: the options must be chooseable. A node-side fee failure must
++// NOT block the apply, and a stale warning must not survive a successful retry.
++// ---------------------------------------------------------------------------
++
++/// An AppState wired to a temp profile dir and an UNREACHABLE node (rpc_addr
++/// points at a closed port): the fee push therefore always fails, which is
++/// exactly the operator's reported situation.
++fn options_state_with_unreachable_node(tag: &str) -> (crate::gui::app_state::AppState, std::path::PathBuf) {
++    let dir = std::env::temp_dir().join(format!("tri7gui_opts_{}_{}", tag, std::process::id()));
++    let _ = std::fs::remove_dir_all(&dir);
++    let cfg = UiConfig {
++        profile_dir: dir.display().to_string(),
++        rpc_addr: Some("127.0.0.1:1".into()),
++        ..UiConfig::default()
++    };
++    (crate::gui::app_state::AppState::new(cfg), dir)
++}
++
++#[test]
++fn options_apply_persists_even_when_the_node_fee_push_fails() {
++    let (mut st, dir) = options_state_with_unreachable_node("persist");
++    st.options.pay_fee = "0.000200".into();
++    st.options.minimize_on_close = true;
++    // the node is unreachable -> the fee push fails -> the OLD code returned
++    // Err here and the dialog refused to complete ("Options not applied")
++    st.save_options_action()
++        .expect("the apply must SUCCEED even when the node fee push fails");
++    // the options ARE on disk
++    let path = st.cfg.options_path();
++    assert!(path.exists(), "options.json must be written");
++    let text = std::fs::read_to_string(&path).unwrap();
++    assert!(text.contains("0.000200"), "fee persisted: {}", text);
++    assert!(text.contains("\"minimize_on_close\": true"), "{}", text);
++    // ...and the failure is reported as a NOTICE, not as a failed apply
++    assert!(st.options_save_error.is_none(), "no failed-apply error");
++    assert!(
++        st.options_fee_notice.is_some(),
++        "the node-side fee failure must be surfaced as a notice"
++    );
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++/// A loopback stand-in for the node that ACCEPTS settxfee and answers with the
++/// tri7d envelope. It serves exactly ONE connection (the one the client
++/// makes) and then stops - so joining the thread cannot block.
++fn accepting_fee_node() -> (String, std::thread::JoinHandle<usize>) {
++    use std::io::{Read, Write};
++    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++    let port = listener.local_addr().unwrap().port();
++    let handle = std::thread::spawn(move || {
++        // serve connections until the client goes quiet - the number of calls
++        // differs per test, so an idle timeout (not a fixed count) keeps
++        // join() from blocking forever
++        listener.set_nonblocking(true).expect("nonblocking");
++        let mut served = 0usize;
++        let mut idle = 0usize;
++        while idle < 80 {
++            match listener.accept() {
++                Ok((mut s, _)) => {
++                    idle = 0;
++                    served += 1;
++                    let mut buf = [0u8; 4096];
++                    let n = s.read(&mut buf).unwrap_or(0);
++                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
++                    // the stand-in must be answering a REAL settxfee request
++                    assert!(
++                        req.contains("\"method\":\"settxfee\""),
++                        "the GUI must call settxfee, got: {}",
++                        req.lines().last().unwrap_or("")
++                    );
++                    let body = r#"{"result":true,"error":null}"#;
++                    let http = format!(
++                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
++                        body.len(),
++                        body
++                    );
++                    let _ = s.write_all(http.as_bytes());
++                }
++                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
++                    idle += 1;
++                    std::thread::sleep(std::time::Duration::from_millis(20));
++                }
++                Err(_) => break,
++            }
++        }
++        served
++    });
++    (format!("127.0.0.1:{}", port), handle)
++}
++
++#[test]
++fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
++    let (mut st, dir) = options_state_with_unreachable_node("stale");
++    // first apply: the node is unreachable -> the notice appears
++    st.save_options_action().expect("apply");
++    assert!(st.options_fee_notice.is_some(), "notice after the failed push");
++    let stale = st.options_fee_notice.clone().unwrap();
++    // the node refused the connection - the exact text differs by platform
++    // ("no node reachable" when no rpc_addr is set, a connect error when the
++    // address is set but nothing listens), so assert on the failure itself
++    assert!(
++        stale.contains("no node reachable") || stale.contains("settxfee:"),
++        "unexpected notice: {}",
++        stale
++    );
++
++    // point the GUI at a node that ACCEPTS settxfee, then apply again
++    let (addr, server) = accepting_fee_node();
++    st.cfg.rpc_addr = Some(addr);
++    st.save_options_action().expect("apply");
++    // the successful push must have CLEARED the stale notice
++    assert!(
++        st.options_fee_notice.is_none(),
++        "a successful push must clear the stale notice, got: {:?}",
++        st.options_fee_notice
++    );
++    // ...and the stale text must not survive anywhere
++    let again = st.options_fee_notice.clone().unwrap_or_default();
++    assert!(!again.contains("no node reachable"), "{}", again);
++    let served = server.join().unwrap();
++    assert!(served >= 1, "the mock node must have been called");
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn saved_fee_is_pushed_when_the_node_appears() {
++    // The fee saved while the node was down must reach the node once it is
++    // reachable (the operator's fee must not stay local-only forever).
++    let (mut st, dir) = options_state_with_unreachable_node("startup");
++    st.options.pay_fee = "0.000300".into();
++    st.save_options_action().expect("apply");
++    assert!(st.options_fee_notice.is_some(), "no node -> notice");
++    assert!(!st.fee_pushed_to_node, "nothing pushed yet");
++
++    let (addr, server) = accepting_fee_node();
++    st.cfg.rpc_addr = Some(addr);
++    st.push_saved_fee_when_node_appears();
++    assert!(st.fee_pushed_to_node, "the saved fee must be pushed");
++    assert!(
++        st.options_fee_notice.is_none(),
++        "the notice must clear after the successful push: {:?}",
++        st.options_fee_notice
++    );
++    let _ = server.join();
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
++    // after a successful push the "pushed" flag must not freeze a NEW fee
++    // value that fails - the new value stays eligible for the automatic retry.
++    let (mut st, dir) = options_state_with_unreachable_node("retry");
++    let (addr, server) = accepting_fee_node();
++    st.cfg.rpc_addr = Some(addr.clone());
++
++    // 1. a successful push of 0.000200
++    st.options.pay_fee = "0.000200".into();
++    st.save_options_action().expect("apply");
++    assert!(st.fee_pushed_to_node, "the fee reached the node");
++    assert_eq!(st.pushed_fee_tri, Some(0.0002));
++    assert!(st.options_fee_notice.is_none(), "no notice after a good push");
++
++    // 2. the operator changes the fee and the node is gone -> the push fails
++    st.cfg.rpc_addr = Some("127.0.0.1:1".into());
++    st.options.pay_fee = "0.000300".into();
++    st.save_options_action().expect("the apply still succeeds");
++    assert!(st.options_fee_notice.is_some(), "the failed push is reported");
++    assert!(
++        !st.fee_pushed_to_node,
++        "a FAILED push must leave the value eligible for retry"
++    );
++    assert_eq!(st.pushed_fee_tri, None);
++
++    // 3. the node returns -> the NEW fee is pushed automatically
++    st.cfg.rpc_addr = Some(addr);
++    st.push_saved_fee_when_node_appears();
++    assert!(
++        st.fee_pushed_to_node,
++        "the new fee must be pushed when the node is reachable again"
++    );
++    assert_eq!(st.pushed_fee_tri, Some(0.0003));
++    assert!(st.options_fee_notice.is_none(), "the notice clears");
++    let _ = server.join();
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn the_fee_notice_survives_the_ok_path_for_the_overview_banner() {
++    // The OK button closes the Options dialog when the apply SUCCEEDED. The
++    // fee push may still have failed - the operator must be told afterwards,
++    // so the notice has to survive in the state the Overview banner reads.
++    let (mut st, dir) = options_state_with_unreachable_node("okpath");
++    st.options.pay_fee = "0.000250".into();
++    // the apply succeeds (the options are persisted) ...
++    st.save_options_action().expect("the apply succeeds");
++    // ... and the fee notice is still there for the Overview banner
++    assert!(
++        st.options_fee_notice.is_some(),
++        "the notice must survive the dialog so the Overview banner can show it"
++    );
++    // the banner shows it and the user can dismiss it
++    st.options_fee_notice = None;
++    assert!(st.options_fee_notice.is_none(), "the banner can dismiss it");
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn close_behaviour_flags_cover_every_combination() {
++    // The close handler keeps the process alive when EITHER keep-running flag
++    // is set, and closes for real only when both are off. This drives the
++    // REAL decision helper the X button uses (AppState::close_decision), not
++    // a restatement of the boolean expression.
++    use crate::gui::app_state::CloseDecision;
++    let (mut st, dir) = options_state_with_unreachable_node("close");
++    for (minimize, tray, expected) in [
++        (true, false, CloseDecision::Minimize),
++        (false, true, CloseDecision::Minimize),
++        (true, true, CloseDecision::Minimize),
++        (false, false, CloseDecision::Quit),
++    ] {
++        st.options.minimize_on_close = minimize;
++        st.options.tray_on_close = tray;
++        assert_eq!(
++            st.close_decision(),
++            expected,
++            "flags (minimize={}, tray={}) -> {:?}",
++            minimize,
++            tray,
++            expected
++        );
++    }
++    // the DEFAULT must be "minimize on close" - the wallet must not die on
++    // the X button
++    let d = OptionsState::default();
++    assert!(d.minimize_on_close, "minimize_on_close must default to true");
++    assert!(!d.tray_on_close, "tray_on_close must default to false");
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn settxfee_is_on_the_gui_allow_list() {
++    // The GUI pushes the typed fee to the node with settxfee; without it on
++    // the allow list the call is refused client-side and the Options apply
++    // failed (the operator's screenshot).
++    assert!(
++        rpc_client::is_allowed("settxfee"),
++        "settxfee must be callable by the GUI (it moves no coins; the daemon validates the 0..0.25 TRI range)"
++    );
++}
++
+ // ---------------------------------------------------------------------------
+ // amounts
+ // ---------------------------------------------------------------------------

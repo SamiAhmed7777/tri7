@@ -1,0 +1,120 @@
+### CMD: DNS2 tip + sole-staker check
+$ curl -s -X POST http://127.0.0.1:19112 -d '{"method":"getblockcount"}'
+{"error":null,"id":null,"result":2206775,"source":"tri7"}
+$ curl -s -X POST http://127.0.0.1:19112 -d '{"method":"getbestblockhash"}'
+{"error":null,"id":null,"result":"85ed282e4eeb662ef19ff520d5e775779cb92d382eb43e5819cb806fef136bbc","source":"tri7"}
+$ curl -s -X POST http://127.0.0.1:19112 -d '{"method":"getstakinginfo"}' | head -c 200
+{"error":null,"id":null,"result":{"attempts":1189478,"coins_considered":216,"coins_meeting_min_age":171,"coins_without_key":0,"connections":1,"currentblocksize":0,"currentblocktx":0,"difficulty":3.061
+
+### CMD: Pi handshake failures (outbound to DNS2 onion + inbound via its own HS) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+[2026-11-06T23:42:04Z] inbound handshake 127.0.0.1:35654 failed: send verack: Broken pipe (os error 32)
+[2026-11-06T23:42:21Z] inbound handshake 127.0.0.1:54290 failed: peer closed connection
+[2026-11-06T23:42:35Z] handshake gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 failed: peer closed connection
+[2026-11-06T23:42:41Z] connect 43kgtx6vcz2253vo5ybfq3ax5sj5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 failed: socks connect to 43kgtx6vcz2253vo5ybfq3ax5sj5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-06T23:42:44Z] connect jbpfhe7zw3qm67wy3j2ayysp3mnrjobopthnko3b3sgahqtecblwqmid.onion:24112 failed: socks connect to jbpfhe7zw3qm67wy3j2ayysp3mnrjobopthnko3b3sgahqtecblwqmid.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-06T23:42:47Z] connect 6ygpphp2qsucwvhwefv6h6ehvk6zjf7b7zdp4ggkzjjwe76cg6jwm7id.onion:24112 failed: socks connect to 6ygpphp2qsucwvhwefv6h6ehvk6zjf7b7zdp4ggkzjjwe76cg6jwm7id.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-06T23:43:18Z] connect nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112 failed: socks connect reply: Resource temporarily unavailable (os error 11)
+[2026-11-06T23:43:18Z] inbound handshake 127.0.0.1:54990 failed: send verack: Broken pipe (os error 32)
+
+### CMD: Pi peer count = 0 (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+{"error":null,"id":null,"result":{"by_transport":{"clearnet":0,"i2p":0,"tor":0},"count":0,"peers":[]},"source":"tri7"}
+
+### CMD: Pi tip stuck at 2206706 while DNS2 advances (2206761+) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+{"error":null,"id":null,"result":2206706,"source":"tri7"}
+
+### CMD: Pi staking OFF (attempts:0 — no competing-staker hazard) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+enabled: False attempts: 0
+
+### CMD: Pi binary predates the wire-restore commits (mtime 22:02 UTC < HEAD 22:33:44 UTC) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+-rwxr-xr-x 2 root root 6164288 Nov  6 22:02 /root/tri7/target/release/follow_tip
+now: 2026-11-06T23:43:26Z
+
+### CMD: Pi source lacks both wire-restore markers (b4c974b and 40778f5 absent) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+0
+0
+
+### CMD: index files frozen since 21:25 while the 22:41 builder run holds the pid (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+total 140540
+drwxr-xr-x 2 root root     4096 Nov  6 21:25 .
+drwxr-xr-x 5 root root     4096 Nov  6 23:43 ..
+-rw-r--r-- 1 root root 71210625 Nov  6 21:25 blockidx.bin
+-rw-r--r-- 1 root root 72685872 Nov  6 21:25 txidx.bin
+    PID                  STARTED
+2041196 Fri Nov  6 23:43:30 2026
+
+### CMD: builder io frozen over 15s (read the full 818MB store once, then stopped) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+t0:read_bytes: 0
+t1:read_bytes: 0
+
+### CMD: tipstate: top-level height 2206706; entries ABSOLUTE 2202107..2206706 (window-relative premise does NOT reproduce here) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+height: 2206706 entries: 4600 min: 2202107 max: 2206706
+
+### CMD: stop_tri7.sh kills an empty string (bypassed by the executor: pgrep-based kill) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+#!/bin/bash
+for p in 2025891; do kill -TERM "" 2>/dev/null; done
+sleep 8
+for p in 2025891; do kill -9 "" 2>/dev/null; done
+rm -f /var/lib/tri7/tri7d.pid
+
+### CMD: start_tri7.sh is the canonical launcher (captured for restart fidelity) (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+#!/usr/bin/env bash
+# Activate tri7 on the aarch64 box against a COPY of the legacy wallet.
+# TOR ONLY: .onion peers via the local SOCKS proxy; P2P listener bound to
+# loopback so no clearnet address is ever exposed or dialled.
+set -euo pipefail
+
+BIN=/root/tri7/target/release/follow_tip
+STATE=/var/lib/tri7
+WALLET_DIR=/root/tri7-wallet
+WALLET=$WALLET_DIR/wallet.dat
+ORIG=/root/.triangles/wallet.dat
+PIDFILE=$STATE/tri7d.pid
+LOG=$STATE/tri7d.log
+
+# onion peers from the legacy conf (Tor only). No clearnet, no Tailscale.
+# Tor-only peers. DNS2's LIVE onion (port 24113 -> its P2P listener).
+# The four legacy addnodes in the old conf are dead (host unreachable) and
+# DNS2's own systemd unit advertises a stale address, so use the verified one.
+ONIONS="gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+
+[[ -x $BIN ]] || { echo "FAIL: $BIN missing"; exit 1; }
+
+# Tor must actually be running — refuse to start without it rather than
+# silently falling back to clearnet.
+if ! (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null; then
+  echo "FAIL: Tor SOCKS is not listening on 127.0.0.1:9050 — start tor@default first"
+  exit 2
+fi
+
+mkdir -p "$STATE" "$WALLET_DIR"
+if [[ ! -f $WALLET ]]; then
+  cp -p "$ORIG" "$WALLET"
+  chmod 600 "$WALLET"
+  echo "wallet copied: $(stat -c%s "$WALLET") bytes"
+else
+  echo "wallet copy present: $(stat -c%s "$WALLET") bytes"
+fi
+
+if [[ -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "already running pid $(cat "$PIDFILE")"
+  exit 0
+fi
+
+echo "commit: $(cat /root/tri7/BUILD_COMMIT 2>/dev/null || echo unknown)"
+echo "binary: $(file -b "$BIN" | cut -c1-60)"
+
+### CMD: cargo present on the Pi (hetzner, 2026-11-06T23:4xZ)
+$ ssh hetzner
+cargo 1.99.1 (5f94df478 2026-08-27)
+

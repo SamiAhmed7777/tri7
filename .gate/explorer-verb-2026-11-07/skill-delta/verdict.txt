@@ -1,0 +1,10 @@
+GRADE=B urn=urn:ump:7yiw6wmg3vvjuqj2jykqc74shtubxqtabb2lqza4bzfyzk42k7wq
+{
+  "blocking": [],
+  "polish": [
+    "The dedupe claim ('exactly ONE occurrence of Distribution pipeline DONE' etc.) cannot be verified from the provided bytes since SKILL.md itself is not included in the gate bundle \u2014 include the relevant SKILL.md diff/hunk or a grep transcript for cold judges.",
+    "Some rules mix several concerns per bullet (e.g. the --balances rule covers build semantics, extraction, atomicity, and wallet pairing); splitting into sub-bullets would aid retrieval.",
+    "Magic numbers (5760 blocks, 6h re-check, 10min retry, COIN=1e6) could carry one-line justifications for future readers.",
+    "The aarch64 linker rule would benefit from the exact error string being quoted verbatim in a code fence for grep-ability."
+  ]
+}

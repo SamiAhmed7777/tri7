@@ -1,0 +1,68 @@
+    /// A9: `addnode=<onion>:<port>` is kept as a tor target, `addnode=
+    /// <b32>.b32.i2p:<port>` as an i2p target (dual-network fleet);
+    /// `addnode=1.2.3.4:24112` (cleartext) is IGNORED with a log line. Junk
+    /// lines never panic.
+    #[test]
+    fn addnode_conf_parsing_dual_overlay() {
+        let tor = ("127.0.0.1".to_string(), 9050u16);
+        let i2p = ("127.0.0.1".to_string(), 4447u16);
+        let conf = "\
+rpcuser=u
+rpcpassword=p
+port=24113
+addnode=1.2.3.4:24112
+addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+addnode=somehost.example.com:24113
+addnode=jbpfhe7zdeadseeddeadseeddeadseeddeadseeddeadseeddeadseed0.onion:24112
+addnode=ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113
+addnode=
+addnode=nonsense-no-port
+addnode=:24112
+addnode=host:notaport
+";
+        let (targets, ignored) = addnode_targets_from_conf(conf, &tor, &i2p);
+        // exactly the two onion targets + the i2p target survive
+        assert_eq!(targets.len(), 3);
+        assert_eq!(
+            targets[0].endpoint(),
+            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+        );
+        assert_eq!(targets[0].transport, Transport::Tor);
+        assert_eq!(targets[0].socks.as_ref().map(|(h, _)| h.as_str()), Some("127.0.0.1"));
+        assert_eq!(targets[1].port, 24112);
+        assert_eq!(
+            targets[2].endpoint(),
+            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
+        );
+        assert_eq!(targets[2].transport, Transport::I2p);
+        assert_eq!(targets[2].socks, Some(i2p.clone()));
+        assert_eq!(targets[2].port, 24113);
+        // the cleartext hosts are in the ignored list (each was logged by the
+        // parser — visible with `cargo test -- --nocapture`)
+        assert_eq!(ignored.len(), 2);
+        assert!(ignored.contains(&"1.2.3.4:24112".to_string()));
+        assert!(ignored.contains(&"somehost.example.com:24113".to_string()));
+        // malformed lines — including colon-carrying junk (:24112 empty host,
+        // host:notaport unparsable port) — are ignored without entries and
+        // without panic
+        assert!(!ignored.iter().any(|s| !s.contains('.')));
+        let (targets, _) = addnode_targets_from_conf("addnode=nonsense-no-port\n", &tor, &i2p);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn addnode_ignored_list_requires_host_port_shape() {
+        let tor = ("127.0.0.1".to_string(), 9050u16);
+        let i2p = ("127.0.0.1".to_string(), 4447u16);
+        let (targets, ignored) = addnode_targets_from_conf(
+            "addnode=:24112\naddnode=host:notaport\naddnode=ok.example.com:24113\n\
+             addnode=nonsense-no-port\naddnode=host:99999\n",
+            &tor,
+            &i2p,
+        );
+        // only the well-formed cleartext host:port enters the ignored list
+        assert!(targets.is_empty());
+        assert_eq!(ignored, vec!["ok.example.com:24113".to_string()]);
+    }
+
+    /// Peer-store keys and the advertised-address filter: loopback and

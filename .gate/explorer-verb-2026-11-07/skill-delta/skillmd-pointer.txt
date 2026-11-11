@@ -1,0 +1,1 @@
+163:- EXPLORER-VERB (2026-11-07, commit b0e9684, GLM B): native `richlist` verb + explicit `--balances` snapshot builder + GUI live-verb preference — see references/explorer-verb.md for the full rule set (atomic writes, snapshot-pair rebuild, archive-seam depth, aarch64 linker env var).

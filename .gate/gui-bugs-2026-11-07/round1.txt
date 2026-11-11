@@ -1,0 +1,9 @@
+GRADE=B urn=urn:ump:r7mfhls62mfb6dfru6d4d7t7dxqazpus2qvv4tccwtdmcft6ayra
+{
+  "blocking": [],
+  "polish": [
+    "distinguish stake_net==0-unknown from a genuinely zero net (e.g. Option<i64> or a scanned-height marker) for exactness",
+    "fix misindented inserted `stake_net: 0,` lines in src/gui/tests.rs",
+    "consider a --history-probe flag to dump all rows for future audits"
+  ]
+}

@@ -1,0 +1,65 @@
+# RAW live verification — FINAL bytes, both install paths, spaces dir
+# (fleet PC sami-pc, 2026-11-10). Wrapper = byte-exact fn output.
+
+## HASH LINKAGE (all three bundled, computed from the bundled files)
+wrapper-final.bat: 12ba494c86ea2e7bc6194830365584b0a9acd88b52caf2f512a84adb78eab18a
+wrapper-traced.bat: 23c83d654e9dfeb84f41092f930f85286cf55889fc0ea8cd090d2669d5e25fb5
+wrapper-spaces.bat: a9e3c7e7dd32104e42ed3973b20829b97eeb36f297bb614af6af5a61717c8b7a
+non-breadcrumb-lines-identical(final vs traced): True
+(wrapper-final = production bytes; wrapper-traced = + breadcrumb echoes
+only — mechanical diff proof printed True; wrapper-spaces = production
+bytes with the work dir at C:\upd test — the SPACES-path variant)
+
+## RUN A — FAILURE PATH, spaces dir (raw capture: raw-spaces-failure-run.txt)
+Work dir "C:\upd test" (path contains a space — the quoting stress case).
+Installer = robocopy copy invoked as <exe> /S → returns rc=16 (usage error —
+a REAL failing installer). Witnessed:
+- the installer EXECUTED (its usage banner visible on the console capture)
+- install-failed.marker written BEFORE relaunch, content:
+  "update-install-failed rc=16" — the rc VALUE in the file (the redirect-first
+  fix: the earlier rc=%rc%> form lost the digit to cmd's fd parsing — caught
+  live, marker came out EMPTY, fixed, this run shows the value)
+- relaunch executed regardless: relaunch.marker "relaunched"
+- self-del: the wrapper absent after the run
+- daemon: stopped + killed by the wrapper (absent from the post-run
+  tasklist) and back at fleet height 2208908 by the end of the session (the
+  machine's own task arrangement restarted it — see KNOWN LIMITATION for the
+  discovery scope of the restore block; this run's capture does not
+  distinguish which mechanism restarted it)
+
+## RUN B — SUCCESS PATH + FULL TIMELINE (no spaces dir)
+Timeline (verbatim breadcrumbs, %time%):
+  IDENTITY-TRUNCATED → DISCOVERY+TASK-STOP → KILL x3 → INSTALLER-START →
+  INSTALLER-DONE rc=0 → RELAUNCH-START → TASK-RESTORE-START →
+  TASK-RESTORE-DONE → IDENTITY-REMOVED-AFTER-RESTORE → SELF-DEL
+Post-run: relaunch.marker "relaunched"; NO install-failed.marker (success);
+follow_tip.exe RESTORED AUTONOMOUSLY (fresh PID 17404) — zero manual steps;
+RPC at fleet height 2208877; wrapper self-deleted.
+Daemon-respawn proof across the session: fresh PIDs after every
+stop/kill/restoration cycle (16308→31976→20944→28564→19736→20908→25948→
+35252→32372→17404→28636→37028→6308...).
+
+## TASK DISCOVERY (root-cause journey, documented)
+schtasks /query CSV exposes NO action column (verified live — a CSV scan can
+never match) → the Tasks MODULE is used: Get-ScheduledTask | Where actions
+match follow_tip|ft_run (the fleet's launcher) → identities persisted
+(TaskPath+TaskName), tasks stopped, and RESTORED after the relaunch.
+
+## TEST COVERAGE (569 passed / 0 failed / 1 ignored; GUI-feature 0 errors)
+Bounded waits (60/15), discovery+stop before kills, full-identity
+persistence + restoration ordering (persist-before-stop, restore-after-
+relaunch, before self-del, one restoration block), rc capture + failure
+marker with redirect-first ordering, GUI marker consumption (surfaced once +
+cleared), Portable flow never kills the daemon.
+
+## HARNESS NOTES (not shipped-code defects)
+Over ssh pipes  prints "Input redirection is not supported" and
+skips 1s sleeps (final run executed REAL sleeps — 17.4s daemon phase). The
+start-spawned relaunch child writes its marker asynchronously — early checks
+raced it; later checks confirm. The GUI's real spawn (CREATE_NO_WINDOW
+console, no redirection) avoids both.
+
+## SIDE FINDING (filed, out of scope)
+AVG quarantined the unsigned mingw test exe within one execution — unsigned
+user-facing installers risk the same on customers: code-sign released assets
+before wide distribution.
