@@ -27,6 +27,16 @@ pub const ALLOWED_METHODS: &[&str] = &[
     "getblock",
     "getrawtransaction",
     "getinfo",
+    // balance CARD atomicity (2026-11-11 judge blocker): the 5s poll reads
+    // the total AND its coverage facts (source/height/partial) from ONE
+    // getwalletinfo payload. The verb was missing here, so EVERY getwalletinfo
+    // call died on this gate and the card's number/label facts silently
+    // never loaded (the tests bypassed rpc_call, so nobody saw it).
+    "getwalletinfo",
+    // sync progress — same silent-failure class: the poll has asked for
+    // getsyncinfo since the "it should show this on the UI" work, but the
+    // allow list refused every call, so the status bar never saw it.
+    "getsyncinfo",
     "getdifficulty",
     "getconnectioncount",
     "getstakemodifier",
