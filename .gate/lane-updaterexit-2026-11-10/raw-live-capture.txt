@@ -1,0 +1,25 @@
+[ 1:06:02.60] KILL 
+[ 1:06:04.25] KILL 
+[ 1:06:04.50] KILL 
+[ 1:06:04.71] INSTALLER-START 
+[ 1:06:17.75] INSTALLER-DONE rc=0 
+[ 1:06:17.75] RELAUNCH-START 
+[ 1:06:17.77] TASK-RESTORE-START 
+[ 1:06:18.45] TASK-RESTORE-DONE 
+[ 1:06:18.45] SELF-DEL 
+.MARKERS. 
+tri7d
+.FAILED-MARKER-STATE. 
+ABSENT-success-path-no-marker
+.RELAUNCH-MARKER. 
+relaunched
+.DIR-AFTER. 
+debug.log
+fake-setup.exe
+install.marker
+relaunch.cmd
+relaunch.marker
+tri7-update.bat
+update-tasks.txt
+.DAEMON-AFTER. 
+follow_tip.exe               37804 Services                   0    172,728 K

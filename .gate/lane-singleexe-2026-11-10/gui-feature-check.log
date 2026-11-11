@@ -1,0 +1,1206 @@
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.2: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.2:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.2:       |                        ^~~
+warning: tri7-core@7.0.2: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: tri7-core@7.0.2: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.2:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.2:       |                      ^~~~
+warning: unused import: `LAST_HARDCODED_CHECKPOINT`
+  --> src/node_embedded.rs:68:40
+   |
+68 |     tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src/spend.rs:1006:5
+     |
+1006 |     /// Version, nTime, the two CompactSize counts, and nLockTime.
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1007 |     let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+     |     -------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `sha256d`
+  --> src/txpool.rs:17:21
+   |
+17 | use crate::legacy::{sha256d, Hash, Tx};
+   |                     ^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:380:43
+    |
+380 |             v.window_stroke = Stroke::new(1.0, th::MENU_SELECTED);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+    = note: `#[warn(float_literal_f32_fallback)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:395:54
+    |
+395 |             v.noninteractive.fg_stroke = Stroke::new(1.0, th::MENU_TEXT);
+    |                                                      ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:396:48
+    |
+396 |             v.inactive.fg_stroke = Stroke::new(1.0, th::MENU_TEXT);
+    |                                                ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:403:47
+    |
+403 |             v.hovered.fg_stroke = Stroke::new(1.0, th::MENU_SELECTED_TEXT);
+    |                                               ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:407:46
+    |
+407 |             v.active.fg_stroke = Stroke::new(1.0, th::MENU_SELECTED_TEXT);
+    |                                              ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:614:55
+    |
+614 | ...                   .stroke = Stroke::new(0.0, Color32::TRANSPARENT);
+    |                                             ^^^ help: explicitly specify the type as `f32`: `0.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:671:51
+    |
+671 |                         .stroke(egui::Stroke::new(1.0, animated_color.gamma_multiply(0.4 + 0.6 * pulse)))
+    |                                                   ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/app.rs:733:55
+    |
+733 | ...                   .stroke(egui::Stroke::new(1.0, th::BORDER_SUBTLE))
+    |                                                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:2573:53
+     |
+2573 |                     let from_resp = egui::ComboBox::from_id_source("from_addr")
+     |                                                     ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:2616:57
+     |
+2616 |                         let book_resp = egui::ComboBox::from_id_source("dest_book")
+     |                                                         ^^^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3028:44
+     |
+3028 |         v.inactive.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+     |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3032:43
+     |
+3032 |         v.hovered.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+     |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3036:42
+     |
+3036 |         v.active.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+     |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3052:44
+     |
+3052 |         v.inactive.bg_stroke = Stroke::new(1.0, th::BORDER);
+     |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3053:44
+     |
+3053 |         v.inactive.fg_stroke = Stroke::new(1.0, th::TEXT_PRIMARY);
+     |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3056:43
+     |
+3056 |         v.hovered.bg_stroke = Stroke::new(1.0, th::BRAND_RED);
+     |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3057:43
+     |
+3057 |         v.hovered.fg_stroke = Stroke::new(1.0, th::TEXT_PRIMARY);
+     |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3060:42
+     |
+3060 |         v.active.bg_stroke = Stroke::new(1.0, th::BRAND_RED);
+     |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3061:42
+     |
+3061 |         v.active.fg_stroke = Stroke::new(1.0, th::TEXT_PRIMARY);
+     |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:3404:33
+     |
+3404 |                 egui::ComboBox::from_id_source("ab_source")
+     |                                 ^^^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3628:41
+     |
+3628 |                     .stroke(Stroke::new(1.0, th::BORDER))
+     |                                         ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:3659:37
+     |
+3659 |                 .stroke(Stroke::new(1.0, th::ERROR))
+     |                                     ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:3720:33
+     |
+3720 |                 egui::ComboBox::from_id_source("tx_type")
+     |                                 ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:3729:33
+     |
+3729 |                 egui::ComboBox::from_id_source("tx_status")
+     |                                 ^^^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:4378:25
+     |
+4378 |                         1.0,
+     |                         ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:4640:37
+     |
+4640 |                 .stroke(Stroke::new(1.0, th::BORDER_SUBTLE))
+     |                                     ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:4685:37
+     |
+4685 |                     egui::ComboBox::from_id_source("smsg_from")
+     |                                     ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:4709:57
+     |
+4709 |                         let book_resp = egui::ComboBox::from_id_source("smsg_to_book")
+     |                                                         ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:4772:33
+     |
+4772 |                 egui::ComboBox::from_id_source("sign_addr")
+     |                                 ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:4788:49
+     |
+4788 |                 let book_resp = egui::ComboBox::from_id_source("sign_addr_book")
+     |                                                 ^^^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:4827:41
+     |
+4827 |                     .stroke(Stroke::new(1.0, th::BORDER_SUBTLE))
+     |                                         ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> src/gui/app.rs:4938:25
+     |
+4938 |                         1.0,
+     |                         ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: use of deprecated associated function `eframe::egui::ComboBox::from_id_source`: Renamed id_salt
+    --> src/gui/app.rs:5155:37
+     |
+5155 |                     egui::ComboBox::from_id_source("opt_language")
+     |                                     ^^^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:80:38
+   |
+80 |     v.selection.stroke = Stroke::new(1.0, BRAND_RED);
+   |                                      ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:82:35
+   |
+82 |     v.window_stroke = Stroke::new(1.0, BORDER);
+   |                                   ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:93:46
+   |
+93 |     w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
+   |                                              ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:94:46
+   |
+94 |     w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_SECONDARY);
+   |                                              ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:97:40
+   |
+97 |     w.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+   |                                        ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+  --> src/gui/theme.rs:98:40
+   |
+98 |     w.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+   |                                        ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:101:39
+    |
+101 |     w.hovered.bg_stroke = Stroke::new(1.0, BRAND_RED);
+    |                                       ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:102:39
+    |
+102 |     w.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                       ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:105:38
+    |
+105 |     w.active.bg_stroke = Stroke::new(1.0, BRAND_RED);
+    |                                      ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:106:38
+    |
+106 |     w.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                      ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:109:36
+    |
+109 |     w.open.bg_stroke = Stroke::new(1.0, BRAND_RED);
+    |                                    ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:110:36
+    |
+110 |     w.open.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                    ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:206:29
+    |
+206 |         .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+    |                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:245:29
+    |
+245 |         .stroke(Stroke::new(1.0, if lift { BORDER } else { BORDER_SUBTLE }))
+    |                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:270:44
+    |
+270 |         v.inactive.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:274:43
+    |
+274 |         v.hovered.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:278:42
+    |
+278 |         v.active.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:291:44
+    |
+291 |         v.inactive.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:295:43
+    |
+295 |         v.hovered.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:299:42
+    |
+299 |         v.active.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:311:44
+    |
+311 |         v.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:312:44
+    |
+312 |         v.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:315:43
+    |
+315 |         v.hovered.bg_stroke = Stroke::new(1.0, BRAND_RED);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:316:43
+    |
+316 |         v.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:319:42
+    |
+319 |         v.active.bg_stroke = Stroke::new(1.0, BRAND_RED);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:320:42
+    |
+320 |         v.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:333:44
+    |
+333 |         v.inactive.fg_stroke = Stroke::new(1.0, TEXT_SECONDARY);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:337:43
+    |
+337 |         v.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:341:42
+    |
+341 |         v.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:353:44
+    |
+353 |         v.inactive.bg_stroke = Stroke::new(1.0, ERROR);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:354:44
+    |
+354 |         v.inactive.fg_stroke = Stroke::new(1.0, ERROR);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:357:43
+    |
+357 |         v.hovered.bg_stroke = Stroke::new(1.0, ERROR);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:358:43
+    |
+358 |         v.hovered.fg_stroke = Stroke::new(1.0, ERROR);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:361:42
+    |
+361 |         v.active.bg_stroke = Stroke::new(1.0, ERROR);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:362:42
+    |
+362 |         v.active.fg_stroke = Stroke::new(1.0, ERROR);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:428:44
+    |
+428 |         v.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:429:44
+    |
+429 |         v.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:433:43
+    |
+433 |         v.hovered.bg_stroke = Stroke::new(1.0, INPUT_HOVER);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:437:42
+    |
+437 |         v.active.bg_stroke = Stroke::new(1.5, BRAND_RED);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:460:44
+    |
+460 |         v.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:462:43
+    |
+462 |         v.hovered.bg_stroke = Stroke::new(1.0, INPUT_HOVER);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:464:42
+    |
+464 |         v.active.bg_stroke = Stroke::new(1.5, BRAND_RED);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:486:44
+    |
+486 |         v.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:487:44
+    |
+487 |         v.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:491:43
+    |
+491 |         v.hovered.bg_stroke = Stroke::new(1.0, INPUT_HOVER);
+    |                                           ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:495:42
+    |
+495 |         v.active.bg_stroke = Stroke::new(1.5, BRAND_RED);
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:532:21
+    |
+532 |         Stroke::new(1.0, BORDER_SUBTLE),
+    |                     ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:576:77
+    |
+576 |             .rect_stroke(rect.shrink(1.0), Rounding::same(4.0), Stroke::new(1.0, BRAND_RED));
+    |                                                                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src/gui/theme.rs:840:29
+    |
+840 |         .stroke(Stroke::new(1.0, color))
+    |                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: unused import: `WalletProvider`
+  --> src/node_embedded.rs:79:131
+   |
+79 | ...DataProvider, EntryView, Proxy, SnapshotWallet, UtxoRow, WalletProvider,
+   |                                                             ^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/gui/app.rs:523:13
+    |
+523 |         let mut resp = th::nav_row(
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stake_tex`
+   --> src/gui/app.rs:637:25
+    |
+637 |                     let stake_tex = self.tex(ui.ctx(), stake_icon);
+    |                         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stake_tex`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `derived`
+    --> src/gui/app.rs:2166:22
+     |
+2166 |             let Some(derived) = st.derived.clone() else {
+     |                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_derived`
+
+warning: unused variable: `tip`
+    --> src/gui/app.rs:2173:17
+     |
+2173 |             let tip = st
+     |                 ^^^ help: if this is intentional, prefix it with an underscore: `_tip`
+
+warning: unused variable: `total`
+    --> src/gui/app.rs:2260:59
+     |
+2260 |             let (spendable, stake, unconfirmed, immature, total, tip_used) =
+     |                                                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_total`
+
+warning: unused variable: `derived`
+    --> src/gui/app.rs:3762:17
+     |
+3762 |             let derived = self.st.derived.clone().unwrap_or_else(|| {
+     |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_derived`
+
+warning: unused variable: `min_amount_sats`
+    --> src/gui/app.rs:3794:17
+     |
+3794 |             let min_amount_sats: i64 = self
+     |                 ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_min_amount_sats`
+
+warning: unused variable: `search`
+    --> src/gui/app.rs:3801:17
+     |
+3801 |             let search = self.tx_search.to_lowercase();
+     |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_search`
+
+warning: unused variable: `ui`
+   --> src/gui/theme.rs:384:25
+    |
+384 | pub fn attach_edit_menu(ui: &mut Ui, response: &egui::Response, buf: &mut String) {
+    |                         ^^ help: if this is intentional, prefix it with an underscore: `_ui`
+
+warning: variable does not need to be mutable
+   --> src/gui/theme.rs:557:16
+    |
+557 |     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    |                ----^^^^
+    |                |
+    |                help: remove this `mut`
+
+warning: unused variable: `fork`
+   --> src/node_embedded.rs:914:9
+    |
+914 |     let fork = recon.fork_height.take();
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_fork`
+
+warning: unused variable: `b`
+    --> src/node_embedded.rs:2605:17
+     |
+2605 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> src/node_embedded.rs:2605:20
+     |
+2605 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `d`
+    --> src/node_embedded.rs:2605:23
+     |
+2605 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                       ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:3624:9
+     |
+3624 |     let mut connect = |stats: &mut Stats| -> Result<Session, String> {
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `wcfg`
+    --> src/node_embedded.rs:3620:9
+     |
+3620 |     let wcfg = Config {
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wcfg`
+
+warning: variable `session_dead` is assigned to, but never used
+    --> src/node_embedded.rs:3732:17
+     |
+3732 |             let mut session_dead = false;
+     |                 ^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_session_dead` instead
+
+warning: value assigned to `session_dead` is never read
+    --> src/node_embedded.rs:3767:25
+     |
+3738 |                     session_dead = true;
+     |                     ------------------- `session_dead` is overwritten here before the previous value is read
+...
+3767 |                         session_dead = true;
+     |                         ^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `session_dead` is never read
+    --> src/node_embedded.rs:3738:21
+     |
+3738 |                     session_dead = true;
+     |                     ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sync_started`
+    --> src/node_embedded.rs:3986:9
+     |
+3986 |     let sync_started = Instant::now();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sync_started`
+
+warning: unused variable: `a`
+    --> src/node_embedded.rs:5480:22
+     |
+5480 |             .filter(|a| {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `wallet_ready`
+    --> src/node_embedded.rs:7147:21
+     |
+7147 |                 let wallet_ready = wl.is_some();
+     |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wallet_ready`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:9044:24
+     |
+9044 |             .and_then(|mut r| r.get(&hash).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:9058:24
+     |
+9058 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:9086:24
+     |
+9086 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:9115:65
+     |
+9115 |         let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
+     |                                                                 ----^
+     |                                                                 |
+     |                                                                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:10443:25
+      |
+10443 |                     let mut stg = st_shared.lock().unwrap();
+      |                         ----^^^
+      |                         |
+      |                         help: remove this `mut`
+
+warning: unused variable: `wp`
+     --> src/node_embedded.rs:10072:26
+      |
+10072 |                 let Some(wp) = &wp2 else { return };
+      |                          ^^ help: if this is intentional, prefix it with an underscore: `_wp`
+
+warning: value assigned to `owned_n` is never read
+     --> src/node_embedded.rs:10104:30
+      |
+10104 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+      |                              ^^^^^^^^^^^ this value is reassigned later and never used
+...
+10107 |                             owned_n = cands.len();
+      |                             --------------------- `owned_n` is overwritten here before the previous value is read
+
+warning: value assigned to `funded_n` is never read
+     --> src/node_embedded.rs:10104:43
+      |
+10104 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+      |                                           ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+10108 |                             funded_n = w.owned_count();
+      |                             -------------------------- `funded_n` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:1800:17
+     |
+1800 |             let mut push_group = |addrs: Vec<String>,
+     |                 ----^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: unused variable: `entries`
+    --> src/rpc.rs:2192:32
+     |
+2192 |                     let (base, entries) = deps.tip.window();
+     |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entries`
+
+warning: unused variable: `deps`
+    --> src/rpc.rs:3221:30
+     |
+3221 | fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+     |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_deps`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:553:13
+    |
+553 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:301:13
+    |
+301 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/spend.rs:1152:5
+     |
+1152 |     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: value assigned to `p` is never read
+   --> src/wallet_encrypt.rs:106:5
+    |
+106 |     p += 4;
+    |     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1911:8
+     |
+1911 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1917:8
+     |
+1917 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1927:4
+     |
+1927 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1936:4
+     |
+1936 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `recent_utxos` is never used
+   --> src/gui/app.rs:167:4
+    |
+167 | fn recent_utxos(st: &AppState, n: usize) -> Vec<UtxoRec> {
+    |    ^^^^^^^^^^^^
+
+warning: fields `fork` and `adopted` are never read
+   --> src/node_embedded.rs:678:16
+    |
+678 |     Switched { fork: u64, adopted: usize },
+    |     --------   ^^^^       ^^^^^^^
+    |     |
+    |     fields in this variant
+    |
+    = note: `ReconOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `total_recv` and `total_sent` are never used
+    --> src/node_embedded.rs:2245:8
+     |
+2238 | impl Stats {
+     | ---------- methods in this implementation
+...
+2245 |     fn total_recv(&self) -> u64 {
+     |        ^^^^^^^^^^
+...
+2248 |     fn total_sent(&self) -> u64 {
+     |        ^^^^^^^^^^
+
+warning: associated function `connect` is never used
+    --> src/node_embedded.rs:2301:8
+     |
+2300 | impl Session {
+     | ------------ associated function in this implementation
+2301 |     fn connect(addr: &str) -> Result<Session, String> {
+     |        ^^^^^^^
+
+warning: field `kernel_seeded` is never read
+    --> src/node_embedded.rs:2902:5
+     |
+2900 | struct ValidationOutcome {
+     |        ----------------- field in this struct
+2901 |     kernel_enforced: bool,
+2902 |     kernel_seeded: bool,
+     |     ^^^^^^^^^^^^^
+
+warning: field `pubkeys` is never read
+    --> src/node_embedded.rs:6074:5
+     |
+6057 | struct OpsAdapter {
+     |        ---------- field in this struct
+...
+6074 |     pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+     |     ^^^^^^^
+
+warning: constant `EARLY_OPS` is never used
+    --> src/node_embedded.rs:6239:7
+     |
+6239 | const EARLY_OPS: &[&str] = &[
+     |       ^^^^^^^^^
+
+warning: method `ready_early` is never used
+    --> src/node_embedded.rs:6251:8
+     |
+6249 | impl OpsAdapter {
+     | --------------- method in this implementation
+6250 |     /// True when this verb may run before the live wallet view is ready.
+6251 |     fn ready_early(&self, method: &str) -> bool {
+     |        ^^^^^^^^^^^
+
+warning: field `msgs_out` is never read
+     --> src/node_embedded.rs:10988:5
+      |
+10967 | struct Peer {
+      |        ---- field in this struct
+...
+10988 |     msgs_out: u64,
+      |     ^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: associated function `key_of` is never used
+    --> src/smsg.rs:1104:8
+     |
+1072 | impl MessageStore {
+     | ----------------- associated function in this implementation
+...
+1104 |     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
+     |        ^^^^^^
+
+warning: fields `pubkey`, `label`, and `encrypted` are never read
+   --> src/bdb_import.rs:318:9
+    |
+316 |     struct KeyRow {
+    |            ------ fields in this struct
+317 |         secret: Option<[u8; 32]>,
+318 |         pubkey: Vec<u8>,
+    |         ^^^^^^
+319 |         label: String,
+    |         ^^^^^
+320 |         encrypted: bool,
+    |         ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: direct cast of function item into an integer
+    --> src/node_embedded.rs:3350:51
+     |
+3350 |         libc::signal(libc::SIGINT, tri7_on_signal as libc::sighandler_t);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+     |
+3350 |         libc::signal(libc::SIGINT, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+    --> src/node_embedded.rs:3351:52
+     |
+3351 |         libc::signal(libc::SIGTERM, tri7_on_signal as libc::sighandler_t);
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+help: first cast to a pointer `as *const ()`
+     |
+3351 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 143 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.49s

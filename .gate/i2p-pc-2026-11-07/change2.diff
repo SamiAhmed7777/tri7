@@ -1,0 +1,67 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index df9f033..2d5dfcb 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -8713,9 +8713,10 @@ fn connect_and_handshake(
+     // Dial order (BRIEF_TOR_V2 item 3): peers that have answered before and
+     // are out of backoff first, then fresh store entries, then the
+     // configured targets (seeds last — they are the network's last resort).
+-    // Store hosts are reconstructed .onion hostnames (dialable); leftover
+-    // legacy hex-tor-key entries and clearnet quads are relay-only and are
+-    // never dialed: the network is Tor-only.
++    // Store hosts are reconstructed .onion hostnames / .b32.i2p destinations
++    // (dialable through their overlay SOCKS); leftover legacy hex-tor-key
++    // entries and clearnet quads are relay-only and are never dialed: the
++    // network has no clearnet P2P.
+     let mut targets: Vec<PeerTarget> = Vec::new();
+     let now = tri7_core::peers::unix_now();
+     let seeds: Vec<(String, u16)> = cfg
+@@ -8725,7 +8726,7 @@ fn connect_and_handshake(
+         .collect();
+     let store = tri7_core::peers::PeerStore::load(&peers_path(cfg));
+     for (host, port) in store.dial_order(now, &seeds) {
+-        if !host.ends_with(".onion") {
++        if !dialable_store_host(&host) {
+             continue;
+         }
+         if let Ok(t) = PeerTarget::parse(&format!("{}:{}", host, port), &cfg.socks, &cfg.i2p_socks)
+@@ -8795,6 +8796,14 @@ fn connect_and_handshake(
+     Err(format!("no outbound target reachable ({} tried)", n))
+ }
+ 
++/// True when a peer-store host is dialable through an overlay transport:
++/// a tor `.onion` hostname or an i2p `.b32.i2p`/`.i2p` destination (each
++/// dials through its own SOCKS). Clearnet quads and legacy hex-tor-key
++/// leftovers are relay-only and never dialed.
++fn dialable_store_host(host: &str) -> bool {
++    host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p")
++}
++
+ /// Bounded multi-target connect that TOLERATES all targets being down
+ /// (headless mode): returns None instead of dying so the native RPC surface
+ /// can serve from persisted state while the follower keeps retrying the
+@@ -9484,6 +9493,24 @@ addnode=host:notaport
+         assert_eq!(ignored, vec!["ok.example.com:24113".to_string()]);
+     }
+ 
++    /// Peer-store hosts dialable through an overlay: onions and i2p
++    /// destinations yes; clearnet quads, legacy hex-key leftovers, and junk
++    /// no. Guards the store-dial filter in connect_and_handshake.
++    #[test]
++    fn dialable_store_host_accepts_onion_and_i2p_only() {
++        assert!(dialable_store_host(
++            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion"
++        ));
++        assert!(dialable_store_host(
++            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p"
++        ));
++        assert!(dialable_store_host("somedest.i2p"));
++        assert!(!dialable_store_host("100.85.236.10"));
++        assert!(!dialable_store_host("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
++        assert!(!dialable_store_host(""));
++        assert!(!dialable_store_host("somehost.example.com"));
++    }
++
+     /// Peer-store keys and the advertised-address filter: loopback and
+     /// unspecified placeholders are never recorded.
+     #[test]

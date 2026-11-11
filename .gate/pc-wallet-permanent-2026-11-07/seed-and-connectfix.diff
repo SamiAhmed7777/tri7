@@ -1,0 +1,47 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 9a62b7a..bae9fbc 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -5099,8 +5099,14 @@ impl OpsAdapter {
+                     ),
+                 ));
+             }
++            // the tx vin is built in (txid, n) sorted order (build_spend_outputs);
++            // re-checking against the SELECTION order would misalign the zip on
++            // any multi-input spend (2026-11-07: every multi-input sendtoaddress
++            // self-rejected with "prevout map misaligned with vin")
++            let mut ordered_sel = selected.clone();
++            ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
+             if let Err(e) =
+-                tri7_core::spend::connect_inputs_check(&plan.tx, &selected, tip_h as u32)
++                tri7_core::spend::connect_inputs_check(&plan.tx, &ordered_sel, tip_h as u32)
+             {
+                 return Err((-1, format!("connect check failed: {e}")));
+             }
+diff --git a/src/gui/state.rs b/src/gui/state.rs
+index cdcf91c..806c978 100644
+--- a/src/gui/state.rs
++++ b/src/gui/state.rs
+@@ -1458,11 +1458,14 @@ pub fn build_signed_send_with_book(
+             plan.fee, req.fee_sats
+         ));
+     }
+-    // self-verify exactly like the CLI dry runs
+-    for (i, input) in selected.iter().enumerate() {
++    // self-verify exactly like the CLI dry runs (vin order = (txid, n) sorted,
++    // matching build_spend_outputs — NOT the selection order)
++    let mut ordered_sel = selected.clone();
++    ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
++    for (i, input) in ordered_sel.iter().enumerate() {
+         spend::verify_input(&plan.tx, i, &input.script_pubkey)?;
+     }
+-    spend::connect_inputs_check(&plan.tx, &selected, spend_height)?;
++    spend::connect_inputs_check(&plan.tx, &ordered_sel, spend_height)?;
+     Ok(SendBuild {
+         txid_display: hash_to_display(&plan.tx.hash()),
+         tx_hex: plan
+ M src/bin/follow_tip.rs
+ M src/gui/state.rs
+?? .gate/pc-wallet-permanent-2026-11-07/
+?? .gate/pi-deploy-2026-11-06/
+?? examples/wallet_from_seed.rs

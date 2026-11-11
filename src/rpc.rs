@@ -199,6 +199,20 @@ pub const NATIVE_METHODS: &[&str] = &[
     "repairwallet",
     "resendtx",
     "stop",
+    // ---- legacy parity 2026-11-10 (RPC-OPS-WIRING lane): net ops + wallet
+    // change key. addnode/disconnectnode/getseedlist/getnetworkstability are
+    // the v5 rpcnet.cpp verbs (addnode/disconnectnode mutate the persistent
+    // peer store / live sessions; getseedlist serves the conf+compiled seed
+    // list; getnetworkstability aggregates the live peer table). gettxout +
+    // getrawchangeaddress are NOT in the v5 RPC table (checked against the
+    // v6.2.6.7 source) — they follow the Bitcoin-Core shapes the v5 fork
+    // derives from. All six are live-engine verbs: never early. ----
+    "addnode",
+    "disconnectnode",
+    "getseedlist",
+    "getnetworkstability",
+    "gettxout",
+    "getrawchangeaddress",
 ];
 
 /// Ops verbs with a passive implementation that needs no live wallet view.
@@ -286,6 +300,17 @@ pub const OPS_METHODS: &[&str] = &[
     "repairwallet",
     "resendtx",
     "stop",
+    // ---- legacy parity 2026-11-10 (RPC-OPS-WIRING lane): the six net-ops /
+    // wallet verbs ride the live engine too — addnode/disconnectnode touch
+    // the peer store + live sessions, getseedlist/getnetworkstability read
+    // conf seeds + the live peer table, gettxout reads the live view/pool/
+    // store/addrindex, getrawchangeaddress writes wallet keys. Never early. ----
+    "addnode",
+    "disconnectnode",
+    "getseedlist",
+    "getnetworkstability",
+    "gettxout",
+    "getrawchangeaddress",
 ];
 
 /// Methods allowed to fall back to the legacy proxy when the native path
@@ -5749,6 +5774,30 @@ mod tests {
         for m in ["reservebalance"] {
             assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
             assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+        }
+    }
+
+    #[test]
+    fn rpc_ops_wiring_verbs_are_native_and_ops_routed() {
+        // RPC-OPS-WIRING lane: the four v5 rpcnet.cpp verbs (addnode,
+        // disconnectnode, getseedlist, getnetworkstability) plus gettxout /
+        // getrawchangeaddress (absent from the v5 table — Core shapes).
+        // All six are live-engine verbs: never early, never proxied.
+        for m in [
+            "addnode",
+            "disconnectnode",
+            "getseedlist",
+            "getnetworkstability",
+            "gettxout",
+            "getrawchangeaddress",
+        ] {
+            assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
+            assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
+            assert!(!OPS_EARLY.contains(&m), "{m} must not answer before the live view is ready");
+            assert!(
+                !PROXY_FALLBACK_METHODS.contains(&m),
+                "{m} must never fall back to the legacy proxy"
+            );
         }
     }
 

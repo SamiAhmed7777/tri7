@@ -1,0 +1,40 @@
+test tests::conf_stake_flag_resolution_and_persistence ... ok
+test tests::rollback_tip_drops_the_phantom_and_truncates ... ok
+test tests::socks5_reply_drain_variants ... ok
+test tests::socks5_request_domain_form_for_onion ... ok
+test tests::socks5_request_ipv4_form ... ok
+test tests::stale_duplicate_header_segments_are_dropped_not_fatal ... ok
+test tests::status_gate_degraded_needs_both_quiets ... ok
+test tests::status_gate_degraded_when_both_quiets ... ok
+test tests::status_gate_exit_codes_are_stable ... ok
+test tests::status_gate_healthy_when_peer_recent ... ok
+test tests::status_gate_stale_state_fails_even_static ... ok
+test tests::status_gate_missing_peer_data_counts_quiet ... ok
+test tests::status_gate_static_skips_network_gate ... ok
+test tests::txpool_rejects_spends_outside_the_live_view_via_ops_shape ... ok
+test tests::wallet_live_apply_candidates_weight ... ok
+test tests::socks5_greeting_bytes ... ok
+test tests::recent_blocks_evicts_oldest_beyond_cap ... ok
+
+failures:
+
+---- tests::addnode_conf_parsing_tor_only stdout ----
+[2026-11-06T23:39:27Z] addnode=1.2.3.4:24112 ignored: Tor-only — only .onion addnode hosts are accepted
+[2026-11-06T23:39:27Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+[2026-11-06T23:39:27Z] addnode=somehost.example.com:24113 ignored: Tor-only — only .onion addnode hosts are accepted
+[2026-11-06T23:39:27Z] addnode=jbpfhe7zdeadseeddeadseeddeadseeddeadseeddeadseeddeadseed0.onion:24112 accepted (tor)
+[2026-11-06T23:39:27Z] addnode=nonsense-no-port ignored: Tor-only — only .onion addnode hosts are accepted
+
+thread 'tests::addnode_conf_parsing_tor_only' (946098) panicked at src/bin/follow_tip.rs:9343:9:
+assertion `left == right` failed
+  left: 3
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::addnode_conf_parsing_tor_only
+
+test result: FAILED. 39 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--bin follow_tip`

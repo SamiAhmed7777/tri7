@@ -1,0 +1,7 @@
+=== COMMAND: cargo check --bin tri7_wallet_gui --features gui (GUI-feature compile) ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+rustc-error-lines: 0
+
+=== COMMAND: cargo check --bins (all bins incl. the new --attach-external shim) ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+rustc-error-lines: 0

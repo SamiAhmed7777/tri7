@@ -1,0 +1,190 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index a473005..bc618bd 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -1509,6 +1509,35 @@ impl Tri7App {
+                     });
+                 }
+             }
++            Step::PhraseAdded { keys_inserted, keys_already_present } => {
++                ui.vertical_centered(|ui| {
++                    th::inline_notice(
++                        ui,
++                        th::Notice::Success,
++                        "Seed phrase added to this wallet",
++                        &format!(
++                            "This wallet had no spendable balance to migrate, so nothing \
++                             was swept. The phrase's own addresses (m/44'/2222'/0'/0/i) are \
++                             now part of wallet.dat: {} keys added, {} already present. Every \
++                             coin this wallet receives from now on is recoverable with the \
++                             phrase — keep those 24 words safe.",
++                            keys_inserted, keys_already_present
++                        ),
++                    );
++                    th::text_meta(
++                        ui,
++                        "back up by storing the 24 words (and this wallet.dat) — the phrase \
++                         alone restores every address this wallet will ever derive",
++                    );
++                    ui.add_space(8.0);
++                    if th::primary_button(ui, "Back to wallet").clicked() {
++                        consumed = true;
++                        if let Err(e) = self.st.refresh_chain_action() {
++                            self.st.status_log.push(format!("refresh after phrase add: {}", e));
++                        }
++                    }
++                });
++            }
+             Step::Done { txid } => {
+                 ui.vertical_centered(|ui| {
+                     th::inline_notice(
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index d01575d..ee99ab9 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -722,26 +722,10 @@ impl AppState {
+                     .into(),
+             );
+         }
+-        // entry pre-check: at least one spendable UTXO must exist. The exact
+-        // source set (minus the destination addresses) is computed in
+-        // prepare() once the phrase — and its addresses — are known.
+-        let tip_height = self.tip.as_ref().map(|t| t.height as u32).unwrap_or(0);
+-        let any_spendable = self
+-            .derived
+-            .as_ref()
+-            .map(|d| {
+-                d.utxos
+-                    .iter()
+-                    .any(|u| crate::sweep::sweep_spendable(&u.prev_kind, u.height, tip_height + 1))
+-            })
+-            .unwrap_or(false);
+-        if !any_spendable {
+-            return Err(
+-                "no spendable UTXOs found for this wallet — nothing to migrate (zero \
+-                 balance, immature coinbase/coinstake, or an empty/missing UTXO snapshot)"
+-                    .into(),
+-            );
+-        }
++        // NOTE: no balance pre-check here (Sami: "people will need it"). A
++        // zero-balance wallet STILL gets the phrase: prepare() completes in
++        // phrase-only mode (keys written, nothing swept, no marker) instead
++        // of refusing.
+         let mut flow = crate::gui::sweep_flow::SweepFlow::new();
+         if let Some(m) = &w.hd_mnemonic {
+             // a stored seed exists (mid-migration retry, or a phrase
+diff --git a/src/gui/sweep_flow.rs b/src/gui/sweep_flow.rs
+index 4e30e7f..5282c87 100644
+--- a/src/gui/sweep_flow.rs
++++ b/src/gui/sweep_flow.rs
+@@ -63,6 +63,9 @@ pub enum SweepStep {
+     PlanReview,
+     /// Broadcast confirmed by tri7d; marker written. Carries the txid.
+     Done { txid: String },
++    /// Zero-balance wallet: the phrase + derived keys were ADDED to
++    /// wallet.dat, but there was no balance to sweep — no tx, no marker.
++    PhraseAdded { keys_inserted: usize, keys_already_present: usize },
+ }
+ 
+ /// The exact-amounts review payload (everything the pre-flight screen and
+@@ -261,13 +264,6 @@ impl SweepFlow {
+             .as_ref()
+             .map(|s| s.0.clone())
+             .ok_or_else(|| "no validated phrase in flight".to_string())?;
+-        if inputs.is_empty() {
+-            return Err(
+-                "no spendable UTXOs found for this wallet — nothing to migrate (zero \
+-                 balance, immature coinbase/coinstake, or an empty/missing UTXO snapshot)"
+-                    .into(),
+-            );
+-        }
+ 
+         // (1) destinations, straight from the phrase
+         let dests = sweep::derive_sweep_destinations(&mnemonic, &self.passphrase)?;
+@@ -315,6 +311,20 @@ impl SweepFlow {
+         wallet.advance_hdchain_to(sweep::SWEEP_ADDR_COUNT as i64)?;
+         wallet.write_defaultkey(&dests[0].pubkey)?;
+ 
++        // (3b) PHRASE-ONLY completion (Sami: "people will need it"): a
++        // zero-balance wallet still gets the phrase — it IS the backup for
++        // every coin this wallet receives from now on. No transaction, no
++        // 'seedmigrated' marker: if coins later arrive on the old random
++        // keys, re-running the wizard locks to the stored phrase and CAN
++        // sweep them.
++        if inputs.is_empty() {
++            self.dests = dests;
++            self.addresses = self.dests.iter().map(|d| d.address.clone()).collect();
++            self.error = None;
++            self.step = SweepStep::PhraseAdded { keys_inserted, keys_already_present };
++            return Ok(());
++        }
++
+         // (4) the ONE consolidation transaction, signed in memory. The source
+         // set excludes the destination addresses (coins already on seed
+         // addresses are left alone); the destination keys inserted above are
+@@ -701,16 +711,20 @@ mod tests {
+         let path = random_key_wallet(&dir, "zeropaths", 1);
+         let mut h = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
+ 
+-        // zero inputs at all — refused BEFORE anything is written
++        // zero inputs at all → PHRASE-ONLY completion (Sami: "people will
++        // need it"): the phrase + derived keys ARE written, no tx, no marker
+         let mut f = flow();
+         f.begin_restore();
+         f.words_input = MN12.into();
+         f.submit_restore();
+-        let err = f.prepare(&mut h, &[], 150, 1_500_000_000).unwrap_err();
+-        assert!(err.contains("no spendable UTXOs"), "{}", err);
++        f.prepare(&mut h, &[], 150, 1_500_000_000).unwrap();
++        assert_eq!(
++            f.step,
++            SweepStep::PhraseAdded { keys_inserted: 10, keys_already_present: 0 }
++        );
+         let w = crate::wallet::read_wallet(&path).unwrap();
+-        assert_eq!(w.keys.len(), 1);
+-        assert!(w.hd_mnemonic.is_none());
++        assert_eq!(w.keys.len(), 1 + 10);
++        assert!(w.hd_mnemonic.is_some());
+ 
+         // inputs that pay TO the destination addresses → nothing left to
+         // sweep. The seed + derived keys ARE already in wallet.dat by then
+@@ -734,9 +748,14 @@ mod tests {
+             secret: d0,
+             pubkey: pk.serialize().to_vec(),
+         };
+-        let err = f.prepare(&mut h, &[dest_input], 150, 1_500_000_000).unwrap_err();
++        // fresh flow: the first prepare() completed this one as PhraseAdded
++        let mut f2 = flow();
++        f2.begin_restore();
++        f2.words_input = MN12.into();
++        f2.submit_restore();
++        let err = f2.prepare(&mut h, &[dest_input], 150, 1_500_000_000).unwrap_err();
+         assert!(err.contains("already sits on the seed-derived addresses"), "{}", err);
+-        assert_eq!(f.step, SweepStep::SeedVerified);
++        assert_eq!(f2.step, SweepStep::SeedVerified);
+         assert!(f.plan.is_none());
+         let w = crate::wallet::read_wallet(&path).unwrap();
+         assert_eq!(w.keys.len(), 1 + 10); // seed-derived keys written (harmless)
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index beb6ec9..160060f 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -1677,13 +1677,14 @@ fn seed_migration_entry_guards_refuse_before_any_value_moves() {
+     let err = st.begin_seed_migration_action().unwrap_err();
+     assert!(err.contains("not writable"), "{}", err);
+ 
+-    // 2. writable but zero spendable UTXOs → refuse (an immature coinbase
+-    // at a tip below maturity is filtered at SELECTION, never at consensus)
++    // 2. writable but zero spendable UTXOs → the wizard NOW OPENS (Sami:
++    // "people will need it") — phrase-only completion happens in prepare().
+     st.wallet_rw = Some(crate::wallet::WalletHandle::open_readwrite(&dir.join("wallet.dat")).unwrap());
+     st.derived.as_mut().unwrap().utxos[0].prev_kind = "coinbase".into();
+     st.tip.as_mut().unwrap().height = 100; // depth 0 for the h100 coin
+-    let err = st.begin_seed_migration_action().unwrap_err();
+-    assert!(err.contains("no spendable UTXOs"), "{}", err);
++    st.begin_seed_migration_action().unwrap();
++    assert!(st.sweep_flow.is_some(), "zero-balance wallet must open the seed wizard");
++    st.sweep_flow = None;
+ 
+     // 3. already-migrated marker → refuse before anything else
+     st.tip.as_mut().unwrap().height = 150; // depth 51 → the coin IS mature

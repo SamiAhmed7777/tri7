@@ -1,0 +1,7 @@
+command: cargo test --lib -- genesis_frame_only fresh_flag_treats_genesis_only_blk multi_input_spend
+(renamed to is_fresh_store_treats_genesis_only_blk_as_fresh in the final tree;
+ the pre-rename run pinned the same assertions)
+test spend::tests::multi_input_spend_writes_vin_in_sorted_order_and_verifiers_follow ... ok
+test node_embedded::tests::genesis_frame_only_store_is_not_usable_state ... ok
+test gui::node_supervisor::tests::fresh_flag_treats_genesis_only_blk_as_fresh ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 656 filtered out; finished in 1.34s

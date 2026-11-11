@@ -219,6 +219,17 @@ pub struct UtxoRowOut {
     pub script: Vec<u8>,
 }
 
+/// One output resolved by outpoint — the `gettxout` spentness oracle.
+/// `spent_height` NULL means the index has never seen the coin spent;
+/// a value means it was consumed at that height.
+pub struct OutpointRow {
+    pub address: String,
+    pub value: i64,
+    pub height: u64,
+    pub spent_height: Option<u64>,
+    pub script: Vec<u8>,
+}
+
 pub fn utxos(c: &Connection, addrs: &[String]) -> Result<Vec<UtxoRowOut>, String> {
     let mut out = Vec::new();
     let mut st = c
@@ -295,6 +306,45 @@ impl LiveIndex {
             conn,
             next_height: next,
         })
+    }
+
+    /// The authority verdict for this index against the chain's own tip
+    /// (facts are read from the open connection; see `authority`).
+    pub fn authority_at(
+        &self,
+        chain_height: u64,
+        chain_hash: Option<[u8; 32]>,
+    ) -> Authority {
+        authority(facts(&self.conn), chain_height, chain_hash)
+    }
+
+    /// One output by outpoint — `gettxout`'s spentness oracle when the live
+    /// address index covers the chain. Uses the (txid, n) index the spend
+    /// marking already relies on.
+    pub fn outpoint(&self, txid: &[u8; 32], n: u32) -> Result<Option<OutpointRow>, String> {
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT addr, value, height, spent_height, script \
+                 FROM out WHERE txid=?1 AND n=?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let txid_blob = txid.to_vec();
+        let mut rows = st
+            .query_map(params![txid_blob, n as i64], |r| {
+                Ok(OutpointRow {
+                    address: r.get(0)?,
+                    value: r.get(1)?,
+                    height: r.get::<_, i64>(2)? as u64,
+                    spent_height: r.get::<_, Option<i64>>(3)?.map(|h| h as u64),
+                    script: r.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(row) => row.map_err(|e| e.to_string()).map(Some),
+            None => Ok(None),
+        }
     }
 
     pub fn apply(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {

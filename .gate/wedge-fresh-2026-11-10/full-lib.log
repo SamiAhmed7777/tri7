@@ -1,0 +1,6 @@
+command: cargo test --lib
+tree: base be3cd3c + wedge-fresh.diff (uncommitted at run time)
+test result: ok. 658 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 102.13s
+(656 base + 3 new: genesis_frame_only_store_is_not_usable_state,
+ is_fresh_store_treats_genesis_only_blk_as_fresh,
+ multi_input_spend_writes_vin_in_sorted_order_and_verifiers_follow)

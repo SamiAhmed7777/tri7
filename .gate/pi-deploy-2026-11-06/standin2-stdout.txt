@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:qmowxfk4goa4qqckujz7ziz727b6pzcjcljsjisavwbobtlffsra
+{
+  "blocking": [],
+  "polish": [
+    "The DEFINITION of \"stable (30 min)\" in brief.md still says \"section H, 67 lines\" while the corrected slice and section H say 61 \u2014 update the stale count so the absolute-term definition matches the attached evidence.",
+    "final-state-evidence.txt has inconsistent section-header markers (=== A-D vs ### G) and a stray '(only the 01:20:17 outbound drop...)' editorial line inside section F's raw-event area; normalize to one marker style and keep editorial comments outside raw captures.",
+    "Section D shows tip 2206831 and section G shows 2206830 from the same capture session without timestamps per line; adding a UTC capture time to each section would preempt apparent inconsistencies.",
+    "deploy-transcript-2b.txt still quotes the superseded v4 launcher sha (cbe7488a) in its appendix note; annotate it with the v5 sha inline rather than only in the brief.",
+    "The diff file name start_tri7-wallet-less.diff no longer matches its content (zero-key, not wallet-less); a rename or a header comment noting the historical name would reduce confusion."
+  ]
+}

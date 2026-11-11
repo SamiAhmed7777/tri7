@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:lgwbnvzp24a42aturwoqgm2m6d6lqwpsrc3oec3fqwgni5bfuw3a
+{
+  "blocking": [],
+  "polish": [
+    "Remove or replace DNS2's stale addnode i6tk7\u2026onion:24112 in a future tick to eliminate a persistent failed-dial.",
+    "Curl-52-as-expected-success is correct reasoning but a raw netcat/protocol-hello dial would be stronger evidence than 'empty reply'; consider for the DNS3 advertisement tick.",
+    "DNS3 HS lacks HiddenServiceVersion consistent check elsewhere \u2014 fine as written, but consider adding ReachableSystems/poW metrics in the next wiring tick when the onion is advertised."
+  ]
+}

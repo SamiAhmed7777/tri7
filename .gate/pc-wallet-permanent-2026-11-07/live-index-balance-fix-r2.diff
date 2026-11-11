@@ -1,0 +1,553 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 555fd18..0fe6e74 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -5812,6 +5812,61 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                     .map_err(|e| (-1, e))?;
+                 Ok(serde_json::json!(sig))
+             }
++            // The wallet's SPENDABLE set from the live address index.
++            //
++            // The index is applied on every accepted block, so it follows the
++            // tip; the replay snapshot stops at whatever height the chain
++            // replay reached (an archive seam, or a hole in the block store).
++            // This is the wallet-scoped view of the index: the same unspent
++            // coins the chain shows, so a spend built from it can never be a
++            // double-spend of a coin the replay thinks is gone.
++            "getwalletspendable" => {
++                let wl = self.wl.lock().unwrap();
++                let Some(wl) = wl.as_ref() else {
++                    return Err((-1, "wallet live UTXO view not ready yet".into()));
++                };
++                let addrs: Vec<String> =
++                    wl.wallet.keys.iter().map(|k| k.address.clone()).collect();
++                let path = tri7_core::addrindex::db_path(&self.state_dir);
++                if !path.exists() {
++                    return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
++                }
++                let c = tri7_core::addrindex::open(&path).map_err(|e| (-1, e))?;
++                let rows = tri7_core::addrindex::utxos(&c, &addrs).map_err(|e| (-1, e))?;
++                let balance: i64 = rows.iter().map(|r| r.value).sum();
++                let idx_h = tri7_core::addrindex::index_height(&c);
++                let (tip_h, _) = self.tip();
++                let utxos: Vec<serde_json::Value> = rows
++                    .iter()
++                    .map(|u| {
++                        serde_json::json!({
++                            "txid": tri7_core::addrindex::txid_hex(&u.txid),
++                            "n": u.n,
++                            "address": u.address,
++                            "script_hex": u.script.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
++                            "value_sats": u.value,
++                            "height": u.height,
++                        })
++                    })
++                    .collect();
++                // The index is applied on every accepted block, so it tracks
++                // the tip - but it is only AUTHORITATIVE when it is a
++                // finished index (`complete`) and it has reached the tip. A
++                // partial build, or an index that trails the tip, does not
++                // know every coin: its set must not be served as the whole
++                // wallet. One block of slack covers the race between the
++                // tip advancing and the index applying that block.
++                let complete = tri7_core::addrindex::is_complete(&c);
++                let authoritative = complete && idx_h.saturating_add(1) >= tip_h;
++                Ok(serde_json::json!({
++                    "balance_sats": balance,
++                    "utxos": utxos,
++                    "index_height": idx_h,
++                    "chain_tip": tip_h,
++                    "complete": complete,
++                    "authoritative": authoritative,
++                }))
++            }
+             // Chain-wide address index (legacy -addressindex=1 parity). Absent
+             // index -> the exact legacy failure text, never a wallet-scoped
+             // shortcut that would answer differently.
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index ef28386..0692637 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -2156,6 +2156,37 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         .size(11.0)
+                         .color(th::TEXT_SECONDARY),
+                 );
++                // A PARTIAL balance must say so: the node's spendable view does
++                // not reach the chain tip (index still building, or a replay
++                // capped at an archive seam). Saying "partial — verified to
++                // h<N>" is honest; showing the number alone is not.
++                let partial = st
++                    .debug_info
++                    .as_ref()
++                    .filter(|d| d.reachable)
++                    .and_then(|d| d.daemon_balance_partial)
++                    .unwrap_or(false);
++                if partial {
++                    let h = st
++                        .debug_info
++                        .as_ref()
++                        .filter(|d| d.reachable)
++                        .and_then(|d| d.daemon_balance_height);
++                    let msg = match h {
++                        Some(h) => format!(
++                            "Partial balance — the node verified this up to height {} only. \
++                             It is still catching up to the chain tip, so this figure can \
++                             change in either direction as it syncs.",
++                            h
++                        ),
++                        None => "Partial balance — the node has not verified this up to the chain \
++                                  tip yet, so this figure can change in either direction as it \
++                                  syncs."
++                            .to_string(),
++                    };
++                    ui.add_space(2.0);
++                    th::inline_notice(ui, th::Notice::Warn, "Partial balance", &msg);
++                }
+                 return;
+             }
+             // legacy split comes from ONE place (AppState::balance_split) so the
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index 4031e27..cccac88 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -139,6 +139,14 @@ pub struct DebugInfo {
+     /// daemon-side wallet balance (getbalance, sats) — the live truth when
+     /// the daemon tracks this wallet's keys (local snapshot may be absent)
+     pub daemon_balance_sats: Option<i64>,
++    /// The node says the balance is PARTIAL (getwalletinfo.balance_partial):
++    /// its spendable view does not reach the chain tip (an index still
++    /// building, or a chain replay capped at an archive seam). The UI must
++    /// say so instead of presenting the number as the whole balance.
++    pub daemon_balance_partial: Option<bool>,
++    /// The height the node's spendable view was verified up to
++    /// (getwalletinfo.balance_height).
++    pub daemon_balance_height: Option<u64>,
+     /// daemon-side unspent set (listunspent) — the Transactions/history truth
+     /// when the wallet folder has no local snapshot (fresh installs)
+     pub daemon_utxos: Option<Vec<crate::gui::state::UtxoRec>>,
+@@ -2231,6 +2239,8 @@ impl AppState {
+                 if let Some(f) = wi.get("paytxfee").and_then(|v| v.as_f64()) {
+                     self.fee_live_sats = Some((f * 1_000_000.0).round() as i64);
+                 }
++                info.daemon_balance_partial = wi.get("balance_partial").and_then(|v| v.as_bool());
++                info.daemon_balance_height = wi.get("balance_height").and_then(|v| v.as_u64());
+             }
+             match rpc_client::rpc_call(&addr, "getconnectioncount", &[]) {
+                 Ok(v) => {
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 0b6570a..b182055 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -2222,6 +2222,8 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
+         blocks: Some(2_204_751),
+         sync: Some(s),
+         daemon_balance_sats: Some(3_036_990_591), // uTRI: 3,036.990591 TRI (COIN=1e6)
++        daemon_balance_partial: Some(false),
++        daemon_balance_height: Some(2_201_090),
+         daemon_utxos: None,
+         wallet_history: None,
+         local_onion: None,
+@@ -2239,6 +2241,8 @@ fn gui_sync_progress_drives_status_bar_and_fraction() {
+         blocks: Some(2_204_751),
+         sync: None,
+         daemon_balance_sats: None,
++        daemon_balance_partial: None,
++        daemon_balance_height: None,
+         daemon_utxos: None,
+         wallet_history: None,
+         local_onion: None,
+@@ -2369,6 +2373,8 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
+         blocks: Some(2_205_301),
+         sync: None,
+         daemon_balance_sats: None,
++        daemon_balance_partial: None,
++        daemon_balance_height: None,
+         daemon_utxos: Some(vec![
+             // the collapsed stake's live coins (full values): must NOT duplicate
+             utxo(&"aa".repeat(32), 14_260_000, "coinstake"),
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 9b7ac2e..c9960c1 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -895,6 +895,34 @@ pub struct Deps<'a> {
+     pub ops: Option<&'a dyn NodeOps>,
+ }
+ 
++/// The wallet's spendable set from the node's LIVE address index.
++///
++/// The index is applied on every accepted block, so it stays tip-accurate
++/// even when the chain replay cannot reach the tip - a hole in the block
++/// store, or an archive that ends below the tip, caps the replay snapshot
++/// while the index keeps moving with the chain. The replay snapshot stays
++/// the fallback for a node without an index (and for a wallet whose index
++/// has not finished building).
++fn live_spendable(deps: &Deps) -> Option<serde_json::Value> {
++    let ops = deps.ops?;
++    let v = ops.call("getwalletspendable", &serde_json::json!([])).ok()?;
++    v.get("balance_sats").and_then(|x| x.as_i64())?;
++    Some(v)
++}
++
++/// The live set is only AUTHORITATIVE when the node says so: a finished
++/// address index that has reached the chain tip. Anything else (a partial
++/// build, an index that trails the tip) does not know every coin, so it must
++/// not be served as the wallet's whole spendable set.
++fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
++    let v = live_spendable(deps)?;
++    if v.get("authoritative").and_then(|x| x.as_bool()) == Some(true) {
++        Some(v)
++    } else {
++        None
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // Envelopes + dispatch
+ // ---------------------------------------------------------------------------
+@@ -1472,13 +1500,23 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+         "getconnectioncount" => NativeOutcome::Ok(json!(deps.tip.peers())),
+ 
+         // ---- tri7 replay-derived wallet snapshots ----
+-        "getbalance" => match deps.wallet.balance() {
+-            Some(b) => NativeOutcome::Ok(json!(sats_to_tri(b.sats))),
+-            None => NativeOutcome::Err(
+-                -1,
+-                "wallet balance snapshot unavailable (balances file not loaded)".into(),
+-            ),
+-        },
++        "getbalance" => {
++            // The LIVE index wins over the replay snapshot: the snapshot is
++            // capped at whatever height the chain replay reached (an archive
++            // seam or a store hole), the index follows the tip.
++            if let Some(live) = live_authoritative(deps) {
++                if let Some(sats) = live.get("balance_sats").and_then(|x| x.as_i64()) {
++                    return NativeOutcome::Ok(json!(sats_to_tri(sats)));
++                }
++            }
++            match deps.wallet.balance() {
++                Some(b) => NativeOutcome::Ok(json!(sats_to_tri(b.sats))),
++                None => NativeOutcome::Err(
++                    -1,
++                    "wallet balance snapshot unavailable (balances file not loaded)".into(),
++                ),
++            }
++        }
+ 
+         "listwalletaddresses" => {
+             let entries = deps.wallet.address_entries();
+@@ -1819,6 +1857,44 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+         "listunspent" => {
+             let minconf = ptry!(p_u64(params, 0, "minconf")).unwrap_or(1);
+             let maxconf = ptry!(p_u64(params, 1, "maxconf")).unwrap_or(9_999_999);
++            // LIVE index first: these are the coins the chain actually shows
++            // as unspent, so a spend built from this list cannot be a
++            // double-spend of a coin the node replayed as gone (or vice versa).
++            if let Some(live) = live_authoritative(deps) {
++                let tip = live
++                    .get("chain_tip")
++                    .and_then(|x| x.as_u64())
++                    .unwrap_or_default();
++                let rows: Vec<Value> = live
++                    .get("utxos")
++                    .and_then(|x| x.as_array())
++                    .map(|arr| {
++                        arr.iter()
++                            .filter_map(|u| {
++                                let h = u.get("height").and_then(|x| x.as_u64())?;
++                                let conf = tip.saturating_sub(h) + 1;
++                                if conf < minconf || conf > maxconf {
++                                    return None;
++                                }
++                                let sats = u.get("value_sats").and_then(|x| x.as_i64())?;
++                                Some(json!({
++                                    "txid": u.get("txid")?,
++                                    "vout": u.get("n")?,
++                                    "address": u.get("address")?,
++                                    "scriptPubKey": u.get("script_hex")?,
++                                    "amount": sats_to_tri(sats),
++                                    "amount_sats": sats,
++                                    "confirmations": conf,
++                                    "height": h,
++                                    "spendable": true,
++                                    "solvable": true,
++                                }))
++                            })
++                            .collect()
++                    })
++                    .unwrap_or_default();
++                return NativeOutcome::Ok(json!(rows));
++            }
+             // Coverage must be present AND consistent across BOTH snapshots —
+             // a missing or mismatched pair rejects every row (never serve
+             // confirmations keyed against the wrong height).
+@@ -2300,26 +2376,69 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+             // empty); txcount stays null — the snapshot carries no tx-count.
+             let bal = deps.wallet.balance();
+             let ex = deps.wallet.extras();
+-            match bal {
+-                Some(b) => NativeOutcome::Ok(json!({
+-                    "walletversion": 60000,
+-                    "balance": sats_to_tri(b.sats),
+-                    "balance_sats": b.sats,
+-                    "txcount": Value::Null,
+-                    "keypoololdest": ex.keypool_oldest.map(|v| json!(v)).unwrap_or(Value::Null),
+-                    "keypoolsize": ex.keypool_size.map(|v| json!(v)).unwrap_or(Value::Null),
+-                    "unlocked_until": unlocked_until(deps),
+-                    "paytxfee": sats_to_tri(ex.paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
+-                    "coverage_height": b.coverage_height,
+-                    "coverage_hash": b.coverage_hash,
+-                    "addresses": b.addresses,
+-                    "utxos": b.utxos,
+-                })),
+-                None => NativeOutcome::Err(
++            // The LIVE index is tip-accurate; the replay snapshot is not
++            // (it stops at whatever height the chain replay reached). Report
++            // the live figure when we have it and say whether it is complete.
++            let live = live_spendable(deps);
++            // The live figure wins when the node has one; the replay snapshot
++            // is the fallback. Either way the answer says whether the node
++            // verified it all the way to the tip: a number that does not
++            // reach the tip is PARTIAL and must be labelled as such.
++            let (bal_sats, utxos_n, bal_height, partial, coverage) = match (&live, &bal) {
++                (Some(l), b) => {
++                    let sats = l.get("balance_sats").and_then(|x| x.as_i64()).unwrap_or(0);
++                    let n = l
++                        .get("utxos")
++                        .and_then(|x| x.as_array())
++                        .map(|a| a.len())
++                        .unwrap_or(0);
++                    let idx_h = l.get("index_height").and_then(|x| x.as_u64());
++                    let authoritative =
++                        l.get("authoritative").and_then(|x| x.as_bool()) == Some(true);
++                    let height = idx_h.or_else(|| b.as_ref().map(|x| x.coverage_height));
++                    let cov = b
++                        .as_ref()
++                        .map(|x| (x.coverage_height, x.coverage_hash.clone()))
++                        .or_else(|| {
++                            l.get("index_height")
++                                .and_then(|x| x.as_u64())
++                                .map(|h| (h, String::new()))
++                        });
++                    (sats, n, height, !authoritative, cov)
++                }
++                (None, Some(b)) => (b.sats, b.utxos, Some(b.coverage_height), true, Some((b.coverage_height, b.coverage_hash.clone()))),
++                (None, None) => (0, 0, None, true, None),
++            };
++            if bal.is_none() && live.is_none() {
++                return NativeOutcome::Err(
+                     -1,
+-                    "wallet balance snapshot unavailable (balances file not loaded)".into(),
+-                ),
++                    "wallet balance unavailable (no live index and no balances snapshot)".into(),
++                );
+             }
++            let b = bal.unwrap_or(BalanceView {
++                sats: bal_sats,
++                utxos: utxos_n,
++                coverage_height: bal_height.unwrap_or_default(),
++                coverage_hash: String::new(),
++                addresses: 0,
++                supply_sats: 0,
++            });
++            NativeOutcome::Ok(json!({
++                "walletversion": 60000,
++                "balance": sats_to_tri(bal_sats),
++                "balance_sats": bal_sats,
++                "utxos": utxos_n,
++                "balance_height": bal_height,
++                "balance_partial": partial,
++                "txcount": Value::Null,
++                "keypoololdest": ex.keypool_oldest.map(|v| json!(v)).unwrap_or(Value::Null),
++                "keypoolsize": ex.keypool_size.map(|v| json!(v)).unwrap_or(Value::Null),
++                "unlocked_until": unlocked_until(deps),
++                "paytxfee": sats_to_tri(ex.paytxfee_sats.unwrap_or(MIN_TX_FEE_SATS)),
++                "coverage_height": coverage.as_ref().map(|c| c.0).unwrap_or_default(),
++                "coverage_hash": coverage.map(|c| c.1).unwrap_or_default(),
++                "addresses": b.addresses,
++            }))
+         }
+ 
+         // Legacy getnewpubkey [account]: "generate a new public key and
+@@ -4064,6 +4183,121 @@ mod tests {
+         assert_eq!(v["result"].as_array().unwrap().len(), 0);
+     }
+ 
++    /// The LIVE address index is tip-accurate; the replay snapshot is not
++    /// (it stops at whatever height the chain replay reached). When the node
++    /// has a FINISHED index that reached the tip, the wallet verbs MUST
++    /// serve it - the snapshot would otherwise show a stale figure.
++    #[test]
++    fn live_index_wins_over_the_replay_snapshot() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let b = StubBlocks { ready: true };
++        let ops = LiveIndexOps { complete: true, index_height: 2_206_000, chain_tip: 2_206_001 };
++        let d = Deps {
++            tip: &t,
++            wallet: &w,
++            blocks: &b,
++            proxy: None,
++            ops: Some(&ops),
++        };
++        // the snapshot alone would answer 3036.990591
++        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
++        let arr = call(&d, "listunspent", json!([]))["result"].as_array().unwrap().clone();
++        assert_eq!(arr.len(), 1);
++        assert_eq!(arr[0]["amount_sats"], 3236439612i64);
++        assert_eq!(arr[0]["height"], 2206000u64);
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance"], json!(3236.439612));
++        assert_eq!(info["utxos"], 1);
++        assert_eq!(info["balance_partial"], json!(false));
++        assert_eq!(info["balance_height"], 2_206_000u64);
++    }
++
++    /// An index that is one block behind the tip is still authoritative (the
++    /// tip can advance between the tip read and the index applying that
++    /// block), but two blocks behind means the node has not seen every coin.
++    #[test]
++    fn live_index_lag_boundary_is_exact() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let b = StubBlocks { ready: true };
++        // one block behind -> authoritative
++        let ops = LiveIndexOps { complete: true, index_height: 2_206_000, chain_tip: 2_206_001 };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
++        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
++        assert_eq!(
++            call(&d, "getwalletinfo", json!([]))["result"]["balance_partial"],
++            json!(false)
++        );
++        // two blocks behind -> NOT authoritative: the snapshot is served and
++        // the answer is flagged partial
++        let ops2 = LiveIndexOps { complete: true, index_height: 2_205_999, chain_tip: 2_206_001 };
++        let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops2) };
++        assert_eq!(call(&d2, "getbalance", json!([]))["result"], json!(3036.990591));
++        let info = call(&d2, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance_partial"], json!(true));
++    }
++
++    /// An index that is still BUILDING is not a whole-wallet view: the node
++    /// must not serve it as the balance, and must flag the answer partial.
++    #[test]
++    fn incomplete_index_is_never_served_as_authoritative() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let b = StubBlocks { ready: true };
++        let ops = LiveIndexOps { complete: false, index_height: 2_206_000, chain_tip: 2_206_001 };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
++        // the snapshot is served, not the half-built index
++        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
++        let arr = call(&d, "listunspent", json!([]))["result"].as_array().unwrap().clone();
++        assert_eq!(arr.len(), 1);
++        assert_eq!(arr[0]["amount_sats"], 100); // the snapshot's own row
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance_partial"], json!(true));
++    }
++
++    /// Without a live index the node falls back to the replay snapshot and
++    /// says the figure is partial, so a UI never presents a capped number as
++    /// the whole balance.
++    #[test]
++    fn snapshot_fallback_is_flagged_partial() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3036.990591));
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance"], json!(3036.990591));
++        assert_eq!(info["balance_partial"], json!(true));
++    }
++
++    /// A fresh node has no replay snapshot yet - but it DOES have the live
++    /// index. The wallet verbs must answer from it instead of failing.
++    #[test]
++    fn live_index_answers_without_a_replay_snapshot() {
++        let t = StubTip;
++        let w = StubNoSnapshot;
++        let b = StubBlocks { ready: true };
++        let ops = LiveIndexOps { complete: true, index_height: 2_206_000, chain_tip: 2_206_001 };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
++        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance"], json!(3236.439612));
++        assert_eq!(info["balance_partial"], json!(false));
++    }
++
++    /// With neither a live index nor a snapshot the node must say so, not
++    /// answer 0.
++    #[test]
++    fn no_view_at_all_is_an_error_not_zero() {
++        let t = StubTip;
++        let w = StubNoSnapshot;
++        let b = StubBlocks { ready: true };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
++        let v = call(&d, "getbalance", json!([]));
++        assert!(v["error"].is_object(), "expected an error, got {}", v);
++    }
++
+     #[test]
+     fn getinfo_composite_fields() {
+         let t = StubTip;
+@@ -5137,6 +5371,60 @@ impl NodeOps for StubOps {
+     }
+ }
+ 
++/// A wallet provider with NO replay snapshot (a fresh node).
++struct StubNoSnapshot;
++impl WalletProvider for StubNoSnapshot {
++    fn balance(&self) -> Option<BalanceView> {
++        None
++    }
++    fn coverage(&self) -> Option<(u64, String)> {
++        None
++    }
++    fn address_entries(&self) -> Vec<AddressEntry> {
++        Vec::new()
++    }
++    fn received_regular(&self, _addr: &str) -> Option<i64> {
++        None
++    }
++    fn is_mine(&self, _addr: &str) -> bool {
++        false
++    }
++    fn utxos(&self) -> Vec<UtxoRow> {
++        Vec::new()
++    }
++}
++
++/// Ops stub that answers the live-spendable verb (the node's live address
++/// index view of the wallet's unspent coins). The fields let a test pin the
++/// boundaries: a finished index at the tip, an index one block behind, an
++/// index that trails the tip, and an index that is still building.
++struct LiveIndexOps {
++    complete: bool,
++    index_height: u64,
++    chain_tip: u64,
++}
++impl NodeOps for LiveIndexOps {
++    fn call(&self, method: &str, _params: &Value) -> Result<Value, (i64, String)> {
++        match method {
++            "getwalletspendable" => Ok(json!({
++                "balance_sats": 3236439612i64,
++                "utxos": [
++                    {"txid": "aa".repeat(32), "n": 0, "address": "Tlive000000000000000000000000000000",
++                     "script_hex": "76a914", "value_sats": 3236439612i64, "height": 2206000u64},
++                ],
++                "index_height": self.index_height,
++                "chain_tip": self.chain_tip,
++                "complete": self.complete,
++                "authoritative": self.complete && self.index_height.saturating_add(1) >= self.chain_tip,
++            })),
++            _ => Err((-3, format!("stub: unhandled {}", method))),
++        }
++    }
++    fn ready(&self) -> bool {
++        true
++    }
++}
++
+ struct T;
+ impl TipProvider for T {
+     fn tip(&self) -> TipView {

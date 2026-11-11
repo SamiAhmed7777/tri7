@@ -1,0 +1,22 @@
+# autostart-check live run on sami-pc, 2026-11-09T23:26:24Z
+# exe: C:\Users\hello\AppData\Local\Tri7Wallet\bin\tri7_wallet_gui.exe --autostart-check
+autostart: supported=true
+autostart roundtrip: PASS (registered, read back, removed cleanly)
+
+# worktree scope capture (lane-gui):
+ M docs/LEGACY-PARITY-BACKLOG.md
+?? TASK-backlog.md
+?? TASK.md
+?? docs/GUI-OPTIONS-AUDIT.md
+?? run-mcode-1.log
+?? run-mcode-2.log
+
+# main repo /root/tri7 status at bundle time:
+ M src/bin/follow_tip.rs
+?? .gate-lane-multisig.diff
+?? .gate/ci-artifact-2026-11-09/
+?? .gate/coin-split-2026-11-08/
+?? .gate/coin-split-docs-2026-11-08/
+?? .gate/disk-watch-2026-11-09/
+?? .gate/explorer-verb-2026-11-07/
+?? .gate/fork-cascade-2026-11-09/

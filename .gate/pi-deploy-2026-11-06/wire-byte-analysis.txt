@@ -1,0 +1,20 @@
+### CMD: version payload DNS2->Pi (declared 165 bytes; parses clean on the 60-byte tri7 addr shape)
+recv hex: 3e1201000100000000000000f068ee6a00000000010000000000000000000000000000000000ffff7f000001000000000000000000000000000000000000000000000000000000000000000000005e30010000000000000000000000000000000000ffff7f000001000000000000000000000000000000000000000000000000000000000000000000005e30f168ee6a36e50d000c2f747269373a372e302e302f3eac2100
+
+### CMD: version payload Pi->DNS2 (declared 163 = 2 bytes short; the pre-fix process was still running)
+send hex: 3e12010001000000000000001269ee6a00000000010000000000000000000000000000000000ffff7f000001000000000000000000000000000000000000000000000000000000000000000000dba8010000000000000000000000000000000000ffff7f0000010000000000000000000000000000000000000000000000000000000000000000005e301369ee6aa3e91e000c2f747269373a372e302e302ff2ab2100
+
+### CMD: structural walk of send(163) against the 60-byte addr layout misaligns
+addr_you.tor ends at offset 76: recv continues flags(0000)+port(5e30); send continues with the start-height bytes (dba80100)
+=> each WireAddr was written with ONE flag byte (59 bytes) instead of two (60 bytes)
+=> DNS2's old reader walks 1 byte short per addr, then reads the UA length from 't' of 'tri7:7.0.0/' = 0x74 = 116 decimal
+=> its journal line 'short read: want 116 bytes, have 14 at offset 149' is the UA-length misread, not an IO failure
+
+### CMD: encode_no_time flag bytes per source era
+b4c974b, 40778f5 (current HEAD): pushes is_tor_v3 AND is_i2p -> 60-byte shape, matches DNS2's deployed reader
+65cf223: encoder rewritten in that commit -> the short shape that broke the fleet handshakes
+
+### CMD: process-vs-binary timeline (the committed fix sat un-activated)
+follow_tip process started 21:26:07 UTC on the pre-fix inode (short encoder)
+fixed binary written to disk 22:02 UTC (sha256 fdb401a9c1dc06ea387408d3ef617c489411aedb718939329fdd3168b794feb2)
+restart activating the fix: 2026-11-07T00:02Z (this deploy; pid 2043417)

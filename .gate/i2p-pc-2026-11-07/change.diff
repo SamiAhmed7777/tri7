@@ -1,0 +1,103 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index bae9fbc..df9f033 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -1243,8 +1243,9 @@ fn parse_args() -> Config {
+             }
+         }
+     }
+-    // conf-file `addnode=<host>:<port>` — Tor-only: .onion targets join the
+-    // attach list; any cleartext IP/hostname is IGNORED with a log line.
++    // conf-file `addnode=<host>:<port>` — dual-network: .onion and .b32.i2p
++    // targets join the attach list (each dialled through its overlay SOCKS);
++    // any cleartext IP/hostname is IGNORED with a log line.
+     if let Ok(text) = std::fs::read_to_string(&cfg.conf_path) {
+         // ignored entries are already logged inside addnode_targets_from_conf
+         let (targets, _) = addnode_targets_from_conf(&text, &cfg.socks, &cfg.i2p_socks);
+@@ -1263,8 +1264,9 @@ fn parse_args() -> Config {
+ }
+ 
+ /// Parse `addnode=<host>:<port>` lines (last one wins per host, like the
+-/// legacy client's repeated-flag handling). Tor-only rule: ONLY `.onion`
+-/// hosts are accepted; a cleartext IP/hostname is dropped AND logged. The
++/// legacy client's repeated-flag handling). Dual-network rule: `.onion`
++/// (tor SOCKS) and `.b32.i2p`/`.i2p` (i2pd SOCKS) hosts are accepted; a
++/// cleartext IP/hostname is dropped AND logged. The
+ /// companion file `addnode=` targets must never crash on junk lines — a
+ /// malformed entry is ignored with a log line too. Returns the accepted
+ /// targets plus the ignored `host:port` strings (each already logged).
+@@ -1284,17 +1286,22 @@ fn addnode_targets_from_conf(
+             continue;
+         }
+         let host = spec.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+-        if host.ends_with(".onion") {
++        // Dual-network fleet (standing directive): `.onion` dials through the
++        // tor SOCKS, `.b32.i2p`/`.i2p` through the i2pd SOCKS — both are
++        // overlay hosts and join the attach list; only cleartext IP/hostname
++        // is rejected (no clearnet P2P).
++        if host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p") {
+             match PeerTarget::parse(spec, socks, i2p_socks) {
+                 Ok(t) => {
+-                    log(&format!("addnode={} accepted (tor)", t.endpoint()));
++                    let tr = if t.transport == Transport::I2p { "i2p" } else { "tor" };
++                    log(&format!("addnode={} accepted ({})", t.endpoint(), tr));
+                     targets.push(t);
+                 }
+                 Err(e) => log(&format!("addnode={} ignored ({})", spec, e)),
+             }
+         } else {
+             log(&format!(
+-                "addnode={} ignored: Tor-only — only .onion addnode hosts are accepted",
++                "addnode={} ignored: only .onion / .b32.i2p addnode hosts are accepted — no cleartext P2P",
+                 spec
+             ));
+             // `ignored` carries rejected host:port specs (the function doc's
+@@ -9410,11 +9417,12 @@ mod tests {
+         assert_eq!(c.socks, None);
+     }
+ 
+-    /// A9: `addnode=<onion>:<port>` is kept as a tor target;
+-    /// `addnode=1.2.3.4:24112` (cleartext) is IGNORED with a log line — the
+-    /// Tor-only rule. Junk lines never panic.
++    /// A9: `addnode=<onion>:<port>` is kept as a tor target, `addnode=
++    /// <b32>.b32.i2p:<port>` as an i2p target (dual-network fleet);
++    /// `addnode=1.2.3.4:24112` (cleartext) is IGNORED with a log line. Junk
++    /// lines never panic.
+     #[test]
+-    fn addnode_conf_parsing_tor_only() {
++    fn addnode_conf_parsing_dual_overlay() {
+         let tor = ("127.0.0.1".to_string(), 9050u16);
+         let i2p = ("127.0.0.1".to_string(), 4447u16);
+         let conf = "\
+@@ -9425,14 +9433,15 @@ addnode=1.2.3.4:24112
+ addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+ addnode=somehost.example.com:24113
+ addnode=jbpfhe7zdeadseeddeadseeddeadseeddeadseeddeadseeddeadseed0.onion:24112
++addnode=ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113
+ addnode=
+ addnode=nonsense-no-port
+ addnode=:24112
+ addnode=host:notaport
+ ";
+         let (targets, ignored) = addnode_targets_from_conf(conf, &tor, &i2p);
+-        // exactly the two onion targets survive
+-        assert_eq!(targets.len(), 2);
++        // exactly the two onion targets + the i2p target survive
++        assert_eq!(targets.len(), 3);
+         assert_eq!(
+             targets[0].endpoint(),
+             "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113"
+@@ -9440,6 +9449,13 @@ addnode=host:notaport
+         assert_eq!(targets[0].transport, Transport::Tor);
+         assert_eq!(targets[0].socks.as_ref().map(|(h, _)| h.as_str()), Some("127.0.0.1"));
+         assert_eq!(targets[1].port, 24112);
++        assert_eq!(
++            targets[2].endpoint(),
++            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
++        );
++        assert_eq!(targets[2].transport, Transport::I2p);
++        assert_eq!(targets[2].socks, Some(i2p.clone()));
++        assert_eq!(targets[2].port, 24113);
+         // the cleartext hosts are in the ignored list (each was logged by the
+         // parser — visible with `cargo test -- --nocapture`)
+         assert_eq!(ignored.len(), 2);

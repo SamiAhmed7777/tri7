@@ -1,0 +1,45 @@
+### DNS2 read-only verification (the patched daemon)
+
+--- date (UTC and local) ---
+2026-11-09T03:32:40Z
+2026-11-08T19:32:40-0800 (PST)
+
+--- the daemon binary and the source it was built from ---
+b32e2d360c1b5bcf46ed4b49ec7777e830d22df82605259554aad9b1779e8602  /opt/tri7/bin/follow_tip
+b5b495addbb0b4e4ae73c60de030cef4a53767ff7a7df3189c9fe4d7ff143394  /root/tri7/src/bin/follow_tip.rs
+7c602e2100881a628b831d39255eae23bb8b2ae831953929c731c94944e58aba  /root/tri7/src/rpc.rs
+
+--- getwalletinfo ---
+{"error":null,"id":null,"result":{"addresses":262,"balance":5292.853544,"balance_height":2207975,"balance_partial":false,"balance_sats":5292853544,"coverage_hash":"cd427b9c3e5634463dd12cfa0a71b7b85d2ee32009b758152209cc4fb6bec9a0","coverage_height":2207975,"keypoololdest":1781668387,"keypoolsize":103,"paytxfee":0.0001,"txcount":null,"unlocked_until":18446744073709551615,"utxos":425,"walletversion":60000},"source":"tri7"}
+--- getbalance ---
+{"error":null,"id":null,"result":5292.853544,"source":"tri7"}
+--- the chain identity the completeness rule proves ---
+    the snapshot's covered_tip_hash:
+       cd427b9c3e5634463dd12cfa0a71b7b85d2ee32009b758152209cc4fb6bec9a0
+    the node's OWN hash at that height (getblockhash):
+{"error":null,"id":null,"result":"cd427b9c3e5634463dd12cfa0a71b7b85d2ee32009b758152209cc4fb6bec9a0","source":"tri7"}
+--- the snapshot's own coverage facts ---
+      height          : 2207975
+      blocks_replayed : 2207976 (== height+1 => every height from genesis)
+      wallet_balance  : 5292853544 sats
+      wallet_utxos    : 425
+
+--- the heights that used to be MISSING (the old hole h2201750..h2203320) ---
+  h2201749: OK 8fd61184ec493209
+  h2201750: OK 45b1cda5a864b8cb
+  h2201800: OK 86d9b97d94027c37
+  h2202000: OK 9ac025936cad3f77
+  h2202500: OK ce03e187fbd47a84
+  h2203000: OK bd459a101fff5097
+  h2203039: OK e3797bac783ba87a
+  h2203320: OK f298ab7becab893f
+  h2203330: OK 06472b989fe84cf7
+  h2207975: OK cd427b9c3e563446
+
+--- the daemon log: index, replay, live view ---
+Nov 08 18:06:37 vmi3080415 follow_tip[3804122]: [blockidx] ready: 2207983 frames, 4494857 txs, heights_ok=true, threaded_tip=Some(2207982), writable=true, built in 83s
+Nov 08 18:06:40 vmi3080415 follow_tip[3804122]: [2026-11-09T02:06:40Z] wallet live view ready: window h2203383..h2207982 — 180 outputs (180 owned) balance 1628614863 sats
+Nov 08 19:12:40 vmi3080415 follow_tip[3881912]: [blockidx] ready: 2208015 frames, 4494921 txs, heights_ok=true, threaded_tip=Some(2208014), writable=true, built in 134s
+Nov 08 19:12:41 vmi3080415 follow_tip[3881912]: [2026-11-09T03:12:41Z] wallet live view ready: window h2203415..h2208014 — 177 outputs (177 owned) balance 1628690855 sats
+Nov 08 19:32:16 vmi3080415 follow_tip[3906050]: [blockidx] ready: 2208025 frames, 4494941 txs, heights_ok=true, threaded_tip=Some(2208024), writable=true, built in 92s
+Nov 08 19:32:19 vmi3080415 follow_tip[3906050]: [2026-11-09T03:32:19Z] wallet live view ready: window h2203425..h2208024 — 183 outputs (183 owned) balance 1628710364 sats

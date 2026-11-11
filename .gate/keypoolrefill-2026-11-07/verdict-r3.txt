@@ -1,0 +1,7 @@
+Round 3 (live-failure fix): GRADE=A urn=ump:26zqogxoe4go2cks5coj5jivwyyuqpirvucjkr4s6ahgfdlt3uga
+Live failure: DNS2 imported pool indices (21..121) reached the HD counter (121);
+refill register at the counter REPLACED an imported row (qt WritePool parity),
+file count grew by 1 while the loop counted +2 -> end-of-refill reader verify
+correctly refused ("reader sees 102, expected 103"). No data loss.
+Fix: recount poolsize from the file after every register + regression test
+refill_recounts_when_register_replaces_an_imported_row (470 lib green).

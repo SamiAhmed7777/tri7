@@ -1,0 +1,5 @@
+# sha256 evidence — CI run 42649739291 (commit 9cb337e)
+run URL: https://github.com/SamiAhmed7777/tri7/actions/runs/42649739291
+artifact tri7-windows/tri7.exe          1df8713c8f12d317aba761c162fcde121e9833d5b38574bd41dd1247983ddd6d  (4,147,200 B)
+setup.exe bin/tri7.exe (extracted)      1df8713c8f12d317aba761c162fcde121e9833d5b38574bd41dd1247983ddd6d  (4,147,200 B extracted, cmp clean — closes the solid-archive size loop)
+setup.exe artifact                      3bb21c87bb984967fafc875da0e6e1560821d5040d4013f87e2adc97c698566f  (7,384,576 B)

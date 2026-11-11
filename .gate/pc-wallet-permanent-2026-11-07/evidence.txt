@@ -1,0 +1,11 @@
+
+[old exe] 95159327abc9d34de9a24eda1b55cc0d4cde98b351d548c15ba3c13acb9f8357
+[new exe (CI)] caf3491653c23b6973d0237bef520d472cc2824978d2351970eadba496f3194a
+[bat sha] d17f72b0f23265aa6e871c6243c1066e7eb73dd407ac8a6276e618952c556ea3
+[staking after restart] enabled:false attempts:0 (peers attached)
+[peers] count:1 tor:1 clearnet:0 i2p:0 endpoint ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112
+[tip parity] pc 2206884 == dns2 2206884; bestblockhash 399b6d3a771edf1cee729167bc83c54e140a95d6c8a7607e5074e01992303656 (both)
+[mined tx] cb4fbfd26424de2984d4c931d6104562b9384ea25287a84d083cb427b37a0cf3: 12 confirmations on PC
+[balance parity] pc h2206888 3238.999998 / dns2 h2206888 3238.006297; THsbyNZB pc=1.0 dns2=0 (PC-keypool-only address, by design)
+[live view after rebuild] window h2202288..h2206887 - 199 outputs (199 owned) balance 3238999998 sats
+[pre-fix catch-up artifact] pc bal 3208.31 vs dns2 3237.99 before restart; healed by restart (disclosed follow-up)

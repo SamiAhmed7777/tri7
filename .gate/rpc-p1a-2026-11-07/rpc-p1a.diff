@@ -1,0 +1,957 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index f011bbf..6cc19da 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -2197,9 +2197,11 @@ fn rpc_seed_window(
+ ///
+ /// `--full-validate` restores the pre-assume-valid strict behavior for the
+ /// whole from-zero walk (slow: every historical kernel enforced).
+-const CHECKPOINT_HORIZON: u64 = 2_203_924; // = Checkpoints::GetTotalBlocksEstimate() on the deployed client
+-const CHECKPOINT_ANCHOR_DISPLAY: &str =
+-    "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14"; // getblockhash(2203924), daemon-verified
++/// CHECKPOINT_HORIZON / CHECKPOINT_ANCHOR_DISPLAY moved to tri7_core::consensus
++/// so the getcheckpoint RPC verb serves the SAME constant the validator
++/// enforces (lib + bin cannot drift). Semantics unchanged: h >= horizon is
++/// full-strict; the anchor binds the trusted history below.
++use tri7_core::consensus::{CHECKPOINT_ANCHOR_DISPLAY, CHECKPOINT_HORIZON};
+ const V6_RESTART_HEIGHT_U64: u64 = 2_200_900; // = consensus::V6_RESTART_HEIGHT; deployed index: real proofs from here up
+ 
+ /// Which kernel treatment applies to a historical block at height h.
+@@ -4528,6 +4530,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+         tri7_core::rpc::WalletProvider::pubkey_for_address(self.snap.as_ref(), addr)
+     }
+ 
++    fn labels(&self) -> std::collections::HashMap<String, String> {
++        tri7_core::rpc::WalletProvider::labels(self.snap.as_ref())
++    }
++
+     fn balance(&self) -> Option<BalanceView> {
+         if let Ok(g) = self.wl.lock() {
+             if let Some(w) = g.as_ref() {
+@@ -8151,6 +8157,18 @@ fn main() {
+                 })
+                 .unwrap_or_default(),
+         ));
++    // Address book labels (legacy mapAddressBook name rows): consumed by
++    // listaddressgroupings for the IsChange decision + the label column.
++    let wallet_labels: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
++        Arc::new(std::sync::RwLock::new(
++            wl_shared
++                .lock()
++                .ok()
++                .and_then(|g| {
++                    g.as_ref().map(|w| w.wallet.names.iter().cloned().collect())
++                })
++                .unwrap_or_default(),
++        ));
+     // Operator fee setting persisted by settxfee (nTransactionFee). Restored
+     // BEFORE the RPC listener answers so estimatefee and every spend from
+     // second zero agree with the setting the operator last made.
+@@ -8184,6 +8202,7 @@ fn main() {
+                     utxos: utxos_snap,
+                     extra: Arc::clone(&wallet_extras),
+                     pubkeys: Arc::clone(&wallet_pubkeys),
++                    labels: Arc::clone(&wallet_labels),
+                 }),
+                 wl: Arc::clone(&wl_shared),
+                 st: Arc::clone(&st_shared),
+diff --git a/src/consensus.rs b/src/consensus.rs
+index 4e35eeb..575c2db 100644
+--- a/src/consensus.rs
++++ b/src/consensus.rs
+@@ -32,6 +32,17 @@ pub const COIN: i64 = 1_000_000;
+ /// boundary and block-signature requirement boundary.
+ pub const LAST_HARDCODED_CHECKPOINT: usize = 9001;
+ 
++/// The compiled trust anchor of everything below it: the HIGHEST entry of the
++/// legacy hardcoded checkpoint map (checkpoints.cpp:82, "canonical tip
++/// (snapshot anchor)") — Checkpoints::GetTotalBlocksEstimate() on the deployed
++/// v6 client. Canonical home so the follower (follow_tip) and the RPC
++/// getcheckpoint verb cannot drift. h2203924 hash daemon-verified 2026-11-03.
++pub const CHECKPOINT_HORIZON: u64 = 2_203_924;
++/// getblockhash(CHECKPOINT_HORIZON) — the block every fetch/backfill path must
++/// hash to before trusting the history below it (strict checkpoint policy).
++pub const CHECKPOINT_ANCHOR_DISPLAY: &str =
++    "a838e60da0e5259ff87380d961b9bb5ca8d0d875775f5c54a95425b69e753a14";
++
+ // ---------------------------------------------------------------------------
+ // Classification (spec §1)
+ // ---------------------------------------------------------------------------
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index 3da7f94..d01575d 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -2328,6 +2328,7 @@ impl AppState {
+                                 legacy_kind: String::new(),
+                                 coinstake: r.get("kind").and_then(|x| x.as_str()) == Some("coinstake"),
+                                 stake_principal: 0,
++                                input_addresses: Vec::new(),
+                                 stake_net: r.get("stake_net").and_then(|x| x.as_i64()),
+                             };
+                             out.push(rec);
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index c9f05f6..beb6ec9 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -2005,6 +2005,7 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
+         legacy_kind: if coinstake { "mined" } else { "recv_with" }.into(),
+         coinstake,
+         stake_principal: 0,
++        input_addresses: Vec::new(),
+         stake_net: Some(net),
+     };
+     let cache = HistoryCache {
+diff --git a/src/history.rs b/src/history.rs
+index ce35190..9cb1ef7 100644
+--- a/src/history.rs
++++ b/src/history.rs
+@@ -55,6 +55,13 @@ pub struct HistoryRec {
+     /// row needs principal + reward, not the reward alone.
+     #[serde(default)]
+     pub stake_principal: i64,
++    /// OUR INPUT ADDRESSES when this tx spent our coins (the txids whose
++    /// prevouts the generator resolved from its own rows map). Empty = the tx
++    /// did not spend our coins, OR the row predates this field (older
++    /// history.json files — listaddressgroupings then contributes output
++    /// singletons only for that tx; a rescan completes the input side).
++    #[serde(default)]
++    pub input_addresses: Vec<String>,
+     /// legacy transactionrecord.cpp decomposition for a stake:
+     /// credit = nNet = GetCredit() - GetDebit() — the REWARD only, not the
+     /// whole stake output (one row per coinstake, subsequent our-outputs
+@@ -331,12 +338,19 @@ fn apply_block(
+ 
+         // spends of our coins
+         let mut spent_total: i64 = 0;
++        // addresses our inputs paid FROM (resolved from the rows map — the
++        // prevouts of an ours-vin are by definition outputs we received).
++        // Consumed by listaddressgroupings' spend branch.
++        let mut spent_from: Vec<String> = Vec::new();
+         for vin in &tx.vin {
+             if vin.prev_n == u32::MAX {
+                 continue;
+             }
+             if let Some(idx) = owned.get(&(vin.prev_hash, vin.prev_n)).copied() {
+                 if let Some(row) = rows.get_mut(idx) {
++                    if !spent_from.contains(&row.address) {
++                        spent_from.push(row.address.clone());
++                    }
+                     if !row.spent {
+                         row.spent = true;
+                         spent_total += row.value_sats;
+@@ -394,6 +408,9 @@ fn apply_block(
+                     } else {
+                         0
+                     },
++                    // our inputs' addresses (empty when this tx spent nothing
++                    // of ours)
++                    input_addresses: spent_from.clone(),
+                     // filled after the outputs loop (needs recv_total +
+                     // spent_total); None keeps old files loadable
+                     stake_net: None,
+@@ -433,6 +450,7 @@ fn apply_block(
+                 legacy_kind: "send".into(),
+                 coinstake: false,
+                 stake_principal: 0,
++                input_addresses: spent_from.clone(),
+                 stake_net: None,
+             });
+         }
+@@ -530,6 +548,7 @@ mod tests {
+                 legacy_kind: "recv_with".into(),
+                 coinstake: false,
+                 stake_principal: 0,
++                input_addresses: Vec::new(),
+                 stake_net: None,
+             }],
+         };
+@@ -697,6 +716,160 @@ mod tests {
+         assert_eq!(s2[1].stake_net, Some(80));
+     }
+ 
++    /// listaddressgroupings' spend branch feeds on HistoryRec.input_addresses:
++    /// every row of a tx that spent our coins carries the addresses those
++    /// inputs paid FROM (resolved from the rows map), rows of receive-only
++    /// txs carry none.
++    #[test]
++    fn spend_rows_carry_the_input_addresses() {
++        use crate::legacy::{Block, Tx, Vin, Vout};
++        let secp = secp256k1::Secp256k1::new();
++        let sk = secp256k1::SecretKey::from_slice(&[12u8; 32]).unwrap();
++        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &sk)
++            .serialize()
++            .to_vec();
++        let payload = crate::address::pubkey_payload(&pubkey);
++        let addr = crate::address::payload_to_address(&payload);
++        let mut by_payload = HashMap::new();
++        by_payload.insert(payload.clone(), addr.clone());
++        let mut by_pubkey = HashMap::new();
++        by_pubkey.insert(pubkey.clone(), addr.clone());
++        let p2pkh = {
++            let mut s = vec![0x76, 0xa9, 0x14];
++            s.extend_from_slice(&payload[1..21]);
++            s.extend_from_slice(&[0x88, 0xac]);
++            s
++        };
++
++        let mut rows: Vec<HistoryRec> = Vec::new();
++        let mut owned: HashMap<([u8; 32], u32), usize> = HashMap::new();
++
++        // h100: coinbase paying us 10 TRI
++        let coinbase = Tx {
++            version: 1,
++            time: 1_700_000_000,
++            vin: vec![Vin {
++                prev_hash: [0u8; 32],
++                prev_n: u32::MAX,
++                script_sig: Vec::new(),
++                sequence: u32::MAX,
++            }],
++            vout: vec![Vout {
++                value: 10_000_000,
++                script_pubkey: p2pkh.clone(),
++            }],
++            locktime: 0,
++        };
++        let cb_block = Block {
++            version: 1,
++            prev_hash: [1u8; 32],
++            merkle_root: [0u8; 32],
++            time: 1_700_000_000,
++            bits: 0x2000ffff,
++            nonce: 0,
++            vtx: vec![coinbase],
++            block_sig: Vec::new(),
++        };
++        apply_block(&cb_block, 100, &by_payload, &by_pubkey, &mut rows, &mut owned);
++        assert_eq!(rows.len(), 1);
++        assert!(rows[0].input_addresses.is_empty(), "receive-only tx has no input side");
++
++        // h101: we spend that coin — pay a FOREIGN address 4 TRI, change 6
++        // back to us (recv < spent => the debit "send" row is emitted)
++        let spend = Tx {
++            version: 1,
++            time: 1_700_000_100,
++            vin: vec![Vin {
++                prev_hash: cb_block.vtx[0].hash(),
++                prev_n: 0,
++                script_sig: Vec::new(),
++                sequence: u32::MAX,
++            }],
++            vout: vec![
++                Vout {
++                    value: 6_000_000,
++                    script_pubkey: p2pkh.clone(),
++                },
++                Vout {
++                    value: 4_000_000,
++                    script_pubkey: {
++                        // foreign payload (nobody's key)
++                        let mut s = vec![0x76, 0xa9, 0x14];
++                        s.extend_from_slice(&[0xAB; 20]);
++                        s.extend_from_slice(&[0x88, 0xac]);
++                        s
++                    },
++                },
++            ],
++            locktime: 0,
++        };
++        let spend_block = Block {
++            version: 1,
++            prev_hash: [2u8; 32],
++            merkle_root: [0u8; 32],
++            time: 1_700_000_100,
++            bits: 0x2000ffff,
++            nonce: 0,
++            vtx: vec![empty_tx(), spend],
++            block_sig: Vec::new(),
++        };
++        apply_block(
++            &spend_block,
++            101,
++            &by_payload,
++            &by_pubkey,
++            &mut rows,
++            &mut owned,
++        );
++        assert_eq!(rows.len(), 3, "change row + foreign-free send row appended");
++        let send = rows.iter().find(|r| r.direction == "out").unwrap();
++        assert_eq!(
++            send.input_addresses,
++            vec![addr.clone()],
++            "the send row carries the address the spent coin came from"
++        );
++        let change = rows
++            .iter()
++            .find(|r| r.direction == "in" && r.height == 101)
++            .unwrap();
++        assert_eq!(
++            change.input_addresses,
++            vec![addr],
++            "the change row of the spend tx carries the same input side"
++        );
++        assert_eq!(
++            rows[0].input_addresses,
++            Vec::<String>::new(),
++            "the earlier receive row is untouched"
++        );
++    }
++
++    /// old history.json files predate input_addresses: serde(default) must
++    /// load them (empty vec), and the field roundtrips on new files.
++    #[test]
++    fn history_rows_without_input_addresses_still_load() {
++        let old = serde_json::json!({
++            "txid": "ab".repeat(32),
++            "height": 100,
++            "time": 1_700_000_000u32,
++            "value_sats": 500,
++            "address": "T",
++            "direction": "in",
++            "kind": "regular",
++            "spent": false,
++            "idx": 0,
++            "legacy_kind": "recv_with",
++            "coinstake": false,
++            "stake_principal": 0,
++            "stake_net": null,
++        });
++        let rec: HistoryRec = serde_json::from_value(old).unwrap();
++        assert!(rec.input_addresses.is_empty());
++        let back = serde_json::to_value(&rec).unwrap();
++        let re: HistoryRec = serde_json::from_value(back).unwrap();
++        assert_eq!(re.input_addresses, rec.input_addresses);
++    }
++
+     /// minimal non-coinbase filler for vtx[0] of test blocks (produces no
+     /// history rows)
+     fn empty_tx() -> crate::legacy::Tx {
+diff --git a/src/legacy_rows.rs b/src/legacy_rows.rs
+index cb7094c..e6bb559 100644
+--- a/src/legacy_rows.rs
++++ b/src/legacy_rows.rs
+@@ -683,6 +683,7 @@ mod csv_tests {
+             legacy_kind: String::new(),
+             coinstake: false,
+             stake_principal: 0,
++            input_addresses: Vec::new(),
+             stake_net: None,
+         };
+         let r = row_from_history(&u, 110);
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 2300503..350c9eb 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -51,7 +51,9 @@ use serde_json::{json, Map, Value};
+ 
+ use crate::address::{script_to_dest, ScriptDest};
+ use crate::blockindex::{BlockHit, TxHit};
+-use crate::consensus::block_is_proof_of_stake;
++use crate::consensus::{
++    block_is_proof_of_stake, CHECKPOINT_ANCHOR_DISPLAY, CHECKPOINT_HORIZON,
++};
+ use crate::p2p::internal_to_display;
+ 
+ // ---------------------------------------------------------------------------
+@@ -159,6 +161,11 @@ pub const NATIVE_METHODS: &[&str] = &[
+     "addmultisigaddress",
+     "addredeemscript",
+     "signrawtransaction",
++    // ---- legacy parity 2026-11-07: address groupings (rpcwallet.cpp:394,
++    // privacy-cluster view over the wallet history) + the sync-checkpoint
++    // report (rpcblockchain.cpp:665, served from the compiled-in anchor) ----
++    "listaddressgroupings",
++    "getcheckpoint",
+     "stop",
+ ];
+ 
+@@ -359,6 +366,14 @@ pub trait WalletProvider: Send + Sync {
+     fn history(&self) -> Vec<crate::history::HistoryRec> {
+         Vec::new()
+     }
++    /// Address book labels (legacy mapAddressBook: address → label). An
++    /// address ABSENT from this map is what legacy IsChange() keys on
++    /// (mine + unlabeled = change). Empty = no book known (wallet file not
++    /// loaded) — every mine output then counts as change, matching a legacy
++    /// wallet with an empty address book.
++    fn labels(&self) -> std::collections::HashMap<String, String> {
++        std::collections::HashMap::new()
++    }
+     /// The `richlist` explorer verb: top addresses by balance from the
+     /// balances snapshot. Default = not configured in this provider (tests,
+     /// read-only tools); the daemon provider reads its state-dir snapshot.
+@@ -648,6 +663,11 @@ pub struct SnapshotWallet {
+     pub extra: std::sync::Arc<std::sync::RwLock<WalletExtras>>,
+     /// address → pubkey for the wallet's own keys (served by getnewpubkey).
+     pub pubkeys: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>>,
++    /// address → label from the wallet's name rows (legacy mapAddressBook),
++    /// wired by the daemon when a wallet file is open. Consumed by
++    /// listaddressgroupings for the legacy IsChange() decision and the third
++    /// row column.
++    pub labels: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+ }
+ 
+ /// Values the ops engine publishes for the passive native handlers. Every
+@@ -774,6 +794,10 @@ impl WalletProvider for SnapshotWallet {
+         self.pubkeys.read().ok().and_then(|m| m.get(addr).cloned())
+     }
+ 
++    fn labels(&self) -> std::collections::HashMap<String, String> {
++        self.labels.read().map(|g| g.clone()).unwrap_or_default()
++    }
++
+     fn address_entries(&self) -> Vec<AddressEntry> {
+         self.balances
+             .wallet
+@@ -1135,6 +1159,18 @@ fn difficulty_json(deps: &Deps) -> Value {
+     })
+ }
+ 
++/// Per-txid aggregation across history rows for listaddressgroupings.
++#[derive(Default)]
++struct TxAgg {
++    /// addresses of OUR outputs in this tx ("in" rows)
++    out_addrs: Vec<String>,
++    /// the tx has a debit row (wallet inputs funded a payment)
++    send: bool,
++    /// OUR INPUT ADDRESSES recorded by the txhistory generator
++    /// (HistoryRec.input_addresses) — the spend branch's left side.
++    inputs: Vec<String>,
++}
++
+ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+     match method {
+         // ---- tri7 tipstate ----
+@@ -1518,6 +1554,178 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
+             NativeOutcome::Ok(json!(rows))
+         }
+ 
++        // Legacy getcheckpoint (rpcblockchain.cpp:665): "Show info of
++        // synchronized checkpoint." Legacy reports Checkpoints::
++        // hashSyncCheckpoint — a RUNTIME value the checkpoint master advances
++        // over the network (AcceptPendingSyncCheckpoint), seeded at genesis.
++        // tri7 does not process checkpoint-master messages, so its checkpoint
++        // of record is the compiled-in anchor (consensus::CHECKPOINT_HORIZON /
++        // CHECKPOINT_ANCHOR_DISPLAY — the highest legacy checkpoint-map entry,
++        // checkpoints.cpp:82) which follow_tip ENFORCES strictly on every
++        // fetch/backfill path (check_checkpoint_anchor). Policy is therefore
++        // always strict on tri7, and `checkpointmaster` (legacy
++        // -checkpointkey) never applies — both keys appear exactly as a
++        // legacy default-policy node without the master key would print them.
++        // timestamp = the anchor block's nTime in the legacy DateTimeStrFormat
++        // ("%Y-%m-%d %H:%M:%S UTC", util.h:425).
++        "getcheckpoint" => {
++            if params.as_array().map_or(false, |a| !a.is_empty()) {
++                return NativeOutcome::Err(-8, "getcheckpoint takes no parameters".into());
++            }
++            if !deps.blocks.ready() {
++                return NativeOutcome::Miss("block index warming up".into());
++            }
++            let ts = match deps.blocks.block_by_height(CHECKPOINT_HORIZON) {
++                Ok(Some(b)) => b.get("time").and_then(|t| t.as_i64()).unwrap_or(0),
++                Ok(None) => {
++                    return NativeOutcome::Miss(format!(
++                        "checkpoint block h{} not covered by the height map",
++                        CHECKPOINT_HORIZON
++                    ))
++                }
++                Err(e) => return NativeOutcome::Err(-1, e),
++            };
++            NativeOutcome::Ok(json!({
++                "synccheckpoint": CHECKPOINT_ANCHOR_DISPLAY,
++                "height": CHECKPOINT_HORIZON,
++                "timestamp": fmt_utc_timestamp(ts.max(0) as u64),
++                "policy": "strict",
++            }))
++        }
++
++        // Legacy listaddressgroupings (rpcwallet.cpp:394): groups of
++        // addresses whose common ownership was made public by common use as
++        // inputs or as the resulting change in past transactions. Data
++        // sources are all tri7's own: the wallet history rows (the wallet tx
++        // set), the per-address balance map listreceivedbyaddress already
++        // serves (so the two verbs cannot disagree), and the address book
++        // labels (the legacy IsChange key: mine + unlabeled = change).
++        //
++        // Branch "inputs group together" fires per tx whose inputs are ours.
++        // The txhistory generator records OUR INPUT ADDRESSES per row
++        // (HistoryRec.input_addresses) — resolvable for free at scan time, so
++        // this verb needs NO live prevout lookups. Coinstakes included: the
++        // kernel pays the stake back to the staked script (CreateCoinStake,
++        // wallet.cpp:2332-2346), so the merge degenerates to the singleton
++        // branch already produces.
++        //
++        // Honest coverage: rows written before input_addresses existed (older
++        // history.json files) carry no input side — their txs contribute
++        // output singletons only, and the answer covers the history file's
++        // window exactly like listwallettx. A rescan with the new generator
++        // completes the input side. Ordering note: legacy iterates
++        // set<set<CTxDestination>> (internal uint160 order); tri7 sorts by
++        // base58 string at both levels — deterministic, not byte-identical to
++        // legacy ordering.
++        "listaddressgroupings" => {
++            let rows = deps.wallet.history();
++            let labels = deps.wallet.labels();
++
++            // per-txid aggregation (one tx appears as several rows)
++            let mut txs: std::collections::BTreeMap<String, TxAgg> = Default::default();
++            for r in &rows {
++                let e = txs.entry(r.txid.clone()).or_default();
++                if r.direction == "in" && !e.out_addrs.contains(&r.address) {
++                    e.out_addrs.push(r.address.clone());
++                }
++                if r.direction == "out" {
++                    e.send = true;
++                }
++                if e.inputs.is_empty() && !r.input_addresses.is_empty() {
++                    e.inputs = r.input_addresses.clone();
++                }
++            }
++
++            // group store with transitive merge-on-shared-member (the legacy
++            // setmap/hits algorithm)
++            let mut groups: Vec<std::collections::BTreeSet<String>> = Vec::new();
++            let mut member_of: std::collections::HashMap<String, usize> = Default::default();
++            let mut push_group = |addrs: Vec<String>,
++                                  groups: &mut Vec<std::collections::BTreeSet<String>>,
++                                  member_of: &mut std::collections::HashMap<String, usize>| {
++                let mut hit: Vec<usize> = addrs
++                    .iter()
++                    .filter_map(|a| member_of.get(a).copied())
++                    .collect();
++                hit.sort_unstable();
++                hit.dedup();
++                let mut merged = std::collections::BTreeSet::new();
++                for id in &hit {
++                    // BTreeSet has no drain(); take() empties the drained
++                    // group in place (compacted away below)
++                    merged.extend(std::mem::take(&mut groups[*id]));
++                }
++                for a in addrs {
++                    merged.insert(a);
++                }
++                let new_id = groups.len();
++                for a in &merged {
++                    member_of.insert(a.clone(), new_id);
++                }
++                groups.push(merged);
++            };
++
++            let mut unresolved_spend_txs = 0usize;
++            for e in txs.values() {
++                if !e.inputs.is_empty() {
++                    // spend branch: inputs ∪ change (mine outputs that are
++                    // NOT in the address book)
++                    let mut addrs = e.inputs.clone();
++                    for a in &e.out_addrs {
++                        if !labels.contains_key(a) {
++                            addrs.push(a.clone());
++                        }
++                    }
++                    push_group(addrs, &mut groups, &mut member_of);
++                }
++                // lone addresses group by themselves (legacy branch B)
++                for a in &e.out_addrs {
++                    push_group(vec![a.clone()], &mut groups, &mut member_of);
++                }
++                if e.inputs.is_empty() && e.send {
++                    unresolved_spend_txs += 1;
++                }
++            }
++            if unresolved_spend_txs > 0 {
++                eprintln!(
++                    "listaddressgroupings: {} spend tx(s) predate HistoryRec.input_addresses — no input-side grouping for them (rescan with the new txhistory completes it)",
++                    unresolved_spend_txs
++                );
++            }
++
++            // balance per address: the same map listreceivedbyaddress reads;
++            // an address without an entry reports 0 (legacy map semantics)
++            let mut balances: std::collections::HashMap<String, i64> = Default::default();
++            for e in deps.wallet.address_entries() {
++                balances.insert(e.address, e.balance_sats);
++            }
++
++            let mut out: Vec<Vec<Value>> = groups
++                .iter()
++                .filter(|g| !g.is_empty())
++                .map(|g| {
++                    g.iter()
++                        .map(|addr| {
++                            let mut row = vec![
++                                json!(addr),
++                                json!(sats_to_tri(*balances.get(addr.as_str()).unwrap_or(&0))),
++                            ];
++                            if let Some(l) = labels.get(addr) {
++                                row.push(json!(l));
++                            }
++                            json!(row)
++                        })
++                        .collect::<Vec<_>>()
++                })
++                .collect();
++            out.sort_by(|a, b| {
++                let ka = a[0][0].as_str().unwrap_or("");
++                let kb = b[0][0].as_str().unwrap_or("");
++                ka.cmp(&kb)
++            });
++            NativeOutcome::Ok(json!(out))
++        }
++
+         // Legacy validatepubkey: decode a hex public key and report the address
+         // it maps to. Pure function, no wallet access.
+         "validatepubkey" => {
+@@ -2748,6 +2956,27 @@ pub fn sats_to_tri(sats: i64) -> f64 {
+     sats as f64 / 1_000_000.0
+ }
+ 
++/// Legacy DateTimeStrFormat (util.h:425-428): "%Y-%m-%d %H:%M:%S UTC" over
++/// gmtime — the format `getcheckpoint.timestamp` reports. Hand-rolled
++/// civil-from-days (Hinnant's algorithm) because the repo carries no chrono
++/// dependency; pinned by unit test against known timestamps.
++pub fn fmt_utc_timestamp(secs: u64) -> String {
++    let days = (secs / 86_400) as i64;
++    let rem = secs % 86_400;
++    let (h, mi, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
++    let z = days + 719_468;
++    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
++    let doe = (z - era * 146_097) as i64;
++    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
++    let y = yoe + era * 400;
++    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++    let mp = (5 * doy + 2) / 153;
++    let d = doy - (153 * mp + 2) / 5 + 1;
++    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
++    let y = if mth <= 2 { y + 1 } else { y };
++    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, mth, d, h, mi, s)
++}
++
+ /// The daemon's own GetDifficulty (rpcmining.cpp double arithmetic) — this is
+ /// the exact formula legacy clients see, down to float rounding:
+ ///   nShift = (bits >> 24) & 0xff
+@@ -3546,8 +3775,8 @@ mod tests {
+ 
+     fn deps<'a>(
+         tip: &'a StubTip,
+-        wallet: &'a StubWallet,
+-        blocks: &'a StubBlocks,
++        wallet: &'a dyn WalletProvider,
++        blocks: &'a dyn BlockDataProvider,
+         proxy: Option<&'a StubProxy>,
+     ) -> Deps<'a> {
+         Deps {
+@@ -3971,6 +4200,7 @@ mod tests {
+             legacy_kind: String::new(),
+             coinstake: false,
+             stake_principal: 0,
++            input_addresses: Vec::new(),
+             stake_net: None,
+         }
+     }
+@@ -4015,6 +4245,282 @@ mod tests {
+         assert_eq!(p.calls.lock().unwrap().len(), 1);
+     }
+ 
++    // ---- listaddressgroupings (rpcwallet.cpp:394 parity) ----
++
++    /// wallet stub carrying history rows + address-book labels + balances
++    struct GroupWallet {
++        rows: Vec<crate::history::HistoryRec>,
++        labels: std::collections::HashMap<String, String>,
++        balances: std::collections::HashMap<String, i64>,
++    }
++    impl WalletProvider for GroupWallet {
++        fn balance(&self) -> Option<BalanceView> {
++            None
++        }
++        fn coverage(&self) -> Option<(u64, String)> {
++            None
++        }
++        fn address_entries(&self) -> Vec<AddressEntry> {
++            self.balances
++                .iter()
++                .map(|(a, sats)| AddressEntry {
++                    address: a.clone(),
++                    balance_sats: *sats,
++                    utxos: 0,
++                    received_regular_sats: 0,
++                    received_all_sats: 0,
++                })
++                .collect()
++        }
++        fn received_regular(&self, _a: &str) -> Option<i64> {
++            None
++        }
++        fn is_mine(&self, _a: &str) -> bool {
++            false
++        }
++        fn utxos(&self) -> Vec<UtxoRow> {
++            Vec::new()
++        }
++        fn history(&self) -> Vec<crate::history::HistoryRec> {
++            self.rows.clone()
++        }
++        fn labels(&self) -> std::collections::HashMap<String, String> {
++            self.labels.clone()
++        }
++    }
++
++    fn group_row(txid: &str, dir: &str, addr: &str, inputs: &[&str]) -> crate::history::HistoryRec {
++        crate::history::HistoryRec {
++            txid: txid.into(),
++            height: 100,
++            time: 1_700_000_000,
++            value_sats: 1_000_000,
++            address: addr.into(),
++            direction: dir.into(),
++            kind: if dir == "in" { "regular" } else { "regular" }.into(),
++            spent: false,
++            idx: 0,
++            legacy_kind: String::new(),
++            coinstake: false,
++            stake_principal: 0,
++            input_addresses: inputs.iter().map(|s| s.to_string()).collect(),
++            stake_net: None,
++        }
++    }
++
++    /// groups → Vec<Vec<String>> of first cells (addresses) for assertions
++    fn flat_groups(v: &Value) -> Vec<Vec<String>> {
++        v.as_array()
++            .unwrap()
++            .iter()
++            .map(|g| {
++                g.as_array()
++                    .unwrap()
++                    .iter()
++                    .map(|row| {
++                        row.as_array().unwrap()[0]
++                            .as_str()
++                            .unwrap_or("")
++                            .to_string()
++                    })
++                    .collect()
++            })
++            .collect()
++    }
++
++    #[test]
++    fn listaddressgroupings_coinstake_and_receive_are_singletons_with_balances() {
++        let t = StubTip;
++        let w = GroupWallet {
++            rows: vec![
++                group_row("aa".repeat(32).as_str(), "in", "Tsolo1", &[]),
++                group_row("bb".repeat(32).as_str(), "in", "Tsolo2", &[]),
++            ],
++            labels: Default::default(),
++            balances: [("Tsolo1".to_string(), 2_500_000)].into_iter().collect(),
++        };
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "listaddressgroupings", json!([]));
++        let g = flat_groups(&v["result"]);
++        assert_eq!(g.len(), 2, "two unrelated addresses = two singleton groups");
++        assert_eq!(g[0], vec!["Tsolo1"]);
++        assert_eq!(g[1], vec!["Tsolo2"]);
++        // row = [addr, balance] (+ label only when the address book has it)
++        let row0 = v["result"][0][0].as_array().unwrap();
++        assert_eq!(row0[1], json!(2.5));
++        assert_eq!(row0.len(), 2, "unlabeled = no third element (legacy mapAddressBook gate)");
++        let row1 = v["result"][1][0].as_array().unwrap();
++        assert_eq!(row1[1], json!(0.0), "no balances entry = 0 (legacy map semantics)");
++        assert_eq!(row1.len(), 2);
++    }
++
++    #[test]
++    fn listaddressgroupings_spend_groups_inputs_with_change() {
++        let t = StubTip;
++        // tx aa: TA pays foreign + TB (unlabeled change) → {TA, TB} merge.
++        // tx bb: TB pays TC — but TC is LABELED ("book"), and labeled outputs
++        // are NOT change, so TC does NOT merge; it stays a lone singleton
++        // WITH the label column (legacy pushes it when mapAddressBook has it).
++        let w = GroupWallet {
++            rows: vec![
++                group_row("aa".repeat(32).as_str(), "in", "TB", &["TA"]),
++                group_row("aa".repeat(32).as_str(), "out", "TB", &["TA"]),
++                group_row("bb".repeat(32).as_str(), "in", "TC", &["TB"]),
++            ],
++            labels: [("TC".to_string(), "book".to_string())].into_iter().collect(),
++            balances: [
++                ("TA".to_string(), 0),
++                ("TB".to_string(), 1_000_000),
++                ("TC".to_string(), 3_000_000),
++            ]
++            .into_iter()
++            .collect(),
++        };
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "listaddressgroupings", json!([]));
++        let g = flat_groups(&v["result"]);
++        assert_eq!(g.len(), 2, "the merge must not swallow the labeled output");
++        assert_eq!(g[0], vec!["TA", "TB"], "inputs ∪ unlabeled change");
++        assert_eq!(g[1], vec!["TC"]);
++        // labeled row = [addr, balance, label]
++        let tc = v["result"][1][0].as_array().unwrap();
++        assert_eq!(tc.len(), 3);
++        assert_eq!(tc[2], json!("book"));
++    }
++
++    #[test]
++    fn listaddressgroupings_merges_transitively_across_txs() {
++        let t = StubTip;
++        // tx aa spends from [TA, TB], tx bb from [TB, TC]: the shared member
++        // TB bridges the two spend groups into ONE cluster. TCh (unlabeled
++        // mine output of tx aa) is change and joins the same cluster.
++        let w = GroupWallet {
++            rows: vec![
++                group_row("aa".repeat(32).as_str(), "in", "TCh", &["TA", "TB"]),
++                group_row("bb".repeat(32).as_str(), "in", "TOut", &["TB", "TC"]),
++            ],
++            labels: Default::default(),
++            balances: Default::default(),
++        };
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "listaddressgroupings", json!([]));
++        let g = flat_groups(&v["result"]);
++        assert_eq!(g.len(), 1, "TB bridges the two txs into one cluster");
++        assert_eq!(
++            g[0],
++            vec!["TA", "TB", "TC", "TCh", "TOut"],
++            "inputs ∪ change from both txs, sorted"
++        );
++    }
++
++    #[test]
++    fn listaddressgroupings_old_file_rows_contribute_singletons_only() {
++        let t = StubTip;
++        // rows predating input_addresses: a send tx with no recorded input
++        // side → no spend branch; the mine output TB stays a lone singleton
++        // (a rescan with the new generator completes the input side)
++        let w = GroupWallet {
++            rows: vec![
++                group_row("aa".repeat(32).as_str(), "in", "TB", &[]),
++                group_row("aa".repeat(32).as_str(), "out", "TB", &[]),
++            ],
++            labels: Default::default(),
++            balances: Default::default(),
++        };
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "listaddressgroupings", json!([]));
++        assert_eq!(flat_groups(&v["result"]), vec![vec!["TB".to_string()]]);
++    }
++
++    #[test]
++    fn listaddressgroupings_empty_history_is_an_empty_array() {
++        let t = StubTip;
++        let w = GroupWallet {
++            rows: Vec::new(),
++            labels: Default::default(),
++            balances: Default::default(),
++        };
++        let b = StubBlocks { ready: true };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "listaddressgroupings", json!([]));
++        assert_eq!(v["result"], json!([]));
++    }
++
++    // ---- getcheckpoint (rpcblockchain.cpp:665 parity) ----
++
++    /// blocks stub that can answer the horizon height (unlike StubBlocks)
++    struct CheckpointBlocks {
++        ready: bool,
++        time: Option<i64>,
++    }
++    impl BlockDataProvider for CheckpointBlocks {
++        fn ready(&self) -> bool {
++            self.ready
++        }
++        fn status_json(&self) -> Value {
++            json!({})
++        }
++        fn block_by_hash(&self, _h: &str) -> Result<Option<Value>, String> {
++            Ok(None)
++        }
++        fn block_by_height(&self, h: u64) -> Result<Option<Value>, String> {
++            if self.ready && h == crate::consensus::CHECKPOINT_HORIZON {
++                Ok(Some(json!({ "height": h, "time": self.time.unwrap_or(0) })))
++            } else {
++                Ok(None)
++            }
++        }
++        fn tx(&self, _t: &str, _v: bool) -> Result<Option<Value>, String> {
++            Ok(None)
++        }
++        fn hash_at(&self, _h: u64) -> Result<Option<String>, String> {
++            Ok(None)
++        }
++    }
++
++    #[test]
++    fn getcheckpoint_reports_the_compiled_anchor_strict_policy() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let b = CheckpointBlocks { ready: true, time: Some(1_783_600_000) };
++        let d = deps(&t, &w, &b, None);
++        let v = call(&d, "getcheckpoint", json!([]));
++        assert_eq!(v["source"], "tri7");
++        assert_eq!(v["result"]["synccheckpoint"], json!(crate::consensus::CHECKPOINT_ANCHOR_DISPLAY));
++        assert_eq!(v["result"]["height"], json!(crate::consensus::CHECKPOINT_HORIZON));
++        assert_eq!(v["result"]["timestamp"], json!("2026-07-09 12:26:40 UTC"));
++        assert_eq!(v["result"]["policy"], json!("strict"));
++        assert!(v["result"].get("checkpointmaster").is_none(), "no -checkpointkey on tri7");
++    }
++
++    #[test]
++    fn getcheckpoint_refuses_params_and_warming_index() {
++        let t = StubTip;
++        let w = StubWallet::default();
++        let bwarm = CheckpointBlocks { ready: false, time: None };
++        let d = deps(&t, &w, &bwarm, None);
++        let v = call(&d, "getcheckpoint", json!([]));
++        assert_eq!(v["error"]["code"], -1, "warming index = honest miss, no proxy: {v}");
++        assert!(v["error"]["message"].as_str().unwrap().contains("warming up"));
++
++        let bready = CheckpointBlocks { ready: true, time: Some(1) };
++        let d = deps(&t, &w, &bready, None);
++        let v = call(&d, "getcheckpoint", json!(["extra"]));
++        assert_eq!(v["error"]["code"], -8, "legacy throws on params; tri7 refuses with -8");
++    }
++
++    #[test]
++    fn fmt_utc_timestamp_matches_the_legacy_format() {
++        assert_eq!(fmt_utc_timestamp(0), "1970-01-01 00:00:00 UTC");
++        assert_eq!(fmt_utc_timestamp(1_700_000_000), "2023-11-14 22:13:20 UTC");
++        // leap-year day: 2024-02-29 13:20:00 UTC
++        assert_eq!(fmt_utc_timestamp(1_709_212_800), "2024-02-29 13:20:00 UTC");
++    }
++
+     #[test]
+     fn native_miss_falls_back_to_proxy_while_warming() {
+         let t = StubTip;
+@@ -4380,6 +4886,7 @@ mod tests {
+             utxos: load_utxos_snap(&up),
+             extra: Default::default(),
+             pubkeys: Default::default(),
++            labels: Default::default(),
+         }
+     }
+ 
+@@ -4476,6 +4983,7 @@ mod tests {
+             utxos: load_utxos_snap(&missing),
+             extra: Default::default(),
+             pubkeys: Default::default(),
++            labels: Default::default(),
+         };
+         assert!(!w.utxos.loaded);
+         assert_eq!(w.coverage(), None);
+@@ -4535,6 +5043,7 @@ mod tests {
+             utxos: load_utxos_snap(&dir.join("absent.json")),
+             extra: Default::default(),
+             pubkeys: Default::default(),
++            labels: Default::default(),
+         };
+         let d = Deps {
+             tip: &t,

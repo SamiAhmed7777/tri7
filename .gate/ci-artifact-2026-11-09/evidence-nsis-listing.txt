@@ -1,0 +1,29 @@
+
+7-Zip 23.01 (x64) : Copyright (c) 1999-2023 Igor Pavlov : 2023-06-20
+ 64-bit locale=C.UTF-8 Threads:6 OPEN_MAX:4096
+
+Scanning the drive for archives:
+1 file, 7384576 bytes (7212 KiB)
+
+Listing archive: /root/.hermes/cache/scratch/ci14/setup/CryptographicTriangles-7.0.1-win64-setup.exe
+
+--
+Path = /root/.hermes/cache/scratch/ci14/setup/CryptographicTriangles-7.0.1-win64-setup.exe
+Type = Nsis
+Physical Size = 7384576
+Method = LZMA:23
+Solid = +
+Headers Size = 18058
+Embedded Stub Size = 51712
+SubType = NSIS-3 Unicode BadCmd=13
+
+   Date      Time    Attr         Size   Compressed  Name
+------------------- ----- ------------ ------------  ------------------------
+2003-09-23 10:34:00 .....        26494      7332860  $PLUGINSDIR/modern-wizard.bmp
+                    .....         9728               $PLUGINSDIR/nsDialogs.dll
+                    .....        12288               $PLUGINSDIR/System.dll
+2026-11-09 08:05:06 .....     12121088               bin/tri7_wallet_gui.exe
+2026-11-09 08:01:14 .....      6685696               bin/follow_tip.exe
+2026-11-09 08:00:52 .....                            bin/tri7.exe
+------------------- ----- ------------ ------------  ------------------------
+2026-11-09 08:05:06           18855294      7332860  6 files

@@ -1,0 +1,122 @@
+=== PHASE A: pre-deploy captures (run ts 20261106-154813) ===
+host-guard: OK
+
+old-binary-sha256:
+fdb401a9c1dc06ea387408d3ef617c489411aedb718939329fdd3168b794feb2  /root/tri7/target/release/follow_tip
+d27f90ff6882ea0115ea9005e4ba83dff668f38793360eb2c21cb7cd2276d106  /root/tri7/target/release/addrindex_build
+
+pre-tip: 2206706
+pre-peers: {"by_transport": {"clearnet": 0, "i2p": 0, "tor": 0}, "count": 0, "peers": []}
+pre-staking: {"enabled": false, "attempts": 0}
+pre-wallet-addresses: 248
+pre-wallet-keys(dumpline-count): 106
+pids-before:
+2025891 /root/tri7/target/release/follow_tip --socks 127.0.0.1:9050 --daemon gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 --listen-port 24112 --listen-bind 127.0.0.1 --state-dir /var/lib/tri7 --blocks-file /root/.triangles/blk0001.dat --index-dir /var/lib/tri7/index --wallet /root/tri7-wallet/wallet.dat --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy --backfill 0 --forever
+
+=== PHASE B: backup-first, ship committed source, build (20261106-154813) ===
+[1] backup old binaries BEFORE any build:
+total 9004
+drwx------  2 root root    4096 Nov  6 23:48 .
+drwxr-xr-x 19 root root    4096 Nov  6 23:48 ..
+-rwxr-xr-x  1 root root 3054504 Nov  6 22:41 addrindex_build
+-rwxr-xr-x  1 root root 6164288 Nov  6 22:02 follow_tip
+d27f90ff6882ea0115ea9005e4ba83dff668f38793360eb2c21cb7cd2276d106  /root/tri7/bin-backup-20261106-154813/addrindex_build
+fdb401a9c1dc06ea387408d3ef617c489411aedb718939329fdd3168b794feb2  /root/tri7/bin-backup-20261106-154813/follow_tip
+
+[2] ship committed HEAD source (git archive — committed state only):
+DNS2 HEAD: 5629b1718911395374bb27dbed0dc3d43fadf127
+ARCHIVE-OK
+Pi marker check post-archive (should be 1 1 now): 0
+0
+
+[3] build on the Pi (nice 10, log to /var/lib/tri7/build.log):
+build-rc=0
+
+warning: `tri7-core` (bin "follow_tip") generated 30 warnings (run `cargo fix --bin "follow_tip" -p tri7-core` to apply 17 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 10s
+[4] new binary hashes + BUILD_COMMIT stamp:
+fdb401a9c1dc06ea387408d3ef617c489411aedb718939329fdd3168b794feb2  /root/tri7/target/release/follow_tip
+8901fe92027831d9aba034af0d41989dddca1e1a8f2d203e283fe7e895a069ee  /root/tri7/target/release/addrindex_build
+44eba81b83eaf0563ff6062c0cbf4c62280e1c417557789368b5078ca29e36a8  /root/tri7/target/release/wallet_keytool
+5629b1718911395374bb27dbed0dc3d43fadf127+judged-diff
+
+=== PHASE C: maintenance window (activate the wire fix) ===
+[C1] stop stale follow_tip (21:26 inode) + zombie addrindex_build, by explicit pid:
+stopping follow_tip pid=2025891 addrindex pid=2043353
+still alive: 2025891 -> KILL
+2043359 /bin/bash -c FT=$(pgrep -f 'target/release/follow_tip' | head -1); AB=$(pgrep -f 'target/release/addrindex_build' | head -1) echo "stopping follow_tip pid=$FT addrindex pid=$AB" [ -n "$FT" ] && kill -TERM $FT; [ -n "$AB" ] && kill -TERM $AB sleep 10 for p in $FT $AB; do kill -0 $p 2>/dev/null && { echo "still alive: $p -> KILL"; kill -9 $p; }; done sleep 2 pgrep -af 'target/release/(follow_tip|addrindex_build)' || echo ALL-STOPPED rm -f /var/lib/tri7/tri7d.pid; echo pidfile-removed
+pidfile-removed
+[C2] rename stub index aside (rollback artifact):
+/var/lib/tri7/index.old.1793959416
+/var/lib/tri7/index.pre-repair-20261106-154813
+[C3] start follow_tip via the canonical launcher (new binary, BUILD_COMMIT stamped):
+wallet copy present: 57344 bytes
+commit: 5629b1718911395374bb27dbed0dc3d43fadf127+judged-diff
+binary: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV)
+started pid 2043417 (Tor-only)
+RPC up after 82s
+[C4] start the address-index rebuild with the FIXED builder:
+addrindex-pid=2043653
+2043645 /usr/sbin/tailscaled be-child ssh --login-shell=/bin/bash --uid=0 --gid=0 --groups=0 --local-user=root --home-dir=/root --remote-user=SamiAhmed7777@github --remote-ip=100.121.150.22 --has-tty=false --tty-name= --force-v1-behavior --cmd=nohup nice -n 19 /root/tri7/target/release/addrindex_build /root/.triangles/blk0001.dat /var/lib/tri7 --full > /var/lib/tri7/addrindex-rebuild.log 2>&1 & echo addrindex-pid=$!; sleep 3; pgrep -af 'target/release/addrindex_build' | head -2
+2043652 /bin/bash -c nohup nice -n 19 /root/tri7/target/release/addrindex_build /root/.triangles/blk0001.dat /var/lib/tri7 --full > /var/lib/tri7/addrindex-rebuild.log 2>&1 & echo addrindex-pid=$!; sleep 3; pgrep -af 'target/release/addrindex_build' | head -2
+[C5] +20s first look:
+[2026-11-07T00:02:38Z] TIP ADVANCE → h2206718 4028515d4a50211ef68c1be191f3a782f66f4296abee3af4db53c551ef1bcb0c (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T00:02:38Z] relay: announced h2206718 to 2 peer(s) (inv)
+[2026-11-07T00:02:39Z] headers announcement does not chain to our tip — requesting reconciliation
+[2026-11-07T00:02:40Z] headers announcement does not chain to our tip — requesting reconciliation
+[2026-11-07T00:02:40Z] h2206719: no external checksum oracle for this block — adopting locally computed 3c88bb31
+[2026-11-07T00:02:40Z] TIP ADVANCE → h2206719 c44fcecbecf054a6a563439e4b4865682fa236eea5418c6067249b23a2dcfc24 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+---
+{"error":{"code":-1,"message":"node ops engine still warming up"},"id":null,"result":null,"source":"tri7"}
+=== PHASE D: acceptance evidence ===
+[D1] +2min: peers / tip / staking / RPC warm:
+peers: 2 by_transport: {'clearnet': 1, 'i2p': 0, 'tor': 1}
+  peer: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 tor
+  peer: 127.0.0.1:35970 (/tri7:7.0.0/ h2206783) clearnet
+{"error":null,"id":null,"result":2206777,"source":"tri7"}
+staking enabled: False attempts: 0
+[D2] DNS2 side for comparison:
+{"error":null,"id":null,"result":2206785,"source":"tri7"}{"error":null,"id":null,"result":"ea31a174652822e21043ca59892258cc365db76982ea1b439999867e51320fdb","source":"tri7"}
+[D3] index rebuild progress + builder log:
+tipstate oracle: 4600 hashes
+[blockidx] ready: 2231537 frames, 4542863 txs, heights_ok=true, threaded_tip=Some(11229), writable=true, built in 55s
+total 140544
+drwxr-xr-x 2 root root     4096 Nov  7 00:03 .
+drwxr-xr-x 6 root root     4096 Nov  7 00:04 ..
+-rw-r--r-- 1 root root 71210625 Nov  7 00:03 blockidx.bin
+-rw-r--r-- 1 root root 72685872 Nov  7 00:03 txidx.bin
+[D4] hash equality at shared height + wallet integrity (+6 min):
+Pi tip now: {"error":null,"id":null,"result":2206786,"source":"tri7"}
+DNS2 tip now: {"error":null,"id":null,"result":2206786,"source":"tri7"}
+shared height h2206785:
+Pi   getblockhash: {"error":null,"id":null,"result":"ea31a174652822e21043ca59892258cc365db76982ea1b439999867e51320fdb","source":"tri7"}
+DNS2 getblockhash: {"error":null,"id":null,"result":"ea31a174652822e21043ca59892258cc365db76982ea1b439999867e51320fdb","source":"tri7"}
+wallet addresses: 248
+wallet key lines (dump): 104
+dumps-removed
+peers/stability: {"error":null,"id":null,"result":{"by_transport":{"clearnet":1,"i2p":0,"tor":1},"count":2,"peers":[{"connected_utc":"2026-11-07T00:02:13Z","endpoint":
+[2026-11-07T00:07:18Z] relay: announced h2206786 to 2 peer(s) (inv)
+[2026-11-07T00:09:10Z] dumpwallet: 103 keys -> /var/lib/tri7/postdeploy-dump.txt
+=== KEY IMPORT TEST (wallet lane step 1) ===
+[1] fetch dump sami-pc -> DNS2 (0600, transient relay):
+14 /root/funded-keys.dump
+[2] push to Pi (0600):
+total 68
+drwxr-xr-x  2 root root  4096 Nov  7 00:11 .
+drwx------ 24 root root  4096 Nov  6 23:56 ..
+-rw-------  1 root root  1394 Nov  7 00:11 funded-keys.dump
+-rw-------  1 root root 57344 Oct 24 06:05 wallet.dat
+[3] backup Pi wallet first:
+-rw-------  1 root root 57344 Oct 24 06:05 wallet.dat.pre-keyimport-20261106-161131
+[4] importwallet (path-based; keys never in transcript):
+{"error":null,"id":null,"result":null,"source":"tri7"}
+[5] verify key count + funded balances:
+104
+  still watch-only: TBxrQx34J2mRvkmixnrdUynwzEC3wPdgb3
+  still watch-only: TFUexruqsggjScyBtGWHprwtJEqwLoP7jR
+  still watch-only: TMrXEza1CQ8GKfH5XSuVFt6z7HAdRcfhpL
+[6] listunspent after import (view refresh check):
+{"error":null,"id":null,"result":[],"source":"tri7"}
+[7] cleanup transient dump copies:
+dns2-copy-removed
+pi-copy-removed

@@ -1,0 +1,7 @@
+# /etc/systemd/system/disk-guard.service
+[Unit]
+Description=DNS2 disk guard (safe hourly vacuum + 90% alert)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /root/security/bin/disk-guard.py

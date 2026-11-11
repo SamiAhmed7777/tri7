@@ -1,0 +1,533 @@
+diff --git a/src/smsg.rs b/src/smsg.rs
+index 7294d64..20e49f7 100644
+--- a/src/smsg.rs
++++ b/src/smsg.rs
+@@ -797,6 +797,19 @@ pub fn smsg_encrypt(
+     message: &str,
+     timestamp: i64,
+ ) -> Result<Vec<u8>, String> {
++    smsg_encrypt_ex(from, to_pubkey, message, timestamp).map(|(w, _, _)| w)
++}
++
++/// smsg_encrypt plus the derived message keys (key_e, key_m): the SENDER
++/// keeps a sealed copy in its outbox row (seal_outbox_keys) because the
++/// ephemeral secret r is destroyed here — the packet alone (cpk_r) does not
++/// let the sender re-derive x(r·K), that is ECDLP-hard.
++pub fn smsg_encrypt_ex(
++    from: Option<&SmsgKey>, // None = anonymous ("anon")
++    to_pubkey: &[u8],
++    message: &str,
++    timestamp: i64,
++) -> Result<(Vec<u8>, [u8; 32], [u8; 32]), String> {
+     let msg = message.as_bytes();
+     if msg.len() > SMSG_MAX_MSG_BYTES {
+         return Err(format!(
+@@ -864,7 +877,7 @@ pub fn smsg_encrypt(
+     let mac = hmac_sha256(&key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
+     m.mac = mac;
+     smsg_set_hash(&mut m)?;
+-    Ok(m.to_wire())
++    Ok((m.to_wire(), key_e, key_m))
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -884,7 +897,31 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
+     let m = SecureMessage::from_wire(wire)?;
+     smsg_validate_ne(&m)?;
+     let (key_e, key_m) = derive_keys(&key.secret, &m.cpk_r)?;
+-    let mac = hmac_sha256(&key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
++    decrypt_message(&m, &key_e, &key_m)
++}
++
++/// Decrypt with already-derived message keys — the SENDER-side path: the
++/// outbox row's sealed keys are opened with the sending private key
++/// (unseal_outbox_keys) and fed here, since the sender cannot re-derive the
++/// shared secret from the packet alone. MAC-first parity with smsg_decrypt.
++pub fn smsg_decrypt_with_keys(
++    wire: &[u8],
++    key_e: &[u8; 32],
++    key_m: &[u8; 32],
++) -> Result<DecryptedMessage, String> {
++    let m = SecureMessage::from_wire(wire)?;
++    smsg_validate_ne(&m)?;
++    decrypt_message(&m, key_e, key_m)
++}
++
++/// Shared body of both decrypt paths: MAC check, AES decrypt, payload
++/// parse, sender recovery (SecureMsgDecrypt after the key derivation).
++fn decrypt_message(
++    m: &SecureMessage,
++    key_e: &[u8; 32],
++    key_m: &[u8; 32],
++) -> Result<DecryptedMessage, String> {
++    let mac = hmac_sha256(key_m, &[&m.timestamp.to_le_bytes(), &m.payload]);
+     if mac != m.mac {
+         return Err("MAC does not match (message not addressed to this key)".into());
+     }
+@@ -946,6 +983,61 @@ pub fn smsg_decrypt(wire: &[u8], key: &SmsgKey) -> Result<DecryptedMessage, Stri
+     })
+ }
+ 
++// ---------------------------------------------------------------------------
++// Outbox sender-side recovery. The wire's shared secret x(r·K) dies with the
++// ephemeral key r (SecureMsgEncrypt parity), so a SENT message cannot be
++// re-decrypted from the packet alone: ECDH(sender_priv, cpk_r) equals the
++// receiver secret only for self-addressed mail — otherwise that is ECDLP.
++// tri7 therefore seals the derived (key_e, key_m) under the SENDING private
++// key at send time and stores the 64-byte seal in the outbox row
++// (messages.ekey). Opening the seal requires the sending secret, so the
++// smsg store on disk alone leaks nothing. Rows without a usable seal
++// (anonymous sends, rows written before this column existed) keep the
++// honest empty from/text placeholders in the listing.
++// ---------------------------------------------------------------------------
++
++/// Seal the message keys for one outbox row: XOR against an HMAC-SHA256
++/// keystream keyed by the sending secret and bound to the 18-byte row key.
++pub fn seal_outbox_keys(
++    sender_secret: &[u8; 32],
++    row_key: &[u8],
++    key_e: &[u8; 32],
++    key_m: &[u8; 32],
++) -> Vec<u8> {
++    let h_e = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-e", row_key]);
++    let h_m = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-m", row_key]);
++    let mut out = Vec::with_capacity(64);
++    for i in 0..32 {
++        out.push(key_e[i] ^ h_e[i]);
++    }
++    for i in 0..32 {
++        out.push(key_m[i] ^ h_m[i]);
++    }
++    out
++}
++
++/// Inverse of seal_outbox_keys. None when the seal is absent or malformed —
++/// a wrong sending secret still yields keys here, but the MAC check in
++/// smsg_decrypt_with_keys then rejects them (never a crash, never a fake).
++pub fn unseal_outbox_keys(
++    sender_secret: &[u8; 32],
++    row_key: &[u8],
++    sealed: &[u8],
++) -> Option<([u8; 32], [u8; 32])> {
++    if sealed.len() != 64 {
++        return None;
++    }
++    let h_e = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-e", row_key]);
++    let h_m = hmac_sha256(sender_secret, &[b"tri7-smsg-outbox-m", row_key]);
++    let mut key_e = [0u8; 32];
++    let mut key_m = [0u8; 32];
++    for i in 0..32 {
++        key_e[i] = sealed[i] ^ h_e[i];
++        key_m[i] = sealed[32 + i] ^ h_m[i];
++    }
++    Some((key_e, key_m))
++}
++
+ fn smsg_validate_ne(m: &SecureMessage) -> Result<(), String> {
+     let rv = smsg_validate(m);
+     match rv {
+@@ -1058,6 +1150,10 @@ pub struct StoredMessage {
+     pub status: u8, // bit0 = unread
+     pub addr_to: String,
+     pub addr_outbox: String,
++    /// Outbox rows only: the message keys sealed under the sending secret
++    /// (seal_outbox_keys, 64 bytes) so the sender view can decrypt. Empty
++    /// (NULL) for inbox/relay rows and anonymous/pre-existing outbox rows.
++    pub ekey: Vec<u8>,
+     pub data: Vec<u8>, // raw wire bytes (header+payload)
+ }
+ 
+@@ -1084,6 +1180,7 @@ impl MessageStore {
+                status INTEGER NOT NULL,
+                addr_to TEXT NOT NULL,
+                addr_outbox TEXT NOT NULL,
++               ekey BLOB,
+                data BLOB NOT NULL,
+                PRIMARY KEY (folder, key)
+              );
+@@ -1098,6 +1195,15 @@ impl MessageStore {
+              );",
+         )
+         .map_err(|e| format!("smsg schema: {}", e))?;
++        // Migration: stores created before the sender-side outbox view lack
++        // the ekey column — ALTER for them, tolerate "duplicate" on fresh
++        // stores (rows written before the column keep NULL seals and show
++        // the honest placeholders in the outbox listing).
++        if let Err(e) = conn.execute("ALTER TABLE messages ADD COLUMN ekey BLOB", []) {
++            if !format!("{}", e).contains("duplicate column") {
++                return Err(format!("smsg schema migrate: {}", e));
++            }
++        }
+         Ok(MessageStore { conn: std::sync::Mutex::new(conn) })
+     }
+ 
+@@ -1122,11 +1228,16 @@ impl MessageStore {
+         };
+         let _ = t;
+         let conn = self.conn.lock().unwrap();
++        let ekey_param: Option<&[u8]> = if msg.ekey.is_empty() {
++            None
++        } else {
++            Some(&msg.ekey[..])
++        };
+         let n = conn
+             .execute(
+                 "INSERT OR IGNORE INTO messages
+-                 (folder, key, time_received, status, addr_to, addr_outbox, data)
+-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
++                 (folder, key, time_received, status, addr_to, addr_outbox, ekey, data)
++                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 rusqlite::params![
+                     folder as i64,
+                     msg.key,
+@@ -1134,6 +1245,7 @@ impl MessageStore {
+                     msg.status as i64,
+                     msg.addr_to,
+                     msg.addr_outbox,
++                    ekey_param,
+                     msg.data
+                 ],
+             )
+@@ -1145,7 +1257,7 @@ impl MessageStore {
+         let conn = self.conn.lock().unwrap();
+         let mut stmt = conn
+             .prepare(
+-                "SELECT key, time_received, status, addr_to, addr_outbox, data
++                "SELECT key, time_received, status, addr_to, addr_outbox, ekey, data
+                  FROM messages WHERE folder = ?1 ORDER BY time_received DESC, key",
+             )
+             .map_err(|e| format!("smsg list: {}", e))?;
+@@ -1157,7 +1269,8 @@ impl MessageStore {
+                     status: r.get::<_, i64>(2)? as u8,
+                     addr_to: r.get(3)?,
+                     addr_outbox: r.get(4)?,
+-                    data: r.get(5)?,
++                    ekey: r.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
++                    data: r.get(6)?,
+                 })
+             })
+             .map_err(|e| format!("smsg list: {}", e))?;
+@@ -1569,6 +1682,7 @@ mod tests {
+             status: SMSG_MASK_UNREAD,
+             addr_to: bob.address.clone(),
+             addr_outbox: String::new(),
++            ekey: Vec::new(),
+             data: wire.clone(),
+         };
+         assert!(store.insert(FOLDER_INBOX, &msg).unwrap());
+@@ -1616,6 +1730,89 @@ mod tests {
+         assert_ne!(pk2, k.pubkey);
+     }
+ 
++    #[test]
++    fn outbox_seal_roundtrip_sender_decrypt_matches_receiver() {
++        let alice = make_key("ob-seal-a");
++        let bob = make_key("ob-seal-b");
++        let (wire, key_e, key_m) = smsg_encrypt_ex(
++            Some(&alice),
++            &bob.pubkey,
++            "sender sees it too",
++            1_700_000_700,
++        )
++        .unwrap();
++        // receiver path unchanged: the packet alone works for the recipient
++        let dm_r = smsg_decrypt(&wire, &bob).unwrap();
++        assert_eq!(dm_r.plaintext, "sender sees it too");
++        assert_eq!(dm_r.from_address, alice.address);
++        // sender path: seal -> unseal -> decrypt with the recovered keys
++        let row_key = [9u8; 18];
++        let sealed = seal_outbox_keys(&alice.secret, &row_key, &key_e, &key_m);
++        assert_eq!(sealed.len(), 64);
++        assert_ne!(sealed, key_e.iter().chain(key_m.iter()).copied().collect::<Vec<u8>>());
++        let (ke, km) = unseal_outbox_keys(&alice.secret, &row_key, &sealed).unwrap();
++        assert_eq!(ke, key_e);
++        assert_eq!(km, key_m);
++        let dm_s = smsg_decrypt_with_keys(&wire, &ke, &km).unwrap();
++        assert_eq!(dm_s.plaintext, dm_r.plaintext);
++        assert_eq!(dm_s.from_address, alice.address);
++        // a different sending secret "unseals" to garbage keys — the MAC
++        // check rejects them (honest failure, no fake plaintext)
++        let eve = make_key("ob-seal-eve");
++        let (ke2, km2) = unseal_outbox_keys(&eve.secret, &row_key, &sealed).unwrap();
++        assert!(smsg_decrypt_with_keys(&wire, &ke2, &km2).is_err());
++        // malformed seals unseal to None, never a panic
++        assert!(unseal_outbox_keys(&alice.secret, &row_key, &sealed[..32]).is_none());
++        assert!(unseal_outbox_keys(&alice.secret, &row_key, &[]).is_none());
++    }
++
++    #[test]
++    fn outbox_store_roundtrips_the_sealed_keys_column() {
++        let dir = std::env::temp_dir().join(format!("tri7-smsg-ekey-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        let store = MessageStore::open(&dir).unwrap();
++        let alice = make_key("ek-a");
++        let bob = make_key("ek-b");
++        let (wire, key_e, key_m) =
++            smsg_encrypt_ex(Some(&alice), &bob.pubkey, "sealed row", 1_700_000_800).unwrap();
++        let t = token_of(&wire).unwrap();
++        let row_key = MessageStore::key_of(FOLDER_OUTBOX, &t);
++        let sealed = seal_outbox_keys(&alice.secret, &row_key, &key_e, &key_m);
++        let out = StoredMessage {
++            key: row_key.clone(),
++            time_received: 1_700_000_801,
++            status: 0,
++            addr_to: bob.address.clone(),
++            addr_outbox: alice.address.clone(),
++            ekey: sealed.clone(),
++            data: wire.clone(),
++        };
++        assert!(store.insert(FOLDER_OUTBOX, &out).unwrap());
++        // inbox rows carry no seal (NULL -> empty vec on the way back)
++        let inbox_row = StoredMessage {
++            key: MessageStore::key_of(FOLDER_INBOX, &t),
++            time_received: 1_700_000_802,
++            status: SMSG_MASK_UNREAD,
++            addr_to: bob.address.clone(),
++            addr_outbox: String::new(),
++            ekey: Vec::new(),
++            data: wire,
++        };
++        assert!(store.insert(FOLDER_INBOX, &inbox_row).unwrap());
++        let out_rows = store.list(FOLDER_OUTBOX).unwrap();
++        assert_eq!(out_rows.len(), 1);
++        assert_eq!(out_rows[0].ekey, sealed);
++        // the persisted seal still opens to the same keys -> same plaintext
++        let (ke, km) = unseal_outbox_keys(&alice.secret, &out_rows[0].key, &out_rows[0].ekey)
++            .unwrap();
++        let dm = smsg_decrypt_with_keys(&out_rows[0].data, &ke, &km).unwrap();
++        assert_eq!(dm.plaintext, "sealed row");
++        let in_rows = store.list(FOLDER_INBOX).unwrap();
++        assert_eq!(in_rows.len(), 1);
++        assert!(in_rows[0].ekey.is_empty());
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     #[test]
+     fn token_ordering_is_legacy_shape() {
+         let a = Token {
+diff --git a/src/smsg_net.rs b/src/smsg_net.rs
+index 292ed1a..d926fa3 100644
+--- a/src/smsg_net.rs
++++ b/src/smsg_net.rs
+@@ -30,9 +30,10 @@
+ 
+ use crate::legacy::Reader;
+ use crate::smsg::{
+-    bucket_time_of, smsg_decrypt, smsg_encrypt, smsg_validate, token_of, Bucket, DecryptedMessage,
+-    MessageStore, SecureMessage, SmsgKey, SMSG_MAX_BUCKETS, SMSG_OK, SMSG_RETENTION,
+-    SMSG_TIME_LEEWAY, FOLDER_INBOX, FOLDER_OUTBOX,
++    bucket_time_of, smsg_decrypt, smsg_decrypt_with_keys, smsg_encrypt_ex, smsg_validate,
++    seal_outbox_keys, token_of, unseal_outbox_keys, Bucket, DecryptedMessage, MessageStore,
++    SecureMessage, SmsgKey, SMSG_MAX_BUCKETS, SMSG_OK, SMSG_RETENTION, SMSG_TIME_LEEWAY,
++    FOLDER_INBOX, FOLDER_OUTBOX,
+ };
+ use serde_json::{json, Value};
+ use std::collections::HashMap;
+@@ -341,6 +342,7 @@ impl SmsgEngine {
+             status: 0,
+             addr_to: String::new(),
+             addr_outbox: String::new(),
++            ekey: Vec::new(),
+             data: wire.to_vec(),
+         };
+         let inserted = self.store.insert(FOLDER_RELAY, &msg)?;
+@@ -382,6 +384,7 @@ impl SmsgEngine {
+             status: crate::smsg::SMSG_MASK_UNREAD,
+             addr_to: k.address.clone(),
+             addr_outbox: String::new(),
++            ekey: Vec::new(),
+             data: wire.to_vec(),
+         };
+         if let Ok(true) = self.store.insert(FOLDER_INBOX, &msg) {
+@@ -842,17 +845,27 @@ impl SmsgEngine {
+                     )
+                 })?,
+         };
+-        let wire = smsg_encrypt(from, &to_pubkey, text, now)?;
++        let (wire, key_e, key_m) = smsg_encrypt_ex(from, &to_pubkey, text, now)?;
+         let t = token_of(&wire)?;
+         let mut st = self.st.lock().unwrap();
+         // outbox + relay mirror
+         let out_key = outbox_key(&t);
++        // Sender-side view: seal the message keys under the SENDING secret
++        // so this engine can decrypt its own sent mail later (the ephemeral
++        // ECDH secret is destroyed by the encryption, see seal_outbox_keys).
++        // Anonymous sends have no sending key — the row keeps the honest
++        // empty seal and the listing shows empty from/text for it.
++        let ekey = match from {
++            Some(f) => seal_outbox_keys(&f.secret, &out_key, &key_e, &key_m),
++            None => Vec::new(),
++        };
+         let om = crate::smsg::StoredMessage {
+             key: out_key,
+             time_received: now,
+             status: 0,
+             addr_to: to_address.to_string(),
+             addr_outbox: from_label.to_string(),
++            ekey,
+             data: wire.clone(),
+         };
+         self.store.insert(FOLDER_OUTBOX, &om)?;
+@@ -862,6 +875,7 @@ impl SmsgEngine {
+             status: 0,
+             addr_to: String::new(),
+             addr_outbox: String::new(),
++            ekey: Vec::new(),
+             data: wire,
+         };
+         self.store.insert(FOLDER_RELAY, &rm)?;
+@@ -1217,8 +1231,10 @@ impl SmsgEngine {
+     }
+ 
+     /// Inventory view of one folder, decrypted for display (RPC/GUI).
+-    /// Decrypts with the owning key; rows that fail to decrypt (shouldn't
+-    /// happen for inbox) show a placeholder.
++    /// Inbox rows decrypt with the owning (receiving) key; outbox rows open
++    /// their sealed keys with the SENDING key (the sender cannot re-derive
++    /// the shared secret from the packet alone). Rows that fail — anonymous
++    /// sends, pre-seal rows, key not owned — show honest placeholders.
+     pub fn list_folder_json(&self, folder: u16, unread_only: bool) -> Result<Value, String> {
+         let msgs = self.store.list(folder)?;
+         let mut rows = Vec::new();
+@@ -1236,7 +1252,14 @@ impl SmsgEngine {
+             };
+             if let Some(addr) = owner {
+                 if let Some(k) = self.owned.iter().find(|k| k.address == addr) {
+-                    if let Ok(dm) = smsg_decrypt(&m.data, k) {
++                    let dm = if folder == FOLDER_OUTBOX && !m.ekey.is_empty() {
++                        unseal_outbox_keys(&k.secret, &m.key, &m.ekey)
++                            .ok_or_else(|| "outbox row has no usable key seal".to_string())
++                            .and_then(|(ke, km)| smsg_decrypt_with_keys(&m.data, &ke, &km))
++                    } else {
++                        smsg_decrypt(&m.data, k)
++                    };
++                    if let Ok(dm) = dm {
+                         from = dm.from_address;
+                         text = dm.plaintext;
+                     }
+@@ -1289,6 +1312,14 @@ impl SmsgEngine {
+             .iter()
+             .find(|k| k.address == owner)
+             .ok_or_else(|| format!("key for {} not loaded", owner))?;
++        if folder == FOLDER_OUTBOX && !m.ekey.is_empty() {
++            // sender-side open (list_folder_json parity — see smsg.rs
++            // seal_outbox_keys for why the packet alone does not suffice)
++            return match unseal_outbox_keys(&k.secret, &m.key, &m.ekey) {
++                Some((ke, km)) => smsg_decrypt_with_keys(&m.data, &ke, &km),
++                None => Err("outbox row has no usable key seal".into()),
++            };
++        }
+         smsg_decrypt(&m.data, k)
+     }
+ 
+@@ -1607,16 +1638,104 @@ mod tests {
+         let rows = outbox.as_array().unwrap();
+         assert_eq!(rows.len(), 1);
+         assert_eq!(rows[0]["to"], k.b.address, "outbox 'to' = recipient");
+-        // KNOWN LIMITATION (disclosed in the milestone evidence): the engine
+-        // implements the RECEIVER-side decrypt only, so an outbox row cannot
+-        // decrypt its own wire — 'from'/'text' come back empty placeholders.
+-        // The mapping fields (to/sent/read) are the contract under test.
+-        assert_eq!(rows[0]["from"], "");
+-        assert_eq!(rows[0]["text"], "");
++        // SENDER-SIDE DECRYPT (was the phase-7 disclosed gap): the row's
++        // sealed keys open with the sending key, so 'from'/'text' are real.
++        assert_eq!(rows[0]["from"], k.a.address, "outbox 'from' = sending identity");
++        assert_eq!(rows[0]["text"], "to myself via outbox");
+         assert_eq!(rows[0]["sent"], true);
+         assert_eq!(rows[0]["read"], true, "own sends start read");
+     }
+ 
++    #[test]
++    fn outbox_sender_and_receiver_decrypt_identical_plaintext() {
++        // encrypt -> store -> decrypt as receiver AND as sender: both views
++        // of the same wire must yield the same plaintext and from.
++        let k = make_keys();
++        let a = engine("obrt-a", vec![k.a.clone()]);
++        let b = engine("obrt-b", vec![k.b.clone()]);
++        let now = now_i64();
++        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
++        a.send_local(&k.a.address, &k.b.address, "both sides agree", now)
++            .unwrap();
++        // deliver to B directly (handshake bypassed for brevity)
++        let wire = a.store.list(FOLDER_RELAY).unwrap()[0].data.clone();
++        let body = build_msg_body(bucket_time_of(now), &[wire]);
++        b.handle("a", "smsgMsg", &enc_vch(&body), now);
++        // sender view (sealed keys opened with the sending key)
++        let outbox = a.list_folder_json(FOLDER_OUTBOX, false).unwrap();
++        let orow = &outbox.as_array().unwrap()[0];
++        assert_eq!(orow["text"], "both sides agree");
++        assert_eq!(orow["from"], k.a.address);
++        assert_eq!(orow["sent"], true);
++        // receiver view (packet + receiving key)
++        let inbox = b.list_folder_json(FOLDER_INBOX, false).unwrap();
++        let irow = &inbox.as_array().unwrap()[0];
++        assert_eq!(irow["text"], orow["text"], "sender and receiver see the same plaintext");
++        assert_eq!(irow["from"], k.a.address);
++        assert_eq!(irow["sent"], false);
++        // single-row open (GUI view) agrees too
++        let key_hex = orow["key"].as_str().unwrap().to_string();
++        let dm = a.read_msg(FOLDER_OUTBOX, &key_hex).unwrap();
++        assert_eq!(dm.plaintext, "both sides agree");
++        assert_eq!(dm.from_address, k.a.address);
++    }
++
++    #[test]
++    fn outbox_row_without_the_sending_key_keeps_the_placeholder() {
++        // Send with A owning the key, then reopen the SAME store without it:
++        // the seal is unusable and the row shows the honest placeholder —
++        // never a crash, never a fake plaintext.
++        let k = make_keys();
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-smsgnet-test-obph-{}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_dir_all(&dir);
++        let a = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
++        let now = now_i64();
++        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
++        a.send_local(&k.a.address, &k.b.address, "locked away", now)
++            .unwrap();
++        drop(a);
++        let a2 = SmsgEngine::open(&dir, vec![k.b.clone()]).unwrap();
++        let rows = a2
++            .list_folder_json(FOLDER_OUTBOX, false)
++            .unwrap()
++            .as_array()
++            .unwrap()
++            .clone();
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0]["from"], "", "no sending key -> honest placeholder");
++        assert_eq!(rows[0]["text"], "");
++        assert_eq!(rows[0]["to"], k.b.address, "mapping fields still real");
++        assert_eq!(rows[0]["sent"], true);
++        // single-row open reports the honest failure too
++        let key_hex = rows[0]["key"].as_str().unwrap().to_string();
++        assert!(a2.read_msg(FOLDER_OUTBOX, &key_hex).is_err());
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[test]
++    fn outbox_anon_row_keeps_the_honest_placeholder() {
++        // Anonymous sends carry no sending key (addr_outbox "anon"), so no
++        // seal is written and the listing keeps the placeholders.
++        let k = make_keys();
++        let a = engine("obanon", vec![k.a.clone()]);
++        let now = now_i64();
++        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
++        a.send_local_anon(&k.b.address, "ghost", now).unwrap();
++        let rows = a
++            .list_folder_json(FOLDER_OUTBOX, false)
++            .unwrap()
++            .as_array()
++            .unwrap()
++            .clone();
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0]["to"], k.b.address);
++        assert_eq!(rows[0]["from"], "", "anonymous send has no sending key");
++        assert_eq!(rows[0]["text"], "");
++    }
++
+     #[test]
+     fn reply_path_b_to_a_uses_learned_pubkey() {
+         let k = make_keys();

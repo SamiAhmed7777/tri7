@@ -1,0 +1,1218 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 83f1779..8fabca3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4116,6 +4116,7 @@ dependencies = [
+  "tauri-winrt-notification",
+  "tray-icon",
+  "ureq",
++ "winreg",
+  "winresource",
+  "zeroize",
+ ]
+@@ -4996,6 +4997,16 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "winreg"
++version = "0.55.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
++dependencies = [
++ "cfg-if",
++ "windows-sys 0.59.0",
++]
++
+ [[package]]
+ name = "winresource"
+ version = "0.1.34"
+diff --git a/Cargo.toml b/Cargo.toml
+index 3c6c51c..9b9491f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -14,6 +14,9 @@ winresource = "0.1"
+ [target.'cfg(windows)'.dependencies]
+ tauri-winrt-notification = "0.7"
+ tray-icon = { version = "0.26.1", optional = true }
++# Start-on-login (src/gui/autostart.rs): the HKCU ...\Run registration
++# (the v5 GUIUtil startup-shortcut mechanism, user scope, sans COM).
++winreg = "0.55"
+ 
+ [[bin]]
+ name = "tri7"
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 4c2df86..416c7de 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -358,3 +358,55 @@ Grades: 1a B, 1b B, 1c B, 1d B, 1e A, p2 B, p3 B, p4 B — all codex-gated.
+   static 25 (KB) vs ~18 MB real payload — cosmetic, fix opportunistically
+   in item 16. A live silent-install exercise (/S + /D) on sami-pc is item
+   16's bar (installer refresh + auto-updater), NOT this item's.
++
++## 2026-11-09 GUI-POLISH: tray hidden-window repaint fix + start-on-login + staking reserve (workqueue item 15, TICK)
++- THREE SURFACES, one commit. (1) TRAY: adopted the sibling lane's disclosed
++  9-line hunk in src/gui/app.rs — THE HIDDEN-WINDOW TRAP: a hidden window
++  produces no input events, so egui stops repainting, update() never runs,
++  and tray clicks sit in the event channel forever (the wallet could never be
++  reopened from the tray). While tray_hidden, the loop now requests a repaint
++  every 400 ms so the tray poll runs. (2) START-ON-LOGIN (v5 StartAtStartup):
++  new src/gui/autostart.rs — Windows writes the standard HKCU\Software\
++  Microsoft\Windows\CurrentVersion\Run value `Triangles` = "<exe>" -min
++  (DISCLOSED DEVIATION: v5 authored a Startup-folder .lnk through COM
++  IShellLink; the Run key is the same user-scope mechanism without the COM
++  dependency — winreg 0.55 added as a cfg(windows) dep). Linux keeps the v5
++  XDG autostart shape byte-for-byte ($XDG_CONFIG_HOME|~/.config)/autostart/
++  triangles.desktop, Hidden=true = disabled, remove-on-disable); macOS keeps
++  the v5 LaunchAgents plist (RunAtLoad + -min). Every launch carries `-min`
++  (start minimized), exactly like v5: the GUI accepts -min/--min and applies
++  ViewportCommand::Minimized on the first frame. The Options checkbox mirrors
++  the OS registration at load (never a stale lie) and Apply registers/
++  unregisters; failure = a notice, never a failed apply. A headless roundtrip
++  lives at `tri7_wallet_gui --autostart-check` (enable → read → disable →
++  read; leaves the OS entry CLEAN — the live PC proof ran this).
++  (3) STAKING RESERVE (v5 -reservebalance, main.cpp:451 nReserveBalance):
++  stake.rs's const became a runtime global (set_reserve_balance/
++  reserve_balance, default 0) read at the same three CreateCoinStake parity
++  sites; the follow_tip daemon parses conf `reservebalance=` at boot (last
++  line wins; --reservebalance CLI overrides; an INVALID conf amount refuses
++  to boot exactly like v5 init) and applies the global at startup. New RPC
++  verb `reservebalance [amount]` (NATIVE + OPS routed): bare = read
++  (legacy money string), amount = v5 ParseMoney parity (negatives are
++  rejections; "1." and ".5" accepted like v5; >6 decimals rejected; DISCLOSED
++  DEVIATION: junk digits like "1x2" are rejected instead of v5's atoi64
++  silent truncation to "1") + live global + conf persist; errors carry the
++  byte-exact v5 init.cpp:907 string "Invalid amount for
++  -reservebalance=<amount>" (the legacy message never substituted the
++  amount). getstakinginfo carries "reservebalance" as a tri7 extension. GUI:
++  the Options Reserve field is REAL (parse-validated before persist; pushes
++  to the node on Apply via the verb with the fee's save-first/
++  push-best-effort shape; loads the node's current value once on first
++  contact, never clobbering session edits), the Staking page Reserve metric
++  shows the live node value, and the field's durable store is the daemon
++  conf — deliberately BETTER than v5, whose QSettings value did not survive
++  restart into the staker global (v5 quirk documented here).
++- SELFHECK SURFACE: `--selfcheck`'s report now carries gui_polish
++  {tray_supported, autostart_supported, autostart_enabled (REAL OS read),
++  reservebalance (live RPC probe)} — the deployed-GUI verification reads the
++  machine's truth without touching it.
++- TESTS: 530 lib (+9: reserve gating serialized behind a test mutex with the
++  solver tests, v5 ParseMoney vectors incl. the loose shapes, verb routing)
++  + 64 follow_tip (+1: verb set-contract — live global, conf line replace,
++  byte-exact error strings) + gui-feature suite 539; windows-gnu all-bins
++  release build green (winreg path compiles for the gnu target).
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 469c3ac..f3ca683 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -1048,6 +1048,10 @@ struct Config {
+     // ---- phase 7 milestone 2: staking / wallet / smsg / i2p ----
+     /// integrated staking loop (conf `stake=1` or --stake; --no-stake wins)
+     stake: Option<bool>,
++    /// staking reserve in microTRI (v5 -reservebalance; conf
++    /// `reservebalance=<tri>` is the deployment default, the CLI flag
++    /// overrides). Coins above balance - reserve sit out of staking.
++    reserve_sats: i64,
+     /// kernel-search cadence seconds
+     stake_tick_secs: u64,
+     /// wallet file (SQLite TRIw) — REQUIRED for staking + smsg
+@@ -1197,6 +1201,7 @@ fn parse_args() -> Config {
+         wallet_utxos_path: PathBuf::new(),
+         index_dir: PathBuf::new(),
+         stake: None,
++        reserve_sats: 0,
+         stake_tick_secs: 15,
+         wallet_path: None,
+         i2p_socks: ("127.0.0.1".into(), 4447),
+@@ -1277,6 +1282,12 @@ fn parse_args() -> Config {
+             "--i2psocks" => cfg.i2p_socks = parse_sock_addr(&need(&mut i, &args)),
+             "--stake" => cfg.stake = Some(true),
+             "--no-stake" => cfg.stake = Some(false),
++            "--reservebalance" => {
++                let v = need(&mut i, &args);
++                cfg.reserve_sats = tri7_core::rpc::legacy_parse_money(&v).unwrap_or_else(|_| {
++                    die(EXIT_USAGE, "Invalid amount for -reservebalance=<amount>")
++                });
++            }
+             "--stake-tick" => {
+                 cfg.stake_tick_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+             }
+@@ -1355,6 +1366,31 @@ fn parse_args() -> Config {
+             }
+         }
+     }
++    // conf-file `reservebalance=<tri>` (v5 -reservebalance) is the deployment
++    // default; the CLI flag overrides. An INVALID conf amount refuses to
++    // boot exactly like v5 init (InitError + return false), so a typo can
++    // never silently enable staking with a 0 reserve.
++    {
++        let mut conf_reserve: Option<Result<i64, ()>> = None;
++        if let Ok(text) = std::fs::read_to_string(&cfg.conf_path) {
++            for line in text.lines() {
++                if let Some(v) = line.trim().strip_prefix("reservebalance=") {
++                    conf_reserve = Some(
++                        tri7_core::rpc::legacy_parse_money(v.trim()).map_err(|_| ()),
++                    );
++                }
++            }
++        }
++        if let Some(parsed) = conf_reserve {
++            match parsed {
++                Ok(sats) => cfg.reserve_sats = sats,
++                Err(()) => die(
++                    EXIT_USAGE,
++                    "Invalid amount for -reservebalance=<amount>",
++                ),
++            }
++        }
++    }
+     // conf-file `addnode=<host>:<port>` — dual-network: .onion and .b32.i2p
+     // targets join the attach list (each dialled through its overlay SOCKS);
+     // any cleartext IP/hostname is IGNORED with a log line.
+@@ -1437,6 +1473,34 @@ fn is_host_port_shape(spec: &str) -> bool {
+     }
+ }
+ 
++/// The `reservebalance <amount>` verb's set path, factored out so the
++/// contract is testable without a live OpsAdapter: v5 ParseMoney parity on
++/// the raw string (NO trim — a leading space is a rejection, as in
++/// mapArgs), the -8 InitError string byte-exact from v5 init.cpp:907 (the
++/// legacy message never substituted <amount>), the global applied live, and
++/// the conf line persisted for the next boot.
++fn reservebalance_apply(conf_path: &Path, raw: &str) -> Result<serde_json::Value, (i64, String)> {
++    let parsed = tri7_core::rpc::legacy_parse_money(raw).map_err(|_e| {
++        (-8, "Invalid amount for -reservebalance=<amount>".to_string())
++    })?;
++    tri7_core::stake::set_reserve_balance(parsed);
++    conf_set_flag(
++        conf_path,
++        "reservebalance",
++        &tri7_core::rpc::legacy_format_money(parsed),
++    )
++    .map_err(|e| (-1, e))?;
++    log(&format!(
++        "RESERVE BALANCE {} TRI (persisted reservebalance= to {})",
++        tri7_core::rpc::legacy_format_money(parsed),
++        conf_path.display()
++    ));
++    Ok(serde_json::json!({
++        "reservebalance": tri7_core::rpc::legacy_format_money(parsed),
++        "persisted_to": conf_path.display().to_string(),
++    }))
++}
++
+ /// Persist `key=value` into the conf file (staking on|off). Replaces an
+ /// existing `key=` line, else appends. Atomic swap; preserves file mode.
+ fn conf_set_flag(conf_path: &Path, key: &str, value: &str) -> Result<(), String> {
+@@ -5137,7 +5201,7 @@ fn stake_tick(
+     let (candidates, _no_key, _unloc, _nonstd) = wl.candidates();
+     stake_st.coins_considered = candidates.len() as u64;
+     let balance = wl.balance();
+-    if balance <= tri7_core::stake::RESERVE_BALANCE {
++    if balance <= tri7_core::stake::reserve_balance() {
+         stake_st.searches += 1;
+         return Ok(false);
+     }
+@@ -6671,6 +6735,11 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                         Some(w) => { let (_, nk, _u, _ns) = w.candidates(); nk }
+                         None => 0,
+                     },
++                    // tri7 extension (GUI-POLISH 2026-11-09): the live staking
++                    // reserve — the same nReserveBalance the staker applies
++                    // (coins above balance - reserve sit out of staking)
++                    "reservebalance": tri7_core::rpc::legacy_format_money(
++                        tri7_core::stake::reserve_balance()),
+                     "in_window_only": true,
+                     "tip_height": tip_height,
+                 }))
+@@ -6711,6 +6780,26 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                     }
+                 }
+             }
++            "reservebalance" => {
++                // v5 -reservebalance (init.cpp:904 → main.cpp:451
++                // nReserveBalance): the staking reserve — coins above
++                // balance - reserve are held OUT of staking
++                // (wallet.cpp:1845/1934/2052/2074). v5 had NO RPC verb (the
++                // amount arrived via conf/CLI at init only); this tri7-native
++                // verb moves the SAME global live and persists it to the
++                // conf so the GUI's Options field can drive it without a
++                // restart. The raw string is parsed by v5 ParseMoney parity —
++                // NO trimming, exactly like mapArgs (a leading space is a
++                // rejection, as in the legacy client).
++                match ps(0) {
++                    None => Ok(serde_json::json!({
++                        "reservebalance": tri7_core::rpc::legacy_format_money(
++                            tri7_core::stake::reserve_balance()),
++                        "conf": self.conf_path.display().to_string(),
++                    })),
++                    Some(raw) => reservebalance_apply(&self.conf_path, &raw),
++                }
++            }
+             "getpeerinfo" => Ok(peer_table_json(&self.peers_table)),
+             // Legacy wallet verbs. Both act on the wallet this node was
+             // started with; the writer is the same WalletHandle the GUI uses
+@@ -8869,6 +8958,16 @@ fn main() {
+         enabled: stake_enabled,
+         ..Default::default()
+     }));
++    // v5 init.cpp:904 — the -reservebalance global is applied at boot; a
++    // nonzero amount is announced so the log explains why staking skips the
++    // reserved tail of the balance.
++    tri7_core::stake::set_reserve_balance(cfg.reserve_sats);
++    if cfg.reserve_sats != 0 {
++        log(&format!(
++            "stake: reserve balance {} TRI — coins above balance minus reserve are held out of staking",
++            tri7_core::rpc::legacy_format_money(cfg.reserve_sats)
++        ));
++    }
+     let wl_shared: SharedWalletLive = Arc::new(Mutex::new(None));
+     let pool_shared: SharedPool = Arc::new(Mutex::new(tri7_core::txpool::TxPool::default()));
+     let announce_shared: TxAnnounce = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+@@ -11601,6 +11700,49 @@ addnode=host:notaport
+ 
+     // ---- smsgenable / smsgdisable / smsgoptions / scans (workqueue item 11) ----
+ 
++    #[test]
++    fn reservebalance_verb_set_contract() {
++        // the reservebalance verb's write path (GUI-POLISH 2026-11-09):
++        // global applied live + conf line persisted + the byte-exact v5
++        // init error on any un-parseable amount. (This test binary has no
++        // other stake-global users, so the process-global set here is safe.)
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-reserve-verb-test-{}",
++            std::process::id()
++        ));
++        std::fs::create_dir_all(&dir).unwrap();
++        let conf = dir.join("triangles.conf");
++        std::fs::write(&conf, "stake=1\n").unwrap();
++        // set: response shape + live global + persisted conf line
++        let v = reservebalance_apply(&conf, "2.5").unwrap();
++        assert_eq!(v["reservebalance"], "2.500000");
++        assert_eq!(tri7_core::stake::reserve_balance(), 2_500_000);
++        let text = std::fs::read_to_string(&conf).unwrap();
++        assert!(
++            text.contains("reservebalance=2.500000"),
++            "conf line persisted, got: {text}"
++        );
++        // an existing line is REPLACED, not appended twice
++        let v = reservebalance_apply(&conf, "0.000001").unwrap();
++        assert_eq!(v["reservebalance"], "0.000001");
++        let text = std::fs::read_to_string(&conf).unwrap();
++        assert_eq!(text.lines().filter(|l| l.starts_with("reservebalance=")).count(), 1);
++        // the exact v5 init.cpp:907 string (never substituted <amount>)
++        assert_eq!(
++            reservebalance_apply(&conf, "zz-not-money").unwrap_err(),
++            (-8, "Invalid amount for -reservebalance=<amount>".to_string())
++        );
++        // negatives are ParseMoney rejections in v5
++        assert_eq!(
++            reservebalance_apply(&conf, "-1").unwrap_err().0,
++            -8
++        );
++        // restore the pristine global for any later test
++        tri7_core::stake::set_reserve_balance(0);
++        std::fs::remove_dir_all(&dir).ok();
++    }
++
++
+     #[test]
+     fn smsg_options_cmd_matches_legacy_shapes() {
+         // default and explicit list
+diff --git a/src/bin/tri7_wallet_gui.rs b/src/bin/tri7_wallet_gui.rs
+index abb2078..2568eef 100644
+--- a/src/bin/tri7_wallet_gui.rs
++++ b/src/bin/tri7_wallet_gui.rs
+@@ -18,6 +18,8 @@ fn usage() -> ! {
+          \x20                      [--wallet PATH] [--state-dir PATH] [--dump PATH]\n\
+          \x20                      [--tipstate PATH] [--archive PATH] [--index-dir PATH]\n\
+          \x20                      [--stake-dryrun PATH] [--rpc ADDR|none] [--profile-dir PATH]\n\
++         \x20                      [-min | --min]  start minimized (the login-autostart flag)\n\
++         \x20                      --autostart-check  roundtrip the login registration (headless)\n\
+          defaults: wallet /root/.triangles/wallet.dat, state-dir /var/lib/tri7,\n\
+          \x20         rpc 127.0.0.1:19114"
+     );
+@@ -28,6 +30,42 @@ fn main() {
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     let selfcheck = args.iter().any(|a| a == "--selfcheck");
+     let history_probe = args.iter().any(|a| a == "--history-probe");
++    // v5 -min: start MINIMIZED (the start-on-login registration launches
++    // with -min; guiutil.cpp passes SW_SHOWMINNOACTIVE/-min the same way)
++    let start_minimized = args.iter().any(|a| a == "-min" || a == "--min");
++    // --autostart-check: headless roundtrip of the start-on-login
++    // registration (enable → read → disable → read; the OS entry is left
++    // CLEAN). Explicit opt-in because it writes the user's Run key /
++    // autostart dir — never run as a side effect of anything else.
++    if args.iter().any(|a| a == "--autostart-check") {
++        let supported = tri7_core::gui::autostart::supported();
++        println!("autostart: supported={supported}");
++        if !supported {
++            eprintln!("autostart roundtrip: unsupported platform");
++            std::process::exit(2);
++        }
++        let outcome = (|| -> Result<bool, String> {
++            tri7_core::gui::autostart::set_enabled(true)?;
++            let on = tri7_core::gui::autostart::is_enabled();
++            tri7_core::gui::autostart::set_enabled(false)?;
++            let off = tri7_core::gui::autostart::is_enabled();
++            Ok(on && !off)
++        })();
++        match outcome {
++            Ok(true) => {
++                println!("autostart roundtrip: PASS (registered, read back, removed cleanly)");
++                std::process::exit(0);
++            }
++            Ok(false) => {
++                println!("autostart roundtrip: FAIL (readback mismatch)");
++                std::process::exit(1);
++            }
++            Err(e) => {
++                println!("autostart roundtrip: ERROR {e}");
++                std::process::exit(1);
++            }
++        }
++    }
+     let mut cfg = tri7_core::gui::state::UiConfig::default();
+     let mut report: Option<String> = None;
+     let get = |flag: &str, args: &[String]| -> Option<String> {
+@@ -178,6 +216,7 @@ fn main() {
+                         | "--stake-dryrun"
+                         | "--rpc"
+                         | "--profile-dir"
++                        | "--min"
+                 )
+         }) {
+             eprintln!("unknown flag {}", bad);
+@@ -187,7 +226,7 @@ fn main() {
+ 
+     #[cfg(feature = "gui")]
+     {
+-        app::run(cfg);
++        app::run(cfg, start_minimized);
+     }
+     #[cfg(not(feature = "gui"))]
+     {
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 9490de6..09ca6fe 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -234,6 +234,10 @@ pub struct Tri7App {
+     /// AND the operator asked for "minimize to the tray"; the wallet can
+     /// then be closed to the tray and reopened from it.
+     tray: Option<crate::gui::tray::TrayIcon>,
++    /// v5 -min: a `-min`/`--min` launch (the start-on-login registration
++    /// passes it) starts the window MINIMIZED; cleared after the first frame
++    /// applies it.
++    pending_minimize: bool,
+ 
+     // ---- view-only state (spec §10/§12.3; no engine logic) ----
+     send_step: SendStep,
+@@ -1716,6 +1720,12 @@ impl eframe::App for Tri7App {
+         //                     running
+         //   quit            -> let the window close for real
+         // CancelClose is what actually stops the window from being destroyed.
++        // v5 -min: apply the startup minimize once (the start-on-login
++        // registration launches with -min, exactly like the legacy client)
++        if self.pending_minimize {
++            self.pending_minimize = false;
++            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
++        }
+         if ctx.input(|i| i.viewport().close_requested()) {
+             // A real quit request (the tray's "Exit" item) must NOT be
+             // swallowed by the keep-running behaviour: the user asked for
+@@ -1773,6 +1783,15 @@ impl eframe::App for Tri7App {
+                 }
+                 None => {}
+             }
++            // THE HIDDEN-WINDOW TRAP: a hidden window produces no input
++            // events, so egui stops repainting and update() is never
++            // called - which means tray clicks would sit in the event
++            // channel forever and the wallet could never be reopened from
++            // the tray. Keep the loop ticking while the wallet is in the
++            // tray so the poll above actually runs.
++            if self.st.tray_hidden {
++                ctx.request_repaint_after(std::time::Duration::from_millis(400));
++            }
+         }
+         Self::apply_theme(ctx);
+         self.header(ctx);
+@@ -4152,7 +4171,18 @@ impl Tri7App {
+                     s::TICKER
+                 ),
+             );
+-            metric(ui, "Reserve", "—");
++            // the live staking reserve from the node (GUI-POLISH): the
++            // getstakinginfo tri7 extension carries "reservebalance"; an
++            // older node answers without it and the metric stays honest (—)
++            let reserve_txt = st
++                .staking_live
++                .info
++                .as_ref()
++                .and_then(|v| v.get("reservebalance"))
++                .and_then(|s| s.as_str())
++                .map(|s| format!("{} {}", s, s::TICKER))
++                .unwrap_or_else(|| "—".into());
++            metric(ui, "Reserve", &reserve_txt);
+             let _ = (spendable, utxo_n);
+         });
+         ui.add_space(8.0);
+@@ -4935,29 +4965,47 @@ impl Tri7App {
+                         });
+                         ui.end_row();
+                         ui.label(egui::RichText::new("Reserve:").color(th::TEXT_SECONDARY));
+-                        th::disabled_input(
+-                            ui,
+-                            140.0,
+-                            &self.st.options.reserve,
+-                            "Requires daemon integration (staking reserve)",
+-                        );
++                        // staking reserve (v5 reserveBalance): REAL — edits
++                        // reach the daemon via the reservebalance RPC on
++                        // Apply, and the daemon persists them to its conf
++                        let resp = th::text_input(ui, 140.0, &mut self.st.options.reserve);
++                        if resp.changed() {
++                            self.st.reserve_field_edited = true;
++                        }
++                        ui.label(egui::RichText::new(s::TICKER).color(th::TEXT_MUTED));
+                         ui.end_row();
+                         ui.label(
+                             egui::RichText::new("Start Triangles on login:")
+                                 .color(th::TEXT_SECONDARY),
+                         );
+-                        th::disabled_input(
+-                            ui,
+-                            140.0,
+-                            "—",
+-                            "Requires daemon integration",
+-                        );
++                        // v5 StartAtStartup: a real checkbox where the OS
++                        // supports the registration; an honest stub where it
++                        // does not (never a checkbox that does nothing).
++                        if super::autostart::supported() {
++                            ui.checkbox(
++                                &mut self.st.options.start_on_login,
++                                "yes",
++                            )
++                            .on_hover_text(
++                                "Registers the wallet to start (minimized) when you log in",
++                            );
++                        } else {
++                            th::disabled_input(
++                                ui,
++                                140.0,
++                                "—",
++                                "Start-on-login is not supported on this platform",
++                            );
++                        }
+                         ui.end_row();
+                         ui.label(egui::RichText::new("Detach databases:").color(th::TEXT_SECONDARY));
+                         th::disabled_input(ui, 140.0, "—", "Requires daemon integration");
+                         ui.end_row();
+                     });
+-                th::text_meta(ui, "Staking reserve belongs here (daemon integration pending).");
++                th::text_meta(
++                    ui,
++                    "Reserve and start-on-login apply on Apply: the reserve reaches the node (reservebalance RPC) and persists in its config; start-on-login registers the OS entry.",
++                );
+                 ui.add_space(8.0);
+                 ui.separator();
+                 // ---- Software updates (src/updater.rs) ----
+@@ -5175,6 +5223,28 @@ impl Tri7App {
+             );
+             ui.add_space(6.0);
+         }
++        if let Some(note) = self.st.options_reserve_notice.clone() {
++            th::inline_notice(
++                ui,
++                th::Notice::Warning,
++                "Options saved - the node has not taken the reserve yet",
++                &format!(
++                    "Every option on this screen was saved. Only the reserve push to the \
++                     node did not go through: {note}. The node will pick it up as soon \
++                     as it is reachable.",
++                ),
++            );
++            ui.add_space(6.0);
++        }
++        if let Some(note) = self.st.options_autostart_notice.clone() {
++            th::inline_notice(
++                ui,
++                th::Notice::Warning,
++                "Options saved - start-on-login was not registered",
++                &note,
++            );
++            ui.add_space(6.0);
++        }
+         // sticky footer: Cancel / Apply / OK
+         ui.add_space(8.0);
+         ui.separator();
+@@ -6304,7 +6374,7 @@ impl Tri7App {
+ // entry point (spec §5: preferred initial 1180×780, minimum 1040×700)
+ // ---------------------------------------------------------------------------
+ 
+-pub fn run(cfg: UiConfig) {
++pub fn run(cfg: UiConfig, start_minimized: bool) {
+     let opts = eframe::NativeOptions {
+         viewport: egui::ViewportBuilder::default()
+             .with_inner_size([1180.0, 780.0])
+@@ -6361,6 +6431,8 @@ pub fn run(cfg: UiConfig) {
+             node_bootstrapped: false,
+             first_run_checked: false,
+             tray,
++            // v5 -min (guiutil.cpp): the autostart launch starts MINIMIZED
++            pending_minimize: start_minimized,
+         }))
+     });
+     if let Err(e) = eframe::run_native("Cryptographic Triangles", opts, app) {
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index dc3c8b6..c185e55 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -82,6 +82,11 @@ pub struct OptionsState {
+     pub tray_on_close: bool,
+     #[serde(default)]
+     pub tray_icon_only: bool,
++    /// "Start Triangles on login" (optionsdialog Main tab; v5
++    /// StartAtStartup). The CHECKED state mirrors the OS registration
++    /// (src/gui/autostart.rs) at load and is applied to the OS on Apply.
++    #[serde(default)]
++    pub start_on_login: bool,
+ }
+ 
+ fn default_true() -> bool {
+@@ -99,6 +104,7 @@ impl Default for OptionsState {
+             minimize_on_close: true,
+             tray_on_close: false,
+             tray_icon_only: false,
++            start_on_login: false,
+         }
+     }
+ }
+@@ -363,6 +369,22 @@ pub struct AppState {
+     /// the options were saved, but the node-side fee push did not take —
+     /// a notice, NOT a failed apply
+     pub options_fee_notice: Option<String>,
++    /// the options were saved, but the node-side reserve push or the OS
++    /// start-on-login registration did not take — a notice, NOT a failed
++    /// apply (GUI-POLISH 2026-11-09)
++    pub options_reserve_notice: Option<String>,
++    pub options_autostart_notice: Option<String>,
++    /// the saved reserve has been pushed to the node at least once this
++    /// session (mirrors fee_pushed_to_node)
++    pub reserve_pushed_to_node: bool,
++    /// the reserve sats the node currently holds (dedupes the push)
++    pub pushed_reserve_sats: Option<i64>,
++    /// the node's CURRENT reserve was loaded into the Options field once
++    /// (the daemon conf is the durable store; the field starts honest)
++    pub reserve_loaded_from_node: bool,
++    /// the operator edited the reserve field this session — the node-side
++    /// load must never clobber unsaved typing
++    pub reserve_field_edited: bool,
+     /// true while the window is hidden in the system tray (the wallet and
+     /// the node keep running; the tray icon brings the window back)
+     pub tray_hidden: bool,
+@@ -436,7 +458,14 @@ impl AppState {
+     pub fn new(cfg: UiConfig) -> Self {
+         let keystore: Vec<AbEntry> = load_side_entries(&cfg.keystore_path(), true);
+         let addressbook: Vec<AbEntry> = load_side_entries(&cfg.addressbook_path(), false);
+-        let options = load_options(&cfg.options_path());
++        let mut options = load_options(&cfg.options_path());
++        // "Start Triangles on login" mirrors the OS registration, not the
++        // last-saved checkbox: whatever wrote the Run key / desktop entry
++        // outside this dialog is the truth (and an entry removed by hand
++        // unchecks the box honestly).
++        if super::autostart::supported() {
++            options.start_on_login = super::autostart::is_enabled();
++        }
+         // explorer endpoints: config rpc_addr first (if set), then the
+         // standard native ports
+         let mut endpoints = cfg.explorer_endpoints.clone();
+@@ -467,6 +496,12 @@ impl AppState {
+             fee_live_sats: None,
+             options_save_error: None,
+             options_fee_notice: None,
++            options_reserve_notice: None,
++            options_autostart_notice: None,
++            reserve_pushed_to_node: false,
++            pushed_reserve_sats: None,
++            reserve_loaded_from_node: false,
++            reserve_field_edited: false,
+             tray_hidden: false,
+             force_quit: false,
+             fee_pushed_to_node: false,
+@@ -2614,6 +2649,61 @@ impl AppState {
+         }
+     }
+ 
++    /// Push the Options "Reserve" value to the node (reservebalance). The
++    /// daemon owns the staking loop, so the setting must land THERE to gate
++    /// coin selection — the v5 GUI wrote its own process's global; tri7's
++    /// node is a separate process (the GUI supervises it), so the same
++    /// intent travels by RPC and persists to the daemon conf.
++    fn push_reserve_to_node(&mut self) -> Result<(), String> {
++        let reserve = parse_tri(&self.options.reserve)
++            .map_err(|e| format!("Reserve is not valid: {e}"))?;
++        if reserve < 0 {
++            return Err("Reserve must not be negative".into());
++        }
++        let Some(addr) = self.live_rpc_addr() else {
++            // offline GUI: the stored value applies the next time a node is
++            // reachable (the conf keeps the node's own copy meanwhile)
++            return Err("no node reachable — the reserve is saved locally but not applied".into());
++        };
++        let v = crate::gui::rpc_client::rpc_call(
++            &addr,
++            "reservebalance",
++            &[serde_json::json!(self.options.reserve.trim())],
++        )
++        .map_err(|e| format!("reservebalance: {e}"))?;
++        // trust the node's echo (legacy money string) over the raw field
++        if let Some(s) = v.get("reservebalance").and_then(|s| s.as_str()) {
++            self.options.reserve = s.to_string();
++        }
++        self.reserve_pushed_to_node = true;
++        self.pushed_reserve_sats = parse_tri(&self.options.reserve).ok();
++        Ok(())
++    }
++
++    /// Read the node's CURRENT reserve into the Options field, once, the
++    /// first time the node answers. The daemon conf (`reservebalance=`) is
++    /// the durable store, so the field starts honest instead of assuming 0.
++    /// Never fires after the operator edited the field this session.
++    pub fn load_reserve_from_node_once(&mut self) {
++        if self.reserve_loaded_from_node || self.reserve_field_edited {
++            return;
++        }
++        let Some(addr) = self.live_rpc_addr() else {
++            return;
++        };
++        if let Ok(v) = crate::gui::rpc_client::rpc_call(&addr, "reservebalance", &[]) {
++            if let Some(s) = v.get("reservebalance").and_then(|s| s.as_str()) {
++                self.options.reserve = s.to_string();
++                self.reserve_loaded_from_node = true;
++                // the node already holds exactly this value
++                self.reserve_pushed_to_node = true;
++                self.pushed_reserve_sats = parse_tri(s).ok();
++                self.status_log
++                    .push(format!("staking reserve: node reports {} TRI", s));
++            }
++        }
++    }
++
+     /// Push the SAVED fee to the node once, when the node first becomes
+     /// reachable in this session. Without this the typed fee only reached the
+     /// node when the operator happened to press Apply while it was up; a fee
+@@ -2622,9 +2712,11 @@ impl AppState {
+         if self.live_rpc_addr().is_none() {
+             return;
+         }
++        self.load_reserve_from_node_once();
+         // nothing to do when the node already holds THIS value
+         let current = parse_tri(&self.options.pay_fee).ok();
+         if self.fee_pushed_to_node && self.pushed_fee_microtri == current {
++            self.push_saved_reserve_when_node_appears();
+             return;
+         }
+         match self.push_paytxfee_to_node() {
+@@ -2641,6 +2733,32 @@ impl AppState {
+                 self.options_fee_notice = Some(e);
+             }
+         }
++        self.push_saved_reserve_when_node_appears();
++    }
++
++    /// The reserve twin of the fee retry: a reserve saved while the node was
++    /// down reaches the node as soon as it is reachable. Skip when the node
++    /// already holds THIS value (loaded or pushed earlier).
++    pub fn push_saved_reserve_when_node_appears(&mut self) {
++        if self.live_rpc_addr().is_none() {
++            return;
++        }
++        let current = parse_tri(&self.options.reserve).ok();
++        if self.reserve_pushed_to_node && self.pushed_reserve_sats == current {
++            return;
++        }
++        match self.push_reserve_to_node() {
++            Ok(()) => {
++                self.options_reserve_notice = None;
++                self.status_log.push(format!(
++                    "staking reserve: node reservebalance set to {} TRI",
++                    self.options.reserve
++                ));
++            }
++            Err(e) => {
++                self.options_reserve_notice = Some(e);
++            }
++        }
+     }
+ 
+     /// Push the Options "Pay transaction fee" value to the node (settxfee).
+@@ -2668,6 +2786,9 @@ impl AppState {
+         // validate the fee is a real amount before persisting
+         parse_tri(&self.options.pay_fee)
+             .map_err(|e| format!("Pay transaction fee invalid: {}", e))?;
++        // the reserve is validated the same way BEFORE anything persists
++        let _reserve_sats = parse_tri(&self.options.reserve)
++            .map_err(|e| format!("Reserve invalid: {}", e))?;
+         // PERSIST EVERYTHING FIRST. The node-side fee push is a best-effort
+         // sync, NOT a gate: it used to abort the whole apply, so a node that
+         // refused the fee (or was unreachable) left the operator unable to
+@@ -2702,6 +2823,47 @@ impl AppState {
+                 self.options_fee_notice = Some(e);
+             }
+         }
++        // the staking reserve twin: same save-first, push-best-effort shape
++        self.options_reserve_notice = None;
++        match self.push_reserve_to_node() {
++            Ok(()) => {
++                self.reserve_pushed_to_node = true;
++                self.reserve_field_edited = false;
++                self.status_log.push(format!(
++                    "staking reserve: node reservebalance set to {} TRI",
++                    self.options.reserve
++                ));
++            }
++            Err(e) => {
++                self.reserve_pushed_to_node = false;
++                self.pushed_reserve_sats = None;
++                self.status_log
++                    .push(format!("reserve (saved locally, node not yet): {e}"));
++                self.options_reserve_notice = Some(e);
++            }
++        }
++        // "Start Triangles on login": the OS registration is applied here,
++        // AFTER the options persist, and a failure is a notice — the saved
++        // state stays on disk and the checkbox keeps the operator's intent.
++        if super::autostart::supported() {
++            let want = self.options.start_on_login;
++            let have = super::autostart::is_enabled();
++            self.options_autostart_notice = None;
++            if want != have {
++                match super::autostart::set_enabled(want) {
++                    Ok(()) => {
++                        self.status_log.push(format!(
++                            "start on login: {}",
++                            if want { "registered" } else { "removed" }
++                        ));
++                    }
++                    Err(e) => {
++                        self.options_autostart_notice =
++                            Some(format!("start-on-login not registered: {e}"));
++                    }
++                }
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -3215,6 +3377,29 @@ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
+         }),
+     );
+ 
++    // --- GUI-POLISH surfaces: tray / start-on-login / staking reserve -------
++    // READ-ONLY: a selfcheck must never create a tray icon (a tray icon in a
++    // process that exits immediately leaves a ghost icon) and never writes
++    // the OS autostart registration — `--autostart-check` is the explicit
++    // opt-in roundtrip for the write path.
++    let reserve_probe = match st.live_rpc_addr() {
++        Some(a) => match crate::gui::rpc_client::rpc_call(&a, "reservebalance", &[]) {
++            Ok(v) => json!({ "value": v.get("reservebalance"), "node": a }),
++            Err(e) => json!({ "error": e, "node": a }),
++        },
++        None => json!({ "error": "no rpc addr configured" }),
++    };
++    report.insert(
++        "gui_polish".into(),
++        json!({
++            "tray_supported": cfg!(windows),
++            "autostart_supported": super::autostart::supported(),
++            "autostart_enabled": super::autostart::supported()
++                && super::autostart::is_enabled(),
++            "reservebalance": reserve_probe,
++        }),
++    );
++
+     // --- explorer smoke (local tri7d RPC only; non-fatal) -------------------
+     {
+         let ex = &mut st.explorer;
+diff --git a/src/gui/mod.rs b/src/gui/mod.rs
+index 38b9550..83f0e87 100644
+--- a/src/gui/mod.rs
++++ b/src/gui/mod.rs
+@@ -16,6 +16,7 @@
+ //! traffic is read-only JSON-RPC to the local tri7d (127.0.0.1:19114).
+ 
+ pub mod app_state;
++pub mod autostart;
+ pub mod explorer;
+ pub mod node_supervisor;
+ pub mod notify;
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index d7b174f..85e5282 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -83,6 +83,41 @@ fn the_window_tab_choices_persist_and_survive_a_reload() {
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
++/// GUI-POLISH 2026-11-09: the Options reserve field is a REAL amount — an
++/// unparseable value fails the apply BEFORE anything persists, a good value
++/// saves and (with an unreachable node) stays eligible for the node retry,
++/// and the start-on-login checkbox persists in the options file. The OS
++/// registration itself is never touched here: the checkbox is left at the
++/// machine's ACTUAL registration, so Apply has nothing to change (the
++/// registration roundtrip is the autostart module's tests + the explicit
++/// `--autostart-check` flag, never a test side effect).
++#[test]
++fn reserve_field_validates_before_persisting_and_persists() {
++    let (mut st, _dir) = options_state_with_unreachable_node("reserve");
++    st.options.reserve = "not-money".into();
++    let err = st.save_options_action().unwrap_err();
++    assert!(err.contains("Reserve invalid"), "got: {err}");
++    // nothing persisted — the rejected text never reaches the options file
++    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap_or_default();
++    assert!(!text.contains("not-money"), "{}", text);
++    // a good value SAVES; the node push failure is a notice, not an error
++    st.options.reserve = "1.500000".into();
++    st.save_options_action().expect("apply");
++    assert!(
++        st.options_reserve_notice.is_some(),
++        "an unreachable node must produce the reserve notice"
++    );
++    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
++    assert!(text.contains("\"reserve\": \"1.500000\""), "{}", text);
++    // the checkbox persists with the machine's actual registration (no OS
++    // write from a test)
++    st.options.start_on_login = crate::gui::autostart::is_enabled();
++    st.options_reserve_notice = None;
++    st.save_options_action().expect("apply");
++    let text = std::fs::read_to_string(st.cfg.options_path()).unwrap();
++    assert!(text.contains("\"start_on_login\""), "{}", text);
++}
++
+ /// The tray's "Exit" item asks for a REAL quit. The close button's
+ /// keep-running behaviour must not swallow it: the force-quit flag is what
+ /// the close handler checks first.
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 14262e4..21bf8aa 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -129,6 +129,10 @@ pub const NATIVE_METHODS: &[&str] = &[
+     // reserve (getnewaddress hands out pooled keys first, a background
+     // maintainer keeps the pool topped) ----
+     "keypoolrefill",
++    // ---- legacy parity 2026-11-09 (GUI-POLISH): the v5 -reservebalance
++    // staking reserve as a live verb (bare = read; amount = set + persist,
++    // v5 ParseMoney-validated) ----
++    "reservebalance",
+     "smsgsend",
+     "smsginbox",
+     "smsgoutbox",
+@@ -227,6 +231,9 @@ pub const OPS_METHODS: &[&str] = &[
+     // reserve (getnewaddress hands out pooled keys first, a background
+     // maintainer keeps the pool topped) ----
+     "keypoolrefill",
++    // ---- legacy parity 2026-11-09 (GUI-POLISH): reservebalance rides the
++    // live engine (read/set the v5 -reservebalance staking reserve) ----
++    "reservebalance",
+     "smsgsend",
+     "smsginbox",
+     "smsgoutbox",
+@@ -3288,6 +3295,62 @@ pub fn legacy_format_money(sats: i64) -> String {
+     )
+ }
+ 
++/// Legacy `ParseMoney` (util.cpp) parity: NO sign (a leading '-' is a
++/// rejection, not a negative amount), optional single '.', at most six
++/// decimals, digits only, i64-safe total. v5 rejected reserve amounts with
++/// exactly this parser (init.cpp:904-908); the RPC `reservebalance` verb
++/// reuses it so the GUI and the conf file cannot feed the staker a value
++/// the legacy client would have refused. Errors carry the v5 init string.
++pub fn legacy_parse_money(s: &str) -> Result<i64, String> {
++    const COIN: i64 = 1_000_000;
++    if s.is_empty() {
++        return Err("empty".into());
++    }
++    if s.starts_with('-') {
++        return Err("negative".into());
++    }
++    let p = s.find('.').unwrap_or(s.len());
++    let whole_s = &s[..p];
++    // atoi64 parity: an empty or non-numeric integer part fails (v5's
++    // atoi64 returned 0 for junk, but its nWhole<0 check never fired; the
++    // frac loop below is what rejected junk digits — we reject up front so
++    // "" and "1x.5" never parse).
++    let whole: i64 = if whole_s.is_empty() {
++        0
++    } else {
++        whole_s
++            .parse()
++            .map_err(|_| format!("invalid digits in {:?}", whole_s))?
++    };
++    if p != s.len() {
++        let frac_s = &s[p + 1..];
++        if frac_s.len() > 6 {
++            return Err(format!("more than 6 decimals in {:?}", s));
++        }
++        // v5 accepts "1." (an empty frac adds 0) and ".5" (atoi64("") == 0)
++        let mut frac: i64 = 0;
++        for c in frac_s.bytes() {
++            if !c.is_ascii_digit() {
++                return Err(format!("invalid digits in {:?}", frac_s));
++            }
++            frac = frac * 10 + (c - b'0') as i64;
++        }
++        // v5's value is nWhole*COIN + nFrac*COIN/10^nExponent — the frac is
++        // SCALED BY POSITION (".5" == 0.5, not 0.000005). len ≤ 6 keeps
++        // scale ≤ 1e6, so COIN/scale is exact and frac*(COIN/scale) fits i64.
++        let whole_v = whole
++            .checked_mul(COIN)
++            .ok_or_else(|| format!("amount overflow in {:?}", s))?;
++        let scale = 10i64.pow(frac_s.len() as u32);
++        Ok(whole_v + frac * (COIN / scale))
++    } else {
++        let whole_v = whole
++            .checked_mul(COIN)
++            .ok_or_else(|| format!("amount overflow in {:?}", s))?;
++        Ok(whole_v)
++    }
++}
++
+ /// Legacy DateTimeStrFormat (util.h:425-428): "%Y-%m-%d %H:%M:%S UTC" over
+ /// gmtime — the format `getcheckpoint.timestamp` reports. Hand-rolled
+ /// civil-from-days (Hinnant's algorithm) because the repo carries no chrono
+@@ -5346,6 +5409,47 @@ mod tests {
+         assert_eq!(legacy_format_money(999_999), "0.999999");
+     }
+ 
++    #[test]
++    fn legacy_parse_money_matches_v5_parsemoney() {
++        // accepts (v5 vectors + the loose shapes its parser allows)
++        assert_eq!(legacy_parse_money("0").unwrap(), 0);
++        assert_eq!(legacy_parse_money("0.5").unwrap(), 500_000);
++        assert_eq!(legacy_parse_money("1.000000").unwrap(), 1_000_000);
++        assert_eq!(legacy_parse_money("2.5").unwrap(), 2_500_000);
++        assert_eq!(legacy_parse_money("3381.763635").unwrap(), 3_381_763_635);
++        // "1." — an empty frac adds 0 (v5's frac loop iterates zero times)
++        assert_eq!(legacy_parse_money("1.").unwrap(), 1_000_000);
++        // ".5" — atoi64("") == 0 (v5 accepted this shape)
++        assert_eq!(legacy_parse_money(".5").unwrap(), 500_000);
++        // exactly 6 decimals is the cap
++        assert!(legacy_parse_money("1.1234567").is_err(), ">6 decimals");
++        // negatives are REJECTIONS, not negative amounts (v5 checks '-'
++        // up front)
++        assert!(legacy_parse_money("-1").is_err());
++        assert!(legacy_parse_money("-0.000001").is_err());
++        // junk digits anywhere fail (tri7 discloses the deviation from v5's
++        // atoi64 silent truncation of the whole part: "1x2" becomes 1 TRI in
++        // the legacy parser — that is a footgun, not parity worth keeping)
++        assert!(legacy_parse_money("1x2").is_err());
++        assert!(legacy_parse_money("1.2x").is_err());
++        assert!(legacy_parse_money("").is_err());
++        assert!(legacy_parse_money(" 1.0").is_err(), "no trimming: v5 mapArgs");
++        // overflow is rejected in i64-safe arithmetic
++        assert!(legacy_parse_money("99999999999999999999").is_err());
++        // roundtrip with the formatter
++        for sats in [0i64, 1, 500_000, 1_000_000, 3_381_763_635, 5_000_000_000] {
++            assert_eq!(legacy_parse_money(&legacy_format_money(sats)).unwrap(), sats);
++        }
++    }
++
++    #[test]
++    fn reservebalance_is_native_and_ops_routed() {
++        for m in ["reservebalance"] {
++            assert!(NATIVE_METHODS.contains(&m), "{m} missing from NATIVE_METHODS");
++            assert!(OPS_METHODS.contains(&m), "{m} missing from OPS_METHODS");
++        }
++    }
++
+     #[test]
+     fn repairwallet_and_resendtx_are_native_and_ops_routed() {
+         // item 9 RPC-P1b: both verbs live ONLY in the live ops engine
+diff --git a/src/stake.rs b/src/stake.rs
+index a9af47d..9af5ef9 100644
+--- a/src/stake.rs
++++ b/src/stake.rs
+@@ -57,8 +57,24 @@ use crate::spend::{sign_input, sign_msg, solver_type, SpendType, SIGHASH_ALL};
+ pub const STAKE_SPLIT_AGE: i64 = 3 * 60 * 60;
+ /// wallet.cpp:30 — `int64_t nStakeCombineThreshold = 20 * COIN;`
+ pub const STAKE_COMBINE_THRESHOLD: i64 = 20 * COIN;
+-/// main.cpp:451 — `int64_t nReserveBalance = 0;` (default)
+-pub const RESERVE_BALANCE: i64 = 0;
++/// main.cpp:451 — `int64_t nReserveBalance = 0;` (default). v5 makes this a
++/// runtime GLOBAL set from `-reservebalance` (init.cpp:904) and read by
++/// CreateCoinStake (wallet.cpp:1845/1934/2052/2074); tri7 mirrors it with an
++/// atomic so the RPC verb can move it live without restarting the staker.
++pub const RESERVE_BALANCE_DEFAULT: i64 = 0;
++static RESERVE_BALANCE: std::sync::atomic::AtomicI64 =
++    std::sync::atomic::AtomicI64::new(RESERVE_BALANCE_DEFAULT);
++
++/// Set the staking reserve (microTRI). Coins above `balance - reserve` are
++/// held out of staking exactly like v5's `nReserveBalance`.
++pub fn set_reserve_balance(sats: i64) {
++    RESERVE_BALANCE.store(sats, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// The live staking reserve (microTRI).
++pub fn reserve_balance() -> i64 {
++    RESERVE_BALANCE.load(std::sync::atomic::Ordering::Relaxed)
++}
+ /// wallet.cpp:2281 — `static int nMaxStakeSearchInterval = 60;`
+ pub const MAX_STAKE_SEARCH_INTERVAL: i64 = 60;
+ /// main.h:40 / wallet.cpp:2436 — coinstake size cap (MAX_BLOCK_SIZE_GEN/5).
+@@ -210,7 +226,8 @@ pub fn create_coinstake(
+     next_height: usize,
+ ) -> Result<(Option<CoinstakePlan>, SearchReport), String> {
+     let mut rep = SearchReport::default();
+-    if balance <= RESERVE_BALANCE {
++    let reserve = reserve_balance();
++    if balance <= reserve {
+         return Ok((None, rep)); // wallet.cpp:2246-2247
+     }
+     let interval = search_interval.min(MAX_STAKE_SEARCH_INTERVAL);
+@@ -356,7 +373,7 @@ pub fn create_coinstake(
+             if credit >= STAKE_COMBINE_THRESHOLD {
+                 break;
+             }
+-            if credit + other.value > balance - RESERVE_BALANCE {
++            if credit + other.value > balance - reserve {
+                 break; // reached the reserve limit
+             }
+             if other.value >= STAKE_COMBINE_THRESHOLD {
+@@ -372,7 +389,7 @@ pub fn create_coinstake(
+         // wallet.cpp:2366-2370 — nCredit == 0 or above balance fails the call
+         // (checked on the input-value credit, before the reward is added).
+         let input_credit: i64 = inputs.iter().map(|i| i.value).sum();
+-        if input_credit == 0 || input_credit > balance - RESERVE_BALANCE {
++        if input_credit == 0 || input_credit > balance - reserve {
+             rep.credit_over_balance_aborts += 1;
+             return Ok((None, rep));
+         }
+@@ -889,8 +906,15 @@ mod tests {
+         times[5]
+     }
+ 
++    /// Tests share the process-global reserve (an AtomicI64) with the staking
++    /// path: tests that (a) mutate it or (b) need it 0 while solving take
++    /// this lock, so parallel test threads never interleave a nonzero
++    /// reserve into an unrelated solve.
++    static RESERVE_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
+     #[test]
+     fn kernel_solve_loop_finds_solution_on_easy_target() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("staker");
+         let coin = make_coin("staker", 0xAA, 50 * COIN, secret, &pubkey);
+@@ -943,6 +967,7 @@ mod tests {
+ 
+     #[test]
+     fn kernel_search_exhausts_on_impossible_target() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("exhaust");
+         let coin = make_coin("exhaust", 0xBB, 50 * COIN, secret, &pubkey);
+@@ -967,6 +992,7 @@ mod tests {
+ 
+     #[test]
+     fn min_age_filter_skips_young_coins() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("young");
+         // containing block 10 s old: below the worst-case min-age filter
+@@ -1144,6 +1170,7 @@ mod tests {
+ 
+     #[test]
+     fn split_stake_rule_three_outputs_when_weight_young() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("splitter");
+         let script = crate::spend::script_pubkey_p2pk(&pubkey).unwrap();
+@@ -1194,6 +1221,7 @@ mod tests {
+ 
+     #[test]
+     fn combine_pass_adds_same_key_inputs_under_threshold() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("combiner");
+         let script = crate::spend::script_pubkey_p2pk(&pubkey).unwrap();
+@@ -1240,6 +1268,7 @@ mod tests {
+ 
+     #[test]
+     fn block_signature_roundtrip_and_tamper() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("signer");
+         let coin = make_coin("signer", 0x31, 10 * COIN, secret, &pubkey);
+@@ -1284,6 +1313,7 @@ mod tests {
+ 
+     #[test]
+     fn timestamp_protocol_rejects_stale_coinstake() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+         let idx = synthetic_index();
+         let (secret, pubkey) = synth_key("stale");
+         let coin = make_coin("stale", 0x41, 10 * COIN, secret, &pubkey);
+@@ -1311,6 +1341,63 @@ mod tests {
+         assert!(err.contains("timestamp floor"), "got: {}", err);
+     }
+ 
++    #[test]
++    fn reserve_balance_gates_staking_like_nreservebalance() {
++        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++        let idx = synthetic_index();
++        let (secret, pubkey) = synth_key("reserved");
++        let coin = make_coin("reserved", 0x51, 10 * COIN, secret, &pubkey);
++        let tx_time = BLOCK_TIME + 12 * 3600;
++        // the default (0) reserve: the 10 TRI coin solves at an easy target
++        set_reserve_balance(0);
++        let (res, _) = create_coinstake(
++            &idx,
++            &[coin.clone()],
++            EASY_BITS,
++            0,
++            tx_time,
++            1,
++            11 * COIN,
++            41,
++        )
++        .expect("search");
++        assert!(res.is_some(), "reserve 0 must not block the solve");
++        // wallet.cpp:2246-2247 — balance <= nReserveBalance aborts BEFORE
++        // any kernel work: reserve = balance means no pass at all
++        set_reserve_balance(11 * COIN);
++        let (res, _) = create_coinstake(
++            &idx,
++            &[coin.clone()],
++            EASY_BITS,
++            0,
++            tx_time,
++            1,
++            11 * COIN,
++            41,
++        )
++        .expect("search");
++        assert!(res.is_none(), "balance <= reserve must produce no plan");
++        // wallet.cpp:2052 — nCredit == 0 or above balance - reserve fails:
++        // reserve 5 TRI leaves a 6 TRI ceiling; the 10 TRI coin's credit
++        // exceeds it, so the call aborts
++        set_reserve_balance(5 * COIN);
++        let (res, _) = create_coinstake(
++            &idx,
++            &[coin.clone()],
++            EASY_BITS,
++            0,
++            tx_time,
++            1,
++            11 * COIN,
++            41,
++        )
++        .expect("search");
++        assert!(res.is_none(), "credit above balance - reserve must abort");
++        // restore the default so the rest of the suite sees the pristine
++        // global (the guard above keeps this test serialized with solvers)
++        set_reserve_balance(0);
++    }
++
+     #[test]
+     fn coinbase_height_prefix_minimal_push() {
+         // CScript << int64 pushes OP_N for 1..16, else minimal signed LE.

@@ -1,0 +1,30 @@
+### command
+./target/release/store_canonicalize /var/lib/tri7/blk0001.dat /var/lib/tri7/tipstate.json --verify-only
+
+### timestamp (UTC and local)
+2026-11-09T01:44:14Z
+2026-11-08T17:44:14-0800 (PST)
+
+### binary
+6f031281827edbcdc3dd8025981837b57bcc4c0fa07439c8ac5d8e090c59d998  target/release/store_canonicalize
+### reviewed source
+f89efbd38441ae3df56a23d8001f4c18ecfe39f3f2a377038467e9e60087fc06  src/bin/store_canonicalize.rs
+
+### input file metadata
+-rw-r--r-- 1 tri7 tri7 985315401 2026-11-08 17:43:41.453405651 -0800 /var/lib/tri7/blk0001.dat
+-rw------- 1 tri7 tri7   2984793 2026-11-08 17:44:06.690439153 -0800 /var/lib/tri7/tipstate.json
+### input file sha256 (the store the tool read)
+acb43489a4560f68a9a42a93b2c73e56a6974a9f41c33553c5791eb37a595370  /var/lib/tri7/blk0001.dat
+4ecd09063c2b21971ba40ae4b0ac3741e63243cc39ceb3f51e27c48ed51b82e0  /var/lib/tri7/tipstate.json
+
+### run
+tipstate window: h2203373..h2207972 (4600 entries)
+physical frames in the source file: 2214610
+distinct header hashes in the source file: 2214554
+byte-identical duplicate frames: 56
+canonical frames kept: 2207973 (genesis..h2203373..tip)
+excluded distinct hashes (non-canonical, i.e. the fork debris): 6581
+excluded physical frames (debris + byte-identical duplicates): 6637
+verify-only: nothing written
+
+### exit status: 0

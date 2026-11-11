@@ -1,0 +1,8 @@
+GRADE=A urn=urn:ump:eizmkg7rpwgmrjc4wk6qw3gchqiiousdhcorsfl4a43xnn5jtuta
+{
+  "blocking": [],
+  "polish": [
+    "Consider a case-insensitivity note or explicit lowercase normalization if store hosts can ever be stored with mixed case TLDs",
+    "A comment on dialable_store_host noting '.b32.i2p' is subsumed by the '.i2p' arm would aid future readers"
+  ]
+}

@@ -1,0 +1,27 @@
+=== POST-APPLY (daemon-reload + restart with sandbox-rw.conf) ===
+$ systemctl cat tri7d | grep ReadWritePaths
+ReadWritePaths=/var/lib/tri7
+ReadWritePaths=/var/lib/tri7 /etc/tri7
+$ reservebalance 1.0
+{"error":{"code":-1,"message":"write /etc/tri7/triangles.conf.tmp: Permission denied (os error 13)"},"id":null,"result":null,"source":"tri7"}
+$ grep reservebalance /etc/tri7/triangles.conf
+$ reservebalance 0.000000
+{"error":{"code":-1,"message":"write /etc/tri7/triangles.conf.tmp: Permission denied (os error 13)"},"id":null,"result":null,"source":"tri7"}
+$ grep reservebalance /etc/tri7/triangles.conf
+$ getstakinginfo
+enabled: True | staking: True | reservebalance: 0.000000 | attempts: 73226 | tip: 2208463
+$ settip (state writes alive)
+{"error":null,"id":null,"result":{"at_daemon_tip":true,"blockhash":"aa91f51bad903aced27aae086d3455dc71d9d1ed86ac34a33a78c069d39ed6cc","height":2208463},"source":"tri7"}
+=== dir fix: chgrp tri7 + chmod 775 on /etc/tri7 (tmp file creation) ===
+$ reservebalance 1.0
+{"error":null,"id":null,"result":{"persisted_to":"/etc/tri7/triangles.conf","reservebalance":"1.000000"},"source":"tri7"}
+$ grep reservebalance /etc/tri7/triangles.conf
+reservebalance=1.000000
+$ reservebalance 0.000000
+{"error":null,"id":null,"result":{"persisted_to":"/etc/tri7/triangles.conf","reservebalance":"0.000000"},"source":"tri7"}
+$ grep reservebalance /etc/tri7/triangles.conf
+reservebalance=0.000000
+$ getstakinginfo
+enabled: True | staking: True | reservebalance: 0.000000 | attempts: 90746 | tip: 2208463
+$ gettip
+{"error":null,"id":null,"result":{"at_daemon_tip":true,"blockhash":"aa91f51bad903aced27aae086d3455dc71d9d1ed86ac34a33a78c069d39ed6cc","height":2208463},"source":"tri7"}

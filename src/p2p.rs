@@ -722,6 +722,14 @@ pub fn build_getdata(inv: &[(u32, Hash)]) -> Vec<u8> {
     w
 }
 
+/// ping payload: u64 nonce LE (BIP0031) — exactly what parse_ping reads
+/// back. tri7 sends these on the keepalive cadence (poll tick) and answers
+/// them (handle_message), so every healthy session carries inbound traffic
+/// even when the chain is quiet at tip.
+pub fn build_ping(nonce: u64) -> Vec<u8> {
+    nonce.to_le_bytes().to_vec()
+}
+
 pub fn build_pong(nonce: u64) -> Vec<u8> {
     nonce.to_le_bytes().to_vec()
 }

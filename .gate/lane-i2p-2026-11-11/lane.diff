@@ -1,0 +1,339 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index af4bfaf..228f879 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -1010,8 +1010,10 @@ fn recon_dispatch(
+             // supervisor reconnect (a fresh version/discovery handshake
+             // re-runs resolution)
+             log(&format!(
+-                "reconciliation: no in-window fork point after {} tries — dropping {} (supervisor reconnects)",
+-                RECON_MAX_UNRESOLVED, peer.label
++                "reconciliation: no in-window fork point after {} tries — dropping {} (transport {}, supervisor reconnects)",
++                RECON_MAX_UNRESOLVED,
++                peer.label,
++                peer.transport.as_str()
+             ));
+             peer.dead = true;
+             peer.sess.shutdown();
+@@ -10479,8 +10481,10 @@ pub fn main_args(argv: &[String]) -> i32 {
+                     for p in peers.iter_mut().filter(|p| p.outbound) {
+                         if let Err(e) = p.sess.send("getheaders", &body, &mut stats) {
+                             log(&format!(
+-                                "send getheaders to {} failed: {} — dropping",
+-                                p.label, e
++                                "send getheaders to {} (transport {}) failed: {} — dropping (send failure)",
++                                p.label,
++                                p.transport.as_str(),
++                                e
+                             ));
+                             p.dead = true;
+                             p.sess.shutdown();
+@@ -10491,6 +10495,31 @@ pub fn main_args(argv: &[String]) -> i32 {
+                 }
+             }
+ 
++            // keepalive: BIP0031 pings clock EVERY session (inbound and
++            // outbound) so the stale-link gate measures "peer stopped
++            // ANSWERING", never "network is quiet". tri7 answers pings but
++            // never sent one — an at-tip i2p session then receives NOTHING
++            // between polls, and one dead i2p tunnel (writes into the local
++            // SOCKS proxy keep succeeding, reads keep timing out → no error
++            // path ever fires) let the 90s stale gate prune it ~2min after a
++            // good handshake (fleet defect: sami-pc→DNS2 i2p session vanished
++            // from getpeerinfo, no drop context). Pings also keep healthy
++            // overlay tunnels from idling out on the proxy side.
++            let ping_body = tri7_core::p2p::build_ping(now_secs());
++            for p in peers.iter_mut() {
++                if let Err(e) = p.sess.send("ping", &ping_body, &mut stats) {
++                    log(&format!(
++                        "keepalive ping to {} (transport {}) failed: {} — dropping (send failure)",
++                        p.label,
++                        p.transport.as_str(),
++                        e
++                    ));
++                    p.dead = true;
++                    p.sess.shutdown();
++                }
++            }
++            peers.retain(|p| p.sess_ok());
++
+             // ---- GAP RECOVERY: walk the window tail for missing disk bodies
+             // (skip while the index build is still warming up — block_by_hash
+             // would report every body as "missing" and spam getdata)
+@@ -10533,6 +10562,14 @@ pub fn main_args(argv: &[String]) -> i32 {
+                             if p.sess.send("getdata", &body, &mut stats).is_ok() {
+                                 sent += 1;
+                             } else {
++                                // LOUD: this dead-mark used to be silent — the
++                                // peer vanished from getpeerinfo with no line
++                                // (the observability half of the i2p defect)
++                                log(&format!(
++                                    "gap getdata send to {} (transport {}) failed — dropping (send failure)",
++                                    p.label,
++                                    p.transport.as_str()
++                                ));
+                                 p.dead = true;
+                                 p.sess.shutdown();
+                             }
+@@ -10655,7 +10692,12 @@ pub fn main_args(argv: &[String]) -> i32 {
+                 let body = tri7_core::p2p::build_getdata(&batch);
+                 if let Some(p) = peers.iter_mut().find(|p| p.outbound) {
+                     if let Err(e) = p.sess.send("getdata", &body, &mut stats) {
+-                        log(&format!("send getdata to {} failed: {} — dropping", p.label, e));
++                        log(&format!(
++                            "send getdata to {} (transport {}) failed: {} — dropping (send failure)",
++                            p.label,
++                            p.transport.as_str(),
++                            e
++                        ));
+                         p.dead = true;
+                         p.sess.shutdown();
+                     }
+@@ -10675,8 +10717,10 @@ pub fn main_args(argv: &[String]) -> i32 {
+                 Ok(m) => msgs.extend(m),
+                 Err(e) => {
+                     log(&format!(
+-                        "protocol failure from {}: {} — dropping",
+-                        peers[pi].label, e
++                        "protocol failure from {} (transport {}): {} — dropping (session error)",
++                        peers[pi].label,
++                        peers[pi].transport.as_str(),
++                        e
+                     ));
+                     peers[pi].dead = true;
+                     peers[pi].sess.shutdown();
+@@ -10726,8 +10770,10 @@ pub fn main_args(argv: &[String]) -> i32 {
+                     // validation failure there is fatal for the process
+                     // (phase-2 fork-safety stance, unchanged)
+                     log(&format!(
+-                        "validation failure from {}: {} — clean disconnect",
+-                        peers[pi].label, e
++                        "validation failure from {} (transport {}): {} — clean disconnect",
++                        peers[pi].label,
++                        peers[pi].transport.as_str(),
++                        e
+                     ));
+                     peers[pi].dead = true;
+                     peers[pi].sess.shutdown();
+@@ -10738,8 +10784,10 @@ pub fn main_args(argv: &[String]) -> i32 {
+                 // drops THE PEER, not the node (Misbehaving-style eviction;
+                 // a rejected pushed block simply never enters our chain)
+                 log(&format!(
+-                    "validation failure from {}: {} — dropping inbound peer",
+-                    peers[pi].label, e
++                    "validation failure from {} (transport {}): {} — dropping inbound peer",
++                    peers[pi].label,
++                    peers[pi].transport.as_str(),
++                    e
+                 ));
+                 peers[pi].dead = true;
+                 peers[pi].sess.shutdown();
+@@ -10903,21 +10951,24 @@ pub fn main_args(argv: &[String]) -> i32 {
+             }
+         }
+ 
+-        // drop silent peers (90s without any inbound traffic)
++        // drop silent peers (90s without any inbound traffic). ALWAYS via
++        // stale_link_reason → the reason line names transport, message
++        // count and connected_utc: a getpeerinfo disappearance with no
++        // matching drop line was the observability bug (i2p fleet defect),
++        // and the keepalive pings above are what keep an ANSWERING idle
++        // session from ever crossing this gate.
+         let stale_cut = Duration::from_secs(STALE_LINK_SECS);
+-        let dropped: Vec<String> = peers
+-            .iter()
+-            .filter(|p| p.last_traffic.elapsed() >= stale_cut)
+-            .map(|p| p.label.clone())
+-            .collect();
+-        if !dropped.is_empty() {
+-            for p in peers.iter_mut() {
+-                if p.last_traffic.elapsed() >= stale_cut {
+-                    log(&format!("no traffic for {}s — dropping {}", STALE_LINK_SECS, p.label));
+-                    p.dead = true;
+-                    p.sess.shutdown();
+-                }
++        let stale_now = Instant::now();
++        let mut dropped_stale = 0usize;
++        for p in peers.iter_mut() {
++            if let Some(reason) = stale_link_reason(p, stale_cut, stale_now) {
++                log(&format!("stale link: {reason}"));
++                p.dead = true;
++                p.sess.shutdown();
++                dropped_stale += 1;
+             }
++        }
++        if dropped_stale > 0 {
+             peers.retain(|p| p.sess_ok());
+             peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+         }
+@@ -10964,6 +11015,27 @@ impl Peer {
+     }
+ }
+ 
++/// The loud reason a session crosses the stale-link gate, or None while it
++/// is KEPT. Pure over (last_traffic, now, cut) so the prune semantics are
++/// unit-testable: an idle session may only leave the peers table THROUGH
++/// this reason (the caller logs it verbatim with the transport), never
++/// silently. Saturating on clock skew (last_traffic in the future → kept).
++fn stale_link_reason(p: &Peer, cut: Duration, now: Instant) -> Option<String> {
++    let idle = now.checked_duration_since(p.last_traffic)?;
++    if idle < cut {
++        return None;
++    }
++    Some(format!(
++        "no inbound traffic (incl. keepalive pongs) for {}s (idle {}s) — dropping {} (transport {}, msgs_in {}, connected {})",
++        cut.as_secs(),
++        idle.as_secs(),
++        p.label,
++        p.transport.as_str(),
++        p.msgs_in,
++        p.connected_utc
++    ))
++}
++
+ fn tri7_rpc(cfg: &Config, user: &str, pass: &str) -> Rpc {
+     Rpc::new(&cfg.rpc_host, cfg.rpc_port, user, pass)
+ }
+@@ -13324,6 +13396,123 @@ addnode=host:notaport
+         assert!(!dialable_store_host("somehost.example.com"));
+     }
+ 
++    /// Test fixture: a real local-socket session labeled as an OUTBOUND i2p
++    /// peer (the fleet-defect shape: sami-pc→DNS2 over i2pd SOCKS 4447).
++    fn i2p_test_peer(stream: std::net::TcpStream) -> Peer {
++        Peer {
++            label: "out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
++                .into(),
++            outbound: true,
++            sess: Session {
++                stream,
++                dec: tri7_core::p2p::MessageDecoder::new(),
++                sent_msgs: 0,
++            },
++            last_traffic: Instant::now(),
++            buffered: VecDeque::new(),
++            dead: false,
++            transport: Transport::I2p,
++            version: 70206,
++            subver: "/tri7:7.0.0/".into(),
++            start_height: 0,
++            msgs_in: 0,
++            msgs_out: 0,
++            connected_utc: now_iso(),
++        }
++    }
++
++    /// Regression (fleet i2p defect, silent peers-table removal after
++    /// handshake): an i2p session may only leave the peers table THROUGH
++    /// stale_link_reason — KEPT while idle under the window, and past the
++    /// window dropped WITH a loud reason naming the transport (the caller
++    /// logs it verbatim). Clock skew must never panic the prune.
++    #[test]
++    fn i2p_idle_session_kept_under_window_dropped_only_with_logged_reason() {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let mut p = i2p_test_peer(stream);
++        let cut = Duration::from_secs(STALE_LINK_SECS);
++        let now = Instant::now();
++        // freshly handshaked / answered recently → KEPT
++        assert!(stale_link_reason(&p, cut, now).is_none());
++        // still under the window → KEPT
++        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS - 1);
++        assert!(stale_link_reason(&p, cut, now).is_none());
++        // idle PAST the window → removed, but the reason MUST be loud:
++        // transport + label + trigger, exactly what follow_tip logs
++        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS + 1);
++        let reason = stale_link_reason(&p, cut, now)
++            .expect("past-window i2p session must cross the stale gate");
++        assert!(reason.contains("i2p"), "reason names the transport: {reason}");
++        assert!(reason.contains(&p.label), "reason names the peer: {reason}");
++        assert!(
++            reason.contains("no inbound traffic"),
++            "reason states the trigger: {reason}"
++        );
++        // last_traffic in the future (skewed clock) → saturates to KEPT
++        p.last_traffic = now + Duration::from_secs(30);
++        assert!(stale_link_reason(&p, cut, now).is_none());
++        let _ = listener;
++    }
++
++    /// The keepalive that rescues idle i2p sessions: a ping goes OUT over
++    /// the session, the peer answers pong on the wire, pump delivers it —
++    /// the inbound traffic that refreshes last_traffic, so an at-tip but
++    /// healthy i2p link is KEPT across the prune window instead of being
++    /// pruned ~90s after its handshake (~2min in getpeerinfo).
++    #[test]
++    fn keepalive_ping_answered_by_pong_refreshes_an_idle_i2p_session() {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let stream = std::net::TcpStream::connect(addr).unwrap();
++        let mut p = i2p_test_peer(stream);
++        let mut peer_end = listener.incoming().next().unwrap().unwrap();
++        peer_end.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++        // idle past a poll tick (what the keepalive pass keys on)
++        p.last_traffic = Instant::now() - Duration::from_secs(POLL_SECS + 1);
++        // the keepalive pass: ping out
++        let mut stats = Stats::default();
++        p.sess
++            .send("ping", &tri7_core::p2p::build_ping(0xA1B2), &mut stats)
++            .expect("keepalive ping send");
++        // the peer side (tri7 answers pings in handle_message) reads it and
++        // replies pong on the wire
++        let pong_frame =
++            tri7_core::p2p::encode_message("pong", &tri7_core::p2p::build_pong(0xA1B2)).unwrap();
++        let mut dec = tri7_core::p2p::MessageDecoder::new();
++        let mut buf = [0u8; 4096];
++        let deadline = Instant::now() + Duration::from_secs(2);
++        let mut got_ping = false;
++        while !got_ping && Instant::now() < deadline {
++            let n = peer_end.read(&mut buf).unwrap_or(0);
++            if n > 0 {
++                for m in dec.feed(&buf[..n]).unwrap_or_default() {
++                    if m.command == "ping" {
++                        got_ping = true;
++                    }
++                }
++            } else {
++                std::thread::sleep(Duration::from_millis(10));
++            }
++        }
++        assert!(got_ping, "peer side must receive the keepalive ping");
++        peer_end.write_all(&pong_frame).unwrap();
++        // the follow loop's pump+dispatch path: ANY inbound message
++        // refreshes last_traffic — the refresh that keeps answered sessions
++        let msgs = p.sess.pump().expect("pump delivers the pong");
++        assert!(
++            msgs.iter().any(|m| m.command == "pong"),
++            "the answering pong must arrive (the refresh trigger)"
++        );
++        assert_eq!(p.sess.sent_msgs, 1, "the ping counted as session outbound");
++        p.last_traffic = Instant::now();
++        assert!(
++            stale_link_reason(&p, Duration::from_secs(STALE_LINK_SECS), Instant::now()).is_none(),
++            "an ANSWERING idle i2p session must be kept across the prune window"
++        );
++        let _ = listener;
++    }
++
+     /// Peer-store keys and the advertised-address filter: loopback and
+     /// unspecified placeholders are never recorded.
+     #[test]
+diff --git a/src/p2p.rs b/src/p2p.rs
+index 30fc1b0..8f73e34 100644
+--- a/src/p2p.rs
++++ b/src/p2p.rs
+@@ -722,6 +722,14 @@ pub fn build_getdata(inv: &[(u32, Hash)]) -> Vec<u8> {
+     w
+ }
+ 
++/// ping payload: u64 nonce LE (BIP0031) — exactly what parse_ping reads
++/// back. tri7 sends these on the keepalive cadence (poll tick) and answers
++/// them (handle_message), so every healthy session carries inbound traffic
++/// even when the chain is quiet at tip.
++pub fn build_ping(nonce: u64) -> Vec<u8> {
++    nonce.to_le_bytes().to_vec()
++}
++
+ pub fn build_pong(nonce: u64) -> Vec<u8> {
+     nonce.to_le_bytes().to_vec()
+ }

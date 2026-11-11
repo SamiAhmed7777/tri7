@@ -1,0 +1,427 @@
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.1: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.1:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.1:       |                        ^~~
+warning: tri7-core@7.0.1: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: tri7-core@7.0.1: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.1:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.1:       |                      ^~~~
+warning: unused doc comment
+    --> src/spend.rs:1006:5
+     |
+1006 |     /// Version, nTime, the two CompactSize counts, and nLockTime.
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1007 |     let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+     |     -------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `sha256d`
+  --> src/txpool.rs:17:21
+   |
+17 | use crate::legacy::{sha256d, Hash, Tx};
+   |                     ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `peers_arg`
+   --> src/gui/node_supervisor.rs:141:13
+    |
+141 |         let peers_arg = peers.join(" --daemon ");
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_peers_arg`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:1752:17
+     |
+1752 |             let mut push_group = |addrs: Vec<String>,
+     |                 ----^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `entries`
+    --> src/rpc.rs:2144:32
+     |
+2144 |                     let (base, entries) = deps.tip.window();
+     |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entries`
+
+warning: unused variable: `deps`
+    --> src/rpc.rs:3038:30
+     |
+3038 | fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+     |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_deps`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:442:13
+    |
+442 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:301:13
+    |
+301 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/spend.rs:1152:5
+     |
+1152 |     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: value assigned to `p` is never read
+   --> src/wallet_encrypt.rs:106:5
+    |
+106 |     p += 4;
+    |     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1911:8
+     |
+1911 | struct SideFile {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1917:8
+     |
+1917 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1927:4
+     |
+1927 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1936:4
+     |
+1936 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `rand_seed` is never used
+   --> src/smsg.rs:979:4
+    |
+979 | fn rand_seed() -> u64 {
+    |    ^^^^^^^^^
+
+warning: associated function `key_of` is never used
+    --> src/smsg.rs:1100:8
+     |
+1072 | impl MessageStore {
+     | ----------------- associated function in this implementation
+...
+1100 |     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
+     |        ^^^^^^
+
+warning: fields `pubkey`, `label`, and `encrypted` are never read
+   --> src/bdb_import.rs:318:9
+    |
+316 |     struct KeyRow {
+    |            ------ fields in this struct
+317 |         secret: Option<[u8; 32]>,
+318 |         pubkey: Vec<u8>,
+    |         ^^^^^^
+319 |         label: String,
+    |         ^^^^^
+320 |         encrypted: bool,
+    |         ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:536:4
+    |
+536 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: `tri7-core` (lib) generated 19 warnings (run `cargo fix --lib -p tri7-core` to apply 9 suggestions)
+   Compiling tri7-core v7.0.1 (/root/tri7)
+warning: unused import: `LAST_HARDCODED_CHECKPOINT`
+  --> src/bin/follow_tip.rs:68:40
+   |
+68 |     tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `WalletProvider`
+  --> src/bin/follow_tip.rs:79:131
+   |
+79 | ...DataProvider, EntryView, Proxy, SnapshotWallet, UtxoRow, WalletProvider,
+   |                                                             ^^^^^^^^^^^^^^
+
+warning: unused variable: `b`
+    --> src/bin/follow_tip.rs:1959:17
+     |
+1959 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `c`
+    --> src/bin/follow_tip.rs:1959:20
+     |
+1959 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `d`
+    --> src/bin/follow_tip.rs:1959:23
+     |
+1959 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                       ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:2974:9
+     |
+2974 |     let mut connect = |stats: &mut Stats| -> Result<Session, String> {
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `wcfg`
+    --> src/bin/follow_tip.rs:2970:9
+     |
+2970 |     let wcfg = Config {
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wcfg`
+
+warning: variable `session_dead` is assigned to, but never used
+    --> src/bin/follow_tip.rs:3082:17
+     |
+3082 |             let mut session_dead = false;
+     |                 ^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_session_dead` instead
+
+warning: value assigned to `session_dead` is never read
+    --> src/bin/follow_tip.rs:3117:25
+     |
+3088 |                     session_dead = true;
+     |                     ------------------- `session_dead` is overwritten here before the previous value is read
+...
+3117 |                         session_dead = true;
+     |                         ^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `session_dead` is never read
+    --> src/bin/follow_tip.rs:3088:21
+     |
+3088 |                     session_dead = true;
+     |                     ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sync_started`
+    --> src/bin/follow_tip.rs:3336:9
+     |
+3336 |     let sync_started = Instant::now();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sync_started`
+
+warning: unused variable: `a`
+    --> src/bin/follow_tip.rs:4688:22
+     |
+4688 |             .filter(|a| {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `wallet_ready`
+    --> src/bin/follow_tip.rs:6308:21
+     |
+6308 |                 let wallet_ready = wl.is_some();
+     |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wallet_ready`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:7700:24
+     |
+7700 |             .and_then(|mut r| r.get(&hash).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:7714:24
+     |
+7714 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:7742:24
+     |
+7742 |             .and_then(|mut r| r.at_height(h).cloned())
+     |                        ----^
+     |                        |
+     |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:7771:65
+     |
+7771 |         let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
+     |                                                                 ----^
+     |                                                                 |
+     |                                                                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/bin/follow_tip.rs:9054:25
+     |
+9054 |                     let mut stg = st_shared.lock().unwrap();
+     |                         ----^^^
+     |                         |
+     |                         help: remove this `mut`
+
+warning: unused variable: `wp`
+    --> src/bin/follow_tip.rs:8685:26
+     |
+8685 |                 let Some(wp) = &wp2 else { return };
+     |                          ^^ help: if this is intentional, prefix it with an underscore: `_wp`
+
+warning: value assigned to `owned_n` is never read
+    --> src/bin/follow_tip.rs:8717:30
+     |
+8717 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+     |                              ^^^^^^^^^^^ this value is reassigned later and never used
+...
+8720 |                             owned_n = cands.len();
+     |                             --------------------- `owned_n` is overwritten here before the previous value is read
+
+warning: value assigned to `funded_n` is never read
+    --> src/bin/follow_tip.rs:8717:43
+     |
+8717 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+     |                                           ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+8721 |                             funded_n = w.owned_count();
+     |                             -------------------------- `funded_n` is overwritten here before the previous value is read
+
+warning: methods `total_recv` and `total_sent` are never used
+    --> src/bin/follow_tip.rs:1599:8
+     |
+1592 | impl Stats {
+     | ---------- methods in this implementation
+...
+1599 |     fn total_recv(&self) -> u64 {
+     |        ^^^^^^^^^^
+...
+1602 |     fn total_sent(&self) -> u64 {
+     |        ^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `connect` is never used
+    --> src/bin/follow_tip.rs:1655:8
+     |
+1654 | impl Session {
+     | ------------ associated function in this implementation
+1655 |     fn connect(addr: &str) -> Result<Session, String> {
+     |        ^^^^^^^
+
+warning: field `kernel_seeded` is never read
+    --> src/bin/follow_tip.rs:2256:5
+     |
+2254 | struct ValidationOutcome {
+     |        ----------------- field in this struct
+2255 |     kernel_enforced: bool,
+2256 |     kernel_seeded: bool,
+     |     ^^^^^^^^^^^^^
+
+warning: field `pubkeys` is never read
+    --> src/bin/follow_tip.rs:5282:5
+     |
+5265 | struct OpsAdapter {
+     |        ---------- field in this struct
+...
+5282 |     pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+     |     ^^^^^^^
+
+warning: constant `EARLY_OPS` is never used
+    --> src/bin/follow_tip.rs:5400:7
+     |
+5400 | const EARLY_OPS: &[&str] = &[
+     |       ^^^^^^^^^
+
+warning: method `ready_early` is never used
+    --> src/bin/follow_tip.rs:5412:8
+     |
+5410 | impl OpsAdapter {
+     | --------------- method in this implementation
+5411 |     /// True when this verb may run before the live wallet view is ready.
+5412 |     fn ready_early(&self, method: &str) -> bool {
+     |        ^^^^^^^^^^^
+
+warning: field `msgs_out` is never read
+    --> src/bin/follow_tip.rs:9598:5
+     |
+9577 | struct Peer {
+     |        ---- field in this struct
+...
+9598 |     msgs_out: u64,
+     |     ^^^^^^^^
+
+warning: direct cast of function item into an integer
+    --> src/bin/follow_tip.rs:2700:51
+     |
+2700 |         libc::signal(libc::SIGINT, tri7_on_signal as libc::sighandler_t);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+     |
+2700 |         libc::signal(libc::SIGINT, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+    --> src/bin/follow_tip.rs:2701:52
+     |
+2701 |         libc::signal(libc::SIGTERM, tri7_on_signal as libc::sighandler_t);
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+help: first cast to a pointer `as *const ()`
+     |
+2701 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (bin "follow_tip") generated 30 warnings (run `cargo fix --bin "follow_tip" -p tri7-core` to apply 17 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 03s
+EXIT=0

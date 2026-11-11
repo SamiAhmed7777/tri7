@@ -1,0 +1,10 @@
+GRADE=B urn=urn:ump:qqawcbqwyj5e2tcvtupbxgtbpzm4uy73zsmg44yy5r5fpy65m5fa
+{
+  "blocking": [],
+  "polish": [
+    "Strip the 'Session context' paragraph (quota wall, judge identity, workqueue URN) \u2014 it is task-log narration the rubric excludes and will be stale within a day; keep only the facts when appending to \u00a76",
+    "State the exact misleading output of `systemctl is-active tor` (e.g. 'returns active for the disabled wrapper') rather than just 'lies'",
+    "Note the i2pd webconsole access method (port/auth) so the sourcing rule is reproducible",
+    "DNS3 'published but not yet advertised' would benefit from the concrete next step or tracking pointer, minus the session URN"
+  ]
+}

@@ -1,0 +1,36 @@
+[2026-11-10T22:57:33Z] addnode=100.98.140.83:24112 ignored: only .onion / .b32.i2p addnode hosts are accepted — no cleartext P2P
+[2026-11-10T22:57:33Z] addnode=100.85.236.10:24112 ignored: only .onion / .b32.i2p addnode hosts are accepted — no cleartext P2P
+[2026-11-10T22:57:33Z] addnode=100.106.76.60:24113 ignored: only .onion / .b32.i2p addnode hosts are accepted — no cleartext P2P
+[2026-11-10T22:57:33Z] addnode=i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 accepted (tor)
+[2026-11-10T22:57:33Z] addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112 accepted (i2p)
+[2026-11-10T22:57:38Z] connect i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: socks connect to i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: SOCKS reply code 1 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-10T22:57:43Z] connect lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112 failed: socks connect to lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-10T22:57:44Z] handshake ok: 46.62.249.20:443 — peer version 70206 (/tri7:7.0.0/) start height 2209301 services 1
+[2026-11-10T22:57:46Z] from-zero: genesis state anchored at 7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021 (h0)
+[2026-11-10T22:57:46Z] connect i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: socks connect to i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 failed: SOCKS reply code 1 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-10T22:57:53Z] connect lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112 failed: socks connect to lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-10T22:57:53Z] handshake ok: 46.62.249.20:443 — peer version 70206 (/tri7:7.0.0/) start height 2209301 services 1
+[2026-11-10T22:57:53Z] state: tip h0 7e7a6e4dd5fe895106fca912dfbacaeaf2a89e76c6a588df8ff96e0e18b96021 · daemon getblockcount 2209302
+[2026-11-10T22:57:53Z] chain slots: seeded 1 window entries from base h0 — height serving follows the threaded tip (stale-slot guard on)
+[2026-11-10T22:57:53Z] from-zero: block index build started before sync (appends land on disk)
+[2026-11-10T22:57:53Z] from-zero: syncing h0 → h2209301 over P2P (2209301 blocks to go, 8 fetcher session(s))
+[2026-11-10T22:58:21Z] from-zero: header walk at h50000
+[2026-11-10T22:58:45Z] from-zero: header walk at h100000
+[2026-11-10T22:59:04Z] from-zero: 126000 headers walked (up to h126000)
+[2026-11-10T22:59:06Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h126000)
+[2026-11-10T22:59:33Z] from-zero: header walk at h176000
+[2026-11-10T22:59:59Z] from-zero: header walk at h226000
+[2026-11-10T23:00:21Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h252000)
+[2026-11-10T23:00:27Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h256000)
+[2026-11-10T23:00:52Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h286000)
+[2026-11-10T23:01:05Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h304000)
+[2026-11-10T23:01:30Z] from-zero: header walk at h354000
+[blockidx] ready: 2210695 frames, 4500216 txs, heights_ok=true, threaded_tip=Some(2201749), writable=true, built in 235s
+[2026-11-10T23:02:00Z] from-zero: header walk at h404000
+[2026-11-10T23:02:28Z] from-zero: header walk at h454000
+[2026-11-10T23:02:53Z] from-zero: header walk at h504000
+[2026-11-10T23:03:06Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h520000)
+[2026-11-10T23:03:35Z] from-zero: header walk at h570000
+[2026-11-10T23:04:04Z] from-zero: dropped stale duplicate headers segment (2000 headers, parent h618000)
+[2026-11-10T23:04:35Z] from-zero: header walk at h668000
+[2026-11-10T23:05:00Z] from-zero: header walk at h718000

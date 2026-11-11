@@ -1,0 +1,10 @@
+GRADE=A urn=urn:ump:aj437nwq5pv2bmkos3f2klspbi4vi7wvytz35dojvfkjqh2w5tba
+{
+  "blocking": [],
+  "polish": [
+    "ctx.request_repaint_after(400ms) only fires while tray_hidden inside the update body; if the window is hidden before the first update the very first wake still depends on the event loop \u2014 worth a soak test on real Windows/Linux tray hosts.",
+    "legacy_parse_money rejects leading/trailing whitespace (' 1.0'); that matches mapArgs no-trim, but the GUI push already trims \u2014 a comment cross-linking the two would prevent future 'fixes'.",
+    "reservebalance_apply writes legacy_format_money(parsed) back to conf, normalizing '2.5' to '2.500000'; harmless but a roundtrip comment would clarify the conf value is normalized.",
+    "push_reserve_to_node errors when no node is reachable even on first Apply with an offline GUI; the notice wording covers it, but the retry path could log once instead of on every tick if the node stays down."
+  ]
+}

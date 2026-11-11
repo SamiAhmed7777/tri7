@@ -1,0 +1,5 @@
+CMD: cargo build --release --bins --target x86_64-pc-windows-gnu
+    Finished `release` profile [optimized] target(s) in 1m 58s
+(first pass, full compile of the tree incl. this diff; a second incremental
+invocation confirms: "Finished `release` profile [optimized] target(s) in
+1.43s", no errors, artifacts present incl. follow_tip.exe)

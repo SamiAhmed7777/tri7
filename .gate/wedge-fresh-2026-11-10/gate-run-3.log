@@ -1,0 +1,20 @@
+=== [1] targeted ===
+test gui::node_supervisor::tests::conf_written_once ... ok
+test gui::node_supervisor::tests::is_fresh_store_treats_genesis_only_blk_as_fresh ... ok
+test gui::node_supervisor::tests::ensure_conf_migrates_legacy_conf_missing_creds ... ok
+test node_embedded::tests::genesis_frame_only_store_is_not_usable_state ... ok
+test node_embedded::tests::partial_or_malformed_tails_are_bare_too ... ok
+test spend::tests::multi_input_spend_writes_vin_in_sorted_order_and_verifiers_follow ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 655 filtered out; finished in 0.02s
+=== [2] full lib (debug) ===
+
+test result: ok. 660 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 60.54s
+
+=== [3] GUI featureful check ===
+warning: `tri7-core` (lib) generated 143 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.15s
+=== [4] release lib ===
+test result: ok. 660 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 28.14s
+=== [5] windows-gnu all-bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 1m 52s

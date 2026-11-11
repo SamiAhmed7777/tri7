@@ -1,0 +1,140 @@
+diff --git a/src/bin/follow_tip.rs b/src/bin/follow_tip.rs
+index 8b17fec..662b266 100644
+--- a/src/bin/follow_tip.rs
++++ b/src/bin/follow_tip.rs
+@@ -5360,7 +5360,20 @@ impl OpsAdapter {
+                     continue;
+                 }
+             };
+-            for (i, input) in selected.iter().enumerate() {
++            // the tx vin is built in (txid, n) sorted order (build_spend_outputs);
++            // BOTH self-verify and the connect check must zip the SAME sorted
++            // order — checking against the SELECTION order misaligns the
++            // position zip whenever selection order differs from (txid, n)
++            // order. With MIXED prevout types on one address (bare-P2PK
++            // coinstake rewards + P2PKH sweep outputs) the crossed pairing
++            // fails loudly ("scriptSig has 2 pushes, Solver expects 1") on a
++            // correctly signed tx; same-type coins masked it since the
++            // 2026-11-07 connect-check fix because twin scripts verify
++            // identically at any position. 2026-11-08: caught live by the
++            // COIN-SPLIT drains (first mixed-solver selection ever built).
++            let mut ordered_sel = selected.clone();
++            ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
++            for (i, input) in ordered_sel.iter().enumerate() {
+                 if let Err(e) = tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey) {
+                     return Err((-1, format!("self-verify failed: {e}")));
+                 }
+@@ -5379,12 +5392,7 @@ impl OpsAdapter {
+                     ),
+                 ));
+             }
+-            // the tx vin is built in (txid, n) sorted order (build_spend_outputs);
+-            // re-checking against the SELECTION order would misalign the zip on
+-            // any multi-input spend (2026-11-07: every multi-input sendtoaddress
+-            // self-rejected with "prevout map misaligned with vin")
+-            let mut ordered_sel = selected.clone();
+-            ordered_sel.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
++            // ordered_sel (vin order) also feeds the connect check below.
+             if let Err(e) =
+                 tri7_core::spend::connect_inputs_check(&plan.tx, &ordered_sel, tip_h as u32)
+             {
+@@ -9651,6 +9659,99 @@ mod tests {
+         s
+     }
+ 
++    // ---- COIN-SPLIT self-verify regression (2026-11-08) ----
++
++    /// The tx vin is sorted (txid, n) while the SELECTION arrives in whatever
++    /// order the picker produced. build_wallet_tx must zip BOTH self-verify
++    /// and the connect check against the SORTED list: with mixed prevout
++    /// types (bare-P2PK coinstake reward + P2PKH sweep output on one
++    /// address) a crossed pairing fails on a correctly signed tx ("scriptSig
++    /// has 2 pushes, Solver expects 1"). Same-type coins masked the
++    /// misalignment from 2026-11-07 to 2026-11-08 because twin scripts
++    /// verify identically at any position.
++    #[test]
++    fn self_verify_zips_vin_sorted_order_not_selection_order() {
++        let ctx = secp256k1::Secp256k1::new();
++        let secret_of = |b: u8| {
++            let mut s = [0u8; 32];
++            s[0] = b;
++            s
++        };
++        let pk_of = |b: u8| {
++            let sk = secp256k1::SecretKey::from_slice(&secret_of(b)).unwrap();
++            secp256k1::PublicKey::from_secret_key(&ctx, &sk)
++                .serialize()
++                .to_vec()
++        };
++        let pk_a = pk_of(11); // bare-P2PK prevout (the coinstake-reward shape)
++        let pk_b = pk_of(22); // P2PKH prevout (the sweep-output shape)
++        let txid = |b: u8| {
++            let mut h = [0u8; 32];
++            h[0] = b;
++            h
++        };
++        let mk = |txid: [u8; 32], n: u32, script: Vec<u8>, pk: Vec<u8>, b: u8| {
++            tri7_core::spend::SpendInput {
++                txid,
++                n,
++                value: 2_000_000,
++                script_pubkey: script,
++                height: 100,
++                tx_time: 1_700_000_000,
++                is_coinbase: false,
++                is_coinstake: false,
++                secret: secret_of(b),
++                pubkey: pk,
++            }
++        };
++        let p2pk_script = tri7_core::spend::script_pubkey_p2pk(&pk_a).unwrap();
++        let p2pkh_script = p2pkh_script(&pk_b);
++        // selection order [A, B] with A > B so the builder's (txid, n) sort
++        // REVERSES it — selection order must differ from vin order.
++        let sel = vec![
++            mk(txid(0xE0), 1, p2pk_script.clone(), pk_a.clone(), 11),
++            mk(txid(0xB0), 0, p2pkh_script.clone(), pk_b.clone(), 22),
++        ];
++        assert!(
++            sel[0].txid > sel[1].txid,
++            "fixture: selection order must differ from sorted order"
++        );
++        let plan = tri7_core::spend::build_spend_outputs(
++            &sel,
++            vec![tri7_core::legacy::Vout {
++                value: 3_000_000,
++                script_pubkey: p2pkh_script.clone(),
++            }],
++            Some(p2pkh_script.clone()),
++            100,
++            1_700_000_100,
++            1_000,
++        )
++        .expect("mixed-solver spend builds and signs");
++        // vin is (txid, n) sorted: B first, A second.
++        assert_eq!(plan.tx.vin[0].prev_hash, sel[1].txid);
++        assert_eq!(plan.tx.vin[1].prev_hash, sel[0].txid);
++        // The BUG: zipping verify against the SELECTION order crosses types
++        // and rejects the correctly signed tx.
++        let crossed = tri7_core::spend::verify_input(&plan.tx, 0, &sel[0].script_pubkey)
++            .err()
++            .expect("selection-order zip must fail on mixed solvers");
++        assert!(
++            crossed.contains("Solver expects"),
++            "crossed pairing error: {crossed}"
++        );
++        // The FIX: zip against the sorted list — every input verifies.
++        let mut ordered = sel.clone();
++        ordered.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.n.cmp(&b.n)));
++        for (i, input) in ordered.iter().enumerate() {
++            assert!(
++                tri7_core::spend::verify_input(&plan.tx, i, &input.script_pubkey).is_ok(),
++                "sorted zip: input {i} must verify"
++            );
++        }
++    }
++
++
+     fn out(value: i64, script: Vec<u8>) -> LiveOut {
+         LiveOut {
+             height: 1,

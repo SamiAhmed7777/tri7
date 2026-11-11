@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""dns2 disk guard: hourly safe vacuum + 90% alert (DNS2, hourly timer).
+
+Reclaims ONLY known-safe, self-regenerating space (rev5 per workqueue item 13):
+  - journal vacuum to 500M (SystemMaxUse already caps it; this is a nudge)
+  - dangling docker images + build cache older than 30d (docker image prune
+    / docker builder prune — NEVER containers, networks, or named volumes)
+  - Hermes cron run-output *.md older than 30d (regenerable scheduler output)
+  - rotated logs >10M older than 30d under /root/.hermes/logs (*.log.* only)
+  rev5 additions (both argv-only `find -delete`, verified safe 2026-11-09 by
+  manual reclaim on this host — the two biggest junk classes measured):
+  - /root/.codex/sessions files older than 7d (judge transcripts; lessons
+    live in UMP/skills; grew 1.79G in ~1 week)
+  - /tmp TOP-LEVEL regular files older than 7d (tick scratch artifacts; 3.0G
+    of Nov 4-6 leftovers found in the item-13 sweep; maxdepth 1 so nothing
+    descends into service dirs; -type f so sockets/dirs are never touched)
+rev5: the >=90% alert now carries the top-5 first-level space offenders
+(`du -x -m --max-depth=1 /`, parsed in python — no shell pipelines) so the
+alert is actionable without an ssh session.
+rev4 invariants kept: NO shell pipelines — every command runs via argv with
+its real exit code; notification failures (send ok=false OR exception) exit
+nonzero; cleanup failures alert even when the disk is healthy. Silent only
+when healthy AND zero failures AND nothing meaningful was freed.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+CHAT_ID = "-1003270059720"
+THREAD_ID = "56320"
+ALERT_PCT = 90.0
+
+
+def disk_pct():
+    st = os.statvfs("/")
+    return 100 * (1 - st.f_bavail / st.f_blocks)
+
+
+def sh(argv, timeout=540):
+    """argv execution — the rc IS the command's rc, nothing can mask it."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout)
+        return r.returncode, (r.stdout or "").strip()[-120:], \
+            (r.stderr or "").strip()[-120:]
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)[-120:]
+
+
+def top_offenders(n=5):
+    """Top-n first-level dirs by du -x -m --max-depth=1 / (argv only).
+
+    Full-stdout capture (sh()'s [-120:] tail would cut the listing), and
+    du's returncode is IGNORED on purpose: du on a live fs is routinely
+    nonzero from /proc entries vanishing mid-walk while stdout still holds
+    the complete data. Returns [] on any failure — the alert omits the
+    section.
+    """
+    try:
+        r = subprocess.run(["du", "-x", "-m", "--max-depth=1", "/"],
+                           capture_output=True, text=True, timeout=540)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if not r.stdout:
+        return []
+    rows = []
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1]))
+    rows.sort(key=lambda row: row[0], reverse=True)
+    return ["%s %s" % (mb, p) for mb, p in rows[:n] if p != "/"]
+
+
+def token():
+    for line in open("/root/.hermes/.env"):
+        if line.startswith("TELEGRAM_BOT_TOKEN="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+
+
+def send(text):
+    """Raises on network error; returns False when Telegram says ok=false."""
+    payload = urllib.parse.urlencode({
+        "chat_id": CHAT_ID, "message_thread_id": THREAD_ID, "text": text,
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.telegram.org/bot%s/sendMessage" % token(), data=payload)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = json.loads(resp.read().decode())
+    if not body.get("ok"):
+        raise RuntimeError("telegram ok=false: %s"
+                           % body.get("description", "?")[:100])
+    return True
+
+
+def notify(text):
+    """Returns True only on confirmed delivery."""
+    try:
+        send(text)
+        return True
+    except Exception as exc:
+        print("SEND FAILED: %s" % exc)
+        return False
+
+
+def main():
+    b_bytes = os.statvfs("/").f_bavail * os.statvfs("/").f_frsize
+    b_pct = disk_pct()
+    actions = []
+    failures = []
+
+    rc, _, err = sh(["journalctl", "--vacuum-size=500M"])
+    actions.append("journal (rc=%d)" % rc)
+    if rc != 0:
+        failures.append("journal vacuum rc=%d: %s" % (rc, err[-100:]))
+
+    # Docker was removed from DNS2 2026-09-14 (all 5 workloads native systemd).
+    # Gate docker prune calls so the script stays useful on a docker host AND
+    # silently no-ops on a dockerless one (no OSError / rc=127 spam).
+    if shutil.which("docker"):
+        rc, out, err = sh(["docker", "image", "prune", "-f",
+                           "--filter", "until=720h"])
+        actions.append("docker images (rc=%d)" % rc)
+        if rc != 0:
+            failures.append("docker image prune rc=%d: %s" % (rc, err[-100:]))
+        rc, out, err = sh(["docker", "builder", "prune", "-f",
+                           "--filter", "until=720h"])
+        actions.append("docker build cache (rc=%d)" % rc)
+        if rc != 0:
+            failures.append("docker builder prune rc=%d: %s" % (rc, err[-100:]))
+    else:
+        actions.append("docker prune (skipped: docker not installed)")
+
+    rc, _, err = sh(["find", "/root/.hermes/cron/output",
+                     "-name", "*.md", "-mtime", "+30", "-delete"])
+    actions.append("hermes cron outputs (rc=%d)" % rc)
+    if rc != 0:
+        failures.append("cron-output prune rc=%d: %s" % (rc, err[-100:]))
+    rc, _, err = sh(["find", "/root/.hermes/logs", "-type", "f",
+                     "-name", "*.log.*", "-size", "+10M",
+                     "-mtime", "+30", "-delete"])
+    actions.append("rotated hermes logs (rc=%d)" % rc)
+    if rc != 0:
+        failures.append("rotated-log prune rc=%d: %s" % (rc, err[-100:]))
+    # find returns nonzero on an absent directory — pre-check so a missing
+    # optional path records "skipped" instead of a spurious failure alert.
+    if os.path.isdir("/root/.codex/sessions"):
+        rc, _, err = sh(["find", "/root/.codex/sessions", "-type", "f",
+                         "-mtime", "+7", "-size", "+1k", "-delete"])
+        actions.append("codex sessions >7d (rc=%d)" % rc)
+        if rc != 0:
+            failures.append("codex-sessions prune rc=%d: %s"
+                            % (rc, err[-100:]))
+    else:
+        actions.append("codex sessions (skipped: absent)")
+    # -user root: only ever reclaim root-owned leftovers (tick scratch) —
+    # another user's stale top-level file is not ours to delete.
+    rc, _, err = sh(["find", "/tmp", "-maxdepth", "1", "-type", "f",
+                     "-user", "root", "-mtime", "+7", "-delete"])
+    actions.append("/tmp top-level files >7d (rc=%d)" % rc)
+    if rc != 0:
+        failures.append("tmp prune rc=%d: %s" % (rc, err[-100:]))
+
+    a_bytes = os.statvfs("/").f_bavail * os.statvfs("/").f_frsize
+    freed = max(0.0, (a_bytes - b_bytes) / 1024.0 ** 3)
+    after = disk_pct()
+
+    rc_main = 0
+    if after >= ALERT_PCT:
+        offenders = top_offenders()
+        msg = ("\u2691\ufe0f *DNS2 DISK* %.0f%% full (was %.0f%% before "
+               "this pass; freed %.1fG)\n" % (after, b_pct, freed)
+               + "\n".join("- %s" % a for a in actions)
+               + (("\nFAILURES:\n" + "\n".join(failures)) if failures else ""))
+        if offenders:
+            msg += "\nTop space:\n" + "\n".join("- %s" % o
+                                                for o in offenders)
+        msg += ("\nInvestigate the Top space list / /opt /srv /var/www "
+                "(content, not auto-deletable).")
+        if not notify(msg):
+            rc_main = 1
+        else:
+            print("ALERTED %.0f%%" % after)
+    elif failures:
+        msg = ("\u2699\ufe0f *DNS2 disk-guard*: cleanup failures "
+               "(disk %.0f%% ok):\n" % after + "\n".join(failures))
+        if not notify(msg):
+            rc_main = 1
+        else:
+            print("ALERTED-FAILURES")
+    elif freed >= 0.5:
+        print("healthy %.0f%%, freed %.1fG" % (after, freed))
+    # else: silent — healthy, no failures, nothing notable reclaimed
+    return rc_main
+
+
+if __name__ == "__main__":
+    sys.exit(main())

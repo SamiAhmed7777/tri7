@@ -1,0 +1,11 @@
+# /etc/systemd/system/disk-guard.timer
+[Unit]
+Description=Run disk guard hourly with persistent missed-run catch-up
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

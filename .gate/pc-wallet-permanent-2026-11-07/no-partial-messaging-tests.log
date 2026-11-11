@@ -1,0 +1,7 @@
+### cargo test --release --lib
+test result: ok. 510 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 55.29s
+EXIT=0
+
+### cargo test --release --features gui --lib
+test result: ok. 518 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.23s
+EXIT=0

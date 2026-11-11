@@ -1,0 +1,176 @@
+diff --git a/src/bin/tri7_wallet_gui.rs b/src/bin/tri7_wallet_gui.rs
+index 651cfca..8bad72d 100644
+--- a/src/bin/tri7_wallet_gui.rs
++++ b/src/bin/tri7_wallet_gui.rs
+@@ -18,6 +18,8 @@ fn usage() -> ! {
+          \x20                      [--wallet PATH] [--state-dir PATH] [--dump PATH]\n\
+          \x20                      [--tipstate PATH] [--archive PATH] [--index-dir PATH]\n\
+          \x20                      [--stake-dryrun PATH] [--rpc ADDR|none] [--profile-dir PATH]\n\
++         \x20                      [--attach-external]  attach to an external daemon\n\
++         \x20                      instead of running the node in-process (fleet mode)\n\
+          \x20                      [-min | --min]  start minimized (the login-autostart flag)\n\
+          \x20                      --autostart-check  roundtrip the login registration (headless)\n\
+          defaults: wallet /root/.triangles/wallet.dat, state-dir /var/lib/tri7,\n\
+@@ -100,6 +102,9 @@ fn main() {
+     if let Some(v) = get("--rpc", &args) {
+         cfg.rpc_addr = if v == "none" { None } else { Some(v) };
+     }
++    if args.iter().any(|a| a == "--attach-external") {
++        cfg.attach_external = true;
++    }
+     if history_probe {
+         // headless: construct the app state, load the wallet exactly like the
+         // GUI does, then print the history the Transactions page would show
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 207da4d..0e6aebc 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -1860,7 +1860,7 @@ impl eframe::App for Tri7App {
+                 self.node = Some(crate::gui::node_supervisor::EmbeddedNode::new(
+                     port,
+                     node_dir.join("node.log"),
+-                    self.st.cfg.rpc_addr.is_some(),
++                    self.st.cfg.attach_external,
+                 ));
+             }
+             if let Some(n) = &mut self.node {
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index 3c38bfe..bac5ecd 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -559,6 +559,20 @@ mod tests {
+ 
+     /// attach-to-external (rpc_addr configured — fleet mode): a dead RPC port
+     /// is Ok(false), and the in-process runner is NEVER invoked.
++    #[test]
++    fn default_gui_config_activates_the_weld_not_attach_mode() {
++        // THE r21 regression: UiConfig.rpc_addr defaults to Some(19114) — the
++        // weld's first cut keyed attach off rpc_addr.is_some(), so EVERY
++        // default user was attach-mode and the in-process node NEVER started
++        // (live-caught on sami-laptop: GUI polled 19114 forever, SYN_SENT).
++        // The default must be attach_external=false (the node runs inside).
++        let cfg = tri7_core::gui::state::UiConfig::default();
++        assert!(
++            !cfg.attach_external,
++            "default config must run the node in-process (the weld)"
++        );
++    }
++
+     #[test]
+     fn attach_external_never_starts_in_process() {
+         let port = free_dead_port();
+diff --git a/src/gui/state.rs b/src/gui/state.rs
+index 04290db..930ce60 100644
+--- a/src/gui/state.rs
++++ b/src/gui/state.rs
+@@ -146,6 +146,10 @@ pub struct UiConfig {
+     pub state_dir_explicit: bool,
+     pub stake_dryrun_path: String,
+     pub rpc_addr: Option<String>, // tri7d native RPC (loopback), None = disable
++    /// attach to an EXTERNAL daemon instead of running the node in-process.
++    /// Default FALSE: the weld's whole point — double-click starts the node
++    /// inside the wallet. Attach is an explicit opt-in (fleet/advanced).
++    pub attach_external: bool,
+     pub profile_dir: String,      // GUI side files (keystore/addressbook/options)
+     pub balances_path: String,    // phase-1e snapshot (explorer rich list)
+     pub explorer_endpoints: Vec<String>, // tried in order; 19112 native first
+@@ -167,6 +171,7 @@ impl Default for UiConfig {
+                 state_dir_explicit: false,
+                 stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
+                 rpc_addr: Some("127.0.0.1:19114".into()),
++                attach_external: false,
+                 profile_dir: format!("{local}\\Tri7Wallet\\profile"),
+                 balances_path: format!("{local}\\Tri7Wallet\\balances.json"),
+                 explorer_endpoints: explorer_defaults(),
+@@ -178,6 +183,7 @@ impl Default for UiConfig {
+                 state_dir_explicit: false,
+                 stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
+                 rpc_addr: Some("127.0.0.1:19112".into()),
++                attach_external: false,
+                 profile_dir: "/root/.tri7_gui".into(),
+                 balances_path: "/root/tri7/balances.json".into(),
+                 explorer_endpoints: explorer_defaults(),
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index ee765f9..9843e3c 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -1747,6 +1747,7 @@ fn derivation_falls_back_to_snapshot_without_index() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.join("profile").display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -1780,6 +1781,7 @@ fn keystore_side_files_persist_new_addresses() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -1911,6 +1913,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -1950,6 +1953,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -1974,6 +1978,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -2031,6 +2036,7 @@ fn locked_wallet_falls_back_to_keystore() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -2059,6 +2065,7 @@ fn upd_test_cfg(dir: &std::path::Path) -> UiConfig {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -2251,6 +2258,7 @@ fn sweep_test_cfg(dir: &std::path::Path, rpc_addr: Option<String>) -> UiConfig {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr,
++        attach_external: false,
+         profile_dir: dir.display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],
+@@ -3353,6 +3361,7 @@ mod passphrase_dialog {
+             state_dir: dir.display().to_string(),
+             state_dir_explicit: true,
+             rpc_addr: None,
++                attach_external: false,
+             profile_dir: dir.join("profile").display().to_string(),
+             ..Default::default()
+         };
+@@ -3526,6 +3535,7 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+         rpc_addr: None,
++                attach_external: false,
+         profile_dir: dir.join("profile").display().to_string(),
+         balances_path: "/nonexistent".into(),
+         explorer_endpoints: vec![],

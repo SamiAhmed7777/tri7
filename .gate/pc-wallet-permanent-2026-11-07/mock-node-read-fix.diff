@@ -1,0 +1,38 @@
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 711715d..f863e67 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -81,9 +81,30 @@ fn accepting_fee_node() -> (
+                 Ok((mut s, _)) => {
+                     idle = 0;
+                     served += 1;
+-                    let mut buf = [0u8; 4096];
+-                    let n = s.read(&mut buf).unwrap_or(0);
+-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
++                    // read until the JSON body is complete: a single read()
++                    // can return 0 bytes or a partial body (it happened on
++                    // the macOS runner), which would fail the assertion
++                    // below for the wrong reason
++                    let mut acc = String::new();
++                    let deadline = std::time::Instant::now()
++                        + std::time::Duration::from_secs(5);
++                    loop {
++                        let mut chunk = [0u8; 4096];
++                        match s.read(&mut chunk) {
++                            Ok(0) => break,
++                            Ok(n) => {
++                                acc.push_str(&String::from_utf8_lossy(&chunk[..n]));
++                                if acc.contains('}') {
++                                    break;
++                                }
++                            }
++                            Err(_) => break,
++                        }
++                        if std::time::Instant::now() > deadline {
++                            break;
++                        }
++                    }
++                    let req = acc.clone();
+                     // the stand-in must be answering a REAL settxfee request
+                     assert!(
+                         req.contains("\"method\":\"settxfee\""),

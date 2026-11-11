@@ -1,0 +1,70 @@
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index 702f40b..c0a7b03 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
+ use std::process::Child;
+ use std::time::{Duration, Instant};
+ 
+-pub const DEFAULT_PEER: &str = "194.233.88.206:24113";
++pub const DEFAULT_PEER: &str = "194.163.161.162:24113";
+ /// how long the supervisor waits for the node's RPC before considering a
+ /// spawn failed (cold index builds are slow — retry window is generous)
+ const RPC_WAIT: Duration = Duration::from_secs(25);
+@@ -61,16 +61,23 @@ impl EmbeddedNode {
+         }
+     }
+ 
+-    /// Generate the node conf on first run (staking off by default — the
+-    /// user flips it in the UI; persisted by the daemon's staking RPC).
+-    fn ensure_conf(conf: &Path) {
++    /// Generate the node conf on first run — a COMPLETE, runnable conf (the
++    /// daemon refuses to start without rpcuser/rpcpassword, which is what made
++    /// the embedded node exit-loop and the wallet fail standalone). Staking
++    /// defaults off; the user flips it in the UI (persisted by the staking RPC).
++    fn ensure_conf(conf: &Path, rpc_port: u16) {
+         if conf.exists() {
+             return;
+         }
+         if let Some(dir) = conf.parent() {
+             let _ = std::fs::create_dir_all(dir);
+         }
+-        let text = "daemon=0\nrpc=1\n";
++        let mut pw = [0u8; 24];
++        getrandom::getrandom(&mut pw).unwrap_or(());
++        let password: String = pw.iter().map(|b| format!("{b:02x}")).collect();
++        let text = format!(
++            "server=1\nrpcport={rpc_port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcuser=tri7\nrpcpassword={password}\nstaking=0\n"
++        );
+         let _ = std::fs::write(conf, text);
+     }
+ 
+@@ -118,7 +125,7 @@ impl EmbeddedNode {
+         };
+         let state_dir = node_dir.join("state");
+         let conf = node_dir.join("triangles.conf");
+-        Self::ensure_conf(&conf);
++        Self::ensure_conf(&conf, self.rpc_port);
+         let _ = std::fs::create_dir_all(&state_dir);
+         let peers_arg = peers.join(" --daemon ");
+         let log = std::fs::OpenOptions::new()
+@@ -285,13 +292,16 @@ mod tests {
+         let dir = std::env::temp_dir().join(format!("nsconf{}", std::process::id()));
+         let conf = dir.join("triangles.conf");
+         let _ = std::fs::remove_dir_all(&dir);
+-        EmbeddedNode::ensure_conf(&conf);
++        EmbeddedNode::ensure_conf(&conf, 19199);
+         assert!(conf.exists());
+         let text = std::fs::read_to_string(&conf).unwrap();
+-        assert!(text.contains("rpc=1"));
++        assert!(text.contains("rpcuser=tri7"));
++        assert!(text.contains("rpcpassword="));
++        assert!(text.contains("rpcport=19199"));
++        assert!(text.contains("server=1"));
+         // idempotent
+         std::fs::write(&conf, "custom").unwrap();
+-        EmbeddedNode::ensure_conf(&conf);
++        EmbeddedNode::ensure_conf(&conf, 19199);
+         assert_eq!(std::fs::read_to_string(&conf).unwrap(), "custom");
+         let _ = std::fs::remove_dir_all(&dir);
+     }

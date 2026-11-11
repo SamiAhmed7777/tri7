@@ -1,0 +1,13 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 0692637..2b35109 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -2185,7 +2185,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                             .to_string(),
+                     };
+                     ui.add_space(2.0);
+-                    th::inline_notice(ui, th::Notice::Warn, "Partial balance", &msg);
++                    th::inline_notice(ui, th::Notice::Warning, "Partial balance", &msg);
+                 }
+                 return;
+             }

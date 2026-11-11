@@ -1,0 +1,8 @@
+ src/bin/follow_tip.rs |  25 ++-
+ src/consensus.rs      |  11 ++
+ src/gui/app_state.rs  |   1 +
+ src/gui/tests.rs      |   1 +
+ src/history.rs        | 173 +++++++++++++++++
+ src/legacy_rows.rs    |   1 +
+ src/rpc.rs            | 515 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ 7 files changed, 721 insertions(+), 6 deletions(-)

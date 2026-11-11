@@ -1,0 +1,16 @@
+# Evidence — lane-updaterexit ROUND 3 (fresh against the final bytes)
+worktree /root/tri7-lanes/lane-updaterexit @ lane/updater-exit (base e42c79b = origin/master)
+state: base + uncommitted modifications in updaterexit.diff (parent commits post-grade)
+changed files:
+ M src/gui/app.rs
+ M src/gui/app_state.rs
+ M src/gui/tests.rs
+ M src/updater.rs
+
+== full lib suite ==
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+
+test result: ok. 569 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 53.23s
+
+== GUI-feature check ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s

@@ -1,0 +1,80 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 1403225..e863aaf 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -1724,7 +1724,7 @@ impl eframe::App for Tri7App {
+                     match n.ensure_running(
+                         Path::new(&wallet),
+                         &node_dir,
+-                        &[crate::gui::node_supervisor::DEFAULT_PEER],
++                        &[crate::gui::node_supervisor::DEFAULT_PEER, crate::gui::node_supervisor::FALLBACK_PEER],
+                     ) {
+                         Ok(_) => {
+                             // first-sync finished? generate the wallet
+@@ -1939,7 +1939,22 @@ impl Tri7App {
+                  swept in one transaction to the phrase's own addresses",
+             );
+             ui.add_space(4.0);
+-            if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
++            let migrated = self
++                .st
++                .wallet
++                .as_ref()
++                .map(|w| w.seed_migrated)
++                .unwrap_or(false);
++            if migrated {
++                th::inline_notice(
++                    ui,
++                    th::Notice::Success,
++                    "This wallet already has a seed phrase",
++                    "Seed migration already ran: the balance lives on the phrase's own \
++                     derived addresses. Another phrase is disabled to prevent a \
++                     double-sweep.",
++                );
++            } else if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
+                 .clicked()
+             {
+                 if let Err(e) = self.st.begin_seed_migration_action() {
+@@ -2905,7 +2920,22 @@ impl Tri7App {
+                      moves the balance to seed-derived addresses.",
+                 );
+                 ui.add_space(4.0);
+-                if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
++                let migrated = self
++                    .st
++                    .wallet
++                    .as_ref()
++                    .map(|w| w.seed_migrated)
++                    .unwrap_or(false);
++                if migrated {
++                    th::inline_notice(
++                        ui,
++                        th::Notice::Success,
++                        "This wallet already has a seed phrase",
++                        "Seed migration already ran: the whole balance now lives on the \
++                         phrase's own derived addresses (see Receive). Adding another \
++                         phrase would double-sweep, so it's disabled.",
++                    );
++                } else if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
+                     if let Err(e) = self.st.begin_seed_migration_action() {
+                         self.st.status_log.push(format!("seed migration: {}", e));
+                     }
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index c0a7b03..de23e89 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -15,7 +15,13 @@ use std::path::{Path, PathBuf};
+ use std::process::Child;
+ use std::time::{Duration, Instant};
+ 
+-pub const DEFAULT_PEER: &str = "194.163.161.162:24113";
++/// Primary bootstrap: the Pi's clearnet listener on 443 — reachable from the
++/// open internet AND from machines behind outbound-web-port filters (laptops
++/// on managed networks can only dial 80/443).
++pub const DEFAULT_PEER: &str = "46.62.249.20:443";
++/// Secondary bootstrap: samihost's clearnet listener on the conventional p2p
++/// port (unrestricted networks reach this one too).
++pub const FALLBACK_PEER: &str = "194.163.161.162:24113";
+ /// how long the supervisor waits for the node's RPC before considering a
+ /// spawn failed (cold index builds are slow — retry window is generous)
+ const RPC_WAIT: Duration = Duration::from_secs(25);

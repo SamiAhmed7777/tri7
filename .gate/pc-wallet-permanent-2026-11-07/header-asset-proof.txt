@@ -1,0 +1,9 @@
+asset: src/gui/assets/brand/brand_header_new@2x.png
+sha256: c3c68ba7e017fe74cc22aae57afaf5b483821189b5d2b917b568c9ff1d158017
+existence proof: include_bytes!(&quot;assets/brand/brand_header_new@2x.png&quot;) is a compile-time
+embed - the successful cargo build (and CI windows-build job 42348067468 green) proves the
+file resolves; a missing asset is a compile error, not a runtime panic.
+runtime safety: the header guard is `if let Some(tex) = self.tex(ctx, &quot;brand/header&quot;)` -
+asset_bytes() returns Option; a None key renders nothing (no unwrap, no panic path).
+rendered verification: operator is watching the live window and will confirm the wordmark
+after deploy (he reported each prior state himself).

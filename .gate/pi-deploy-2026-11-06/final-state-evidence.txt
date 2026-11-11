@@ -1,0 +1,103 @@
+=== A: wallet-empty.dat verification (01:32:52Z) ===
+total 16
+drwxr-xr-x  2 root root 4096 Nov  7 00:49 .
+drwx------ 24 root root 4096 Nov  7 01:32 ..
+-rw-------  1 root root 8192 Nov  7 00:49 wallet-empty.dat
+application_id=1414687095 user_version=1 rows=0 tables=['main']
+=== B: dumpwallet on the zero-key wallet (node log) ===
+[2026-11-07T00:52:23Z] dumpwallet: 0 keys -> /var/lib/tri7/empty-dump.txt
+=== C: running process wallet args ===
+--wallet
+/root/tri7-wallet/wallet-empty.dat
+--rpc-port
+=== D: live checks ===
+tip: 2206831
+peers: "count":2
+staking: "attempts":0 "enabled":false 
+launcher sha256: 6f0923c1bcd247f1ee50a20f84da23fc9c281b5dfb96f80313ed6074ee0a8e3a
+=== E: hash parity at h2206825 ===
+Pi  : {"error":null,"id":null,"result":"d56db8291fcfd7307b16bef62b69f4f559ae6132ef870b8bdf9cfa38cd8e03b2","source":"tri7"}
+=== F: peer-event accounting for the window 00:51:00-01:22:00 ===
+--- inbound events:
+[2026-11-07T00:51:04Z] p2p: inbound listener on 127.0.0.1:24112 (getdata/getheaders/push-block)
+[2026-11-07T00:51:12Z] inbound peer connected: in:127.0.0.1:59084 (/tri7:7.0.0/ h2206812)
+--- disconnect/dropping events:
+[2026-11-07T01:20:17Z] protocol failure from out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113: peer closed connection — dropping
+(only the 01:20:17 outbound drop; re-attached 01:20:59)
+
+### G: DNS2 parity capture (command + response) ===
+### capture host: DNS2 (vmi3080415), UTC 2026-11-07T01:29:52Z
+$ curl -s --max-time 6 -X POST http://127.0.0.1:19112 -d '{"method":"getblockhash","params":[2206825]}'
+{"error":null,"id":null,"result":"d56db8291fcfd7307b16bef62b69f4f559ae6132ef870b8bdf9cfa38cd8e03b2","source":"tri7"}
+$ curl -s --max-time 6 -X POST http://127.0.0.1:19112 -d '{"method":"getblockcount"}'
+{"error":null,"id":null,"result":2206830,"source":"tri7"}
+
+
+=== H: COMPLETE unfiltered window slice (Pi; selection command verbatim; 61 lines) ===
+### capture host: Pi (ubuntu-4gb-hel1-1), UTC 2026-11-07T01:32:50Z
+### selection command (verbatim, $2 is literal - copied from this script via a quoted heredoc):
+awk -F'[][]' '$2 >= "2026-11-07T00:51:00Z" && $2 <= "2026-11-07T01:22:00Z"' /var/lib/tri7/tri7d.log
+### BEGIN SLICE (complete, unfiltered)
+[2026-11-07T00:51:03Z] connect nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112 failed: socks connect to nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-07T00:51:03Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2206812 services 1
+[2026-11-07T00:51:03Z] state: tip h2206812 7a09473ece53f53ca856a8d618a9fdfb9e872268d62d5bfbdfe80ba8f1db9fb6 · daemon getblockcount -1
+[2026-11-07T00:51:03Z] smsg: engine live with 0 wallet key(s) — store /var/lib/tri7/smsg
+[2026-11-07T00:51:04Z] rpc: block index build started (background thread, cache-first)
+[2026-11-07T00:51:04Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+[2026-11-07T00:51:04Z] p2p: inbound listener on 127.0.0.1:24112 (getdata/getheaders/push-block)
+[2026-11-07T00:51:12Z] inbound peer connected: in:127.0.0.1:59084 (/tri7:7.0.0/ h2206812)
+[2026-11-07T00:52:04Z] wallet live view ready: window h2202213..h2206812 — 0 outputs (0 owned) balance 0 sats
+[2026-11-07T00:52:23Z] dumpwallet: 0 keys -> /var/lib/tri7/empty-dump.txt
+[2026-11-07T00:57:40Z] h2206813: no external checksum oracle for this block — adopting locally computed 4c39ce49
+[2026-11-07T00:57:40Z] TIP ADVANCE → h2206813 c4f768234abaa82cec2a1760a35c21aab3641b51038f67fd3867d0a12b9142d0 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T00:57:41Z] relay: announced h2206813 to 2 peer(s) (inv)
+[2026-11-07T00:58:10Z] h2206814: no external checksum oracle for this block — adopting locally computed c72f7a4a
+[2026-11-07T00:58:10Z] TIP ADVANCE → h2206814 9a9f6fb38a9e4be349935d8cd51e38711c1e2930cba941f7d369a638f0d7fab5 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T00:58:11Z] relay: announced h2206814 to 2 peer(s) (inv)
+[2026-11-07T00:58:41Z] h2206815: no external checksum oracle for this block — adopting locally computed 9f0a6f7a
+[2026-11-07T00:58:41Z] TIP ADVANCE → h2206815 b13365c7aaf19df2fd55887a5c19626d5f080b838f67e2288702005a15b000a2 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T00:58:41Z] relay: announced h2206815 to 2 peer(s) (inv)
+[2026-11-07T01:01:42Z] h2206816: no external checksum oracle for this block — adopting locally computed d3c68a18
+[2026-11-07T01:01:42Z] TIP ADVANCE → h2206816 704f3809d295635349990e7c13eefb896b8a3511bf20370cb554a878de9239bf (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:01:42Z] relay: announced h2206816 to 2 peer(s) (inv)
+[2026-11-07T01:05:16Z] h2206817: no external checksum oracle for this block — adopting locally computed b0426be3
+[2026-11-07T01:05:16Z] TIP ADVANCE → h2206817 2b64adc10854c5f6a0fb976bd3d55ec50abbe9a2875c9de1baa0c0e57b06f8db (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:05:17Z] relay: announced h2206817 to 2 peer(s) (inv)
+[2026-11-07T01:06:47Z] h2206818: no external checksum oracle for this block — adopting locally computed 967ee1d2
+[2026-11-07T01:06:47Z] TIP ADVANCE → h2206818 1dd4e3aafe9448383ee7c8f240778195fe5badf1ea665d84d1b5dbe4f181cec6 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:06:47Z] relay: announced h2206818 to 2 peer(s) (inv)
+[2026-11-07T01:10:50Z] h2206819: no external checksum oracle for this block — adopting locally computed 12adbde3
+[2026-11-07T01:10:50Z] TIP ADVANCE → h2206819 2caacc5e13c62dd0281a16f77f1f6efe55194a805ed5f1801d1aaba068a83593 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:10:50Z] relay: announced h2206819 to 2 peer(s) (inv)
+[2026-11-07T01:12:22Z] h2206820: no external checksum oracle for this block — adopting locally computed 6670f395
+[2026-11-07T01:12:22Z] TIP ADVANCE → h2206820 e85efb3a219e24e45f2b4de3b8f2d192f499249aac53d9d5308b2a04af679b04 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:12:22Z] relay: announced h2206820 to 2 peer(s) (inv)
+[2026-11-07T01:13:22Z] h2206821: no external checksum oracle for this block — adopting locally computed 913d7799
+[2026-11-07T01:13:22Z] TIP ADVANCE → h2206821 c206b2e8ca36715804b3d42eb331cb6fa83c1afd8e1668f3b65360c31ca02a36 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:13:22Z] relay: announced h2206821 to 2 peer(s) (inv)
+[2026-11-07T01:15:23Z] h2206822: no external checksum oracle for this block — adopting locally computed 986ad7c9
+[2026-11-07T01:15:23Z] TIP ADVANCE → h2206822 918210818a00681f5e8b7658bdc7597cca06d506ada669064963b7ca27d50d65 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:15:24Z] relay: announced h2206822 to 2 peer(s) (inv)
+[2026-11-07T01:15:54Z] h2206823: no external checksum oracle for this block — adopting locally computed 782745d3
+[2026-11-07T01:15:54Z] TIP ADVANCE → h2206823 920bd273b2daac9ecb474a43deabf3deeb271dc0cb898662d0852927ec16f4c9 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:15:54Z] relay: announced h2206823 to 2 peer(s) (inv)
+[2026-11-07T01:19:28Z] h2206824: no external checksum oracle for this block — adopting locally computed a6f80d36
+[2026-11-07T01:19:28Z] TIP ADVANCE → h2206824 3d4ec89d90cb431b373d108e8eb1dbedceecb61f18d0902798cf51cced89b27f (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:19:29Z] relay: announced h2206824 to 2 peer(s) (inv)
+[2026-11-07T01:20:17Z] protocol failure from out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113: peer closed connection — dropping
+[2026-11-07T01:20:29Z] connect 43kgtx6vcz2253vo5ybfq3ax5sj5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 failed: socks connect to 43kgtx6vcz2253vo5ybfq3ax5sj5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-07T01:20:35Z] connect jbpfhe7zw3qm67wy3j2ayysp3mnrjobopthnko3b3sgahqtecblwqmid.onion:24112 failed: socks connect to jbpfhe7zw3qm67wy3j2ayysp3mnrjobopthnko3b3sgahqtecblwqmid.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-07T01:20:38Z] connect 6ygpphp2qsucwvhwefv6h6ehvk6zjf7b7zdp4ggkzjjwe76cg6jwm7id.onion:24112 failed: socks connect to 6ygpphp2qsucwvhwefv6h6ehvk6zjf7b7zdp4ggkzjjwe76cg6jwm7id.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-07T01:20:55Z] connect nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112 failed: socks connect to nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112 failed: SOCKS reply code 4 (0=ok, 1=general, 4=host unreachable, 5=refused)
+[2026-11-07T01:20:59Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2206826 services 1
+[2026-11-07T01:20:59Z] outbound re-attached: out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:21:01Z] headers announcement does not chain to our tip — requesting reconciliation
+[2026-11-07T01:21:02Z] headers announcement does not chain to our tip — requesting reconciliation
+[2026-11-07T01:21:03Z] h2206825: no external checksum oracle for this block — adopting locally computed fc2714e0
+[2026-11-07T01:21:03Z] TIP ADVANCE → h2206825 d56db8291fcfd7307b16bef62b69f4f559ae6132ef870b8bdf9cfa38cd8e03b2 (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:21:03Z] relay: announced h2206825 to 2 peer(s) (inv)
+[2026-11-07T01:21:04Z] h2206826: no external checksum oracle for this block — adopting locally computed 99e75e01
+[2026-11-07T01:21:04Z] TIP ADVANCE → h2206826 e20c2557b5bb188c957146eb37d7c1ce554f187cc5bed1386b00d2ae1f1f402a (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+[2026-11-07T01:21:04Z] relay: announced h2206826 to 2 peer(s) (inv)
+### END SLICE
+### slice line count: 61

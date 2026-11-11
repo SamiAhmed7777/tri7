@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:nih26vb3oiox4glpgirkzu2jhmh5bhxe3iitdimser6s445jd4dq
+{
+  "blocking": [],
+  "polish": [
+    "--history-probe-full prints after the sampled section; consider a header line before the sampled rows noting truncation so audit consumers don't mistake sample for full output.",
+    "The stake-row color rule in app.rs checks only view.negative; a hypothetical Some(0) net would render '+0.000000 TRI' green \u2014 disclosed and acceptable, but a debug_assert or comment near the Some(0) case would harden intent.",
+    "tooltip.replace('\\n', ' / ') is duplicated between the sampled and full-dump print sites; a tiny helper would keep them identical if the line shape ever changes."
+  ]
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=SSH tunnel: DNS2:19115 -> Pi:19112 (Triangles RPC, Raspberry Pi)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=root
+# The Raspberry Pi's daemon RPC is deliberately loopback-only (the daemon
+# refuses non-loopback binds and does no auth on loopback), so the supported
+# way to use it from another host is an SSH tunnel over the tailnet -
+# the same pattern as tunnel-pc-tri-rpc.service.
+# The local end is bound EXPLICITLY to 127.0.0.1 so nothing is published
+# beyond this host.
+ExecStart=/usr/bin/autossh -N -M 0 -o "ServerAliveInterval=15" -o "ServerAliveCountMax=3" -o "StrictHostKeyChecking=yes" -o "BatchMode=yes" -o "ExitOnForwardFailure=yes" -L 127.0.0.1:19115:127.0.0.1:19112 root@100.106.76.60
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

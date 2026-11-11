@@ -1,0 +1,3 @@
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+
+test result: ok. 542 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 68.18s

@@ -1,0 +1,11 @@
+command: CARGO_TARGET_DIR=/root/tri7-target-gate cargo check --bin tri7_wallet_gui --features gui
+(src/gui changed -> the GUI compile gate applies)
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 47s
+(zero errors)
+NOTE: an intermediate version of this change appended a spawning supervisor
+test that raced the OnceLock embedded-log-path global + the in_process test's
+deadlines (in_process_node_answers_rpc FAILED once, 657/1). The fix REMOVED the
+spawn (pure is_fresh_store unit test; the argv-level --sync-from-zero wiring is
+now pinned inside in_process_node_answers_rpc's run-1 argv capture) and the
+full suite then ran 658/0. Recorded for honesty: the flake was introduced and
+eliminated within this lane.
