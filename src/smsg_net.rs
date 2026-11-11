@@ -30,9 +30,10 @@
 
 use crate::legacy::Reader;
 use crate::smsg::{
-    bucket_time_of, smsg_decrypt, smsg_encrypt, smsg_validate, token_of, Bucket, DecryptedMessage,
-    MessageStore, SecureMessage, SmsgKey, SMSG_MAX_BUCKETS, SMSG_OK, SMSG_RETENTION,
-    SMSG_TIME_LEEWAY, FOLDER_INBOX, FOLDER_OUTBOX,
+    bucket_time_of, smsg_decrypt, smsg_decrypt_with_keys, smsg_encrypt_ex, smsg_validate,
+    seal_outbox_keys, token_of, unseal_outbox_keys, Bucket, DecryptedMessage, MessageStore,
+    SecureMessage, SmsgKey, SMSG_MAX_BUCKETS, SMSG_OK, SMSG_RETENTION, SMSG_TIME_LEEWAY,
+    FOLDER_INBOX, FOLDER_OUTBOX,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -341,6 +342,7 @@ impl SmsgEngine {
             status: 0,
             addr_to: String::new(),
             addr_outbox: String::new(),
+            ekey: Vec::new(),
             data: wire.to_vec(),
         };
         let inserted = self.store.insert(FOLDER_RELAY, &msg)?;
@@ -382,6 +384,7 @@ impl SmsgEngine {
             status: crate::smsg::SMSG_MASK_UNREAD,
             addr_to: k.address.clone(),
             addr_outbox: String::new(),
+            ekey: Vec::new(),
             data: wire.to_vec(),
         };
         if let Ok(true) = self.store.insert(FOLDER_INBOX, &msg) {
@@ -842,17 +845,27 @@ impl SmsgEngine {
                     )
                 })?,
         };
-        let wire = smsg_encrypt(from, &to_pubkey, text, now)?;
+        let (wire, key_e, key_m) = smsg_encrypt_ex(from, &to_pubkey, text, now)?;
         let t = token_of(&wire)?;
         let mut st = self.st.lock().unwrap();
         // outbox + relay mirror
         let out_key = outbox_key(&t);
+        // Sender-side view: seal the message keys under the SENDING secret
+        // so this engine can decrypt its own sent mail later (the ephemeral
+        // ECDH secret is destroyed by the encryption, see seal_outbox_keys).
+        // Anonymous sends have no sending key — the row keeps the honest
+        // empty seal and the listing shows empty from/text for it.
+        let ekey = match from {
+            Some(f) => seal_outbox_keys(&f.secret, &out_key, &key_e, &key_m),
+            None => Vec::new(),
+        };
         let om = crate::smsg::StoredMessage {
             key: out_key,
             time_received: now,
             status: 0,
             addr_to: to_address.to_string(),
             addr_outbox: from_label.to_string(),
+            ekey,
             data: wire.clone(),
         };
         self.store.insert(FOLDER_OUTBOX, &om)?;
@@ -862,6 +875,7 @@ impl SmsgEngine {
             status: 0,
             addr_to: String::new(),
             addr_outbox: String::new(),
+            ekey: Vec::new(),
             data: wire,
         };
         self.store.insert(FOLDER_RELAY, &rm)?;
@@ -1217,8 +1231,10 @@ impl SmsgEngine {
     }
 
     /// Inventory view of one folder, decrypted for display (RPC/GUI).
-    /// Decrypts with the owning key; rows that fail to decrypt (shouldn't
-    /// happen for inbox) show a placeholder.
+    /// Inbox rows decrypt with the owning (receiving) key; outbox rows open
+    /// their sealed keys with the SENDING key (the sender cannot re-derive
+    /// the shared secret from the packet alone). Rows that fail — anonymous
+    /// sends, pre-seal rows, key not owned — show honest placeholders.
     pub fn list_folder_json(&self, folder: u16, unread_only: bool) -> Result<Value, String> {
         let msgs = self.store.list(folder)?;
         let mut rows = Vec::new();
@@ -1236,7 +1252,14 @@ impl SmsgEngine {
             };
             if let Some(addr) = owner {
                 if let Some(k) = self.owned.iter().find(|k| k.address == addr) {
-                    if let Ok(dm) = smsg_decrypt(&m.data, k) {
+                    let dm = if folder == FOLDER_OUTBOX && !m.ekey.is_empty() {
+                        unseal_outbox_keys(&k.secret, &m.key, &m.ekey)
+                            .ok_or_else(|| "outbox row has no usable key seal".to_string())
+                            .and_then(|(ke, km)| smsg_decrypt_with_keys(&m.data, &ke, &km))
+                    } else {
+                        smsg_decrypt(&m.data, k)
+                    };
+                    if let Ok(dm) = dm {
                         from = dm.from_address;
                         text = dm.plaintext;
                     }
@@ -1289,6 +1312,14 @@ impl SmsgEngine {
             .iter()
             .find(|k| k.address == owner)
             .ok_or_else(|| format!("key for {} not loaded", owner))?;
+        if folder == FOLDER_OUTBOX && !m.ekey.is_empty() {
+            // sender-side open (list_folder_json parity — see smsg.rs
+            // seal_outbox_keys for why the packet alone does not suffice)
+            return match unseal_outbox_keys(&k.secret, &m.key, &m.ekey) {
+                Some((ke, km)) => smsg_decrypt_with_keys(&m.data, &ke, &km),
+                None => Err("outbox row has no usable key seal".into()),
+            };
+        }
         smsg_decrypt(&m.data, k)
     }
 
@@ -1607,14 +1638,102 @@ mod tests {
         let rows = outbox.as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["to"], k.b.address, "outbox 'to' = recipient");
-        // KNOWN LIMITATION (disclosed in the milestone evidence): the engine
-        // implements the RECEIVER-side decrypt only, so an outbox row cannot
-        // decrypt its own wire — 'from'/'text' come back empty placeholders.
-        // The mapping fields (to/sent/read) are the contract under test.
-        assert_eq!(rows[0]["from"], "");
-        assert_eq!(rows[0]["text"], "");
+        // SENDER-SIDE DECRYPT (was the phase-7 disclosed gap): the row's
+        // sealed keys open with the sending key, so 'from'/'text' are real.
+        assert_eq!(rows[0]["from"], k.a.address, "outbox 'from' = sending identity");
+        assert_eq!(rows[0]["text"], "to myself via outbox");
         assert_eq!(rows[0]["sent"], true);
         assert_eq!(rows[0]["read"], true, "own sends start read");
+    }
+
+    #[test]
+    fn outbox_sender_and_receiver_decrypt_identical_plaintext() {
+        // encrypt -> store -> decrypt as receiver AND as sender: both views
+        // of the same wire must yield the same plaintext and from.
+        let k = make_keys();
+        let a = engine("obrt-a", vec![k.a.clone()]);
+        let b = engine("obrt-b", vec![k.b.clone()]);
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+        a.send_local(&k.a.address, &k.b.address, "both sides agree", now)
+            .unwrap();
+        // deliver to B directly (handshake bypassed for brevity)
+        let wire = a.store.list(FOLDER_RELAY).unwrap()[0].data.clone();
+        let body = build_msg_body(bucket_time_of(now), &[wire]);
+        b.handle("a", "smsgMsg", &enc_vch(&body), now);
+        // sender view (sealed keys opened with the sending key)
+        let outbox = a.list_folder_json(FOLDER_OUTBOX, false).unwrap();
+        let orow = &outbox.as_array().unwrap()[0];
+        assert_eq!(orow["text"], "both sides agree");
+        assert_eq!(orow["from"], k.a.address);
+        assert_eq!(orow["sent"], true);
+        // receiver view (packet + receiving key)
+        let inbox = b.list_folder_json(FOLDER_INBOX, false).unwrap();
+        let irow = &inbox.as_array().unwrap()[0];
+        assert_eq!(irow["text"], orow["text"], "sender and receiver see the same plaintext");
+        assert_eq!(irow["from"], k.a.address);
+        assert_eq!(irow["sent"], false);
+        // single-row open (GUI view) agrees too
+        let key_hex = orow["key"].as_str().unwrap().to_string();
+        let dm = a.read_msg(FOLDER_OUTBOX, &key_hex).unwrap();
+        assert_eq!(dm.plaintext, "both sides agree");
+        assert_eq!(dm.from_address, k.a.address);
+    }
+
+    #[test]
+    fn outbox_row_without_the_sending_key_keeps_the_placeholder() {
+        // Send with A owning the key, then reopen the SAME store without it:
+        // the seal is unusable and the row shows the honest placeholder —
+        // never a crash, never a fake plaintext.
+        let k = make_keys();
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-smsgnet-test-obph-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+        a.send_local(&k.a.address, &k.b.address, "locked away", now)
+            .unwrap();
+        drop(a);
+        let a2 = SmsgEngine::open(&dir, vec![k.b.clone()]).unwrap();
+        let rows = a2
+            .list_folder_json(FOLDER_OUTBOX, false)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["from"], "", "no sending key -> honest placeholder");
+        assert_eq!(rows[0]["text"], "");
+        assert_eq!(rows[0]["to"], k.b.address, "mapping fields still real");
+        assert_eq!(rows[0]["sent"], true);
+        // single-row open reports the honest failure too
+        let key_hex = rows[0]["key"].as_str().unwrap().to_string();
+        assert!(a2.read_msg(FOLDER_OUTBOX, &key_hex).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outbox_anon_row_keeps_the_honest_placeholder() {
+        // Anonymous sends carry no sending key (addr_outbox "anon"), so no
+        // seal is written and the listing keeps the placeholders.
+        let k = make_keys();
+        let a = engine("obanon", vec![k.a.clone()]);
+        let now = now_i64();
+        a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
+        a.send_local_anon(&k.b.address, "ghost", now).unwrap();
+        let rows = a
+            .list_folder_json(FOLDER_OUTBOX, false)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["to"], k.b.address);
+        assert_eq!(rows[0]["from"], "", "anonymous send has no sending key");
+        assert_eq!(rows[0]["text"], "");
     }
 
     #[test]
