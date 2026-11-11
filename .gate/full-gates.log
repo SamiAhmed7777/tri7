@@ -1,0 +1,13 @@
+=== GATE 1/4: cargo test --lib (debug) — 2026-11-11T15:08:28-08:00
+test result: ok. 739 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 72.43s
+
+=== GATE 2/4: cargo test --release --lib — 2026-11-11T15:09:49-08:00
+test result: ok. 739 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 28.45s
+
+=== GATE 3/4: cargo check gui — 2026-11-11T15:12:56-08:00
+warning: `tri7-core` (lib) generated 147 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.59s
+=== GATE 4/4: windows-gnu bins — 2026-11-11T15:13:14-08:00
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 1m 56s
+=== ALL GATES DONE — 2026-11-11T15:15:11-08:00
