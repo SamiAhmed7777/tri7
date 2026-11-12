@@ -1076,6 +1076,14 @@ fn credit_body_miss_round(
         .collect();
     let mut reports = Vec::new();
     for label in round_labels {
+        // MED-3b: an i2p source that accepted getdata but served nothing is
+        // usually a tunnel still building, not a dead peer — never DEMOTE it
+        // (the 45s age-out/requeue above still rotates the request, so bulk
+        // sync keeps moving; a healthy i2p source serves on its next round).
+        // Clearnet/tor labels keep the exact pre-lane demotion behavior.
+        if label_is_i2p(&label) {
+            continue;
+        }
         let n = peer_misses.entry(label.clone()).or_insert(0);
         *n += 1;
         if *n >= adv_fail_limit && !demoted_at.contains_key(&label) {
@@ -2362,6 +2370,59 @@ fn usage() -> ! {
     node_exit(EXIT_USAGE);
 }
 
+/// Built-in fleet seed floor — ("transport tag", "host:port"). The tags are
+/// documentation; `PeerTarget::parse` derives the transport from the host
+/// suffix (the augment test pins tag == parsed). These seeds are a FLOOR,
+/// never a ceiling: they are APPENDED to whatever the operator configured
+/// (CLI --daemon/--onion/--i2p + conf addnode=), deduped by host:port, so a
+/// fresh wallet with zero config reaches the fleet over BOTH overlay
+/// networks automatically and user addnodes always win the dial order
+/// (connect_and_handshake tries store/answered peers first).
+///   - DNS2 onion  = /var/lib/tor/triangles/hostname (the fleet's canonical
+///     hidden service; mirrors node_supervisor::FLEET_ONION_SEED).
+///   - DNS2 i2p    = the live tri7d server-tunnel destination, derived from
+///     /var/lib/i2pd/tri7d-p2p-keys.dat (base32(sha256(dest))) and verified
+///     against i2pd's own `destinations/` state on this host.
+///   - clearnet    = the two bootstrap listeners (DEFAULT_PEER/FALLBACK_PEER).
+pub const DEFAULT_PEER_SEEDS: &[(&str, &str)] = &[
+    ("clearnet", "46.62.249.20:443"),
+    ("clearnet", "100.85.236.10:24113"),
+    (
+        "tor",
+        "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+    ),
+    (
+        "i2p",
+        "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113",
+    ),
+];
+
+/// Parse the seed table into dial targets through the CURRENT socks/i2p
+/// endpoints (a malformed seed must never crash the boot — skipped silently,
+/// though the augment test pins every entry parses).
+fn seed_targets(socks: &(String, u16), i2p_socks: &(String, u16)) -> Vec<PeerTarget> {
+    DEFAULT_PEER_SEEDS
+        .iter()
+        .filter_map(|(_, spec)| PeerTarget::parse(spec, socks, i2p_socks).ok())
+        .collect()
+}
+
+/// HIGH-5: merge the seed floor into the attach list (idempotent — a
+/// user-configured target with the same host:port always wins, the seed is
+/// skipped). Appended AFTER configured peers so explicit targets keep the
+/// front of the rotation.
+fn augment_default_seeds(cfg: &mut Config) {
+    for t in seed_targets(&cfg.socks, &cfg.i2p_socks) {
+        if !cfg
+            .peers
+            .iter()
+            .any(|e| e.host == t.host && e.port == t.port)
+        {
+            cfg.peers.push(t);
+        }
+    }
+}
+
 fn parse_args(argv: &[String]) -> Config {
     let mut cfg = Config {
         peers: vec![PeerTarget {
@@ -2642,6 +2703,9 @@ fn parse_args(argv: &[String]) -> Config {
         }
     }
     cfg.explicit_peers = explicit_peers;
+    // HIGH-5: the fleet seed floor rides EVERY boot — appended after the
+    // operator's own targets (augment, never replace), deduped by endpoint.
+    augment_default_seeds(&mut cfg);
     cfg
 }
 
@@ -2988,7 +3052,13 @@ impl Session {
                 stream
             }
             Some((sh, sp)) => {
-                let stream = socks5_connect(sh, *sp, &target.host, target.port)?;
+                let stream = socks5_connect(
+                    sh,
+                    *sp,
+                    &target.host,
+                    target.port,
+                    dial_socks_read_timeout(target.transport),
+                )?;
                 stream
             }
         };
@@ -3107,11 +3177,44 @@ fn socks5_consume_reply(atyp: u8, r: &mut impl Read) -> Result<(), String> {
     }
 }
 
+/// Per-transport SOCKS read window (MED-3a): i2pd holds the SOCKS5 CONNECT
+/// reply open while the OUTBOUND tunnel builds (30-90s on a cold network),
+/// so the clearnet/tor 30s cap churns slow i2p dials — the retry loop then
+/// re-dials every poll tick, each attempt paying a fresh tunnel build.
+/// Clearnet/tor behavior is UNCHANGED.
+fn dial_socks_read_timeout(t: Transport) -> Duration {
+    match t {
+        Transport::I2p => Duration::from_secs(90),
+        _ => Duration::from_secs(30),
+    }
+}
+
+/// Per-transport post-connect version/verack window (MED-3a): the handshake
+/// rides the freshly built tunnel (1-2s RTT on i2p); 20s bounds clearnet/tor
+/// while i2p gets a wider window for the first exchange.
+fn dial_handshake_window(t: Transport) -> Duration {
+    match t {
+        Transport::I2p => Duration::from_secs(60),
+        _ => Duration::from_secs(20),
+    }
+}
+
+/// True when a peer label names an i2p body source ("out:<host>:<port>" /
+/// "in:<host>:<port>" with a `.b32.i2p`/`.i2p` host). Slow tunnel builds must
+/// not DEMOTE the source during bulk sync (MED-3b): the 45s age-out/requeue
+/// still applies to every peer — only the demotion CREDIT is skipped, so an
+/// i2p source is retried rather than benched while its tunnel warms.
+/// Clearnet/tor demotion behavior is unchanged.
+fn label_is_i2p(label: &str) -> bool {
+    label.contains(".b32.i2p:") || label.contains(".i2p:")
+}
+
 fn socks5_connect(
     socks_host: &str,
     socks_port: u16,
     host: &str,
     port: u16,
+    socks_read_timeout: Duration,
 ) -> Result<TcpStream, String> {
     use std::net::ToSocketAddrs;
     let mut s = TcpStream::connect(
@@ -3122,7 +3225,7 @@ fn socks5_connect(
             .ok_or_else(|| format!("resolve socks {}: no address", socks_host))?,
     )
     .map_err(|e| format!("connect socks {}: {}", socks_host, e))?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    s.set_read_timeout(Some(socks_read_timeout)).ok();
     s.set_write_timeout(Some(Duration::from_secs(10))).ok();
     s.write_all(&socks5_greeting())
         .map_err(|e| format!("socks greeting: {}", e))?;
@@ -3160,6 +3263,7 @@ fn handshake(
     stats: &mut Stats,
     our_height: u64,
     target: &PeerTarget,
+    addr_me: &tri7_core::p2p::WireAddr,
 ) -> Result<PeerInfo, String> {
     // addr_you: the target's address for direct IP peers; a placeholder
     // (127.0.0.1 + the target port) for .onion peers — the wire form needs 4
@@ -3179,27 +3283,19 @@ fn handshake(
     let q = quad.unwrap_or([127, 0, 0, 1]);
     let (a, b, c, d) = (q[0], q[1], q[2], q[3]);
     let addr_you = tri7_core::p2p::WireAddr::ipv4(a, b, c, d, target.port, tri7_core::p2p::NODE_NETWORK);
-    let addr_me = tri7_core::p2p::WireAddr::ipv4(
-        127,
-        0,
-        0,
-        1,
-        tri7_core::p2p::DEFAULT_PORT,
-        tri7_core::p2p::NODE_NETWORK,
-    );
     let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
     let vp = tri7_core::p2p::VersionPayload {
         version: tri7_core::p2p::PROTOCOL_VERSION,
         services: tri7_core::p2p::NODE_NETWORK,
         timestamp: now_secs() as i64,
         addr_you,
-        addr_me,
+        addr_me: addr_me.clone(),
         nonce,
         user_agent: "/tri7:7.0.0/".into(),
         start_height: our_height as i32,
     };
     sess.send("version", &tri7_core::p2p::encode_version(&vp), stats)?;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + dial_handshake_window(target.transport);
     let mut peer: Option<PeerInfo> = None;
     let mut veracked = false;
     let mut verack_sent = false;
@@ -3254,6 +3350,68 @@ fn handshake(
         services: 0,
         advertised: None,
     }))
+}
+
+/// MED-4d — the node's SELF-ADVERTISED listening address for `version`
+/// addr_me. Reads the overlay identity files the i2p/tor layers maintain in
+/// the state dir (the same files `getlocalinfo` serves to the GUI):
+///   - `i2p_destination.txt`  ("<b32>.b32.i2p:<port>", written by the wallet's
+///     i2p supervisor when the server tunnel is live — the .b32 address is
+///     STABLE because i2pd keeps the destination keys under the node dir),
+///   - `onion_address.txt` / `hidden_service/hostname` / `tor/hostname`
+///     (the .onion hostname; our own listener supplies the port).
+/// An overlay address is advertised ONLY when the node actually LISTENS:
+/// a `--no-listen` follower has nothing behind the address, and advertising
+/// it would hand peers an endpoint that refuses every dial. No identity or
+/// no listener → None (call sites keep their historical 127.0.0.1
+/// placeholder bytes, which every peer's advertised-store gate filters).
+fn overlay_addr_me(
+    state_dir: &Path,
+    listen_port: Option<u16>,
+) -> Option<tri7_core::p2p::WireAddr> {
+    let port = listen_port?;
+    let read_trimmed = |name: &str| -> Option<String> {
+        let s = std::fs::read_to_string(state_dir.join(name)).ok()?;
+        let s = s.trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    // i2p first (the wallet-native transport: the supervisor writes this
+    // file; the port in the file is the i2pd tunnel TARGET port — the port
+    // peers dial through the network, which is the one to advertise)
+    if let Some(dest) = read_trimmed("i2p_destination.txt").or_else(|| read_trimmed("i2p/hostname")) {
+        if let Some((host, p)) = dest.rsplit_once(':') {
+            if let Ok(p) = p.parse::<u16>() {
+                if host.ends_with(".b32.i2p") {
+                    if let Ok(addr) =
+                        tri7_core::p2p::WireAddr::from_i2p_label(host, p, tri7_core::p2p::NODE_NETWORK)
+                    {
+                        return Some(addr);
+                    }
+                }
+            }
+        }
+        log(&format!(
+            "i2p_destination.txt ignored (not <b32>.b32.i2p:<port>): {}",
+            dest
+        ));
+    }
+    // tor second: hostname file + our listen port
+    for name in ["onion_address.txt", "hidden_service/hostname", "tor/hostname"] {
+        if let Some(host) = read_trimmed(name) {
+            if host.len() == 62 && host.ends_with(".onion") {
+                if let Ok(addr) =
+                    tri7_core::p2p::WireAddr::from_onion_label(&host, port, tri7_core::p2p::NODE_NETWORK)
+                {
+                    return Some(addr);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Peer-store key for an address a peer advertised about ITSELF (version
@@ -11936,7 +12094,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                     Ok((stream, sa)) => {
                         let height = st_shared.lock().unwrap().tip_height;
                         let port = cfg.listen_port.unwrap_or(0);
-                        match accept_handshake(stream, sa, &mut stats, height, port) {
+                        match accept_handshake(stream, sa, &mut stats, height, port, &cfg.state_dir) {
                             Ok(p) => {
                                 stats.inbound_accepted += 1;
                                 log(&format!("inbound peer connected: {}", p.label));
@@ -12881,7 +13039,18 @@ fn onetry_dial(adapter: &OpsAdapter, node: &str, host: &str, port: u16) -> Resul
     let mut sess = Session::connect_target(&target)?;
     let mut scratch = Stats::default();
     let height = adapter.mirror.height();
-    let info = match handshake(&mut sess, &mut scratch, height, &target) {
+    // onetry keeps the loopback placeholder addr_me (disclosed): the verb is
+    // a manual one-shot probe, and without the ops adapter carrying the full
+    // state-dir identity the honest answer is the filtered placeholder.
+    let placeholder = tri7_core::p2p::WireAddr::ipv4(
+        127,
+        0,
+        0,
+        1,
+        tri7_core::p2p::DEFAULT_PORT,
+        tri7_core::p2p::NODE_NETWORK,
+    );
+    let info = match handshake(&mut sess, &mut scratch, height, &target, &placeholder) {
         Ok(info) => info,
         Err(e) => {
             sess.shutdown();
@@ -13430,6 +13599,7 @@ fn accept_handshake(
     stats: &mut Stats,
     our_height: u64,
     listen_port: u16,
+    state_dir: &Path,
 ) -> Result<Peer, String> {
     stream.set_nodelay(true).ok();
     stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
@@ -13470,7 +13640,21 @@ fn accept_handshake(
     }
     let info = peer.ok_or("inbound handshake: no version from client")?;
     let connected_at = Instant::now();
-    // 2. our version + verack together
+    // 2. our version + verack together. MED-4d: when the node listens AND
+    // carries an overlay identity (i2p destination / onion hostname), the
+    // inbound peer learns our real address — an i2p listener announces its
+    // .b32 destination, a tor listener its .onion. Otherwise the historical
+    // loopback placeholder (informational on the wire).
+    let addr_me = overlay_addr_me(state_dir, Some(listen_port)).unwrap_or_else(|| {
+        tri7_core::p2p::WireAddr::ipv4(
+            127,
+            0,
+            0,
+            1,
+            listen_port,
+            tri7_core::p2p::NODE_NETWORK,
+        )
+    });
     let (ya, yb, yc, yd, yport) = match peer_addr.ip() {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -13484,14 +13668,6 @@ fn accept_handshake(
         yc,
         yd,
         yport,
-        tri7_core::p2p::NODE_NETWORK,
-    );
-    let addr_me = tri7_core::p2p::WireAddr::ipv4(
-        127,
-        0,
-        0,
-        1,
-        listen_port,
         tri7_core::p2p::NODE_NETWORK,
     );
     let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
@@ -13540,7 +13716,13 @@ fn accept_handshake(
         connected_at,
         buffered,
         dead: false,
-        transport: Transport::Clearnet,
+        // LOW-2b: an overlay inbound arrives as loopback TCP (i2pd's server
+        // tunnel / tor's hidden service connect locally), so the SOCKET
+        // address cannot classify it. The peer's own advertised addr_me CAN:
+        // a .b32.i2p / .onion store key means the session lives on that
+        // transport. A placeholder (loopback) stays Clearnet — honest
+        // "unknown", never a fabricated label.
+        transport: transport_of_advertised(info.advertised.as_deref()),
         version: info.version,
         subver: info.subver.clone(),
         start_height: info.start_height,
@@ -13564,6 +13746,21 @@ fn connect_and_handshake(
     // (dialable through their overlay SOCKS); leftover legacy hex-tor-key
     // entries and clearnet quads are relay-only and are never dialed: the
     // network has no clearnet P2P.
+    // MED-4d: our self-advertised listening address for version addr_me —
+    // the overlay identity (i2p destination / onion hostname) when the node
+    // listens and one is known, else the historical loopback placeholder
+    // (byte-identical to the pre-lane wire bytes; filtered by every peer's
+    // advertised-store gate).
+    let our_addr = overlay_addr_me(&cfg.state_dir, cfg.listen_port).unwrap_or_else(|| {
+        tri7_core::p2p::WireAddr::ipv4(
+            127,
+            0,
+            0,
+            1,
+            tri7_core::p2p::DEFAULT_PORT,
+            tri7_core::p2p::NODE_NETWORK,
+        )
+    });
     let mut targets: Vec<PeerTarget> = Vec::new();
     let now = tri7_core::peers::unix_now();
     let seeds: Vec<(String, u16)> = cfg
@@ -13593,7 +13790,7 @@ fn connect_and_handshake(
         let idx = (start + off) % n;
         let target = &targets[idx];
         match Session::connect_target(target) {
-            Ok(mut sess) => match handshake(&mut sess, stats, height, target) {
+            Ok(mut sess) => match handshake(&mut sess, stats, height, target, &our_addr) {
                 Ok(peer) => {
                     log(&format!(
                         "handshake ok: {} — peer version {} ({}) start height {} services {}",
@@ -13651,6 +13848,18 @@ fn connect_and_handshake(
 /// leftovers are relay-only and never dialed.
 fn dialable_store_host(host: &str) -> bool {
     host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p")
+}
+
+/// LOW-2b: classify a peer's transport from its OWN advertised store key —
+/// the socket address cannot tell an overlay inbound (arrives as loopback
+/// TCP from i2pd/tor) from a local clearnet peer, but the advertised addr_me
+/// shape can. Placeholder/None (loopback quads) → Clearnet = honest unknown.
+fn transport_of_advertised(adv: Option<&str>) -> Transport {
+    match adv {
+        Some(h) if h.ends_with(".b32.i2p") || h.ends_with(".i2p") => Transport::I2p,
+        Some(h) if h.ends_with(".onion") => Transport::Tor,
+        _ => Transport::Clearnet,
+    }
 }
 
 /// Bounded multi-target connect that TOLERATES all targets being down
@@ -19051,5 +19260,259 @@ addnode=host:notaport
             "exactly one row per write, no resurrected duplicates"
         );
         let _ = std::fs::remove_dir_all(&*state);
+    }
+
+    // -------------------------------------------------------------------
+    // i2p lane: seed floor, self-advertise, per-transport windows, demotion
+    // exemption, inbound transport classification
+    // -------------------------------------------------------------------
+
+    /// HIGH-5: every DEFAULT_PEER_SEEDS entry parses through PeerTarget and
+    /// the parsed transport matches the documented tag — the table is the
+    /// boot floor, a typo here would silently strand a transport.
+    #[test]
+    fn default_peer_seeds_parse_with_expected_transports() {
+        let socks = ("127.0.0.1".to_string(), 9050);
+        let i2p = ("127.0.0.1".to_string(), 4447);
+        let targets = seed_targets(&socks, &i2p);
+        assert_eq!(targets.len(), DEFAULT_PEER_SEEDS.len(), "every seed parses");
+        for ((tag, spec), t) in DEFAULT_PEER_SEEDS.iter().zip(&targets) {
+            let want = match *tag {
+                "tor" => Transport::Tor,
+                "i2p" => Transport::I2p,
+                _ => Transport::Clearnet,
+            };
+            assert_eq!(
+                t.transport, want,
+                "seed {spec} tagged {tag} must parse to the same transport"
+            );
+            assert_eq!(t.endpoint(), *spec);
+        }
+        // the overlay seeds dial through the RIGHT socks endpoints
+        let i2p_seed = targets
+            .iter()
+            .find(|t| t.transport == Transport::I2p)
+            .expect("an i2p seed exists");
+        assert_eq!(i2p_seed.socks.as_ref().unwrap().1, 4447);
+        let tor_seed = targets
+            .iter()
+            .find(|t| t.transport == Transport::Tor)
+            .expect("a tor seed exists");
+        assert_eq!(tor_seed.socks.as_ref().unwrap().1, 9050);
+        // the fleet identities are the live ones
+        assert!(DEFAULT_PEER_SEEDS.iter().any(|(_, s)| s
+            .starts_with("ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p")));
+        assert!(DEFAULT_PEER_SEEDS.iter().any(|(_, s)| s
+            .starts_with("gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion")));
+    }
+
+    /// HIGH-5: parse_args APPENDS the seed floor (augment, never replace)
+    /// and a user target equal to a seed never duplicates.
+    #[test]
+    fn parse_args_appends_default_seeds_without_duplicates() {
+        let state = std::env::temp_dir().join(format!("i2pseeds{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        // (a) a bare boot (only state dir + a missing conf): the default
+        // loopback target PLUS the full seed floor
+        let argv = vec![
+            "--state-dir".to_string(),
+            state.display().to_string(),
+            "--conf".to_string(),
+            state.join("empty.conf").display().to_string(),
+        ];
+        let cfg = parse_args(&argv);
+        assert!(
+            cfg.peers
+                .iter()
+                .any(|t| t.transport == Transport::I2p && t.host.ends_with(".b32.i2p")),
+            "the i2p seed must be in the boot target list: {:?}",
+            cfg.peers.iter().map(|t| t.endpoint()).collect::<Vec<_>>()
+        );
+        assert!(
+            cfg.peers.iter().any(|t| t.transport == Transport::Tor),
+            "the tor seed must be in the boot target list"
+        );
+        // (b) a user config that ALREADY names the i2p seed: no duplicate,
+        // and the user target stays in FRONT of the appended floor
+        let seed_spec = "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113";
+        let argv2 = vec![
+            "--state-dir".to_string(),
+            state.display().to_string(),
+            "--conf".to_string(),
+            state.join("empty.conf").display().to_string(),
+            "--i2p".to_string(),
+            seed_spec.to_string(),
+        ];
+        let cfg2 = parse_args(&argv2);
+        let count = cfg2
+            .peers
+            .iter()
+            .filter(|t| t.host == "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p")
+            .count();
+        assert_eq!(count, 1, "the user's own seed target wins, no dup");
+        assert_eq!(cfg2.peers[0].endpoint(), seed_spec);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// MED-4d: overlay_addr_me reads the supervisor-written state files and
+    /// builds the wire form with the is_i2p flag; an unknown identity or a
+    /// --no-listen follower yields None (call sites keep the placeholder).
+    #[test]
+    fn overlay_addr_me_carries_i2p_flag_and_gates_on_listen() {
+        let state = std::env::temp_dir().join(format!("i2paddrme{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        // no identity → None
+        assert!(overlay_addr_me(&state, Some(24113)).is_none());
+        // listener off → None even WITH an identity (never advertise an
+        // address nothing listens behind)
+        std::fs::write(
+            state.join("i2p_destination.txt"),
+            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113\n",
+        )
+        .unwrap();
+        assert!(
+            overlay_addr_me(&state, None).is_none(),
+            "--no-listen must not advertise"
+        );
+        // identity + listener → the i2p wire form with the flag
+        let addr = overlay_addr_me(&state, Some(24113)).expect("the destination parses");
+        assert!(addr.is_i2p);
+        assert!(!addr.is_tor_v3);
+        assert_eq!(addr.port, 24113);
+        assert_eq!(
+            addr.i2p_hostname().unwrap(),
+            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p"
+        );
+        // garbage in the file is skipped (logged), falls through to None
+        std::fs::write(state.join("i2p_destination.txt"), "not-a-destination\n").unwrap();
+        assert!(overlay_addr_me(&state, Some(24113)).is_none());
+        // tor fallback: a hostname file yields the onion wire form
+        std::fs::remove_file(state.join("i2p_destination.txt")).unwrap();
+        std::fs::write(
+            state.join("onion_address.txt"),
+            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion\n",
+        )
+        .unwrap();
+        let onion = overlay_addr_me(&state, Some(24113)).expect("onion identity parses");
+        assert!(onion.is_tor_v3);
+        assert!(!onion.is_i2p);
+        assert_eq!(onion.port, 24113);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// MED-3a: the i2p dial windows are wider than clearnet/tor (tunnel
+    /// builds are slow; the retry loop would otherwise churn them), and the
+    /// clearnet/tor values are unchanged.
+    #[test]
+    fn i2p_dial_timeouts_are_wider_than_clearnet() {
+        use Transport::{Clearnet, I2p, Tor};
+        assert_eq!(dial_socks_read_timeout(I2p).as_secs(), 90);
+        assert_eq!(dial_socks_read_timeout(Clearnet).as_secs(), 30);
+        assert_eq!(dial_socks_read_timeout(Tor).as_secs(), 30);
+        assert_eq!(dial_handshake_window(I2p).as_secs(), 60);
+        assert_eq!(dial_handshake_window(Clearnet).as_secs(), 20);
+        assert_eq!(dial_handshake_window(Tor).as_secs(), 20);
+    }
+
+    /// MED-3b: i2p-labeled body sources are NEVER credited a demotion miss
+    /// (a silent tunnel is a build in progress, not a dead peer); clearnet
+    /// labels demote exactly as before.
+    #[test]
+    fn credit_body_miss_round_skips_i2p_labels() {
+        let clearnet_label = "out:100.85.236.10:24113".to_string();
+        let b32_label =
+            "out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
+                .to_string();
+        let dns_label = "in:somepeer.i2p:24113".to_string();
+        let mut hash_a = [0xA1u8; 32];
+        hash_a[0] = 1;
+        let mut hash_b = [0xA1u8; 32];
+        hash_b[0] = 2;
+        let tries = HashMap::from([
+            (
+                hash_a,
+                BodyTries {
+                    sent_at: Instant::now(),
+                    attempts: 1,
+                    tried: vec![b32_label.clone(), clearnet_label.clone()],
+                },
+            ),
+            (
+                hash_b,
+                BodyTries {
+                    sent_at: Instant::now(),
+                    attempts: 1,
+                    tried: vec![dns_label.clone()],
+                },
+            ),
+        ]);
+        let mut misses: HashMap<String, u32> = HashMap::new();
+        let mut demoted: HashMap<String, Instant> = HashMap::new();
+        // round 1: both labels of hash_a are "tried" — the clearnet one
+        // crosses the limit immediately (adv_fail_limit 1) and DEMOTES; the
+        // b32 i2p one is skipped entirely
+        let reports = credit_body_miss_round(
+            &[(hash_a, 0, 1)],
+            &tries,
+            &mut misses,
+            &mut demoted,
+            1,
+            Duration::from_secs(120),
+            Duration::from_secs(45),
+            Instant::now(),
+        );
+        assert!(
+            demoted.contains_key(&clearnet_label),
+            "clearnet demotion unchanged: {demoted:?}"
+        );
+        assert!(reports.iter().any(|r| r.contains("100.85.236.10")));
+        assert!(
+            !misses.contains_key(&b32_label),
+            "i2p source must not be credited: {misses:?}"
+        );
+        assert!(!demoted.iter().any(|(k, _)| k.contains(".b32.i2p")));
+        // round 2: the plain-`.i2p` inbound label is i2p too — exempt
+        let reports2 = credit_body_miss_round(
+            &[(hash_b, 0, 1)],
+            &tries,
+            &mut misses,
+            &mut demoted,
+            1,
+            Duration::from_secs(120),
+            Duration::from_secs(45),
+            Instant::now(),
+        );
+        assert!(
+            reports2.is_empty(),
+            "the .i2p label must be exempt too: {reports2:?}"
+        );
+        assert!(!misses.contains_key(&dns_label));
+    }
+
+    /// LOW-2b: inbound peers classify by their OWN advertised address shape
+    /// (the socket of an overlay inbound is always loopback).
+    #[test]
+    fn transport_of_advertised_classifies_overlay() {
+        assert_eq!(
+            transport_of_advertised(Some(
+                "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p"
+            )),
+            Transport::I2p
+        );
+        assert_eq!(transport_of_advertised(Some("example.i2p")), Transport::I2p);
+        assert_eq!(
+            transport_of_advertised(Some(
+                "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion"
+            )),
+            Transport::Tor
+        );
+        // loopback placeholder / none = honest Clearnet-unknown
+        assert_eq!(
+            transport_of_advertised(Some("127.0.0.1")),
+            Transport::Clearnet
+        );
+        assert_eq!(transport_of_advertised(None), Transport::Clearnet);
     }
 }

@@ -783,6 +783,50 @@ impl Tri7App {
                         ),
                     )
                     .on_hover_text(tor_hover);
+                    // 5d. I2P transport status — tor-parity (Sami, standing:
+                    // I2P IS FIRST-CLASS / the fleet is dual-network). The
+                    // honest supervisor state: our i2pd child running, the
+                    // user's own system i2pd on the pinned 4447, or
+                    // unavailable. NEVER a phantom "i2p on": amber means
+                    // .b32.i2p peers are unreachable this session.
+                    let i2p = self.node.as_ref().map(|n| n.i2p_status());
+                    let (i2p_label, i2p_color, i2p_hover) = match &i2p {
+                        Some(s) => {
+                            let hover = match s.socks_port() {
+                                Some(p) => format!(
+                                    "i2pd SOCKS endpoint for .b32.i2p peers: {} (127.0.0.1:{p})",
+                                    s.label()
+                                ),
+                                None => format!(
+                                    "i2pd SOCKS endpoint for .b32.i2p peers: {}",
+                                    s.label()
+                                ),
+                            };
+                            (
+                                s.label(),
+                                if s.socks_port().is_some() {
+                                    th::TEXT_MUTED
+                                } else {
+                                    th::WARNING
+                                },
+                                hover,
+                            )
+                        }
+                        None => (
+                            "I2P: unavailable".to_string(),
+                            th::WARNING,
+                            "i2pd is not running — i2p peers unreachable this session \
+                             (tor/clearnet bootstrap only)"
+                                .to_string(),
+                        ),
+                    };
+                    ui.separator();
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i2p_label).size(11.0).strong().color(i2p_color),
+                        ),
+                    )
+                    .on_hover_text(i2p_hover);
                     // 6. refresh — 28 px icon-only ghost button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
@@ -3663,7 +3707,7 @@ impl Tri7App {
                                 ui.label(
                                     egui::RichText::new(match kind {
                                         "onion" => "not configured on this node",
-                                        _ => "not configured (needs i2pd)",
+                                        _ => "no i2p tunnel yet (the wallet's i2pd is starting, was unavailable, or has no bundled payload)",
                                     })
                                     .size(12.0)
                                     .color(th::TEXT_MUTED),

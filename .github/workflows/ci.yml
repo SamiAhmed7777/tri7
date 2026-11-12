@@ -105,6 +105,41 @@ jobs:
           New-Item -ItemType Directory -Force -Path deploy\windows\tor-bundle | Out-Null
           Copy-Item (Join-Path $src 'tor\tor.exe') deploy\windows\tor-bundle\tor.exe
           Write-Host "tor.exe sha256:" (Get-FileHash deploy\windows\tor-bundle\tor.exe -Algorithm SHA256).Hash
+      # I2P IS FIRST-CLASS (Sami, standing; the fleet is dual-network): the
+      # wallet SHIPS the real i2pd daemon beside tor, fetched from the
+      # official PurpleI2P release, PINNED by version AND sha256 — the job
+      # FAILS on any digest mismatch (same supply-chain gate as tor).
+      # i2pd.exe + the official reseed certificates land in
+      # deploy\windows\i2pd-bundle\ where the NSIS script installs them
+      # ($INSTDIR\i2pd\) and the portable zip packs them beside the GUI exe;
+      # the node supervisor (src/gui/node_supervisor.rs, I2pSupervisor) runs
+      # i2pd as a hidden child with GENERATED configs (zero user steps),
+      # pins SOCKS 4447, and reads the stable .b32.i2p destination back.
+      # A machine whose own system i2pd already answers on 4447 uses that
+      # instead (never two). Bump = change $ver + $want here AND
+      # deploy/windows/i2pd-bundle/README.md.
+      - name: Fetch bundled i2pd (pinned 3.0.0 + SHA256 gate)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '3.0.0'
+          $url = "https://github.com/PurpleI2P/i2pd/releases/download/$ver/i2pd_${ver}_win64_mingw.zip"
+          $want = '973abdd5793e05cd21171ee701f3e2603d756543872dfb81d0a5c2d1a3ff3fb3'
+          $zip = Join-Path $env:RUNNER_TEMP 'i2pd-win64-mingw.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) {
+            throw "i2pd bundle SHA256 MISMATCH for $url : got $got want $want"
+          }
+          Write-Host "i2pd bundle digest OK: $got"
+          $src = Join-Path $env:RUNNER_TEMP 'i2pd-pkg'
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $src -Force
+          New-Item -ItemType Directory -Force -Path deploy\windows\i2pd-bundle\certificates | Out-Null
+          Copy-Item (Join-Path $src 'i2pd.exe') deploy\windows\i2pd-bundle\i2pd.exe
+          Copy-Item (Join-Path $src 'contrib\certificates\*') deploy\windows\i2pd-bundle\certificates\ -Recurse -Force
+          Copy-Item deploy\windows\i2pd-bundle\README.md deploy\windows\i2pd-bundle\I2PD-LICENSE.txt
+          Write-Host "i2pd.exe sha256:" (Get-FileHash deploy\windows\i2pd-bundle\i2pd.exe -Algorithm SHA256).Hash
       - name: Run tests
         run: cargo test --release --lib
       - uses: actions/upload-artifact@v4
@@ -137,9 +172,16 @@ jobs:
           # (pick_asset prefix match) resolves it for portable installs.
           $stage = Join-Path $env:RUNNER_TEMP 'portable-tor-stage'
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tor') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'i2pd\certificates') | Out-Null
           Copy-Item target\release\tri7_wallet_gui.exe $stage\
           Copy-Item deploy\windows\tor-bundle\tor.exe (Join-Path $stage 'tor\tor.exe')
           Copy-Item deploy\windows\tor-bundle\README.md (Join-Path $stage 'tor\TOR-LICENSE.txt')
+          # dual-transport portable (I2P IS FIRST-CLASS): i2pd.exe + its
+          # reseed certificates ride the SAME zip — the supervisor finds
+          # i2pd\i2pd.exe beside the GUI exe (bundled_i2pd_exe lookup)
+          Copy-Item deploy\windows\i2pd-bundle\i2pd.exe (Join-Path $stage 'i2pd\i2pd.exe')
+          Copy-Item deploy\windows\i2pd-bundle\certificates\* (Join-Path $stage 'i2pd\certificates\') -Recurse -Force
+          Copy-Item deploy\windows\i2pd-bundle\I2PD-LICENSE.txt (Join-Path $stage 'i2pd\I2PD-LICENSE.txt')
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-gui-portable-tor.zip" -Force
       - name: SHA256SUMS (digest pinning for the updater)
         shell: pwsh

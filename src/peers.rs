@@ -316,16 +316,18 @@ impl PeerStore {
     }
 
     /// Merge `addr` gossip into the store (net.cpp ProcessMessage "addr"
-    /// relay). Tor-only: only tor_v3 entries are stored, keyed by their
-    /// reconstructed `.onion` HOSTNAME (see `WireAddr::store_key` /
-    /// `onion_hostname`) so the dial loop can connect to them; clearnet/i2p
-    /// entries are ignored. Entries matching our own identity are skipped.
+    /// relay). Overlay-only (Sami: "I2P IS FIRST-CLASS … the fleet is
+    /// dual-network"): tor_v3 AND i2p (GarliCat / `is_i2p`) entries are
+    /// stored, keyed by their reconstructed `.onion` / `.b32.i2p` HOSTNAME
+    /// (see `WireAddr::store_key`) so the dial loop can connect to them;
+    /// cleartext IP gossip is still NEVER stored. Entries matching our own
+    /// identity are skipped.
     /// Returns the number of entries merged (new or refreshed).
     pub fn merge_addr(&mut self, entries: &[AddrEntry], now: u64) -> usize {
         let mut merged = 0;
         for e in entries {
-            if !e.addr.is_tor_v3 {
-                continue; // Tor-only network: never store cleartext gossips
+            if !(e.addr.is_tor_v3 || e.addr.is_i2p) {
+                continue; // overlay-only network: never store cleartext gossip
             }
             let Some(host) = e.addr.store_key() else {
                 continue;
@@ -683,5 +685,51 @@ mod tests {
         assert!(!store.remove("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5555.onion", 24113));
         assert_eq!(store.len(), 1);
         assert_eq!(store.peers()[0].host, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb7777.onion");
+    }
+
+    /// HIGH-4a (dual-stack directive): `merge_addr` accepts i2p (GarliCat /
+    /// is_i2p) gossip alongside tor_v3 — keyed by the reconstructed
+    /// `.b32.i2p` hostname, re-servable over getaddr — while cleartext IP
+    /// gossip stays rejected. Without the i2p arm every wire-learned i2p
+    /// peer is silently discarded and discovery is tor-only.
+    #[test]
+    fn merge_addr_accepts_i2p_and_tor_rejects_clearnet() {
+        let mut store = PeerStore::default();
+        // an i2p identity: hash → wire form (as a gossiper would encode it)
+        let mut hash = [0u8; 32];
+        for (i, b) in hash.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0x33;
+        }
+        let i2p_addr = WireAddr::i2p_from_hash(&hash, 24113, crate::p2p::NODE_NETWORK);
+        let i2p_host = i2p_addr.i2p_hostname().unwrap();
+        assert!(i2p_host.ends_with(".b32.i2p"));
+        // a tor_v3 identity (still accepted)
+        let onion = WireAddr::onion_v3([0x44u8; 32], 24113, crate::p2p::NODE_NETWORK);
+        let onion_host = onion.onion_hostname().unwrap();
+        // a cleartext quad (still rejected — overlay-only network)
+        let clear = WireAddr::ipv4(192, 168, 1, 5, 24113, crate::p2p::NODE_NETWORK);
+        let merged = store.merge_addr(
+            &[
+                AddrEntry { time: 1, addr: i2p_addr.clone() },
+                AddrEntry { time: 2, addr: onion.clone() },
+                AddrEntry { time: 3, addr: clear },
+            ],
+            100,
+        );
+        assert_eq!(merged, 2, "i2p + tor merge, clearnet rejected");
+        assert_eq!(store.len(), 2);
+        let hosts: Vec<&str> = store.peers().iter().map(|e| e.host.as_str()).collect();
+        assert!(hosts.contains(&i2p_host.as_str()), "i2p keyed by b32 hostname");
+        assert!(hosts.contains(&onion_host.as_str()));
+        // re-served over getaddr in wire form (the from_store_key inverse)
+        let served = store.addr_entries(200, 1000);
+        assert_eq!(served.len(), 2);
+        assert!(
+            served.iter().any(|e| e.addr == i2p_addr),
+            "i2p entry re-encodes to the same wire form"
+        );
+        // and the dial plan carries the dialable b32 hostname
+        let plan = store.dial_order(300, &[]);
+        assert!(plan.iter().any(|(h, _)| *h == i2p_host));
     }
 }

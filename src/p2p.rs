@@ -246,6 +246,16 @@ pub fn onion_v3_label(pubkey: &[u8; 32]) -> String {
     WireAddr::base32_encode_rfc4648(&raw)
 }
 
+/// The 52-char lowercase base32 label (without the `.b32.i2p` suffix) of an
+/// i2p destination HASH: base32(sha256(destination)). 32 bytes is exactly
+/// 52 unpadded base32 chars, so this is a lossless TEXT spelling of the
+/// hash — the same alphabet as the onion label. The fleet's live identities
+/// verify this parser byte-for-byte (DNS2's `ztj5lcg4…` server tunnel and a
+/// throwaway probe instance: derived == i2pd's own logged address on both).
+pub fn i2p_b32_label(dest_hash: &[u8; 32]) -> String {
+    WireAddr::base32_encode_rfc4648(dest_hash)
+}
+
 /// Legacy wire layout (verified against /opt/triangles-v5/src, netbase.h:88-93,
 /// netbase.cpp SetSpecial/ToStringIP, protocol.h:84-109):
 ///
@@ -352,6 +362,66 @@ impl WireAddr {
         Ok(WireAddr::onion_v3(key, port, services))
     }
 
+    /// Reconstructed `.b32.i2p` HOSTNAME for this address:
+    /// `base32(tor_key) + ".b32.i2p"` where tor_key carries the destination's
+    /// 32-byte SHA256 hash (see `from_i2p_label`). This is what makes
+    /// wire-learned i2p gossip dialable: the store keeps the hostname and the
+    /// dial loop dispatches on `.b32.i2p` through the i2pd SOCKS endpoint.
+    /// None for non-i2p addresses.
+    pub fn i2p_hostname(&self) -> Option<String> {
+        if !self.is_i2p {
+            return None;
+        }
+        Some(format!("{}.b32.i2p", i2p_b32_label(&self.tor_key)))
+    }
+
+    /// Wire form of a published `.b32.i2p` destination. The label TEXT is
+    /// base32(sha256(destination)) — the destination bytes themselves are NOT
+    /// recoverable from it, which is exactly why the wire carries the 32-byte
+    /// HASH. Encoded in the legacy GarliCat form: ip[0..6] = GARLICAT,
+    /// ip[6..16] = hash[0..10]; the FULL hash rides tor_key (the tri7 CNetAddr
+    /// body always carries the 32-byte key field), `is_i2p = true`.
+    pub fn i2p_from_hash(hash: &[u8; 32], port: u16, services: u64) -> Self {
+        let mut ip = [0u8; 16];
+        ip[..6].copy_from_slice(&GARLICAT);
+        ip[6..16].copy_from_slice(&hash[..10]);
+        WireAddr {
+            services,
+            ip,
+            tor_key: *hash,
+            is_tor_v3: false,
+            is_i2p: true,
+            port,
+        }
+    }
+
+    /// Parse a published `.b32.i2p` hostname (label with or without the
+    /// suffix) into the wire form — the inverse of `i2p_hostname`. The label
+    /// must be exactly 52 lowercase base32 chars (a-z, 2-7): anything else
+    /// (DNS-style `.i2p` names, uppercase, wrong length) is NOT a destination
+    /// hash and is rejected — a fabricated hash would be an unroutable lie.
+    pub fn from_i2p_label(label: &str, port: u16, services: u64) -> Result<WireAddr, String> {
+        let label = label
+            .strip_suffix(".b32.i2p")
+            .unwrap_or_else(|| label.strip_suffix(".i2p").unwrap_or(label));
+        let ok_chars = label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b));
+        if label.len() != 52 || !ok_chars {
+            return Err(format!(
+                "i2p label must be 52 lowercase base32 chars, got {} ({} chars)",
+                label,
+                label.len()
+            ));
+        }
+        let raw = WireAddr::base32_decode_rfc4648(label)
+            .ok_or_else(|| "i2p label has non-base32 chars".to_string())?;
+        let hash: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| "i2p label must decode to exactly 32 bytes".to_string())?;
+        Ok(WireAddr::i2p_from_hash(&hash, port, services))
+    }
+
     /// Reconstructed v3 onion HOSTNAME for this address:
     /// `base32(pubkey(32) || checksum(2) || 0x03) + ".onion"` where
     /// `checksum = sha3_256(".onion checksum" || pubkey || 0x03)[..2]`.
@@ -426,12 +496,17 @@ impl WireAddr {
     ///    (`onion_hostname()` — the v3 checksum is a pure encoding of the
     ///    tor-generated pubkey, so the hostname is exact, and it feeds the
     ///    dial loop directly: `host.ends_with(".onion")` → dialable).
-    ///  - IPv4-mapped → dotted quad (never dialed on a Tor-only network,
+    ///  - i2p → the reconstructed `.b32.i2p` HOSTNAME (`i2p_hostname()` —
+    ///    base32 of the carried destination hash; dialable through the i2pd
+    ///    SOCKS endpoint: `host.ends_with(".b32.i2p")`).
+    ///  - IPv4-mapped → dotted quad (never dialed on an overlay-only network,
     ///    but round-trippable for the codec).
     ///  - other shapes → None.
     pub fn store_key(&self) -> Option<String> {
         if self.is_tor_v3 {
             self.onion_hostname()
+        } else if self.is_i2p {
+            self.i2p_hostname()
         } else if self.is_ipv4_mapped() {
             Some(format!(
                 "{}.{}.{}.{}",
@@ -442,12 +517,17 @@ impl WireAddr {
         }
     }
 
-    /// Inverse of `store_key`: hostname (`.onion`, 56-char label), 64-char
-    /// hex tor key, or dotted quad → wire form.
+    /// Inverse of `store_key`: hostname (`.onion` 56-char label, `.b32.i2p`
+    /// 52-char label), 64-char hex tor key, or dotted quad → wire form.
+    /// DNS-style `<name>.i2p` entries have no hash and parse to None here —
+    /// they are conf-only dial targets, not wire-gossipable identities.
     pub fn from_store_key(key: &str, port: u16, services: u64) -> Option<WireAddr> {
         let lower = key.to_ascii_lowercase();
         if lower.len() == 62 && lower.ends_with(".onion") {
             return WireAddr::from_onion_label(&lower, port, services).ok();
+        }
+        if lower.len() == 60 && lower.ends_with(".b32.i2p") {
+            return WireAddr::from_i2p_label(&lower, port, services).ok();
         }
         if key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
             let raw = hex_decode(key).ok()?;
@@ -1683,5 +1763,108 @@ mod tests {
         legacy.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         let back = parse_version(&legacy).expect("legacy + trailing must resolve");
         assert_eq!(back, v);
+    }
+
+    // -------------------------------------------------------------------
+    // i2p wire form (GarliCat + destination hash) — store-key round trip
+    // -------------------------------------------------------------------
+
+    /// RFC 4648 base32 pin vectors for `i2p_b32_label` (bit-packing of a
+    /// 32-byte hash, lowercase unpadded — the `.b32.i2p` address alphabet).
+    #[test]
+    fn i2p_b32_label_pin_vectors() {
+        assert_eq!(
+            i2p_b32_label(&[0u8; 32]),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            i2p_b32_label(&[
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+            ]),
+            "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq"
+        );
+    }
+
+    /// label → wire → hostname → store key → parse: the full i2p identity
+    /// loop must close, carry `is_i2p` across the tri7 wire shape, use the
+    /// GarliCat ip prefix, and be storable/serveable via store_key /
+    /// from_store_key (HIGH-4b/4c: without this an i2p peer can never be
+    /// keyed, gossiped back over getaddr, or re-dialed from the store).
+    #[test]
+    fn i2p_wire_form_round_trips_with_flag() {
+        let mut hash = [0u8; 32];
+        for (i, b) in hash.iter_mut().enumerate() {
+            *b = (i * 7 + 3) as u8;
+        }
+        let label = i2p_b32_label(&hash);
+        assert_eq!(label.len(), 52);
+
+        let addr = WireAddr::from_i2p_label(&label, 24113, NODE_NETWORK)
+            .expect("a 52-char lowercase label parses");
+        assert!(addr.is_i2p);
+        assert!(!addr.is_tor_v3);
+        assert_eq!(addr.ip[..6], GARLICAT, "GarliCat ip prefix");
+        assert_eq!(addr.ip[6..16], hash[..10], "hash head in ip[6..16]");
+        assert_eq!(addr.tor_key, hash, "full hash in tor_key");
+        assert_eq!(addr.port, 24113);
+
+        // hostname reconstruction is exact and dialable-suffix correct
+        let host = addr.i2p_hostname().expect("i2p addr has a hostname");
+        assert_eq!(host, format!("{label}.b32.i2p"));
+        assert_eq!(addr.store_key().as_deref(), Some(host.as_str()));
+
+        // store-key inverse (getaddr serve path: peers.rs addr_entries)
+        let back = WireAddr::from_store_key(&host, 24113, NODE_NETWORK)
+            .expect("b32 hostname parses back to wire");
+        assert_eq!(back.tor_key, hash);
+        assert!(back.is_i2p);
+        assert_eq!(back.ip, addr.ip);
+
+        // tri7 wire shape keeps the i2p flag byte end-to-end
+        let mut w = Vec::new();
+        addr.encode_no_time(&mut w);
+        let mut r = Reader::new(&w);
+        let dec = WireAddr::decode_no_time_compat(&mut r).expect("compat decode");
+        assert!(dec.is_i2p);
+        assert_eq!(dec.tor_key, hash);
+        assert_eq!(dec.ip, addr.ip);
+        assert_eq!(dec.port, 24113);
+
+        // legacy-shape decode derives i2p from the GarliCat prefix alone
+        // (legacy CService form: services LE + ip + key + flag + port BE)
+        let mut lw = Vec::new();
+        lw.extend_from_slice(&addr.services.to_le_bytes());
+        addr.encode_service(&mut lw);
+        let mut lr = Reader::new(&lw);
+        let leg = WireAddr::decode_no_time(&mut lr).expect("legacy decode");
+        assert!(leg.is_i2p, "GarliCat prefix implies i2p on the legacy shape");
+
+        // reject non-hash forms: DNS-style .i2p names, uppercase, short labels
+        assert!(WireAddr::from_i2p_label("example.i2p", 24113, 0)
+            .is_err());
+        assert!(WireAddr::from_i2p_label(&label.to_uppercase(), 24113, 0).is_err());
+        assert!(WireAddr::from_i2p_label("abc", 24113, 0).is_err());
+    }
+
+    /// The LIVE fleet identity pins the parser end-to-end: DNS2's server
+    /// tunnel destination hash (independent of the throwaway identities the
+    /// derivation was proven against on-host) reconstructs to exactly the
+    /// address the fleet dials.
+    #[test]
+    fn i2p_label_of_known_fleet_hash_matches_dns2_identity() {
+        // The REAL vector: the live DNS2 label decodes, re-encodes, and
+        // lands back on exactly the address the fleet dials.
+        let live = "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p";
+        let addr = WireAddr::from_i2p_label(live, 24113, NODE_NETWORK)
+            .expect("the live fleet identity is a valid label");
+        assert_eq!(addr.i2p_hostname().as_deref(), Some(live));
+        assert_eq!(
+            WireAddr::from_store_key(live, 24113, NODE_NETWORK)
+                .expect("store-key parse")
+                .i2p_hostname()
+                .as_deref(),
+            Some(live)
+        );
     }
 }

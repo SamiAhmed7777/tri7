@@ -94,6 +94,25 @@ Section "Install"
   File "tor-bundle\tor.exe"
   File /oname=TOR-LICENSE.txt "tor-bundle\README.md"
 
+  ; I2P — the wallet SHIPS the REAL i2pd daemon too (Sami, standing: "I2P
+  ; IS FIRST-CLASS … the fleet is dual-network"). CI fetches the PINNED
+  ; official win64-mingw build with a SHA256 gate (.github/workflows/ci.yml)
+  ; into i2pd-bundle\; it is installed under the app dir (binary + the
+  ; official reseed certificates) and the node supervisor
+  ; (src/gui/node_supervisor.rs, I2pSupervisor) runs i2pd\i2pd.exe as a
+  ; hidden child with GENERATED configs — the user never touches a config
+  ; file. A machine whose own system i2pd already answers on 4447 uses that
+  ; instead (never two). No i2pd-bundle\ payload (local manual builds) ->
+  ; comment these lines out; the wallet then runs WITHOUT i2p (honest
+  ; status bar, tor still ships).
+  SetOutPath "$INSTDIR\i2pd"
+  File "i2pd-bundle\i2pd.exe"
+  File /oname=I2PD-LICENSE.txt "i2pd-bundle\I2PD-LICENSE.txt"
+  SetOutPath "$INSTDIR\i2pd\certificates\reseed"
+  File "i2pd-bundle\certificates\reseed\*.crt"
+  SetOutPath "$INSTDIR\i2pd\certificates\family"
+  File "i2pd-bundle\certificates\family\*"
+
   ; the chain store + config live beside the wallet: the GUI's node
   ; supervisor uses <wallet folder>\node\state and
   ; <wallet folder>\node\triangles.conf (verified in src/gui/app.rs +
@@ -159,6 +178,14 @@ Section "Uninstall"
   Delete "$INSTDIR\tor\tor.exe"
   Delete "$INSTDIR\tor\TOR-LICENSE.txt"
   RMDir "$INSTDIR\tor"
+  ; the bundled i2pd payload (re-downloadable, no user data inside — the
+  ; i2pd datadir with the tunnel keys lives under node\state\i2p, removed
+  ; with the node state above; NOTE: deleting the keys dat changes the
+  ; wallet's i2p address, same chain-store re-download class)
+  Delete "$INSTDIR\i2pd\i2pd.exe"
+  Delete "$INSTDIR\i2pd\I2PD-LICENSE.txt"
+  RMDir /r "$INSTDIR\i2pd\certificates"
+  RMDir "$INSTDIR\i2pd"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR\bin"
   RMDir /r "$INSTDIR\node\state"
