@@ -1,0 +1,11 @@
+=== G1: lib debug
+test result: ok. 760 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 105.10s
+
+=== G2: lib release
+test result: ok. 760 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 31.18s
+
+=== G3: gui check
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 51.87s
+=== G4: windows-gnu gui bins
+    Finished `release` profile [optimized] target(s) in 5m 31s
+=== DONE
