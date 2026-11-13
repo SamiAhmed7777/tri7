@@ -2361,7 +2361,17 @@ mod tests {
     /// spawn_override stub: a REAL long-lived child (kill-on-drop is real,
     /// not simulated) that ALSO binds the requested SOCKS port and answers
     /// the probe greeting, so the bounded SOCKS wait succeeds in ~0s.
-    fn stub_tor_spawn(req: TorSpawnRequest) -> Result<Child, String> {
+    /// `registry` (when Some) records each spawned child's pid — paired with
+    /// an injected listener resolver it reproduces the PRODUCTION identity
+    /// shape (the child process owns the port with the bundled exe path),
+    /// which the Windows fail-closed attribution requires; without it the
+    /// port's true listener is the test process itself and a real OS
+    /// resolution would correctly refuse it (live-caught: the windows CI run
+    /// failed exactly the attribution tests for this reason).
+    fn stub_tor_spawn(
+        req: TorSpawnRequest,
+        registry: Option<&Arc<std::sync::Mutex<Option<u32>>>>,
+    ) -> Result<Child, String> {
         let mut cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "ping", "-n", "60", "127.0.0.1"]);
@@ -2377,6 +2387,9 @@ mod tests {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, same as prod
         }
         let child = cmd.spawn().map_err(|e| e.to_string())?;
+        if let Some(reg) = registry {
+            *reg.lock().unwrap() = Some(child.id());
+        }
         // serve the SOCKS wait from a DETACHED thread — the supervisor
         // probes only AFTER this fn returns, so the listener must outlive
         // the call (bounded lifetime; the port is a free one nobody reuses
@@ -2417,6 +2430,27 @@ mod tests {
     fn fake_bundle_exe(dir: &Path) {
         std::fs::create_dir_all(dir.join("tor")).unwrap();
         std::fs::write(dir.join("tor").join("tor.exe"), b"").unwrap();
+    }
+
+    /// (pid registry, injected listener resolver) pair for the stub spawner:
+    /// the stub records each spawned child's pid into the registry and the
+    /// resolver reports it with the bundled exe path — the PRODUCTION
+    /// identity shape (the spawned tor.exe owns the pinned port). Without
+    /// this pair the port's true listener is the test process itself and the
+    /// Windows fail-closed attribution correctly refuses it (live-caught: the
+    /// windows CI run failed exactly the attribution tests for that reason).
+    fn child_identity_pair(
+        bundled_path: String,
+    ) -> (
+        Arc<std::sync::Mutex<Option<u32>>>,
+        Arc<dyn Fn(u16) -> Option<(u32, String)> + Send + Sync>,
+    ) {
+        let reg: Arc<std::sync::Mutex<Option<u32>>> = Arc::new(std::sync::Mutex::new(None));
+        let reg2 = Arc::clone(&reg);
+        let resolver = Arc::new(move |_port: u16| {
+            reg2.lock().unwrap().map(|pid| (pid, bundled_path.clone()))
+        });
+        (reg, resolver)
     }
 
     /// a REAL long-lived child with NO socks listener (for hand-planted
@@ -2496,9 +2530,11 @@ mod tests {
         let kills = sup.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
+        let (pid_reg, tor_listener_resolver) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup.listener_resolver = Some(tor_listener_resolver);
         sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg))
         }));
         // hand-plant an ALIVE child whose SOCKS port has NO listener
         sup.child = Some(long_lived_child());
@@ -2707,9 +2743,11 @@ mod tests {
         let pinned = sup.bundled_probe_port;
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
+        let (pid_reg, tor_listener_resolver) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup.listener_resolver = Some(tor_listener_resolver);
         sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg))
         }));
         let st = sup.ensure(&dir, true);
         assert!(
@@ -2738,9 +2776,11 @@ mod tests {
         let kills = sup.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
+        let (pid_reg, tor_listener_resolver) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup.listener_resolver = Some(tor_listener_resolver);
         sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg))
         }));
         // 1. spawn
         let st = sup.ensure(&dir, true);
@@ -2774,9 +2814,11 @@ mod tests {
         //    nothing is silently inherited)
         let mut sup2 = tor_supervisor(&dir, probe);
         let sc2 = Arc::clone(&spawns);
+        let (pid_reg2, tor_listener_resolver2) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup2.listener_resolver = Some(tor_listener_resolver2);
         sup2.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
             sc2.fetch_add(1, Ordering::SeqCst);
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg2))
         }));
         let st4 = sup2.ensure(&dir, true);
         assert!(matches!(st4, TorStatus::Bundled(_)));
@@ -3091,9 +3133,11 @@ mod tests {
         let kills = n.tor.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
+        let (pid_reg, tor_listener_resolver) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        n.tor.listener_resolver = Some(tor_listener_resolver);
         n.tor.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg))
         }));
         // capture the node argv the runner receives; exit instantly
         let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
@@ -3785,8 +3829,10 @@ mod tests {
         let mut n = EmbeddedNode::new(free_dead_port(), dir.join("node.log"), false);
         n.tor.system_probe_port = tor_probe;
         let spawns = Arc::new(AtomicUsize::new(0));
+        let (pid_reg, tor_listener_resolver) = child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        n.tor.listener_resolver = Some(tor_listener_resolver);
         n.tor.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
-            stub_tor_spawn(req)
+            stub_tor_spawn(req, Some(&pid_reg))
         }));
         n.i2p.system_probe_port = free_dead_port();
         std::fs::write(dir.join("i2pd-fake"), b"").unwrap(); // exists → used
