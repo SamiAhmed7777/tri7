@@ -1,0 +1,14 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index b3146d5..44d6829 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -346,6 +346,9 @@ impl Tri7App {
+             .exact_height(88.0)
+             .frame(egui::Frame::none().fill(th::WINDOW_BG))
+             .show(ctx, |ui| {
++                // nudge the row down a touch (operator 2026-11-13: the
++                // 30px words felt top-clipped in the 88px header)
++                ui.add_space(8.0);
+                 // brand lockup LEFT-aligned — legacy mainwindow.ui placement
+                 // (brand left, menus right). Crisp: mark at native size + REAL
+                 // text, never a downscaled 1199x252 banner (spec §1: no blurry

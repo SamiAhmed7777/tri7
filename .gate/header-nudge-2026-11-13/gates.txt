@@ -1,0 +1,27 @@
+== nudge diff (vs commit 3033aff) ==
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index b3146d5..44d6829 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -346,6 +346,9 @@ impl Tri7App {
+             .exact_height(88.0)
+             .frame(egui::Frame::none().fill(th::WINDOW_BG))
+             .show(ctx, |ui| {
++                // nudge the row down a touch (operator 2026-11-13: the
++                // 30px words felt top-clipped in the 88px header)
++                ui.add_space(8.0);
+                 // brand lockup LEFT-aligned — legacy mainwindow.ui placement
+                 // (brand left, menus right). Crisp: mark at native size + REAL
+                 // text, never a downscaled 1199x252 banner (spec §1: no blurry
+
+== gates on the working tree (full lib suite incl. the wordmark pin) ==
+test result: ok. 762 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 100.19s
+
+
+== GUI featureful check ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.45s
+
+== windows release build ==
+    Finished `release` profile [optimized] target(s) in 0.76s
+== artifact ==
+ecf14b0a423181eec2dd4124e9c88976b8563d189253b88d97ec1d254cd8ec0a  target-win/x86_64-pc-windows-gnu/release/tri7_wallet_gui.exe
