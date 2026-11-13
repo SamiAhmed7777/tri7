@@ -111,6 +111,13 @@ asset_map! {
     "icons/tx_conflicted" => "icons/tx_conflicted.png",
     "icons/refresh" => "icons/refresh.png",
     "brand/header" => "brand/brand_header_white.png",
+    // SPLIT LOCKUP (Sami 2026-11-13: bigger word, icon unchanged): the three
+    // segments of brand_header_white.png cut at its natural gaps and
+    // content-tight; the header composes them so the words can size
+    // independently of the triangle.
+    "brand/lockup_icon" => "brand/brand_lockup_icon.png",
+    "brand/word_cryptographic" => "brand/brand_word_cryptographic.png",
+    "brand/word_triangles" => "brand/brand_word_triangles.png",
     "brand/mark" => "brand/brand_mark_32.png",
     "brand/mark64" => "brand/brand_mark_64.png",
     "brand/mark16" => "brand/brand_mark_16.png",
@@ -336,7 +343,7 @@ impl Tri7App {
     // -----------------------------------------------------------------------
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("wHeader")
-            .exact_height(64.0)
+            .exact_height(88.0)
             .frame(egui::Frame::none().fill(th::WINDOW_BG))
             .show(ctx, |ui| {
                 // brand lockup LEFT-aligned — legacy mainwindow.ui placement
@@ -347,14 +354,31 @@ impl Tri7App {
                 // menu (right) — the panel ui itself is top-down, so without
                 // this the menu would land on a clipped second row.
                 ui.horizontal(|ui| {
-                    // The wordmark IS the operator's artwork (brand/header =
-                    // the supplied PNG lockup: triangle + styled lettering) —
-                    // never a plain-font text label (operator 2026-11-07: the
+                    // The wordmark IS the operator's artwork (the supplied
+                    // PNG lockup: triangle + styled lettering) — never a
+                    // plain-font text label (operator 2026-11-07: the
                     // label rendered in the default egui font, not his mark).
-                    if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
+                    // SPLIT LOCKUP (Sami 2026-11-13: "just the word itself
+                    // bigger and leave the icon the same size"): the
+                    // 1199x252 lockup split at its natural gaps into
+                    // triangle / "Cryptographic" / "Triangles" (content-tight
+                    // crops 186x162, 587x59, 378x59). The icon renders at its
+                    // pre-split size (36 px content height — the old lockup
+                    // showed it at 56/252 x 162 = 36.0); each word renders
+                    // BIGGER at 20 px (the old lockup showed the words at
+                    // 59 x 56/252 = 13.1 px). Aspect ratios are the crops'
+                    // own; the brand stays crisp native pixels.
+                    if let (Some(icon), Some(w1), Some(w2)) = (
+                        self.tex(ui.ctx(), "brand/lockup_icon"),
+                        self.tex(ui.ctx(), "brand/word_cryptographic"),
+                        self.tex(ui.ctx(), "brand/word_triangles"),
+                    ) {
                         ui.add_space(16.0);
-                        let aspect = 600.0 / 126.0;
-                        ui.add(img(&tex, Vec2::new(56.0 * aspect, 56.0)));
+                        ui.add(img(&icon, Vec2::new(36.0 * 186.0 / 162.0, 36.0)));
+                        ui.add_space(6.0);
+                        ui.add(img(&w1, Vec2::new(30.0 * 587.0 / 59.0, 30.0)));
+                        ui.add_space(5.0);
+                        ui.add(img(&w2, Vec2::new(30.0 * 378.0 / 59.0, 30.0)));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);

@@ -4621,3 +4621,61 @@ fn windows_release_wallet_launches_with_no_console_window() {
         "gated to windows release builds only (stdout stays for headless selfcheck): {gate}"
     );
 }
+
+/// SAMI 2026-11-13: "just the word itself bigger and leave the icon the same
+/// size" — the header no longer scales the combined lockup (which grew the
+/// triangle with the words); it composes the SPLIT lockup assets so the
+/// triangle keeps its pre-split rendered size (36 px content height) while
+/// each word renders bigger. Operator PICKED 30 px words + an 88 px header
+/// (from the 30px mockup sheet, bottom variant) — sizes below are pinned to
+/// that choice.
+#[test]
+fn header_word_is_bigger_and_icon_size_is_unchanged() {
+    let app = include_str!("app.rs");
+    // the three split assets are embedded (content-tight crops of the
+    // 1199x252 lockup, cut at its natural gaps)
+    for key in ["brand/lockup_icon", "brand/word_cryptographic", "brand/word_triangles"] {
+        assert!(app.contains(&format!("\"{key}\" =>")), "missing split asset {key}");
+    }
+    // the header composes them (not the combined lockup)
+    let header = app
+        .split("fn header(&mut self")
+        .nth(1)
+        .expect("header fn")
+        .split("fn menu_bar")
+        .next()
+        .expect("header body");
+    assert!(
+        header.contains("brand/lockup_icon") && header.contains("brand/word_cryptographic"),
+        "header must render the split lockup"
+    );
+    assert!(!header.contains("brand/header"), "header must not fall back to the combined lockup");
+    // the operator's pick: 30 px words in an 88 px header
+    assert!(header.contains("exact_height(88.0)"), "header must be the picked 88 px height");
+    // the icon keeps its size: 36 px content height x (186/162 aspect)
+    assert!(
+        header.contains("36.0 * 186.0 / 162.0"),
+        "icon must stay at its pre-split 36 px content height"
+    );
+    // the words are BIGGER: 30 px (was 59/252 x 56 = 13.1 px)
+    assert!(
+        header.contains("30.0 * 587.0 / 59.0") && header.contains("30.0 * 378.0 / 59.0"),
+        "words must render at the picked 30 px height"
+    );
+    // the split crops are the artwork's exact content boxes (px extents of
+    // brand_header_white.png measured at alpha>32: x 10..195 / 202..788 /
+    // 813..1190, y 33..194 / 88..146 / 88..146) — if the source PNG changes,
+    // these crops and ratios must be re-derived, not guessed.
+    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gui/assets/brand"));
+    let expect = [
+        ("brand_lockup_icon.png", 186u32, 162u32),
+        ("brand_word_cryptographic.png", 587u32, 59u32),
+        ("brand_word_triangles.png", 378u32, 59u32),
+    ];
+    for (name, w, h) in expect {
+        let bytes = std::fs::read(assets.join(name)).expect(name);
+        let pw = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let ph = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        assert!((pw, ph) == (w, h), "{name} is {pw}x{ph}, expected {w}x{h}");
+    }
+}

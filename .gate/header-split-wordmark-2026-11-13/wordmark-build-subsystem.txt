@@ -1,0 +1,11 @@
+# windows release build (worktree HEAD = base 1ece227 + header-split diff)
+$ CARGO_TARGET_DIR=/root/tri7/target-win cargo build --release --target x86_64-pc-windows-gnu --features gui --bin tri7_wallet_gui
+  warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+      Finished `release` profile [optimized] target(s) in 5m 43s
+  EXIT=0
+
+# PE optional-header Subsystem parse of the built artifact
+$ python3: e_lfanew=128 Subsystem=2  # 2=GUI 3=console -> GUI-SUBSYSTEM (no console window)
+$ sha256sum tri7_wallet_gui.exe
+  2c083f545a32f219055d48a331db075283d4e1ad363ef37388827bdee4efed68  tri7_wallet_gui.exe
+  size: 15775039 bytes

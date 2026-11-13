@@ -1,0 +1,143 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 3bbdbeb..b3146d5 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -111,6 +111,13 @@ asset_map! {
+     "icons/tx_conflicted" => "icons/tx_conflicted.png",
+     "icons/refresh" => "icons/refresh.png",
+     "brand/header" => "brand/brand_header_white.png",
++    // SPLIT LOCKUP (Sami 2026-11-13: bigger word, icon unchanged): the three
++    // segments of brand_header_white.png cut at its natural gaps and
++    // content-tight; the header composes them so the words can size
++    // independently of the triangle.
++    "brand/lockup_icon" => "brand/brand_lockup_icon.png",
++    "brand/word_cryptographic" => "brand/brand_word_cryptographic.png",
++    "brand/word_triangles" => "brand/brand_word_triangles.png",
+     "brand/mark" => "brand/brand_mark_32.png",
+     "brand/mark64" => "brand/brand_mark_64.png",
+     "brand/mark16" => "brand/brand_mark_16.png",
+@@ -336,7 +343,7 @@ impl Tri7App {
+     // -----------------------------------------------------------------------
+     fn header(&mut self, ctx: &egui::Context) {
+         egui::TopBottomPanel::top("wHeader")
+-            .exact_height(64.0)
++            .exact_height(88.0)
+             .frame(egui::Frame::none().fill(th::WINDOW_BG))
+             .show(ctx, |ui| {
+                 // brand lockup LEFT-aligned — legacy mainwindow.ui placement
+@@ -347,14 +354,31 @@ impl Tri7App {
+                 // menu (right) — the panel ui itself is top-down, so without
+                 // this the menu would land on a clipped second row.
+                 ui.horizontal(|ui| {
+-                    // The wordmark IS the operator's artwork (brand/header =
+-                    // the supplied PNG lockup: triangle + styled lettering) —
+-                    // never a plain-font text label (operator 2026-11-07: the
++                    // The wordmark IS the operator's artwork (the supplied
++                    // PNG lockup: triangle + styled lettering) — never a
++                    // plain-font text label (operator 2026-11-07: the
+                     // label rendered in the default egui font, not his mark).
+-                    if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
++                    // SPLIT LOCKUP (Sami 2026-11-13: "just the word itself
++                    // bigger and leave the icon the same size"): the
++                    // 1199x252 lockup split at its natural gaps into
++                    // triangle / "Cryptographic" / "Triangles" (content-tight
++                    // crops 186x162, 587x59, 378x59). The icon renders at its
++                    // pre-split size (36 px content height — the old lockup
++                    // showed it at 56/252 x 162 = 36.0); each word renders
++                    // BIGGER at 20 px (the old lockup showed the words at
++                    // 59 x 56/252 = 13.1 px). Aspect ratios are the crops'
++                    // own; the brand stays crisp native pixels.
++                    if let (Some(icon), Some(w1), Some(w2)) = (
++                        self.tex(ui.ctx(), "brand/lockup_icon"),
++                        self.tex(ui.ctx(), "brand/word_cryptographic"),
++                        self.tex(ui.ctx(), "brand/word_triangles"),
++                    ) {
+                         ui.add_space(16.0);
+-                        let aspect = 600.0 / 126.0;
+-                        ui.add(img(&tex, Vec2::new(56.0 * aspect, 56.0)));
++                        ui.add(img(&icon, Vec2::new(36.0 * 186.0 / 162.0, 36.0)));
++                        ui.add_space(6.0);
++                        ui.add(img(&w1, Vec2::new(30.0 * 587.0 / 59.0, 30.0)));
++                        ui.add_space(5.0);
++                        ui.add(img(&w2, Vec2::new(30.0 * 378.0 / 59.0, 30.0)));
+                     }
+                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                         ui.add_space(12.0);
+diff --git a/src/gui/assets/brand/brand_lockup_icon.png b/src/gui/assets/brand/brand_lockup_icon.png
+new file mode 100644
+index 0000000..0d3b913
+Binary files /dev/null and b/src/gui/assets/brand/brand_lockup_icon.png differ
+diff --git a/src/gui/assets/brand/brand_word_cryptographic.png b/src/gui/assets/brand/brand_word_cryptographic.png
+new file mode 100644
+index 0000000..f5160d4
+Binary files /dev/null and b/src/gui/assets/brand/brand_word_cryptographic.png differ
+diff --git a/src/gui/assets/brand/brand_word_triangles.png b/src/gui/assets/brand/brand_word_triangles.png
+new file mode 100644
+index 0000000..d5518d9
+Binary files /dev/null and b/src/gui/assets/brand/brand_word_triangles.png differ
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index aa50673..2e120ab 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -4621,3 +4621,61 @@ fn windows_release_wallet_launches_with_no_console_window() {
+         "gated to windows release builds only (stdout stays for headless selfcheck): {gate}"
+     );
+ }
++
++/// SAMI 2026-11-13: "just the word itself bigger and leave the icon the same
++/// size" — the header no longer scales the combined lockup (which grew the
++/// triangle with the words); it composes the SPLIT lockup assets so the
++/// triangle keeps its pre-split rendered size (36 px content height) while
++/// each word renders bigger. Operator PICKED 30 px words + an 88 px header
++/// (from the 30px mockup sheet, bottom variant) — sizes below are pinned to
++/// that choice.
++#[test]
++fn header_word_is_bigger_and_icon_size_is_unchanged() {
++    let app = include_str!("app.rs");
++    // the three split assets are embedded (content-tight crops of the
++    // 1199x252 lockup, cut at its natural gaps)
++    for key in ["brand/lockup_icon", "brand/word_cryptographic", "brand/word_triangles"] {
++        assert!(app.contains(&format!("\"{key}\" =>")), "missing split asset {key}");
++    }
++    // the header composes them (not the combined lockup)
++    let header = app
++        .split("fn header(&mut self")
++        .nth(1)
++        .expect("header fn")
++        .split("fn menu_bar")
++        .next()
++        .expect("header body");
++    assert!(
++        header.contains("brand/lockup_icon") && header.contains("brand/word_cryptographic"),
++        "header must render the split lockup"
++    );
++    assert!(!header.contains("brand/header"), "header must not fall back to the combined lockup");
++    // the operator's pick: 30 px words in an 88 px header
++    assert!(header.contains("exact_height(88.0)"), "header must be the picked 88 px height");
++    // the icon keeps its size: 36 px content height x (186/162 aspect)
++    assert!(
++        header.contains("36.0 * 186.0 / 162.0"),
++        "icon must stay at its pre-split 36 px content height"
++    );
++    // the words are BIGGER: 30 px (was 59/252 x 56 = 13.1 px)
++    assert!(
++        header.contains("30.0 * 587.0 / 59.0") && header.contains("30.0 * 378.0 / 59.0"),
++        "words must render at the picked 30 px height"
++    );
++    // the split crops are the artwork's exact content boxes (px extents of
++    // brand_header_white.png measured at alpha>32: x 10..195 / 202..788 /
++    // 813..1190, y 33..194 / 88..146 / 88..146) — if the source PNG changes,
++    // these crops and ratios must be re-derived, not guessed.
++    let assets = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gui/assets/brand"));
++    let expect = [
++        ("brand_lockup_icon.png", 186u32, 162u32),
++        ("brand_word_cryptographic.png", 587u32, 59u32),
++        ("brand_word_triangles.png", 378u32, 59u32),
++    ];
++    for (name, w, h) in expect {
++        let bytes = std::fs::read(assets.join(name)).expect(name);
++        let pw = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
++        let ph = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
++        assert!((pw, ph) == (w, h), "{name} is {pw}x{ph}, expected {w}x{h}");
++    }
++}

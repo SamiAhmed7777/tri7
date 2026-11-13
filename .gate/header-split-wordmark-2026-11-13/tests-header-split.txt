@@ -1,0 +1,9 @@
+== revision ==
+9a7fc71006259b08b313fc1e1e94a04264875c89
+
+== full lib suite ==
+test result: ok. 762 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 114.94s
+
+
+== GUI featureful check ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
