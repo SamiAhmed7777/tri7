@@ -1,0 +1,28 @@
+== v4 deployed hash vs source ==
+9671f2cff742bf262d790a97bd8f1dea3c5fbb373da55e90e59712b08d6f7795
+9671f2cff742bf262d790a97bd8f1dea3c5fbb373da55e90e59712b08d6f7795  (source)
+== behavioral harness v4 (deployed RpcCall function, 5 cases) ==
+--- CASE mixed ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+--- CASE allstale ---
+DECISION-RESULT stalling=True
+RETRY-RESULT h1=4242
+--- CASE zeropeers ---
+DECISION-RESULT stalling=True
+RETRY-RESULT h1=4242
+--- CASE singlefresh ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+--- CASE retry ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+== live watchdog tick (manual /Run; node at tip + fresh peer -> must log HEALTHY, not restart) ==
+pre-tick height:
+2210962
+SUCCESS: Attempted to run the scheduled task "tri7gui-stallwatch".
+[2026-11-13T01:25:01.5014849-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T01:25:05.7095952-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T01:29:12.2830381-08:00] healthy: height 2210962 -> 2210963
+post-tick height:
+2210963

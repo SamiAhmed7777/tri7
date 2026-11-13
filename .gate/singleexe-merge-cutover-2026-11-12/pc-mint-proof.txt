@@ -1,0 +1,38 @@
+[2026-11-13T06:59:05Z] addrindex: h2210893 skipped: index is at h2210877, block is h2210893 (builder will catch up)
+[2026-11-13T06:59:05Z] STAKE MINTED ƒ+' h2210893 e46fdf39fc90d0b9281f2b0d38a91d8808e4e21885154bbbf0ab1df64cba7ab2 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T06:59:20Z] STAKE: kernel solved after 601 attempts (0.0002246s) ƒ?" coin a6510bc392033afba40971cd0aa985c06b6728bf0aaabc3e1ce046ee04a40b53:2 (6081767 sats, 0 coin-days), reward 6275 sats, fees 0
+[2026-11-13T06:59:22Z] h2210894: no external checksum oracle for this block ƒ?" adopting locally computed 0b772479
+[2026-11-13T06:59:22Z] addrindex: h2210894 skipped: index is at h2210877, block is h2210894 (builder will catch up)
+[2026-11-13T06:59:22Z] STAKE MINTED ƒ+' h2210894 7369f754261eb61466e128154112d59a1b95c68e3fa80afe11b6a4ab1788d98c (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:00:39Z] STAKE: kernel solved after 1270 attempts (0.0003471s) ƒ?" coin 536c2490396bf1ea59a63eda67a89491069923273719a45ebc6c2ea1d6e9e658:1 (13570000 sats, 0 coin-days), reward 6038 sats, fees 0
+[2026-11-13T07:00:41Z] h2210895: no external checksum oracle for this block ƒ?" adopting locally computed 7c308636
+[2026-11-13T07:00:41Z] addrindex: h2210895 skipped: index is at h2210877, block is h2210895 (builder will catch up)
+[2026-11-13T07:00:41Z] STAKE MINTED ƒ+' h2210895 33dc7e7c9daa6052a15bb5144f8375e2a95ea136bf5d64aaafc218fc16241b17 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:00:56Z] STAKE: kernel solved after 677 attempts (0.0001784s) ƒ?" coin e33367e367875513703871821041365cccc90625548ec9c27d3eeec034b71087:1 (24007797 sats, 0 coin-days), reward 5378 sats, fees 0
+[2026-11-13T07:00:58Z] h2210896: no external checksum oracle for this block ƒ?" adopting locally computed 768f4403
+[2026-11-13T07:00:58Z] addrindex: h2210896 skipped: index is at h2210877, block is h2210896 (builder will catch up)
+[2026-11-13T07:00:58Z] STAKE MINTED ƒ+' h2210896 90637e279c3343a7645642be8a0b741d692cf68c63fdd44a9e5d3efb36a4c195 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:02:33Z] STAKE: kernel solved after 134 attempts (0.0001207s) ƒ?" coin 96455cf3a50b3a561a90ba4a677cf39aefeb37ab4aa87840e671c027255cfaa7:1 (18850000 sats, 0 coin-days), reward 7028 sats, fees 0
+[2026-11-13T07:02:35Z] h2210897: no external checksum oracle for this block ƒ?" adopting locally computed 8db94f1b
+[2026-11-13T07:02:35Z] addrindex: h2210897 skipped: index is at h2210877, block is h2210897 (builder will catch up)
+[2026-11-13T07:02:35Z] STAKE MINTED ƒ+' h2210897 0f5bc9e0d69d0d9efc7d31c5bbf266552421019317ab716e0406d47ab4eaf33c (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:02:48Z] STAKE: kernel solved after 1095 attempts (0.0002689s) ƒ?" coin ae9c2d6ef7769705cbdb33b69d804dcf7fc5225d3061458796c0dcbfc005dc85:1 (30224175 sats, 0 coin-days), reward 5564 sats, fees 0
+[2026-11-13T07:02:50Z] h2210898: no external checksum oracle for this block ƒ?" adopting locally computed 17c2f9fd
+[2026-11-13T07:02:50Z] addrindex: h2210898 skipped: index is at h2210877, block is h2210898 (builder will catch up)
+[2026-11-13T07:02:50Z] STAKE MINTED ƒ+' h2210898 8f048d70e5abd5e12eaef450d71a0a1c3b952f90ae6b6efe264432f40fdf4ceb (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:04:24Z] STAKE: kernel solved after 66 attempts (0.0000695s) ƒ?" coin 8d867211c65977348e9882ccc0ff38bdae08c6cc43a46ccee04bcb782ab230a4:1 (21611576 sats, 0 coin-days), reward 6439 sats, fees 0
+[2026-11-13T07:04:26Z] h2210899: no external checksum oracle for this block ƒ?" adopting locally computed b43e6f09
+[2026-11-13T07:04:27Z] addrindex: h2210899 skipped: index is at h2210877, block is h2210899 (builder will catch up)
+[2026-11-13T07:04:27Z] STAKE MINTED ƒ+' h2210899 bfff0faf2269ac69fa7b3b17b6f556f63b03ceb5db1d66d955359f7ebc6b6a41 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:10:02Z] h2210900: no external checksum oracle for this block ƒ?" adopting locally computed 872f2614
+[2026-11-13T07:10:02Z] addrindex: h2210900 skipped: index is at h2210877, block is h2210900 (builder will catch up)
+[2026-11-13T07:10:02Z] TIP ADVANCE ƒ+' h2210900 e49ecf8192d038bf06fa3adb8fa02cac0c34e6fe58f96732b00d8bfaa2b38d58 (kernel enforced) via out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112
+[2026-11-13T07:10:02Z] relay: announced h2210900 to 1 peer(s) (inv)
+
+== addrindex gap closure ==
+tipstate oracle: 4600 hashes
+[blockidx] ready: 2211036 frames, 4500964 txs, heights_ok=true, threaded_tip=Some(2210899), writable=true, built in 43s
+store threaded to h2210899
+resuming at file offset 983557037
+walk: stale fork leftover at offset 983557037 (hash db2448a1501271cbf2ba3a6d85f34992bff34883d55f1904409f13f5fba33246 not in the tipstate window) â€” skipping non-canonical frames by design
+addrindex: done â€” 400 blocks, 529 outputs, 554 spends, 61 stale fork leftover(s) skipped in 11.4s

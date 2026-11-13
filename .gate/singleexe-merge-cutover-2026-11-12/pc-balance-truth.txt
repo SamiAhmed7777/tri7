@@ -1,0 +1,27 @@
+# BALANCE-TRUTH reconciliation on the merged sami-pc wallet (2026-11-13 ~07:3xZ)
+
+## the three independent chain-derived reads (node = the in-GUI embedded node)
+1. live view: listunspent = 134 UTXO rows, sum = 2,501.00000000 TRI (amount_sats summed)
+2. addrindex: getwalletinfo balance_source=live-index = 2,488.74277 TRI at h2210906 (index_complete=true, index_behind=0); getaddressutxos summed 2,499.66 TRI at a nearby tip (minting drift between reads)
+3. gettxout spot check on the oldest indexed coin (TNFvoQ… vout 0, h2031567, 100 sats): REAL chain output — confirmations 179,343, bestblock anchored, scriptPubKey matches the address
+
+## the OLD display was a stale snapshot
+the pre-merge daemon's GUI read 1,538 TRI from balances.json/wallet_utxos.json
+(balance_source=snapshot-pair, coverage frozen at h2208645 = 2026-11-08);
+the 11-11 parity-loop record itself said 'balance reads the warm-start snapshot 1531.808964 cov 2208645' — the daemon's wallet live view never re-seeded past it.
+delta vs today ≈ +963 TRI = staking rewards + coins that accumulated AFTER that snapshot froze.
+
+## NOT the ledger's number
+listwalletaddresses.balance sums 51.1 TRI over 24 funded addresses — that field reads
+the legacy wallet-table accounting (pre-tri7 imported coins), not the chain; the
+chain-derived sources (1 and 2) agree with each other, not with it.
+
+## fleet cross-reads
+DNS2 (262 addresses, same-height h2210906): 1,901.599872 TRI — a DIFFERENT KEY SET
+(subset copy); the PC wallet holds 399 addresses incl. legacy funded ones absent from
+the DNS2 copy (e.g. TA9DVnUq… 300.5 TRI, TABe4ay5… 305.9 TRI — single-UTXO legacy adds).
+example lifetime flow: TNFvoQdbk… received 424,521,195 sats (424.5 TRI) historically, now holds a 100-sat coin.
+
+## capture commands (all over ssh powershell against 127.0.0.1:19114)
+listunspent / getwalletinfo / getaddressutxos / getaddressbalance / gettxout / getblockcount
+DNS2 cross-read: POST 127.0.0.1:19112 getwalletinfo+getblockcount

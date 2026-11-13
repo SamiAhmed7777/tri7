@@ -1,0 +1,337 @@
+=== captured 2026-11-12T23:20:16.1133779-08:00 ===
+=== getblockcount ===
+2210905
+=== getwalletinfo (full) ===
+{
+    "addresses":  399,
+    "balance":  2488.74277,
+    "balance_height":  2210906,
+    "balance_partial":  false,
+    "balance_sats":  2488742770,
+    "balance_source":  "live-index",
+    "coverage_hash":  null,
+    "coverage_height":  2210906,
+    "index_behind":  0,
+    "index_complete":  true,
+    "index_height":  2210906,
+    "keypoololdest":  1781668387,
+    "keypoolsize":  250,
+    "paytxfee":  0.0001,
+    "txcount":  null,
+    "unlocked_until":  18446744073709551615,
+    "utxos":  133,
+    "walletversion":  60000
+}
+=== getstakinginfo (full) ===
+{
+    "attempts":  1157,
+    "coins_considered":  72,
+    "coins_meeting_min_age":  20,
+    "coins_without_key":  119,
+    "connections":  1,
+    "currentblocksize":  0,
+    "currentblocktx":  0,
+    "difficulty":  4.2242464514138241E-06,
+    "enabled":  true,
+    "errors":  "",
+    "expectedtime":  0,
+    "in_window_only":  true,
+    "initialblockdownload":  false,
+    "last_hit_utc":  "2026-11-13T07:20:16Z",
+    "last_search_secs":  0.0004794,
+    "last_search_utc":  "2026-11-13T07:20:16Z",
+    "last_stake":  {
+                       "at_utc":  "2026-11-13T07:20:18Z",
+                       "hash":  "faf747ee25ff72e496ae0db77728e4c73cc8c00d877dd376945690b8ee866aa3",
+                       "height":  2210906
+                   },
+    "maturecoins":  true,
+    "modifier":  "63d2f40abcd0e367",
+    "netstakeweight":  114,
+    "pooledtx":  0,
+    "reservebalance":  "0.000000",
+    "search-interval":  60,
+    "searches":  1,
+    "staking":  true,
+    "staking_disabled_reasons":  [
+
+                                 ],
+    "stale_live_view":  null,
+    "target":  "1f037065",
+    "tip_height":  2210906,
+    "walletlocked":  false,
+    "weight":  452
+}
+=== getpeerinfo (full) ===
+{
+    "by_transport":  {
+                         "clearnet":  0,
+                         "i2p":  0,
+                         "tor":  1
+                     },
+    "count":  1,
+    "peers":  [
+                  {
+                      "claimed_tip_hash":  "8ccb8f045cb12d5e1d0fbc109fc4b880f77ce6acb6d108cd043184ce82c3a9bf",
+                      "claimed_tip_height":  2210905,
+                      "connected_utc":  "2026-11-13T07:18:43Z",
+                      "endpoint":  "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                      "inbound":  false,
+                      "label":  "out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                      "last_traffic_ms_ago":  3319,
+                      "msgs_in":  19,
+                      "msgs_out":  26,
+                      "start_height":  2210904,
+                      "subver":  "/tri7:7.0.0/",
+                      "transport":  "tor",
+                      "version":  70206
+                  }
+              ]
+}
+=== health (full) ===
+{
+    "at_daemon_tip":  false,
+    "block_index":  {
+                        "build_secs":  61,
+                        "frames":  2211041,
+                        "heights_ok":  true,
+                        "state":  "ready",
+                        "threaded_tip":  2210904,
+                        "txs_indexed":  4500974
+                    },
+    "blockhash":  "faf747ee25ff72e496ae0db77728e4c73cc8c00d877dd376945690b8ee866aa3",
+    "daemon_tip":  2210881,
+    "height":  2210906,
+    "legacy_rpc":  "down",
+    "native_methods":  [
+                           "gettip",
+                           "getblockcount",
+                           "getbestblockhash",
+                           "getblockhash",
+                           "getblock",
+                           "getrawtransaction",
+                           "gettransaction",
+                           "getinfo",
+                           "gettxoutsetinfo",
+                           "getaddressbalance",
+                           "getaddressutxos",
+                           "getaddresstxids",
+                           "getdifficulty",
+                           "getconnectioncount",
+                           "getstakemodifier",
+                           "getbalance",
+                           "listunspent",
+                           "listtransactions",
+                           "listsinceblock",
+                           "listwallettx",
+                           "getlocalinfo",
+                           "listwalletaddresses",
+                           "getreceivedbyaddress",
+                           "richlist",
+                           "validateaddress",
+                           "validatepubkey",
+                           "makekeypair",
+                           "health",
+                           "getsyncinfo",
+                           "sendrawtransaction",
+                           "getstakinginfo",
+                           "staking",
+                           "getpeerinfo",
+                           "getrawmempool",
+                           "getmempoolinfo",
+                           "getnetworkhashps",
+                           "getnewaddress",
+                           "backupwallet",
+                           "encryptwallet",
+                           "walletpassphrase",
+                           "walletlock",
+                           "walletpassphrasechange",
+                           "decryptwallet",
+                           "sendtoaddress",
+                           "sendmany",
+                           "signmessage",
+                           "dumpprivkey",
+                           "dumpwallet",
+                           "importwallet",
+                           "importprivkey",
+                           "checkwallet",
+                           "keypoolrefill",
+                           "reservebalance",
+                           "smsgsend",
+                           "smsgsendanon",
+                           "smsgbroadcast",
+                           "smsginbox",
+                           "smsgoutbox",
+                           "smsgscandir",
+                           "smsgpurge",
+                           "smsgaddaddress",
+                           "smsgkeys",
+                           "smsglocalinfo",
+                           "smsgenable",
+                           "smsgdisable",
+                           "smsgoptions",
+                           "smsgscanchain",
+                           "smsgscanbuckets",
+                           "smsgbuckets",
+                           "smsggetpubkey",
+                           "smsgaddkey",
+                           "help",
+                           "getblockheader",
+                           "getblockbynumber",
+                           "getblockchaininfo",
+                           "getwalletinfo",
+                           "getnetworkinfo",
+                           "getmininginfo",
+                           "getsubsidy",
+                           "estimatefee",
+                           "verifymessage",
+                           "decoderawtransaction",
+                           "decodescript",
+                           "createrawtransaction",
+                           "settxfee",
+                           "listreceivedbyaddress",
+                           "getnewpubkey",
+                           "addmultisigaddress",
+                           "addredeemscript",
+                           "createmultisig",
+                           "signrawtransaction",
+                           "listaddressgroupings",
+                           "getcheckpoint",
+                           "repairwallet",
+                           "resendtx",
+                           "stop",
+                           "addnode",
+                           "disconnectnode",
+                           "getseedlist",
+                           "getnetworkstability",
+                           "gettxout",
+                           "getrawchangeaddress"
+                       ],
+    "node_ops":  true,
+    "peer_detail":  {
+                        "by_transport":  {
+                                             "clearnet":  0,
+                                             "i2p":  0,
+                                             "tor":  1
+                                         },
+                        "count":  1,
+                        "peers":  [
+                                      {
+                                          "claimed_tip_hash":  "8ccb8f045cb12d5e1d0fbc109fc4b880f77ce6acb6d108cd043184ce82c3a9bf",
+                                          "claimed_tip_height":  2210905,
+                                          "connected_utc":  "2026-11-13T07:18:43Z",
+                                          "endpoint":  "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                                          "inbound":  false,
+                                          "label":  "out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                                          "last_traffic_ms_ago":  5335,
+                                          "msgs_in":  19,
+                                          "msgs_out":  26,
+                                          "start_height":  2210904,
+                                          "subver":  "/tri7:7.0.0/",
+                                          "transport":  "tor",
+                                          "version":  70206
+                                      }
+                                  ]
+                    },
+    "peers":  1,
+    "state_write_age_secs":  13,
+    "status":  "ok",
+    "uptime_secs":  73,
+    "window":  {
+                   "base":  2206307,
+                   "entries":  4600
+               }
+}
+=== process inventory (tri7|follow_tip) ===
+tri7_wallet_gui pid=36316 path=E:\Coins\TRI\bin\tri7_wallet_gui.exe
+=== 19114 listener owner ===
+=== node.log addrindex/mint/kernel lines (last 12 of 400) ===
+[2026-11-13T07:11:59Z] addrindex: h2210901 skipped: index is at h2210877, block is h2210901 (builder will catch up)
+[2026-11-13T07:11:59Z] STAKE MINTED → h2210901 99ebb77806988b6ee7e235c86f1b84a8b3f681900d3143068ecc94c00dc3468e (self-validated: kernel enforced, nbits enforced) — relaying to 1 peer(s)
+[2026-11-13T07:12:46Z] STAKE: kernel solved after 13 attempts (0.0000539s) — coin 72c8781435c1c72a46a6aafaf3efbbfb14d85dc8063f3317d4e154da9edf7eca:1 (26404859 sats, 0 coin-days), reward 8461 sats, fees 0
+[2026-11-13T07:12:48Z] addrindex: h2210902 skipped: index is at h2210877, block is h2210902 (builder will catch up)
+[2026-11-13T07:12:48Z] STAKE MINTED → h2210902 217778235f38b178521829b89f4fae99c9201d1714e9531b3e9a77a7eef96403 (self-validated: kernel enforced, nbits enforced) — relaying to 1 peer(s)
+[2026-11-13T07:13:01Z] STAKE: kernel solved after 1229 attempts (0.0003619s) — coin aa331349d636ab5497c009e426461634b69630081a62c06a361987a2c60f3f66:1 (20397296 sats, 0 coin-days), reward 2667 sats, fees 0
+[2026-11-13T07:13:03Z] addrindex: h2210903 skipped: index is at h2210877, block is h2210903 (builder will catch up)
+[2026-11-13T07:13:03Z] STAKE MINTED → h2210903 52fd4a04646b1a881c522740934966a33cc1a5437d0df6bfac2042efc14d465b (self-validated: kernel enforced, nbits enforced) — relaying to 1 peer(s)
+[2026-11-13T07:16:42Z] addrindex: h2210904 skipped: index is at h2210877, block is h2210904 (builder will catch up)
+[2026-11-13T07:18:31Z] addrindex: live updates enabled (addressindex.db present)
+[2026-11-13T07:20:16Z] STAKE: kernel solved after 1157 attempts (0.0004794s) — coin e04bec876683c27d907e6a338be135272b6e5e97ace23c3c7ad254ebed904c10:1 (24311616 sats, 0 coin-days), reward 3498 sats, fees 0
+[2026-11-13T07:20:18Z] STAKE MINTED → h2210906 faf747ee25ff72e496ae0db77728e4c73cc8c00d877dd376945690b8ee866aa3 (self-validated: kernel enforced, nbits enforced) — relaying to 1 peer(s)
+=== E:\Coins\TRI\node\triangles.conf (full) ===
+# Auto-accept local UTXO snapshot without compiled-in hash check
+acceptanylocalsnapshot=1
+port=24112
+rpcport=19114
+rpcbind=127.0.0.1
+rpcbind=100.64.0.0/10
+rpcallowip=100.64.0.0/10
+rpcallowip=100.71.97.12
+rpcuser=<redacted>
+rpcpassword=<redacted-rotated>
+rpcallowip=127.0.0.1
+rpcallowip=10.0.0.0/8
+rpcallowip=192.168.0.0/16
+rpcallowip=100.71.97.12
+rpcallowip=100.121.150.22
+server=1
+daemon=1
+listen=1
+rest=1
+txindex=1
+staking=0
+addressindex=1
+timestampindex=1
+spentindex=1
+dbcache=512
+
+bootstrap=0
+
+# Operator addnode set (cycle-45 refresh ??? verified live 2026-08-06)
+# 7 canonical live entries: DNS2 onion + i2p, DNS3 onion + i2p, SAMI-PC onion + i2p, Hetzner onion
+addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+addnode=jbpfhe7zw3qm67wy3j2ayysp3mnrjobopthnko3b3sgahqtecblwqmid.onion:24112
+addnode=6ygpphp2qsucwvhwefv6h6ehvk6zjf7b7zdp4ggkzjjwe76cg6jwm7id.onion:24112
+addnode=nawqqoazk2hhaglygulpeg6kh7hsgnvi2fursdvpvkantu4ojj26taid.onion:24112
+# retired 2026-11-07: legacy-era i2p destination, fleet deleted, unreachable (was: addnode=qgrkbxy7j2vuu5flhnyvho7chk7pfzk4o72p5pgdb6nrf72mz7kq.b32.i2p:24112)
+# retired 2026-11-07: legacy-era i2p destination, fleet deleted, unreachable (was: addnode=7egsdm3ae7jmmrx6zmhozffuczl3fmxyadca3plkuv2ed7lxosna.b32.i2p:24112)
+# retired 2026-11-07: legacy-era i2p destination, fleet deleted, unreachable (was: addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112)
+stake=1
+addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 
+
+# tri7 fleet i2p (2026-11-07): DNS2 tri7d-p2p tunnel via i2pd SOCKS 4447
+addnode=ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113
+reservebalance=0.000000
+socks=127.0.0.1:9050
+=== migrated store counts ===
+files: 30  total bytes: 2620174218
+blk0001.dat 983775013
+tipstate.json 2899259
+addressindex.db 1465778176
+balances.json 2199134
+wallet_utxos.json 6281
+=== deployed exe ===
+663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2 (2=GUI 3=console)
+=== launcher task tri7gui-run ===
+state: Running
+action: E:\Coins\TRI\bin\tri7_wallet_gui.exe --wallet E:\Coins\TRI\wallet.dat
+trigger: MSFT_TaskLogonTrigger enabled=True delay=PT5M
+principal: hello logon=Interactive
+=== tri7 task inventory (final) ===
+KrystieTRIRescan = Disabled
+StartTri = Disabled
+tri7-addrindex-build = Disabled
+tri7-addrindex-timer = Disabled
+tri7d = Disabled
+tri7d2 = Disabled
+tri7d3 = Disabled
+tri7d-watchdog = Disabled
+tri7gui = Disabled
+tri7gui-preview = Disabled
+tri7gui-run = Running
+tri7-gui-verify = Disabled
+tri7hist = Disabled
+tri7probe = Disabled
+tri7tor = Running
+tri7watch = Disabled

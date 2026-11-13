@@ -1,0 +1,113 @@
+=== tri7gui-stallwatch PACKAGE v4 FINAL (alias-shadowing root cause fixed; regenerated from the deployed laptop) ===
+
+== ROOT CAUSE (found by the harness): the RPC helper was named H — PowerShell's built-in alias h=Get-History SHADOWS functions, so every H '...' call errored (Get-History -Id json) and returned null; the watchdog therefore restarted the GUI every tick unconditionally. Fix: function renamed RpcCall. ==
+
+== deployed v4 sha256 (laptop) vs source ==
+9671f2cff742bf262d790a97bd8f1dea3c5fbb373da55e90e59712b08d6f7795
+9671f2cff742bf262d790a97bd8f1dea3c5fbb373da55e90e59712b08d6f7795  (source)
+
+== deployed v4 script (type from the laptop) ==
+# tri7-stallwatch.ps1 — INTERIM reliability workaround for the embedded-node
+# reconnect defect (node never re-dials after its last peer dies). Runs via
+# scheduled task tri7gui-stallwatch (SYSTEM, every 10 min). If the wallet's
+# node RPC is up AND the chain height is frozen across 75s AND every peer's
+# last traffic is stale (>240s), restart the GUI once and log it. Removed
+# when the reconnect dev item lands.
+$log = 'C:\Coins\TRI-LAPTOP\stallwatch.log'
+function Log($m) { ("[{0}] {1}" -f (Get-Date -Format o), $m) | Add-Content $log }
+function RpcCall($b) {
+  try { return (Invoke-RestMethod -Uri 'http://127.0.0.1:19114/' -Method Post -Body $b -ContentType 'application/json' -TimeoutSec 10).result }
+  catch { return $null }
+}
+$gui = Get-Process -Name tri7_wallet_gui -ErrorAction SilentlyContinue
+if (-not $gui) { Log "gui not running - nothing to watch"; exit }
+$h1 = RpcCall '{"method":"getblockcount"}'
+if ($null -eq $h1) {
+  Log "rpc not answering - retrying once in 60s before considering a restart"
+  Start-Sleep -Seconds 60
+  $h1b = RpcCall '{"method":"getblockcount"}'
+  if ($null -eq $h1b) {
+    Log "rpc STILL down after retry -> restarting GUI (wedged)"
+    taskkill /IM tri7_wallet_gui.exe /F 2>$null | Out-Null
+    Start-Sleep -Seconds 4
+    schtasks /Run /TN 'tri7gui-laptop' | Out-Null
+    Log "restarted via tri7gui-laptop (wedged rpc)"
+    exit
+  }
+  Log "rpc answered on retry - continuing health check"
+  $h1 = $h1b
+}
+Start-Sleep -Seconds 75
+$h2 = RpcCall '{"method":"getblockcount"}'
+if ($null -eq $h2) { Log "rpc stopped answering mid-check - leaving it alone"; exit }
+if ($h2 -ne $h1) { Log ("healthy: height {0} -> {1}" -f $h1, $h2); exit }
+$stale = $false
+$p = RpcCall '{"method":"getpeerinfo"}'
+if ($null -eq $p -or $p.count -eq 0) { $stale = $true }
+else {
+  $peers = @($p.peers)
+  $allStale = $true
+  foreach ($peer in $peers) { if ($peer.last_traffic_ms_ago -le 240000) { $allStale = $false } }
+  if ($allStale) { $stale = $true }
+}
+if (-not $stale) { Log ("height static {0} but peer traffic fresh - not stalling" -f $h2); exit }
+Log ("STALL: height frozen at {0} with stale/dead peers -> restarting GUI" -f $h2)
+taskkill /IM tri7_wallet_gui.exe /F 2>$null | Out-Null
+Start-Sleep -Seconds 4
+schtasks /Run /TN 'tri7gui-laptop' | Out-Null
+Log "restarted via tri7gui-laptop"
+
+== scheduled task query + trigger (raw) ==
+TaskName:                             \tri7gui-stallwatch
+Next Run Time:                        11/13/2026 1:34:00 AM
+Status:                               Ready
+Last Run Time:                        11/13/2026 1:27:56 AM
+Task To Run:                          powershell -NoProfile -ExecutionPolicy Bypass -File C:\Coins\TRI-LAPTOP\tri7-stallwatch.ps1
+Run As User:                          SYSTEM
+Schedule Type:                        One Time Only, Minute 
+class=MSFT_TaskTimeTrigger interval=PT10M duration= enabled=True
+
+== watchdog log (raw, incl. the v3-era unconditional restarts and the first v4 HEALTHY tick) ==
+[2026-11-13T00:24:44.7012362-08:00] rpc not answering (booting or wedged) - leaving it alone this tick
+[2026-11-13T00:25:35.2102037-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T00:26:35.2471762-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T00:26:39.6078731-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T00:34:02.7492662-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T00:35:02.7802907-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T00:35:07.0435021-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T00:44:02.4121230-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T00:45:02.4403280-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T00:45:06.6541460-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T00:54:02.5276279-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T00:55:02.5740293-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T00:55:06.8275322-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T01:04:01.4739543-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T01:05:01.5083474-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T01:05:05.7277981-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T01:14:01.4233099-08:00] gui not running - nothing to watch
+[2026-11-13T01:24:01.4571265-08:00] rpc not answering - retrying once in 60s before considering a restart
+[2026-11-13T01:25:01.5014849-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+[2026-11-13T01:25:05.7095952-08:00] restarted via tri7gui-laptop (wedged rpc)
+[2026-11-13T01:29:12.2830381-08:00] healthy: height 2210962 -> 2210963
+
+== behavioral harness v4 (5 cases against the deployed decision+retry blocks; case files harness-case-*.ps1 built from the deployed bytes + literal stub tables) ==
+--- CASE mixed ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+--- CASE allstale ---
+DECISION-RESULT stalling=True
+RETRY-RESULT h1=4242
+--- CASE zeropeers ---
+DECISION-RESULT stalling=True
+RETRY-RESULT h1=4242
+--- CASE singlefresh ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+--- CASE retry ---
+DECISION-RESULT stalling=False
+RETRY-RESULT h1=4242
+
+== install commands ==
+scp tri7-stallwatch.ps1 sami-laptop:C:/Coins/TRI-LAPTOP/tri7-stallwatch.ps1 (v4: RpcCall rename)
+schtasks /Create /F /TN tri7gui-stallwatch /RU SYSTEM /SC MINUTE /MO 10 /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Coins\TRI-LAPTOP\tri7-stallwatch.ps1"
+schtasks /Run /TN tri7gui-stallwatch

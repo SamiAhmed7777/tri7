@@ -1,0 +1,21 @@
+=== LAPTOP CAPTURE BOUNDARY: fresh restart performed, capture starts 2026-11-13T00:03:44.6628889-08:00 ===
+RESTART ISSUED (taskkill + schtasks /Run tri7gui-laptop); warming 100s
+[00:05:29] sample1: height=ERR>>> Unable to connect to the remote server peers=? node_ops=? state_write_age_secs=? ERR>>> Unable to connect to the remote server
+[00:06:00] sample2: height=ERR>>> Unable to connect to the remote server peers=0 node_ops=False state_write_age_secs=2  traffic_ago_ms= in=
+[00:06:30] sample3: height=2210619 peers=0 node_ops=False state_write_age_secs=29  traffic_ago_ms= in=
+[00:06:57] sample4: height=2210619 peers=0 node_ops=False state_write_age_secs=56  traffic_ago_ms= in=
+[00:07:24] sample5: height=2210619 peers=0 node_ops=False state_write_age_secs=83  traffic_ago_ms= in=
+[00:07:51] sample6: height=2210619 peers=0 node_ops=False state_write_age_secs=110  traffic_ago_ms= in=
+[00:08:18] sample7: height=2210619 peers=0 node_ops=False state_write_age_secs=137  traffic_ago_ms= in=
+[00:08:45] sample8: height=2210682 peers=1 node_ops=True state_write_age_secs=26 ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 traffic_ago_ms=18721 in=0
+[00:09:20] sample9: height=2210694 peers=1 node_ops=True state_write_age_secs=23 ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 traffic_ago_ms=43984 in=17
+[00:09:50] sample10: height=2210694 peers=? node_ops=True state_write_age_secs=83 ERR>>> The request was aborted: The operation has timed out.
+[00:10:50] sample11: height=2210694 peers=1 node_ops=True state_write_age_secs=113 ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 traffic_ago_ms=136641 in=17
+[00:11:20] sample12: height=2210694 peers=1 node_ops=True state_write_age_secs=140 ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 traffic_ago_ms=163674 in=17
+RAW getwalletinfo: {"addresses":10,"balance":250.0,"balance_height":2208645,"balance_partial":true,"balance_sats":250000000,"balance_source":"snapshot-pair","coverage_hash":"02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e","coverage_height":2208645,"index_behind":null,"index_complete":null,"index_height":null,"keypoololdest":null,"keypoolsize":0,"paytxfee":0.0001,"txcount":null,"unlocked_until":18446744073709551615,"utxos":1,"walletversion":60000}
+staking: enabled=True staking=True attempts=0 weight=1612
+final height: 2210694
+exe sha256: 663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2
+=== FLEET (DNS2) contemporaneous tips ===
+{"error":null,"id":null,"result":2210929,"source":"tri7"}

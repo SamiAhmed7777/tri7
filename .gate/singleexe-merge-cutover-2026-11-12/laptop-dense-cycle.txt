@@ -1,0 +1,17 @@
+=== DENSE LAPTOP CAPTURE through a stall/recovery cycle (started 08:39:55Z) ===
+=== fleet tip at start:
+{"error":null,"id":null,"result":2210937,"source":"tri7"}[00:40:02] t+1 height=2210938 peers=1 ztj5lcg4tgcn7l ago_ms=14253 in=77
+[00:40:58] t+2 height=2210938 peers=1 ztj5lcg4tgcn7l ago_ms=3770 in=85
+[00:41:53] t+3 height=2210938 peers=1 ztj5lcg4tgcn7l ago_ms=4757 in=105
+[00:42:48] t+4 height=2210938 peers=1 ztj5lcg4tgcn7l ago_ms=16480 in=114
+[00:43:43] t+5 height=2210937 peers=1 ztj5lcg4tgcn7l ago_ms=6931 in=123
+[00:44:41] t+6 height=2210939 peers=1 ztj5lcg4tgcn7l ago_ms=13461 in=131
+[00:45:36] t+7 height=RPC-DOWN peers=? peer-rpc-timeout
+[00:46:35] t+8 height=2210940 peers=0 peer-rpc-timeout
+=== capture tail continuation (after the ssh window was cut) ===
+2210946
+peers: 1
+  gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 transport=tor ago_ms=24522 in=90 out=81
+staking: enabled=True staking=True attempts=0
+=== fleet tip now ===
+{"error":null,"id":null,"result":2210946,"source":"tri7"}

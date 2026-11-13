@@ -1,0 +1,15 @@
+--- CASE mixed (deployed decision+retry blocks, stubbed RPC) ---
+DECISION-RESULT stalling=True
+  [log] rpc not answering - retrying once in 60s before considering a restart
+--- CASE allstale (deployed decision+retry blocks, stubbed RPC) ---
+DECISION-RESULT stalling=True
+  [log] rpc not answering - retrying once in 60s before considering a restart
+--- CASE zeropeers (deployed decision+retry blocks, stubbed RPC) ---
+DECISION-RESULT stalling=True
+  [log] rpc not answering - retrying once in 60s before considering a restart
+--- CASE singlefresh (deployed decision+retry blocks, stubbed RPC) ---
+DECISION-RESULT stalling=True
+  [log] rpc not answering - retrying once in 60s before considering a restart
+--- CASE retry (deployed decision+retry blocks, stubbed RPC) ---
+DECISION-RESULT stalling=True
+  [log] rpc not answering - retrying once in 60s before considering a restart

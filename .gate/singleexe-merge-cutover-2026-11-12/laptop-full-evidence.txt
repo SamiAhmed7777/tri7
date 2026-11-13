@@ -1,0 +1,264 @@
+=== captured 2026-11-12T23:35:00.1857614-08:00 ===
+=== getblockcount ===
+2210200
+=== getwalletinfo (full) ===
+{
+    "addresses":  10,
+    "balance":  250.0,
+    "balance_height":  2208645,
+    "balance_partial":  true,
+    "balance_sats":  250000000,
+    "balance_source":  "snapshot-pair",
+    "coverage_hash":  "02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e",
+    "coverage_height":  2208645,
+    "index_behind":  null,
+    "index_complete":  null,
+    "index_height":  null,
+    "keypoololdest":  null,
+    "keypoolsize":  0,
+    "paytxfee":  0.0001,
+    "txcount":  null,
+    "unlocked_until":  18446744073709551615,
+    "utxos":  1,
+    "walletversion":  60000
+}
+=== getstakinginfo (full) ===
+{
+    "attempts":  0,
+    "coins_considered":  1,
+    "coins_meeting_min_age":  0,
+    "coins_without_key":  207,
+    "connections":  1,
+    "currentblocksize":  0,
+    "currentblocktx":  0,
+    "difficulty":  0.0,
+    "enabled":  true,
+    "errors":  "",
+    "expectedtime":  -1,
+    "in_window_only":  true,
+    "initialblockdownload":  false,
+    "last_hit_utc":  null,
+    "last_search_secs":  7E-07,
+    "last_search_utc":  "2026-11-13T07:07:29Z",
+    "last_stake":  null,
+    "maturecoins":  true,
+    "modifier":  "0000000000000000",
+    "netstakeweight":  0,
+    "pooledtx":  0,
+    "reservebalance":  "0.000000",
+    "search-interval":  60,
+    "searches":  5,
+    "staking":  true,
+    "staking_disabled_reasons":  [
+
+                                 ],
+    "stale_live_view":  null,
+    "target":  "00000000",
+    "tip_height":  2210200,
+    "walletlocked":  false,
+    "weight":  1774
+}
+=== getpeerinfo (full) ===
+{
+    "by_transport":  {
+                         "clearnet":  0,
+                         "i2p":  0,
+                         "tor":  1
+                     },
+    "count":  1,
+    "peers":  [
+                  {
+                      "claimed_tip_hash":  "bfff0faf2269ac69fa7b3b17b6f556f63b03ceb5db1d66d955359f7ebc6b6a41",
+                      "claimed_tip_height":  2210899,
+                      "connected_utc":  "2026-11-13T07:07:18Z",
+                      "endpoint":  "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                      "inbound":  false,
+                      "label":  "out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                      "last_traffic_ms_ago":  1657792,
+                      "msgs_in":  16,
+                      "msgs_out":  12,
+                      "start_height":  2210899,
+                      "subver":  "/tri7:7.0.0/",
+                      "transport":  "tor",
+                      "version":  70206
+                  }
+              ]
+}
+=== health (full) ===
+{
+    "at_daemon_tip":  true,
+    "block_index":  {
+                        "build_secs":  51,
+                        "frames":  2210028,
+                        "heights_ok":  true,
+                        "state":  "ready",
+                        "threaded_tip":  2210005,
+                        "txs_indexed":  4498948
+                    },
+    "blockhash":  "8e2b495e7400e377cd0e4afa33a7e5de9cf8931add5b70dffde86a0086944a9a",
+    "daemon_tip":  2210200,
+    "height":  2210200,
+    "legacy_rpc":  "down",
+    "native_methods":  [
+                           "gettip",
+                           "getblockcount",
+                           "getbestblockhash",
+                           "getblockhash",
+                           "getblock",
+                           "getrawtransaction",
+                           "gettransaction",
+                           "getinfo",
+                           "gettxoutsetinfo",
+                           "getaddressbalance",
+                           "getaddressutxos",
+                           "getaddresstxids",
+                           "getdifficulty",
+                           "getconnectioncount",
+                           "getstakemodifier",
+                           "getbalance",
+                           "listunspent",
+                           "listtransactions",
+                           "listsinceblock",
+                           "listwallettx",
+                           "getlocalinfo",
+                           "listwalletaddresses",
+                           "getreceivedbyaddress",
+                           "richlist",
+                           "validateaddress",
+                           "validatepubkey",
+                           "makekeypair",
+                           "health",
+                           "getsyncinfo",
+                           "sendrawtransaction",
+                           "getstakinginfo",
+                           "staking",
+                           "getpeerinfo",
+                           "getrawmempool",
+                           "getmempoolinfo",
+                           "getnetworkhashps",
+                           "getnewaddress",
+                           "backupwallet",
+                           "encryptwallet",
+                           "walletpassphrase",
+                           "walletlock",
+                           "walletpassphrasechange",
+                           "decryptwallet",
+                           "sendtoaddress",
+                           "sendmany",
+                           "signmessage",
+                           "dumpprivkey",
+                           "dumpwallet",
+                           "importwallet",
+                           "importprivkey",
+                           "checkwallet",
+                           "keypoolrefill",
+                           "reservebalance",
+                           "smsgsend",
+                           "smsgsendanon",
+                           "smsgbroadcast",
+                           "smsginbox",
+                           "smsgoutbox",
+                           "smsgscandir",
+                           "smsgpurge",
+                           "smsgaddaddress",
+                           "smsgkeys",
+                           "smsglocalinfo",
+                           "smsgenable",
+                           "smsgdisable",
+                           "smsgoptions",
+                           "smsgscanchain",
+                           "smsgscanbuckets",
+                           "smsgbuckets",
+                           "smsggetpubkey",
+                           "smsgaddkey",
+                           "help",
+                           "getblockheader",
+                           "getblockbynumber",
+                           "getblockchaininfo",
+                           "getwalletinfo",
+                           "getnetworkinfo",
+                           "getmininginfo",
+                           "getsubsidy",
+                           "estimatefee",
+                           "verifymessage",
+                           "decoderawtransaction",
+                           "decodescript",
+                           "createrawtransaction",
+                           "settxfee",
+                           "listreceivedbyaddress",
+                           "getnewpubkey",
+                           "addmultisigaddress",
+                           "addredeemscript",
+                           "createmultisig",
+                           "signrawtransaction",
+                           "listaddressgroupings",
+                           "getcheckpoint",
+                           "repairwallet",
+                           "resendtx",
+                           "stop",
+                           "addnode",
+                           "disconnectnode",
+                           "getseedlist",
+                           "getnetworkstability",
+                           "gettxout",
+                           "getrawchangeaddress"
+                       ],
+    "node_ops":  true,
+    "peer_detail":  {
+                        "by_transport":  {
+                                             "clearnet":  0,
+                                             "i2p":  0,
+                                             "tor":  1
+                                         },
+                        "count":  1,
+                        "peers":  [
+                                      {
+                                          "claimed_tip_hash":  "bfff0faf2269ac69fa7b3b17b6f556f63b03ceb5db1d66d955359f7ebc6b6a41",
+                                          "claimed_tip_height":  2210899,
+                                          "connected_utc":  "2026-11-13T07:07:18Z",
+                                          "endpoint":  "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                                          "inbound":  false,
+                                          "label":  "out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+                                          "last_traffic_ms_ago":  1659814,
+                                          "msgs_in":  16,
+                                          "msgs_out":  12,
+                                          "start_height":  2210899,
+                                          "subver":  "/tri7:7.0.0/",
+                                          "transport":  "tor",
+                                          "version":  70206
+                                      }
+                                  ]
+                    },
+    "peers":  0,
+    "state_write_age_secs":  1669,
+    "status":  "ok",
+    "uptime_secs":  2107,
+    "window":  {
+                   "base":  2205601,
+                   "entries":  4600
+               }
+}
+=== process inventory (tri7|follow_tip) ===
+tri7_wallet_gui pid=32520 path=C:\Coins\TRI-LAPTOP\tri7_wallet_gui.exe
+=== node.log addrindex/stake lines (last 12 of 500) ===
+[2026-11-13T07:02:16Z] stake tick: wallet live view not ready yet (seeding)
+[2026-11-13T07:02:32Z] STAKE: STALE LIVE VIEW — coin 00b8d6019c04c124a45cb9aedd3fa1f1286b622b5fd1152eefa7cb9a748b8ca4:0 claims containing block h2207570 (block_time 1794126844, tx_time 1794126753) but that outpoint is ABSENT from the canonical UTXO map although h2207570 is inside the threaded window (chain holds block_time 1794126844 there); wallet evidence is not chain evidence — 1 coin(s) excluded from staking. A fork adoption does not roll the wallet live view back: run `repairwallet` to rebuild it from the store.
+=== C:\Coins\TRI-LAPTOP\node\triangles.conf (full) ===
+server=1
+rpcport=19114
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcuser=tri7
+rpcpassword=<redacted-rotated>
+staking=0
+stake=1
+socks=127.0.0.1:58033
+addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+addnode=ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113
+=== deployed exe ===
+663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2 (2=GUI 3=console)
+=== launcher task tri7gui-laptop ===
+state: Running
+action: C:\Coins\TRI-LAPTOP\tri7_wallet_gui.exe --wallet C:\Coins\TRI-LAPTOP\wallet.dat --rpc 127.0.0.1:19114
+principal: Sami logon=Interactive

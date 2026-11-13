@@ -1,0 +1,57 @@
+# LIVE POST-CUTOVER VERIFICATION — sami-pc + sami-laptop (2026-11-13 ~07:00-07:10Z)
+
+## sami-pc final state
+$ ssh sami-pc tri-final.ps1 (raw)
+blocks: 2210899
+wallet: {"addresses":399,"balance":1538.11522,"balance_height":2210899,"balance_partial":false,"balance_sats":1538115220,"balance_source":"snapshot-pair","coverage_hash":"bfff0faf2269ac69fa7b3b17b6f556f63b03ceb5db1d66d955359f7ebc6b6a41","coverage_h
+staking: {"attempts":210926,"coins_considered":73,"coins_meeting_min_age":50,"coins_without_key":119,"connections":1,"currentblocksize":0,"currentblocktx":0,"difficulty":5.337664422380835E-06,"enabled":true,"errors":"","expectedtime":0,"in_window_only":true,"initialblo
+peers: {"by_transport":{"clearnet":0,"i2p":0,"tor":1},"count":1,"peers":[{"claimed_tip_hash":null,"claimed_tip_height":null,"connected_utc":"2026-11-13T06:58:15Z","endpoint":"ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112","inbound":false,"label":"out:ra32xf5ogzq2ialyjyptodb6ibhs4owcf
+procs: tri7_wallet_gui/13356
+
+$ ssh sami-pc: deployed exe hash + PE subsystem + task inventory
+663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2
+
+TaskName                State
+--------                -----
+KrystieTRIRescan     Disabled
+StartTri             Disabled
+tri7-addrindex-build Disabled
+tri7-addrindex-timer Disabled
+tri7d                Disabled
+tri7d2               Disabled
+tri7d3               Disabled
+tri7d-watchdog       Disabled
+tri7gui              Disabled
+tri7gui-preview      Disabled
+tri7gui-run           Running
+tri7-gui-verify      Disabled
+tri7hist             Disabled
+tri7probe            Disabled
+tri7tor               Running
+tri7watch            Disabled
+
+
+follow_tip.exe
+ft_run.bat
+ft_state2.bat
+ft_state3.bat
+
+## sami-laptop state (mid-catchup at capture)
+$ ssh sami-laptop tri-final.ps1 (raw)
+blocks: 2210200
+wallet: {"addresses":10,"balance":250.0,"balance_height":2208645,"balance_partial":true,"balance_sats":250000000,"balance_source":"snapshot-pair","coverage_hash":"02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e","coverage_height":2
+staking: rpc getstakinginfo ERR: The request was aborted: The operation has timed out.
+peers: {"by_transport":{"clearnet":0,"i2p":0,"tor":1},"count":1,"peers":[{"claimed_tip_hash":"bfff0faf2269ac69fa7b3b17b6f556f63b03ceb5db1d66d955359f7ebc6b6a41","claimed_tip_height":2210899,"connected_utc":"2026-11-13T07:07:18Z","endpoint":"gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:2411
+procs: tri7_wallet_gui/32520
+
+$ ssh sami-laptop: deployed exe hash + PE subsystem + task inventory
+663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2
+
+TaskName          State
+--------          -----
+tri7d-laptop   Disabled
+tri7gui-laptop  Running
+
+

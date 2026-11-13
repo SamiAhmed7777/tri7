@@ -1,0 +1,6 @@
+== pre-cutover sami-pc inventory (2026-11-12 ~22:1xZ) ==
+processes: follow_tip.exe/26472 (Services sess, state2 daemon, RPC 19114, staking, tailscale inbound 100.85.236.10:24113), tri7_wallet_gui.exe/24696 (Console, NO ARGS, attach-mode rides the daemon's RPC), tor.exe + i2pd.exe (system services)
+tasks active: tri7d2 (Running, daemon), tri7gui-run (Ready, GUI no-args), tri7tor (Running, tor svc), tri7-addrindex-build + tri7-addrindex-timer (Ready, console exe every 20min = periodic console flash + addrindex gap-closer)
+disabled: tri7d tri7d3 tri7d-watchdog tri7watch tri7gui (--attach-external!) tri7gui-preview tri7-gui-verify tri7hist tri7probe StartTri KrystieTRIRescan TRI-smsgDB-cleanup
+exe: E:\Coins\TRI\bin\tri7_wallet_gui.exe PE Subsystem=3 (CONSOLE - the second window), built 11-11 from 308d9ad
+appdata NSIS copy: gone (bin dir exists, no exe)

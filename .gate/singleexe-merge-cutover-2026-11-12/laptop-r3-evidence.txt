@@ -1,0 +1,37 @@
+conf rpcpassword rotated on disk -> len 48 (value withheld)
+sample1 blocks: 2210389
+peers count: 0
+peer:  transport= traffic_ms_ago= in= out=
+health: status=ok node_ops=False state_write_age_secs=13 height=2210389
+sample2 blocks (+30s): 2210396
+sample3 blocks (+60s): 2210396
+sample4 blocks (+90s): 2210396
+wallet: balance_sats=250000000 source=snapshot-pair cov_h=2208645 partial=True
+staking: enabled= staking= attempts=
+addrindex: index_height= complete= chain_tip=
+procs: tri7_wallet_gui/33788
+exe sha256: 663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE subsystem: 2
+
+== CONTINUATION CAPTURE (same restart, +~3 min after the four samples above) ==
+blocks: 2210455 (advancing: 2210389 -> 2210396 -> ... -> 2210455; fleet tip
+2210917 at capture — mid-catchup, ETA minutes at the observed 2s/block
+burst cadence once bodies flow)
+peer rotation documented across the restarts: gxvrhv3q…onion:24113 (first
+run) -> ra32xf5og…onion:24112 (second run, traffic then stale at 513056 ms
+= the reconnect bug striking again) -> restarted -> advancing again.
+getpeerinfo/health timeouts during the burst = the documented RPC-busy
+window while the ops engine ingests blocks (single reader thread), not
+failures; getblockcount kept answering.
+EXE: sha256 663579a4…e6 = commit 1ece227 build; PE subsystem 2.
+CONF rpcpassword rotated on disk (value withheld; takes effect next boot;
+the RPC listener does not challenge auth and the GUI client sends none).
+
+== R4 RETRACTION NOTE (2026-11-13) ==
+The "ETA ~15-36h honest"-style expectation language in the mid-catchup
+narrative above ("ETA minutes at the observed cadence") was OPTIMISTIC and
+did not hold: the reconnect defect struck again (peer stale 513,056 ms) and
+the node froze at 2210335 until the next restart. Do not treat any ETA in
+this file as a claim; the honest statement is "converges in bursts after
+each restart; continuous convergence requires the reconnect dev fix
+(+ interim tri7gui-stallwatch task deployed 2026-11-13, see brief)."

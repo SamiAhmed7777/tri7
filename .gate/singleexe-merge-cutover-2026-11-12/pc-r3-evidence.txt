@@ -1,0 +1,52 @@
+conf rpcpassword rotated on disk -> len 48 (value withheld)
+TIP: 2210917
+getwalletinfo: balance_sats=2500176114 source=live-index cov_h=2210917 partial=False utxos=135
+listunspent: 135 rows sum 2500176114 sats = 25.00176114 TRI
+listwalletaddresses balance_sats sum: 5110900381 sats over 24 funded (wallet-table ledger)
+getaddressbalance[index_height=2210917, complete=True, chain_tip=2210917]
+getaddresstxids for staking address h2208645..2210917: 10358 txs
+  sample: "bf8bde89cf8b29b2a4f9dfda5c43fb6e3b571040ab7d522f8f2b385fcacb8736"
+  sample: "73947137338de46775ca01e6a60b9f89ab3336447bfa2b10e1624650fc8b14a4"
+  sample: "10b2211c7baf627f14831b17c871fee2d6402ad65616fccf3f9653fcdd504745"
+
+== exclusive addrindex rebuild log (full) ==
+tipstate oracle: 4600 hashes
+[blockidx] ready: 2211041 frames, 4500974 txs, heights_ok=true, threaded_tip=Some(2210904), writable=true, built in 42s
+store threaded to h2210904
+resuming at file offset 983557037
+walk: stale fork leftover at offset 983557037 (hash db2448a1501271cbf2ba3a6d85f34992bff34883d55f1904409f13f5fba33246 not in the tipstate window) â€” skipping non-canonical frames by design
+addrindex: done â€” 405 blocks, 536 outputs, 561 spends, 61 stale fork leftover(s) skipped in 0.4s
+
+== post-rebuild node.log: addrindex + mints (last 8 matches) ==
+[2026-11-13T07:16:42Z] addrindex: h2210904 skipped: index is at h2210877, block is h2210904 (builder will catch up)
+[2026-11-13T07:18:31Z] addrindex: live updates enabled (addressindex.db present)
+[2026-11-13T07:20:18Z] STAKE MINTED ƒ+' h2210906 faf747ee25ff72e496ae0db77728e4c73cc8c00d877dd376945690b8ee866aa3 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:23:41Z] addrindex: h2210906 skipped: index is at h2210906, block is h2210906 (builder will catch up)
+[2026-11-13T07:29:01Z] STAKE MINTED ƒ+' h2210908 a8c26845d1b6d95f344e5e87dc7d000148525842a827b6644c42b66d0ed05cb8 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:32:14Z] STAKE MINTED ƒ+' h2210909 9afe3eadb016cfd182803ca95e751c161e454c942038c57f69b4486c32a140de (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:45:12Z] STAKE MINTED ƒ+' h2210915 69d18b225676f646751155bc5f92731a45af9c85a063a1c245c2dd6f12fed5e6 (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+[2026-11-13T07:45:28Z] STAKE MINTED ƒ+' h2210916 ffd17e5edc9655d469de905e34e134352cd413128ea9a2e7161bf1a2c53f32dd (self-validated: kernel enforced, nbits enforced) ƒ?" relaying to 1 peer(s)
+
+== UNIT CORRECTION (agent display bug in the script above) ==
+Triangles uses 1,000,000 satoshis per TRI (6-decimal, legacy chain parity:
+the 1e balances record "3,036,990,591 sats = 3036.99 TRI" confirms 1e6).
+So 2,500,176,114 satoshis = 2500.176114 TRI (the script's "/1e8" printf
+line reading 25.00 TRI is wrong math in the PRINT only; the raw satoshi
+counts quoted everywhere else are exact and are the evidence).
+
+== SAME-TIP EQUALITY (the reconciliation proof) ==
+At one single tip (h2210917), two independent chain-derived sources return
+the IDENTICAL figure: getwalletinfo.balance_sats == listunspent amount_sats
+sum == 2,500,176,114 (2500.176114 TRI), utxos=135, balance_partial=false,
+balance_source=live-index.
+The earlier 2488.74277 / 2499.66 / 2501.00 were the SAME sources read at
+three DIFFERENT tips minutes apart (the wallet stakes every few minutes;
+every mint changes the number) â€” proven by this same-moment capture.
+The pre-merge UI number (1538) was balance_source=snapshot-pair with
+coverage_height=2208645 (frozen 2026-11-08); the difference vs today is
+everything the chain paid or moved since that frozen height â€” the window
+contains 10,358 transactions on the staking address (getaddresstxids
+h2208645..2210917, raw count above); per-tx attribution is a txhistory
+scan out of scope for this cutover artifact. The claim this artifact
+makes is narrower and proven: the merged wallet serves the CURRENT live
+chain figure and two independent sources agree on it exactly.

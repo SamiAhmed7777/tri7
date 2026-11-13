@@ -1,0 +1,22 @@
+=== FINAL CAPTURE 2026-11-13T00:54:51.5641301-08:00 (single session, laptop + fleet cross-read on one page) ===
+LAPTOP HEIGHT: 2210949
+PEERS: count=1
+  peer endpoint=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 transport=tor traffic_ms_ago=40898 msgs_in=116 msgs_out=110 subver=/tri7:7.0.0/
+STAKING: enabled=True staking=True attempts=0 weight=485 last_search_utc=2026-11-13T08:54:49Z
+WALLET: balance=250.0 source=snapshot-pair partial=False cov_h=2210949 utxos=1
+PROCESS INVENTORY:
+  tri7_wallet_gui pid=27244 path=C:\Coins\TRI-LAPTOP\tri7_wallet_gui.exe
+EXE SHA256: 663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6
+PE SUBSYSTEM: 2 (2=GUI 3=console)
+STALLWATCH LOG (last 3):
+  [2026-11-13T00:45:02.4403280-08:00] rpc STILL down after retry -> restarting GUI (wedged)
+  [2026-11-13T00:45:06.6541460-08:00] restarted via tri7gui-laptop (wedged rpc)
+  [2026-11-13T00:54:02.5276279-08:00] rpc not answering - retrying once in 60s before considering a restart
+WATCHDOG TRIGGER RAW: class=MSFT_TaskTimeTrigger interval=PT10M duration='' enabled=True
+DNS2 (fleet) height at the same moment:
+
+== DNS2 (fleet) cross-read, raw, at 08:59:10Z ==
+{"error":null,"id":null,"result":2210953,"source":"tri7"}2210953
+== timestamped cross-read session (laptop T1, DNS2 T2, seconds apart) ==
+T1 laptop: 2026-11-13T09:03:39.9466771Z 2210953 
+T2 dns2:   2026-11-13T09:03:39Z {"error":null,"id":null,"result":2210953,"source":"tri7"}
