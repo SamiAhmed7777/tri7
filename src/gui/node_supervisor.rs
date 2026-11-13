@@ -23,13 +23,16 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Primary bootstrap: the Pi's clearnet listener on 443 — reachable from the
-/// open internet AND from machines behind outbound-web-port filters (laptops
-/// on managed networks can only dial 80/443).
-pub const DEFAULT_PEER: &str = "46.62.249.20:443";
-/// Secondary bootstrap: samihost's clearnet listener on the conventional p2p
-/// port (unrestricted networks reach this one too).
-pub const FALLBACK_PEER: &str = "100.85.236.10:24113";
+/// Overlay-only bootstrap seeds (operator policy 2026-11-13: Triangles is
+/// NEVER on public clearnet). The GUI passes these to ensure_running so a
+/// spawned node bootstraps through its tor onion and i2p routes; the former
+/// clearnet constants (Pi 443 / samihost 24113) are RETIRED — the fleet's
+/// nftables drop those ports from public interfaces and the dialer must not
+/// resurrect them. Aliased to the fleet seeds (single source of truth).
+pub const DEFAULT_PEER: &str = FLEET_ONION_SEED;
+/// Secondary overlay bootstrap: DNS2's live i2p server tunnel (kept so the
+/// ensure_running seed list stays dual-network).
+pub const FALLBACK_PEER: &str = FLEET_I2P_SEED;
 /// Fleet onion bootstrap seed (Sami 2026-11-11): written as an `addnode=`
 /// conf line whenever tor is live so a bundled-tor wallet has an onion route
 /// immediately (dialled through the tor SOCKS port by follow_tip).

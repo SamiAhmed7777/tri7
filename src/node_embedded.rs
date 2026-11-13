@@ -2392,21 +2392,21 @@ fn usage() -> ! {
 
 /// Built-in fleet seed floor — ("transport tag", "host:port"). The tags are
 /// documentation; `PeerTarget::parse` derives the transport from the host
-/// suffix (the augment test pins tag == parsed). These seeds are a FLOOR,
-/// never a ceiling: they are APPENDED to whatever the operator configured
-/// (CLI --daemon/--onion/--i2p + conf addnode=), deduped by host:port, so a
-/// fresh wallet with zero config reaches the fleet over BOTH overlay
-/// networks automatically and user addnodes always win the dial order
-/// (connect_and_handshake tries store/answered peers first).
+/// Overlay-only seed floor (operator policy 2026-11-13: "Triangles should
+/// not be on clearnet"). These seeds are a FLOOR, never a ceiling: they are
+/// APPENDED to whatever the operator configured (CLI --daemon/--onion/--i2p
+/// + conf addnode=), deduped by host:port, so a fresh wallet with zero
+/// config reaches the fleet over BOTH overlay networks automatically and
+/// user addnodes always win the dial order (connect_and_handshake tries
+/// store/answered peers first). Cleartext seeds were REMOVED: a fresh
+/// wallet bootstraps through its tor/i2p proxies (the supervisor owns
+/// those), never a public listener. The augment test pins tag == parsed.
 ///   - DNS2 onion  = /var/lib/tor/triangles/hostname (the fleet's canonical
 ///     hidden service; mirrors node_supervisor::FLEET_ONION_SEED).
 ///   - DNS2 i2p    = the live tri7d server-tunnel destination, derived from
 ///     /var/lib/i2pd/tri7d-p2p-keys.dat (base32(sha256(dest))) and verified
 ///     against i2pd's own `destinations/` state on this host.
-///   - clearnet    = the two bootstrap listeners (DEFAULT_PEER/FALLBACK_PEER).
 pub const DEFAULT_PEER_SEEDS: &[(&str, &str)] = &[
-    ("clearnet", "46.62.249.20:443"),
-    ("clearnet", "100.85.236.10:24113"),
     (
         "tor",
         "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
@@ -2416,10 +2416,6 @@ pub const DEFAULT_PEER_SEEDS: &[(&str, &str)] = &[
         "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113",
     ),
 ];
-
-/// Parse the seed table into dial targets through the CURRENT socks/i2p
-/// endpoints (a malformed seed must never crash the boot — skipped silently,
-/// though the augment test pins every entry parses).
 fn seed_targets(socks: &(String, u16), i2p_socks: &(String, u16)) -> Vec<PeerTarget> {
     DEFAULT_PEER_SEEDS
         .iter()
@@ -19755,6 +19751,14 @@ addnode=host:notaport
         let i2p = ("127.0.0.1".to_string(), 4447);
         let targets = seed_targets(&socks, &i2p);
         assert_eq!(targets.len(), DEFAULT_PEER_SEEDS.len(), "every seed parses");
+        // operator policy 2026-11-13: Triangles is NEVER on public clearnet —
+        // the compiled seed floor must stay overlay-only (tor onion / i2p)
+        for (tag, spec) in DEFAULT_PEER_SEEDS {
+            assert!(
+                *tag != "clearnet" && !spec.starts_with("46.62.") && !spec.starts_with("100."),
+                "seed floor went back on clearnet: {tag} {spec}"
+            );
+        }
         for ((tag, spec), t) in DEFAULT_PEER_SEEDS.iter().zip(&targets) {
             let want = match *tag {
                 "tor" => Transport::Tor,
