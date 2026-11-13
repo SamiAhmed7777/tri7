@@ -271,6 +271,10 @@ fn keypool_maintainer_loop(
 const STALE_LINK_SECS: u64 = 90;
 const MAX_OUTSTANDING_GETDATA: usize = 64;
 const GETDATA_BATCH: usize = 32;
+/// (2026-11-13 boot-body-stall) Body-phase deadline for boot backfill.
+/// Bounded, NOT fatal: a stall ends the PHASE (skip+warn — the follow loop
+/// owns the chain from the persisted tip), never the process.
+const BACKFILL_BODY_DEADLINE: Duration = Duration::from_secs(180);
 // (item 23, live-caught on DNS2 2026-11-11) A body request the target never
 // answers used to sit in `outstanding` FOREVER: at the 64-entry cap the
 // dispatch gate closed permanently and the node re-fired identical
@@ -5624,26 +5628,115 @@ fn run_backfill(
         return Ok(got);
     }
     log(&format!("backfill: requesting {} full blocks", picks.len()));
+    let bdeadline = Instant::now() + BACKFILL_BODY_DEADLINE;
+    let validated = backfill_fetch_bodies(sess, st, rpc, stats, &got, picks, bdeadline)?;
+    if validated == 0 {
+        // (2026-11-13 boot-body-stall) a peer that validated our headers but
+        // served ZERO bodies by the deadline is a stalled/dead server, not a
+        // protocol crime: returning Err here exit(4)-crash-looped every boot
+        // against it (DNS2 live 2026-11-13 17:20:14Z: 2991 headers validated,
+        // 0/100 bodies in the full 180 s window, server side = Pi's
+        // "send block: Broken pipe — dropping inbound peer"; the restart
+        // re-dialed the SAME peer and stalled again). SKIP like the item-17
+        // empty-serve above: the follow loop owns the chain from the
+        // persisted tip, gap recovery fetches what backfill missed, and the
+        // peer-rotation paths own the peer (send-failure shutdown,
+        // empty-reply evidence + escalation dial).
+        log(&format!(
+            "backfill: peer validated {} header(s) but 0 bodies by the deadline — skipping the body phase (follow loop owns the chain)",
+            got.len()
+        ));
+        return Ok(got);
+    }
+    log(&format!(
+        "backfill: {} blocks fully validated (kernel enforced {} / seeded {})",
+        validated, stats.kernel_enforced, stats.kernel_seeded
+    ));
+    Ok(got)
+}
+
+/// The BODY phase of boot backfill, extracted from run_backfill so tests can
+/// run it with a short deadline (2026-11-13 boot-body-stall).
+///
+/// Fault treatment follows the item-17 precedent for the header phase: a
+/// boot must never exit(4) on a PEER's serving behavior. A session error
+/// (peer death, wire garbage at the pump layer), an unusable served payload,
+/// a failed getdata send, or a deadline stall returns the count of blocks
+/// validated so far — the caller turns 0 into a WARN+skip. ONLY a kernel
+/// VALIDATION failure of a served body stays fatal (a chain problem, not a
+/// transport problem: loud exit + operator eyes; disclosed remainder — no
+/// live occurrence of that shape).
+fn backfill_fetch_bodies(
+    sess: &mut Session,
+    st: &ChainState,
+    rpc: &Rpc,
+    stats: &mut Stats,
+    headers: &[Block],
+    picks: Vec<(Hash, u64)>,
+    deadline: Instant,
+) -> Result<usize, String> {
     for chunk in picks.chunks(GETDATA_BATCH) {
         let inv: Vec<(u32, Hash)> = chunk
             .iter()
             .map(|(h, _)| (tri7_core::p2p::MSG_BLOCK, *h))
             .collect();
-        sess.send("getdata", &tri7_core::p2p::build_getdata(&inv), stats)?;
+        if let Err(e) = sess.send("getdata", &tri7_core::p2p::build_getdata(&inv), stats) {
+            // the socket died before the request even left — a peer fault,
+            // not a protocol crime: skip the phase, the follow loop owns it
+            log(&format!(
+                "backfill: send getdata failed ({}) — skipping the body phase (follow loop owns the chain)",
+                e
+            ));
+            return Ok(0);
+        }
     }
     let mut want: HashMap<Hash, u64> = picks.into_iter().collect();
     let mut validated = 0usize;
-    let bdeadline = Instant::now() + Duration::from_secs(180);
-    while validated < want.len() + validated && Instant::now() < bdeadline {
-        for msg in sess.pump()? {
+    // `want` empties as requested bodies arrive, ending the wait early; the
+    // deadline is the backstop (the old `validated < want.len() + validated`
+    // spelling meant exactly this).
+    while !want.is_empty() && Instant::now() < deadline {
+        let msgs = match sess.pump() {
+            Ok(m) => m,
+            Err(e) => {
+                // the serving peer died mid-body-phase ("peer closed
+                // connection" / "read: …") — the OLD code let this Err
+                // propagate to finish(EXIT_PROTOCOL), so every boot against
+                // a peer that dies after headers crash-looped
+                log(&format!(
+                    "backfill: body-phase session error ({}) — skipping the body phase (follow loop owns the chain)",
+                    e
+                ));
+                return Ok(validated);
+            }
+        };
+        for msg in msgs {
             stats.note_recv(&msg.command);
             match msg.command.as_str() {
                 "block" => {
                     stats.blocks_received += 1;
                     let mut r = Reader::new(&msg.payload);
-                    let b = Block::read(&mut r).map_err(|e| format!("block parse: {}", e))?;
-                    r.expect_done()
-                        .map_err(|e| format!("block trailing: {}", e))?;
+                    let b = match Block::read(&mut r) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            // (2026-11-13, disclosed widening of the old
+                            // `?`) an unusable payload is the peer's serving
+                            // behavior, not a protocol crime: skip the
+                            // phase, never exit(4)-loop on it
+                            log(&format!(
+                                "backfill: served body unusable (block parse: {}) — skipping the body phase (follow loop owns the chain)",
+                                e
+                            ));
+                            return Ok(validated);
+                        }
+                    };
+                    if let Err(e) = r.expect_done() {
+                        log(&format!(
+                            "backfill: served body unusable (block trailing: {}) — skipping the body phase (follow loop owns the chain)",
+                            e
+                        ));
+                        return Ok(validated);
+                    }
                     let hash = b.hash();
                     let height = match want.remove(&hash) {
                         Some(h) => h,
@@ -5664,7 +5757,7 @@ fn run_backfill(
                             continue;
                         }
                     };
-                    let header = got.iter().find(|hdr| hdr.hash() == hash);
+                    let header = headers.iter().find(|hdr| hdr.hash() == hash);
                     validate_block(
                         st,
                         rpc,
@@ -5687,22 +5780,30 @@ fn run_backfill(
                     }
                 }
                 "ping" => {
-                    let n = tri7_core::p2p::parse_ping(&msg.payload)?;
-                    sess.send("pong", &tri7_core::p2p::build_pong(n), stats)?;
+                    let n = match tri7_core::p2p::parse_ping(&msg.payload) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            log(&format!(
+                                "backfill: served body phase got an unusable ping ({}) — skipping the body phase (follow loop owns the chain)",
+                                e
+                            ));
+                            return Ok(validated);
+                        }
+                    };
+                    if let Err(e) = sess.send("pong", &tri7_core::p2p::build_pong(n), stats) {
+                        log(&format!(
+                            "backfill: send pong failed ({}) — skipping the body phase (follow loop owns the chain)",
+                            e
+                        ));
+                        return Ok(validated);
+                    }
                 }
                 _ => {}
             }
         }
         std::thread::sleep(Duration::from_millis(40));
     }
-    if validated == 0 {
-        return Err("backfill: no blocks validated".into());
-    }
-    log(&format!(
-        "backfill: {} blocks fully validated (kernel enforced {} / seeded {})",
-        validated, stats.kernel_enforced, stats.kernel_seeded
-    ));
-    Ok(got)
+    Ok(validated)
 }
 
 // ---------------------------------------------------------------------------
@@ -17299,6 +17400,117 @@ mod tests {
         // degenerate inputs
         assert!(backfill_pick_indices(0, 100, tip, 0).is_empty());
         assert!(backfill_pick_indices(100, 0, tip, 0).is_empty());
+    }
+
+    // ---- 2026-11-13 boot-body-stall: the body phase must never exit(4) ----
+
+    #[test]
+    fn backfill_body_stall_zero_bodies_returns_ok_zero_never_a_fatal_err() {
+        let _live_store_serial = lock_live_store_tests();
+        // the LIVE 2026-11-13 17:20Z shape: headers validated, then the peer
+        // goes silent — the body phase must return Ok(0) at the deadline
+        // (the caller WARN+skips), never the old fatal
+        // "backfill: no blocks validated" that exit(4)-crash-looped boots
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let holder = std::thread::spawn(move || {
+            // accept and HOLD the socket open, serve NOTHING
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        });
+        let mut sess = Session::connect(&format!("127.0.0.1:{}", addr.port())).unwrap();
+        let stg = synthetic_chain(100, 105);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks: Vec<(Hash, u64)> = (0..3u8)
+            .map(|i| {
+                let mut h = [0x22u8; 32];
+                h[0] = i;
+                (h, 103 + i as u64)
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let no_headers: Vec<Block> = Vec::new();
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a body-phase stall must be Ok, never a fatal Err");
+        holder.join().unwrap();
+        assert_eq!(validated, 0, "nothing was served, so nothing validated");
+    }
+
+    #[test]
+    fn backfill_body_peer_death_after_headers_returns_ok_never_a_fatal_err() {
+        let _live_store_serial = lock_live_store_tests();
+        // the server dies right after accept (Pi's "send block: Broken pipe"
+        // shape seen from the other side): the pump layer errors — the OLD
+        // code propagated that to finish(EXIT_PROTOCOL)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let holder = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            drop(s); // die immediately
+        });
+        let mut sess = Session::connect(&format!("127.0.0.1:{}", addr.port())).unwrap();
+        let stg = synthetic_chain(100, 105);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks: Vec<(Hash, u64)> = (0..3u8)
+            .map(|i| {
+                let mut h = [0x23u8; 32];
+                h[0] = i;
+                (h, 103 + i as u64)
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let no_headers: Vec<Block> = Vec::new();
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a dead peer must be Ok(validated-so-far), never a fatal Err");
+        holder.join().unwrap();
+        assert_eq!(validated, 0);
+    }
+
+    #[test]
+    fn backfill_body_garbage_block_payload_skips_the_phase_never_a_fatal_err() {
+        let _live_store_serial = lock_live_store_tests();
+        // a wire-valid "block" frame whose payload is garbage: the OLD code
+        // propagated the parse error to finish(EXIT_PROTOCOL) — every boot
+        // against such a peer would crash-loop. Now: WARN + skip the phase.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let holder = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let frame = tri7_core::p2p::encode_message("block", b"not-a-block-at-all")
+                .expect("encode ok");
+            use std::io::Write as _;
+            let _ = s.write_all(&frame);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        });
+        let mut sess = Session::connect(&format!("127.0.0.1:{}", addr.port())).unwrap();
+        let stg = synthetic_chain(100, 105);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks: Vec<(Hash, u64)> = (0..3u8)
+            .map(|i| {
+                let mut h = [0x24u8; 32];
+                h[0] = i;
+                (h, 103 + i as u64)
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let no_headers: Vec<Block> = Vec::new();
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a garbage served body must be Ok(validated-so-far), never a fatal Err");
+        holder.join().unwrap();
+        assert_eq!(validated, 0);
+        assert!(
+            stats.blocks_received >= 1,
+            "the garbage block frame must have been received and counted"
+        );
     }
 
     #[test]
