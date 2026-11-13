@@ -8,6 +8,17 @@
 //!                                 no broadcast, wallet/archive read-only.
 //!
 //! Exit codes: 0 selfcheck OK / 1 selfcheck failed / 2 usage or no-gui build.
+//
+// SAMI (2026-11-12): the wallet is ONE window, period — "no other window
+// should open outside of the GUI when it is running". Windows release builds
+// link as a GUI-subsystem binary, so launching the wallet never opens a
+// console next to it. Debug builds and every non-Windows target keep the
+// console subsystem so headless --selfcheck runs still print diagnostics
+// (on a GUI-subsystem exe, pass --report PATH instead of reading stdout).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 #[cfg(feature = "gui")]
 use tri7_core::gui::app;

@@ -1,0 +1,15 @@
+# windows release build (worktree HEAD, base 308d9ad + this diff)
+$ CARGO_TARGET_DIR=/root/tri7/target-win cargo build --release --target x86_64-pc-windows-gnu --features gui --bin tri7_wallet_gui
+[tail]
+  warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+      Finished `release` profile [optimized] target(s) in 6m 24s
+  EXIT=0
+
+# PE optional-header Subsystem parse of the built artifact
+$ python3: e_lfanew=128 Subsystem=2  # 2=GUI 3=console -> GUI-SUBSYSTEM
+$ sha256sum tri7_wallet_gui.exe
+  663579a425ca3e8f16a22acd9ef1c3162bfca08df982750907d3ae6450e9bbe6  tri7_wallet_gui.exe
+  size: 15736121 bytes
+
+# the problem, measured on the DEPLOYED sami-pc exe before this change
+$ powershell (over ssh, 2026-11-12): e_lfanew=128 Subsystem=3  # console-subsystem

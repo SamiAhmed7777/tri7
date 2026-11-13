@@ -4584,3 +4584,40 @@ fn balance_card_number_and_label_come_from_one_getwalletinfo_payload() {
     shutdown.store(true, Ordering::SeqCst);
     let _ = server.join();
 }
+
+/// SAMI 2026-11-12: "No other window should open outside of the GUI when it
+/// is running" — a console-subsystem exe opens a console window next to the
+/// wallet every launch, which is exactly the second window he forbids. The
+/// Windows RELEASE build must link as a GUI-subsystem binary (attribute in
+/// the bin root). Windows-only + release-only: debug builds and every
+/// non-Windows target keep the console subsystem so headless --selfcheck
+/// runs still print their diagnostics to stdout.
+#[test]
+fn windows_release_wallet_launches_with_no_console_window() {
+    let bin = include_str!("../bin/tri7_wallet_gui.rs");
+    let want = "windows_subsystem = \"windows\"";
+    assert!(
+        bin.contains(want),
+        "the GUI bin must carry the windows_subsystem attribute (one window, period)"
+    );
+    // the attribute must stay gated: a bare #![windows_subsystem] would also
+    // silence Linux --selfcheck stdout (the DNS2 headless validation path)
+    let attr_line = bin
+        .lines()
+        .find(|l| l.contains("#![cfg_attr("))
+        .expect("the subsystem attribute is wrapped in cfg_attr");
+    assert!(
+        attr_line.contains("cfg_attr"),
+        "subsystem applies via cfg_attr, never bare"
+    );
+    let gate = bin
+        .lines()
+        .skip_while(|l| !l.contains("#![cfg_attr("))
+        .take(5)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        gate.contains("target_os = \"windows\"") && gate.contains("not(debug_assertions)"),
+        "gated to windows release builds only (stdout stays for headless selfcheck): {gate}"
+    );
+}
