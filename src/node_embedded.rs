@@ -282,6 +282,22 @@ const GETDATA_BATCH: usize = 32;
 const GETDATA_TIMEOUT_SECS: u64 = 45;
 const MAX_BODY_ATTEMPTS: u32 = 6; // attempts before the stall line goes loud
 const BODY_TRIES_WASHOUT: u32 = 12; // attempts before rotation memory resets
+/// (fleet-resilience, 2026-11-13 live laptop/DNS2 session) How fresh a peer's
+/// traffic must be for it to count as a dial-rotation SUPPRESSOR. The
+/// keepalive pass fires every POLL_SECS and the stale-link prune cuts at
+/// STALE_LINK_SECS, so a HEALTHY outbound peer always shows traffic well
+/// inside this window; a dead-but-not-yet-evicted entry or a hung session
+/// shows none and must never keep the node from dialing fresh seeds.
+const OUTBOUND_FRESH_WINDOW: Duration = Duration::from_secs(240);
+/// (fleet-resilience) adoption escalation timing: a dispatch pass where NO
+/// live peer could take the batch must burn a grace window first (demotion
+/// expiry retries the connected set), then dial a fresh seed at most once
+/// per spacing. Live DNS2 shape: 'no live peer can take N body request(s)'
+/// every second for 20+ minutes while every connected peer claimed a taller
+/// tip none of them could serve — a daemon restart unstuck it; this does
+/// the restart's one useful move (a fresh handshake) in-band.
+const BODY_NO_SERVER_GRACE: Duration = Duration::from_secs(60);
+const BODY_ESCALATION_DIAL_SECS: Duration = Duration::from_secs(60);
 // (fz-rec fix 5) a body source that accepted getdata but served nothing for
 // this many unserved ROUNDS loses selection (a demotion window arms) —
 // advertiser-first protects the initial request, not a peer that accepts and
@@ -11843,6 +11859,12 @@ pub fn main_args(argv: &[String]) -> i32 {
     // budget). Selection reads body_demoted_at in every tier.
     let mut body_peer_misses: HashMap<String, u32> = HashMap::new();
     let mut body_demoted_at: HashMap<String, Instant> = HashMap::new();
+    // (fleet-resilience) adoption no-server escalation state: how long every
+    // dispatch pass has failed to find a live server, and when the last
+    // escalation dial fired. Both are loop-scope because the pending queue
+    // outlives any single pass.
+    let mut body_no_server_since: Option<Instant> = None;
+    let mut body_escalation_last_dial: Option<Instant> = None;
     // (fz-rec fix 6) last body-getdata target + the tip-frozen tracker for
     // the fail-loud ADOPTION STALLED summary
     let mut last_body_getdata: Option<(String, Instant)> = None;
@@ -11898,7 +11920,15 @@ pub fn main_args(argv: &[String]) -> i32 {
                     g.bestblock_hash = Some(hash);
                 }
             }
-            let have_outbound = peers.iter().any(|p| p.outbound);
+            // (OPEN DEV ITEM 1 fix — fleet-resilience) the gate counts only
+            // HEALTHY outbound peers: a dead-but-not-yet-evicted entry or a
+            // stale one must never keep the rotation suppressed. Live shape
+            // (laptop, twice): a stale peer entry kept have_outbound true for
+            // a 29-minute freeze while every transport seed was dialable, and
+            // every GUI restart re-dialled instantly — the burst-sync
+            // behavior this gate now owns continuously.
+            let have_outbound =
+                fresh_outbound_present(&peers, Instant::now(), OUTBOUND_FRESH_WINDOW);
             if !have_outbound {
                 // headless/peerless: retry the outbound rotation each tick
                 if let Some((p, idx)) = try_connect(&cfg, &mut stats, height_for_attach, outbound_start) {
@@ -12211,11 +12241,14 @@ pub fn main_args(argv: &[String]) -> i32 {
                 ));
             }
         }
-        if pending_from_headers.is_empty()
-            && outstanding.is_empty()
-            && recon_acc.branch_source.is_some()
-        {
-            recon_acc.branch_source = None; // adoption satisfied
+        if pending_from_headers.is_empty() && outstanding.is_empty() {
+            // adoption satisfied (or nothing in flight): the escalation
+            // clock must not carry stale starvation into the next adoption
+            body_no_server_since = None;
+            body_escalation_last_dial = None;
+            if recon_acc.branch_source.is_some() {
+                recon_acc.branch_source = None; // adoption satisfied
+            }
         }
         if !pending_from_headers.is_empty()
             && outstanding.len() < MAX_OUTSTANDING_GETDATA
@@ -12243,6 +12276,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                 // group (see group_batch_by_history): the common case is one
                 // group, so batching behavior is unchanged
                 let groups = group_batch_by_history(batch, &body_tries);
+                let mut no_server_this_pass = false;
                 // (r2 judge) failed groups accumulate and requeue ONCE, in
                 // group-encounter order (= the batch's chain order): pushing
                 // each group to the queue front independently would put later
@@ -12302,6 +12336,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                             }
                         }
                         None => {
+                            no_server_this_pass = true;
                             log(&format!(
                                 "adoption body dispatch: no live peer can take {} body request(s) — requeued (no pin)",
                                 group.len()
@@ -12312,6 +12347,40 @@ pub fn main_args(argv: &[String]) -> i32 {
                 }
                 if !unsent.is_empty() {
                     requeue_unsent_batch(&mut pending_from_headers, &unsent);
+                }
+                // (fleet-resilience) the no-server escalation: when dispatch
+                // passes starve — ANY request group finding no live server —
+                // past the grace window, dial a FRESH
+                // seed (rate-limited). The connected-but-non-serving peer set
+                // never refreshes on its own — this is the restart's one
+                // useful move, done in-band.
+                if no_server_this_pass {
+                    if body_no_server_since.is_none() {
+                        body_no_server_since = Some(Instant::now());
+                    }
+                    if adoption_escalation_due(
+                        body_no_server_since,
+                        body_escalation_last_dial,
+                        Instant::now(),
+                        BODY_NO_SERVER_GRACE,
+                        BODY_ESCALATION_DIAL_SECS,
+                    ) {
+                        body_escalation_last_dial = Some(Instant::now());
+                        log(
+                            "adoption body ESCALATION: no connected peer could serve the adopted branch — dialling a fresh transport seed",
+                        );
+                        let tip_now = st_shared.lock().unwrap().tip_height;
+                        if let Some((p, idx)) =
+                            try_connect(&cfg, &mut stats, tip_now, outbound_start)
+                        {
+                            log(&format!("outbound re-attached: {}", p.label));
+                            outbound_start = (idx + 1) % cfg.peers.len();
+                            peers.push(p);
+                            st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
+                        }
+                    }
+                } else {
+                    body_no_server_since = None;
                 }
                 peers.retain(|p| p.sess_ok());
             }
@@ -12752,6 +12821,54 @@ impl Peer {
     /// already shut down).
     fn sess_ok(&self) -> bool {
         !self.dead
+    }
+}
+
+/// (OPEN DEV ITEM 1 fix — fleet-resilience) The dial-rotation gate: an
+/// OUTBOUND peer suppresses a fresh dial rotation only while its traffic is
+/// FRESH and it is not flagged dead. Pure over (outbound, dead, last_traffic)
+/// per peer so the semantics are unit-testable without sockets. A
+/// dead-but-not-yet-evicted entry (sess_ok() can stay true through a hung
+/// session) or a stale entry must NOT keep the node from dialing — this bare
+/// `any(p.outbound)` gate froze the laptop for 29 minutes beside a dead onion
+/// entry while every transport seed was dialable.
+fn fresh_outbound_present(peers: &[Peer], now: Instant, fresh: Duration) -> bool {
+    peers.iter().any(|p| {
+        p.outbound
+            && !p.dead
+            && now
+                .checked_duration_since(p.last_traffic)
+                .map(|idle| idle <= fresh)
+                .unwrap_or(true) // skewed (future) traffic counts as fresh
+    })
+}
+
+/// (fleet-resilience) The adoption no-server escalation decision, extracted
+/// pure: `no_server_since` is Some for as long as the dispatch pass starved —
+/// i.e. ANY request group found no live server under the demotion/avoid
+/// filters (None = every group was dispatched). The pass-level semantics
+/// deliberately count a mixed pass (some groups served, one starved) as
+/// starving: the starved group still requeues, and the grace window + dial
+/// spacing bound the escalation rate, so the wider trigger cannot storm.
+/// Fires when the starvation has burned the grace window AND the spacing
+/// since the previous dial has elapsed — demotion expiry gets its chance
+/// first, and a fresh dial never storms.
+fn adoption_escalation_due(
+    no_server_since: Option<Instant>,
+    last_dial: Option<Instant>,
+    now: Instant,
+    grace: Duration,
+    spacing: Duration,
+) -> bool {
+    let Some(since) = no_server_since else {
+        return false;
+    };
+    if now.duration_since(since) < grace {
+        return false;
+    }
+    match last_dial {
+        None => true,
+        Some(t) => now.duration_since(t) >= spacing,
     }
 }
 
@@ -17769,6 +17886,110 @@ addnode=host:notaport
         p.last_traffic = now + Duration::from_secs(30);
         assert!(stale_link_reason(&p, cut, now).is_none());
         let _ = listener;
+    }
+
+    /// Test fixture for the rotation gate: a peer with controllable
+    /// (outbound, dead, last_traffic) and a real local-socket session.
+    fn gate_peer(outbound: bool, dead: bool, last_traffic: Instant) -> Peer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        Peer {
+            label: "out:gate-peer".into(),
+            outbound,
+            sess: Session {
+                stream,
+                dec: tri7_core::p2p::MessageDecoder::new(),
+                sent_msgs: 0,
+            },
+            last_traffic,
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead,
+            transport: Transport::Tor,
+            version: 70206,
+            subver: "/tri7:7.0.0/".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+        }
+    }
+
+    /// (fleet-resilience) The dial-rotation gate must count only FRESH,
+    /// HEALTHY outbound peers as rotation suppressors. The laptop defect:
+    /// `any(p.outbound)` kept the rotation suppressed for 29 minutes beside a
+    /// dead-but-unevicted peer entry while every transport seed was dialable.
+    #[test]
+    fn rotation_gate_counts_only_fresh_healthy_outbound_peers() {
+        let now = Instant::now();
+        let fresh = OUTBOUND_FRESH_WINDOW;
+        // an empty peer set is never a suppressor — the rotation fires
+        assert!(!fresh_outbound_present(&[], now, fresh));
+        // a fresh healthy outbound peer suppresses (the normal steady state)
+        let ok = gate_peer(true, false, now);
+        assert!(fresh_outbound_present(&[ok], now, fresh));
+        // a DEAD-flagged outbound entry must NOT suppress (defect shape 1:
+        // dead but not yet swept by the retain pass)
+        let dead = gate_peer(true, true, now);
+        assert!(!fresh_outbound_present(&[dead], now, fresh));
+        // a STALE outbound entry must NOT suppress (defect shape 2: hung
+        // session, no traffic past the window)
+        let stale = gate_peer(
+            true,
+            false,
+            now - OUTBOUND_FRESH_WINDOW - Duration::from_secs(1),
+        );
+        assert!(!fresh_outbound_present(&[stale], now, fresh));
+        // a fresh INBOUND peer does not suppress: the rotation dials
+        // OUTBOUND targets, and an inbound-only set is exactly the
+        // headless-tolerant shape that must keep dialing
+        let inbound = gate_peer(false, false, now);
+        assert!(!fresh_outbound_present(&[inbound], now, fresh));
+        // a stale inbound plus a fresh outbound composes to suppressed
+        let both = vec![
+            gate_peer(false, false, now - Duration::from_secs(600)),
+            gate_peer(true, false, now),
+        ];
+        assert!(fresh_outbound_present(&both, now, fresh));
+    }
+
+    /// (fleet-resilience) The adoption escalation fires only after the grace
+    /// window burned and never more often than the dial spacing.
+    #[test]
+    fn adoption_escalation_fires_after_grace_and_spaces_dials() {
+        let now = Instant::now();
+        let grace = BODY_NO_SERVER_GRACE;
+        let spacing = BODY_ESCALATION_DIAL_SECS;
+        // a served pass (no starvation) never escalates
+        assert!(!adoption_escalation_due(None, None, now, grace, spacing));
+        // starving but inside the grace window: hold — demotion expiry gets
+        // its chance to fix the connected set first
+        assert!(!adoption_escalation_due(
+            Some(now - Duration::from_secs(10)),
+            None,
+            now,
+            grace,
+            spacing
+        ));
+        // starving past grace, never dialed: fire
+        assert!(adoption_escalation_due(Some(now - grace), None, now, grace, spacing));
+        // just dialed: hold to the spacing
+        assert!(!adoption_escalation_due(
+            Some(now - grace),
+            Some(now - Duration::from_secs(5)),
+            now,
+            grace,
+            spacing
+        ));
+        // dialed longer ago than the spacing: fire again
+        assert!(adoption_escalation_due(
+            Some(now - grace),
+            Some(now - spacing),
+            now,
+            grace,
+            spacing
+        ));
     }
 
     /// The keepalive that rescues idle i2p sessions: a ping goes OUT over
