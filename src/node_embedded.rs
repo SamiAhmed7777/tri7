@@ -13312,6 +13312,22 @@ pub fn main_args(argv: &[String]) -> i32 {
                 }
             }
             if let Some(e) = fatal {
+                // (item 26) a peer-send transport failure drops THE PEER on
+                // every transport — it is a circuit/socket fact, not a chain
+                // fact, and it must never ride the outbound-is-fatal funnel
+                // (see is_transport_send_error: the Pi 09:09:56Z exit-3
+                // restart was exactly this path).
+                if is_transport_send_error(&e) {
+                    log(&format!(
+                        "send failure to {} (transport {}): {} — dropping peer (non-fatal)",
+                        peers[pi].label,
+                        peers[pi].transport.as_str(),
+                        e
+                    ));
+                    peers[pi].dead = true;
+                    peers[pi].sess.shutdown();
+                    continue;
+                }
                 if peers[pi].outbound {
                     // outbound targets are the trusted tip sources — a
                     // validation failure there is fatal for the process
@@ -14823,8 +14839,27 @@ fn dialable_store_host(host: &str) -> bool {
     host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p")
 }
 
-/// LOW-2b: classify a peer's transport from its OWN advertised store key —
-/// the socket address cannot tell an overlay inbound (arrives as loopback
+/// (item 26) A peer-send transport failure — the socket (or the tor/i2p
+/// circuit under it) died mid-write. That is a PEER/CIRCUIT fact, never a
+/// chain fact: the trusted-tip-source stance has nothing to say about it
+/// (a total mesh partition is already survivable — try_connect tolerates
+/// every target down — so a single wedged write cannot rationally be
+/// more fatal than the fleet's normal night). Session::send prefixes
+/// every write error with "send <command>: " (the only write path into
+/// a peer session), so the class is recognizable at the follow-loop
+/// funnel by prefix. Live catch 2026-11-14 09:09:56Z on Pi: DNS2's
+/// onion circuit churned mid-pong on the item-25 binary → handle_message
+/// surfaced Err("send pong: Broken pipe (os error 32)") → the outbound
+/// branch called finish(EXIT_VALIDATE) → systemd restart → full ~5-min
+/// warmup + a fresh §16 stale-live-view flag. The read side (pump) and
+/// the poll-side sends were already contained; this closes the last
+/// send-failure lane (the handle_message funnel).
+fn is_transport_send_error(e: &str) -> bool {
+    e.starts_with("send ")
+}
+
+/// LOW-2b: honest transport classification for a PEER TABLE row (not a wire
+/// message): the socket address cannot tell an overlay inbound (arrives as loopback
 /// TCP from i2pd/tor) from a local clearnet peer, but the advertised addr_me
 /// shape can. Placeholder/None (loopback quads) → Clearnet = honest unknown.
 fn transport_of_advertised(adv: Option<&str>) -> Transport {
@@ -21871,5 +21906,134 @@ addnode=host:notaport
             .expect("resolvable coin must recompute");
             assert_eq!(via_helper, stg.entries[i].hash_proof_of_stake);
         }
+    }
+
+    // ---- item 26: transport-send failures are peer drops, never exits ----
+
+    #[test]
+    fn item26_transport_send_errors_classify_non_fatal() {
+        // the live incident note, verbatim (Pi 2026-11-14 09:09:56Z)
+        assert!(is_transport_send_error("send pong: Broken pipe (os error 32)"));
+        // the whole Session::send class (every command, every io error shape
+        // the fleet has thrown: DNS2 15:58 pong/32, 16:21 headers/104,
+        // Pi ping/32)
+        assert!(is_transport_send_error("send ping: Broken pipe (os error 32)"));
+        assert!(is_transport_send_error("send headers: Connection reset (os error 104)"));
+        assert!(is_transport_send_error("send inv: Connection reset (os error 104)"));
+        // genuine chain/validation errors keep the outbound-fatal stance
+        assert!(!is_transport_send_error(
+            "kernel target mismatch at h2211635"
+        ));
+        assert!(!is_transport_send_error("bad block checksum"));
+        assert!(!is_transport_send_error(
+            "read: Connection reset (os error 104)"
+        ));
+        assert!(!is_transport_send_error("peer closed connection"));
+    }
+
+    #[test]
+    fn item26_outbound_pong_write_failure_surfaces_as_a_classifiable_transport_err() {
+        // THE funnel input, produced for real: an outbound loopback peer
+        // whose server side is already gone — the pong write must fail, and
+        // the surfaced error must classify as transport (non-fatal) so the
+        // follow-loop funnel drops the peer and keeps running instead of
+        // finish(EXIT_VALIDATE)-ing the daemon.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // accept, then full-close: FIN (CLOSE_WAIT client-side) + RST on
+            // the next client write — the second write then fails for real
+            let (s, _) = listener.accept().unwrap();
+            drop(s);
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item26-peer".into(),
+            outbound: true, // the Pi wedge shape: the relay died on an OUTBOUND link
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+        };
+        // let the FIN land so the socket is in CLOSE_WAIT (writes still
+        // buffer) — the real incident shape: a session that was healthy
+        // seconds before
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let mut stg = synthetic_chain(2_204_000, 2_204_419);
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port: unused by ping
+        let mk_ping = |n: u64| tri7_core::p2p::RawMessage {
+            command: "ping".into(),
+            payload: tri7_core::p2p::build_ping(n),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: std::collections::HashSet<Hash> =
+            std::collections::HashSet::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+        let cfg = gate_test_cfg();
+
+        let mut drive = |msg: tri7_core::p2p::RawMessage| {
+            handle_message(
+                &mut peer,
+                &mut stg,
+                &rpc,
+                &mut stats,
+                &cfg,
+                msg,
+                &mut outstanding,
+                &mut body_tries,
+                &mut reinject,
+                &mut pending_from_headers,
+                &store,
+                &mut recent,
+                &gap,
+                &no_smsg,
+                &mut pool,
+                &wl,
+                &announce,
+                &mut pending_tx_getdata,
+                &mut recon,
+            )
+        };
+
+        // write #1: buffers fine in CLOSE_WAIT (the healthy-session shape)
+        assert!(
+            drive(mk_ping(0x16)).is_ok(),
+            "the first pong write over a FIN'd socket still succeeds locally"
+        );
+        // the kernel now RSTs the client socket (write hit a closed peer)
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        // write #2: fails for real — the funnel input, produced live
+        let e = drive(mk_ping(0x17))
+            .err()
+            .expect("the second pong write over a reset socket must surface Err");
+        assert!(
+            is_transport_send_error(&e),
+            "the funnel must classify this non-fatal (peer drop, never exit): {}",
+            e
+        );
     }
 }
