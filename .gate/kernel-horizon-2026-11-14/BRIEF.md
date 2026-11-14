@@ -1,5 +1,29 @@
 # BRIEF — item 24 KERNEL-HORIZON (2026-11-14): a wallet coin older than ~1700 conf became permanently unstakable
 
+## Revision r2 (deploy-found, 2026-11-14 02:52Z): store-first + deferred retry + window-top pin
+
+The fleet live-restart exposed that `tri7d` IS the follower process — the RPC
+listener binds only AFTER `load_state`, so the boot backfill's self-dial
+always refuses (observed live on DNS3: "rpc connect: Connection refused … 0
+block(s) folded", floor pinned honestly, staking on young coins unaffected —
+the fail-honest posture did its job). Revision:
+
+1. **PASS 1 reads the LOCAL STORE** (`live_store()` → `raw_body_by_height`)
+   — no listener dependency, same bodies the daemon's getblock serves; a
+   height the store misses or whose body does NOT hash to the window entry
+   (raced store slot, item 18) is a MISS, not a stop.
+2. **PASS 2 batched RPC** covers the store misses — at boot it fails fast;
+   the **follow-loop retry lane** re-runs the WHOLE pass every 60s (fold is
+   idempotent, insert-only) until coverage completes, logging only on floor
+   transitions / first attempt / every 10th retry.
+3. **Partial-pass floor = entries.len()** (window top): a mid-pass failure
+   leaves NON-CONTIGUOUS coverage, which a single floor number cannot
+   express — so any hole disqualifies the whole claim and every ABSENT coin
+   classifies honestly unresolvable (a coverage fact, never "repairwallet")
+   until a full retry lands floor 0. Coins already IN the map keep resolving
+   and staking either way (kernel_meta hits bypass the floor — regression-
+   tested both sides).
+
 ## Change
 
 One file: `src/node_embedded.rs` (+4 tests). Four coupled fixes that make the

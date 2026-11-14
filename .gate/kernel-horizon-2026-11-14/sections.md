@@ -1,4 +1,4 @@
-# VERBATIM SECTION EXTRACTS — src/node_embedded.rs (all item-24 changed regions, grep-anchored, working-tree line numbers)
+# VERBATIM SECTION EXTRACTS — src/node_embedded.rs (r2 revision: store-first two-pass + retry lane + window-top pin; grep-anchored, working-tree line numbers)
 
 ## SECTION 1: WindowOutputs::trim + coverage doc (lines 1922-1930)
 
@@ -94,7 +94,7 @@
 
 ```
 
-## SECTION 4: load_state floor + boot_backfill_kernel_window + fold_backfill_batch + fold_backfill_block (lines 5211-5435)
+## SECTION 4: load_state floor + boot_backfill_kernel_window (store pass 1 + rpc pass 2 + window-top pin) + fold_backfill_batch + fold_backfill_block (lines 5211-5495)
 
 ```rust
     let tip = entries.last().unwrap();
@@ -162,60 +162,99 @@ fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
     // not walk past the window — clamp to the threaded range
     let want = ((first_record_abs - st.base) as usize).min(st.entries.len());
     let started = Instant::now();
+    // PASS 1 — the LOCAL STORE (no RPC-listener dependency: at boot the RPC
+    // listener binds only after load_state, so a self-dial would always
+    // refuse; the store holds the same bodies the daemon serves). A height
+    // the store misses or whose body does NOT hash to the window entry
+    // (raced store slot, item 18) is a MISS passed to pass 2, not a stop.
+    let mut need_rpc: Vec<usize> = Vec::new();
+    let mut store_folded = 0usize;
+    {
+        let store = live_store();
+        for rel in 0..want {
+            let h = st.base + rel as u64;
+            let body = store.as_ref().and_then(|s| {
+                match s.raw_body_by_height(h) {
+                    Ok(Some(raw)) => {
+                        let mut reader = Reader::new(&raw);
+                        match Block::read(&mut reader) {
+                            Ok(block) if reader.expect_done().is_ok() => Some(block),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            });
+            let verified = body.filter(|b| {
+                st.entry_abs(h).map(|e| b.hash() == e.hash).unwrap_or(false)
+            });
+            match verified {
+                Some(block) => {
+                    st.utxo.apply_block(&block, rel);
+                    store_folded += 1;
+                }
+                None => need_rpc.push(rel),
+            }
+        }
+    }
+    // PASS 2 — batched RPC for the store misses. At boot this fails fast
+    // (listener not up yet); the follow-loop retry (60s cadence, while the
+    // floor is > 0) succeeds once the listener binds. Failures do NOT stop
+    // the pass — they are collected, the pass finishes, and the floor pins
+    // at entries.len() (see below).
+    let mut rpc_folded = 0usize;
+    let mut first_hole: Option<u64> = None;
     const BATCH: usize = 200;
-    let mut folded = 0usize;
-    for chunk_start in (0..want).step_by(BATCH) {
-        let chunk_end = (chunk_start + BATCH).min(want);
-        let calls: Vec<(u64, &str, serde_json::Value)> = (chunk_start..chunk_end)
-            .map(|i| {
-                let h = st.base + i as u64;
+    let mut idx = 0usize;
+    while idx < need_rpc.len() {
+        let chunk_rel = &need_rpc[idx..(idx + BATCH).min(need_rpc.len())];
+        idx += BATCH;
+        let calls: Vec<(u64, &str, serde_json::Value)> = chunk_rel
+            .iter()
+            .map(|rel| {
                 let hash = st
-                    .entry_abs(h)
+                    .entry_abs(st.base + *rel as u64)
                     .map(|e| tri7_core::p2p::internal_to_display(&e.hash))
                     .unwrap_or_default();
-                (i as u64, "getblock", serde_json::json!([hash, false]))
+                (
+                    *rel as u64,
+                    "getblock",
+                    serde_json::json!([hash, false]),
+                )
             })
             .collect();
         let items = match rpc.call_batch(calls) {
-            Ok(items) if items.len() == chunk_end - chunk_start => items,
+            Ok(items) if items.len() == chunk_rel.len() => items,
             Ok(items) => {
                 log(&format!(
-                    "kernel-window backfill: batch size mismatch ({} != {}) at h{} — \
-                     stopping with coverage floor at window-rel {} ({} block(s) folded in {:?}); \
-                     coins below that height stay honestly unresolvable",
+                    "kernel-window backfill: rpc batch size mismatch ({} != {}) at h{}",
                     items.len(),
-                    chunk_end - chunk_start,
-                    st.base + chunk_start as u64,
-                    chunk_start,
-                    folded,
-                    started.elapsed(),
+                    chunk_rel.len(),
+                    st.base + chunk_rel[0] as u64,
                 ));
-                st.utxo_floor_rel = st.utxo_floor_rel.max(chunk_start + 1);
-                return;
+                if first_hole.is_none() {
+                    first_hole = Some(st.base + chunk_rel[0] as u64);
+                }
+                continue;
             }
             Err(e) => {
                 log(&format!(
-                    "kernel-window backfill: rpc batch failed ({}) at h{} — \
-                     stopping with coverage floor at window-rel {} ({} block(s) folded in {:?})",
+                    "kernel-window backfill: rpc batch failed ({}) at h{}",
                     e,
-                    st.base + chunk_start as u64,
-                    chunk_start,
-                    folded,
-                    started.elapsed(),
+                    st.base + chunk_rel[0] as u64,
                 ));
-                st.utxo_floor_rel = st.utxo_floor_rel.max(chunk_start + 1);
-                return;
+                if first_hole.is_none() {
+                    first_hole = Some(st.base + chunk_rel[0] as u64);
+                }
+                continue;
             }
         };
-        // unwrap the batch responses into (rel, hex) bodies for the fold —
-        // a response without a hex result (daemon error entry) yields an
-        // empty string, which fold_backfill_batch refuses at that height.
         let chunk: Vec<(usize, String)> = items
             .iter()
             .enumerate()
             .map(|(slot, item)| {
                 (
-                    chunk_start + slot,
+                    chunk_rel[slot],
                     item.get("result")
                         .and_then(|r| r.as_str())
                         .unwrap_or_default()
@@ -224,40 +263,61 @@ fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
             })
             .collect();
         match fold_backfill_batch(st, &chunk) {
-            Ok(n) => folded += n,
-            Err(first_uncovered_rel) => {
+            Ok(n) => rpc_folded += n,
+            Err(bad_rel) => {
                 log(&format!(
-                    "kernel-window backfill: h{} unusable — \
-                     stopping with coverage floor at window-rel {} ({} block(s) folded in {:?})",
-                    st.base + first_uncovered_rel as u64,
-                    first_uncovered_rel + 1,
-                    folded,
-                    started.elapsed(),
+                    "kernel-window backfill: h{} refused by fold (hash/parse gate)",
+                    st.base + bad_rel as u64,
                 ));
-                st.utxo_floor_rel = st.utxo_floor_rel.max(first_uncovered_rel + 1);
-                return;
+                if first_hole.is_none() {
+                    first_hole = Some(st.base + bad_rel as u64);
+                }
             }
         }
     }
-    st.utxo_floor_rel = 0;
-    log(&format!(
-        "kernel-window backfill: {} block(s) folded from the daemon in {:?} — \
-         kernel coverage now spans the full staking window (floor 0)",
-        folded,
-        started.elapsed(),
-    ));
+    if first_hole.is_none() {
+        st.utxo_floor_rel = 0;
+        log(&format!(
+            "kernel-window backfill: {} block(s) folded (store {}, rpc {}) in {:?} — \
+             kernel coverage spans the full staking window (floor 0)",
+            store_folded + rpc_folded,
+            store_folded,
+            rpc_folded,
+            started.elapsed(),
+        ));
+    } else {
+        // Partial pass: coverage is NON-CONTIGUOUS (a hole sits between the
+        // folded prefix and the records tail), and a single floor number
+        // cannot express that honestly. Pin the floor ABOVE THE WHOLE WINDOW
+        // — every ABSENT coin is classified unresolvable (a coverage fact,
+        // never "repairwallet") until a retry completes; coins already IN
+        // the map keep resolving and staking either way. The follow-loop
+        // retry re-runs the whole pass (fold is idempotent) every 60s.
+        st.utxo_floor_rel = st.entries.len();
+        log(&format!(
+            "kernel-window backfill: PARTIAL — {} block(s) folded (store {}, rpc {}), \
+             first hole h{}; coverage NON-CONTIGUOUS → floor pinned at the window top \
+             (every absent coin honestly unresolvable until a retry completes); \
+             retry runs with the follow loop",
+            store_folded + rpc_folded,
+            store_folded,
+            rpc_folded,
+            first_hole.unwrap(),
+        ));
+    }
 }
 
 /// Fold ONE fetched batch [(rel, hex)] into the kernel map, stopping at the
-/// first bad body. Ok(n) = all n folded. Err(first_uncovered_rel) = the
-/// fail-honest stop: the caller pins utxo_floor_rel ABOVE first_uncovered_rel
-/// (floor = first_uncovered_rel + 1 — the floor is the lowest COVERED
-/// height). Asymmetry (deliberate, tested): a PER-ITEM fault (bad body at
-/// slot k) reports AT that item's rel — the prefix k-chunk_start folded and
-/// is covered; a BATCH-level fault (RPC error / size mismatch — handled by
-/// the caller before this fn) pins at chunk_start because NOTHING in the
-/// batch was verifiable. One-shot per process: a partial stop stays honest
-/// for the whole session; the next restart re-runs the backfill.
+/// first bad body. Ok(n) = all n folded. Err(bad_rel) = the fail-honest
+/// stop AT the offending height: the CALLER pins the floor above the whole
+/// window (entries.len()) whenever ANY height failed — a single floor
+/// number cannot express non-contiguous coverage, so every ABSENT coin is
+/// classified unresolvable (a coverage fact, never "repairwallet") until a
+/// full retry completes; coins already in the map keep resolving and
+/// staking either way. (A batch-level fault where NOTHING is verifiable —
+/// RPC error or size mismatch — never reaches this fn: the caller records
+/// the first hole directly.) One-shot per pass; the follow-loop retry
+/// re-runs the whole pass (fold is idempotent) every 60s while floor > 0.
 ///
 /// ORDER SAFETY: the kernel map is INSERT-ONLY — apply_block,
 /// rebuild_from_records and this fold never remove an entry, spent or not
@@ -324,7 +384,7 @@ fn fold_backfill_block(
 /// byte-for-byte locally), then seed the modifier state via the daemon index.
 ```
 
-## SECTION 5: resolve_stake_evidence — coverage-aware classification, FULL body (lines 7149-7259)
+## SECTION 5: resolve_stake_evidence — coverage-aware classification, FULL body (lines 7209-7319)
 
 ```rust
 /// FAIL loop on the seed-copied laptop node (2026-11-11).
@@ -440,7 +500,7 @@ fn resolve_stake_evidence(
 }
 ```
 
-## SECTION 6: note_stale_evidence (full fn incl. absent-branch message) (lines 7272-7360)
+## SECTION 6: note_stale_evidence (lines 7332-7420)
 
 ```rust
 fn note_stale_evidence(stg: &mut ChainState, stale_coins: &[StaleLiveView]) {
@@ -534,7 +594,7 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
 
 ```
 
-## SECTION 7: stake_tick unresolvable skip log (lines 7415-7421)
+## SECTION 7: stake_tick unresolvable skip log (lines 7475-7481)
 
 ```rust
     let fees = pool.total_fees();
@@ -546,26 +606,81 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
     }
 ```
 
-## SECTION 8: THE BOOT CALL SITE (lines 11284-11297)
+## SECTION 8: THE BOOT CALL SITE (lines 11345-11359)
 
 ```rust
-    let mut st: ChainState = if have_state {
         log("loading tipstate.json …");
         let mut loaded =
             load_state(&cfg).unwrap_or_else(|e| die(EXIT_SEED, &format!("load state: {}", e)));
-        // Item 24: fold the [base..first_record) bodies from the daemon so
-        // the kernel map spans the whole staking window — a records-only
-        // boot used to leave every coin older than ~1700 conf permanently
-        // unstakable ("phantom"). Non-fatal on partial failure: the floor
-        // stays at the first unfetched height and below-floor coins are
-        // honestly unresolvable.
+        // Item 24: fold the [base..first_record) bodies so the kernel map
+        // spans the whole staking window — a records-only boot used to leave
+        // every coin older than ~1700 conf permanently unstakable
+        // ("phantom"). Pass 1 reads the local store (no listener
+        // dependency); pass 2 batched RPC covers store misses. A partial
+        // pass pins the floor at the window top (every absent coin honestly
+        // unresolvable); the follow-loop retry lane completes the coverage
+        // once the RPC listener is up.
         boot_backfill_kernel_window(&mut loaded, &rpc);
         loaded
     } else if from_zero {
         // fresh state from genesis: fetch block 0, pin it to the compiled-in
 ```
 
-## SECTION 9: all seven regression tests (lines 15393-15937)
+## SECTION 9: the follow-loop retry lane (decl + loop body) (lines 12281-12285)
+
+```rust
+    let mut last_state_write = Instant::now();
+    // ITEM 24 deferred kernel-window backfill retry lane (see the loop body)
+    let mut last_backfill_try = Instant::now();
+    let mut backfill_tries = 0usize;
+    let mut backfill_complete = false;
+```
+
+## SECTION 10: the retry gate body (lines 13206-13244)
+
+```rust
+        // ITEM 24 deferred kernel-window backfill: at boot the RPC listener
+        // is not yet bound, so pass 2 (rpc) cannot run and pass 1 (store) may
+        // leave holes — the pass pins the floor at the window top and this
+        // retry re-runs the WHOLE pass (fold is idempotent, insert-only)
+        // every 60s until the coverage is complete (floor 0). Logs only on
+        // state changes: the first attempt, floor transitions, and every
+        // 10th retry while still partial.
+        if last_backfill_try.elapsed() >= Duration::from_secs(60) {
+            last_backfill_try = Instant::now();
+            let floor_now = { st_shared.lock().unwrap().utxo_floor_rel };
+            match floor_now {
+                0 => {
+                    if !backfill_complete {
+                        backfill_complete = true;
+                        log("kernel-window backfill: coverage complete (floor 0) — retry lane parked");
+                    }
+                }
+                _ => {
+                    backfill_tries += 1;
+                    let mut stg = st_shared.lock().unwrap();
+                    let floor_before = stg.utxo_floor_rel;
+                    boot_backfill_kernel_window(&mut stg, &rpc);
+                    let floor_after = stg.utxo_floor_rel;
+                    if floor_after != floor_before || backfill_tries == 1 || backfill_tries % 10 == 0 {
+                        log(&format!(
+                            "kernel-window backfill retry #{}: floor {} → {}",
+                            backfill_tries, floor_before, floor_after
+                        ));
+                    }
+                    if floor_after == 0 {
+                        backfill_complete = true;
+                    }
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+```
+
+## SECTION 11: all seven regression tests (lines 15495-16059)
 
 ```rust
         // claimed h108 is inside the window (base 100..=tip 110)
@@ -838,10 +953,11 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
         ];
         let first_uncovered = fold_backfill_batch(&mut stg, &chunk).unwrap_err();
         assert_eq!(first_uncovered, 5, "the failure reports AT the first bad height");
-        // the caller's pin (boot_backfill's exact expression): floor ABOVE
-        // the bad height — the folded prefix (rel 3..5) stays covered, rel 5
-        // itself and everything above stay uncovered.
-        stg.utxo_floor_rel = stg.utxo_floor_rel.max(first_uncovered + 1);
+        // the caller's pin (boot_backfill's exact expression): ANY failure
+        // makes coverage NON-CONTIGUOUS, which a single floor number cannot
+        // express — so the floor pins above the WHOLE window (entries.len())
+        // and every absent coin classifies unresolvable until a full retry.
+        stg.utxo_floor_rel = stg.entries.len();
         let key34 = (blocks[4].vtx[0].hash(), 0u32);
         assert!(stg.utxo.map.contains_key(&key34), "good prefix stays folded");
         // a coin claimed at rel 5 (the first uncovered height) is honestly
@@ -859,18 +975,38 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
             secret,
             pubkey: pubkey.to_vec(),
         };
-        let (resolved, stale, unres) = resolve_stake_evidence(&stg, vec![cand]);
+        let (resolved, stale, unres) = resolve_stake_evidence(&stg, vec![cand.clone()]);
         assert_eq!((resolved.len(), stale.len(), unres), (0, 0, 1));
+        // and so is ANY absent coin anywhere (the honest cost of a partial
+        // pass: absence is ambiguous with a coverage hole), while the FOLDED
+        // rel-4 output keeps resolving — kernel_meta hits bypass the floor
+        let mut ghost10 = cand.clone();
+        ghost10.txid = [0x64u8; 32];
+        ghost10.block_height = 10;
+        let (resolved10, stale10, unres10) = resolve_stake_evidence(&stg, vec![ghost10]);
+        assert_eq!((resolved10.len(), stale10.len(), unres10), (0, 0, 1));
+        let mut real4 = cand.clone();
+        real4.txid = blocks[4].vtx[0].hash();
+        real4.n = 0; // the coinbase outpoint the chunk folded
+        real4.block_height = 4;
+        real4.block_time = blocks[4].time;
+        real4.tx_time = blocks[4].vtx[0].time;
+        real4.tx_offset = 81; // apply_block: 80-byte header + 1-byte vtx count
+        real4.value = 1;
+        let (resolved4, stale4, unres4) = resolve_stake_evidence(&stg, vec![real4]);
+        assert_eq!(
+            (resolved4.len(), stale4.len(), unres4),
+            (1, 0, 0),
+            "a FOLDED output resolves regardless of the window-top floor"
+        );
     }
 
     /// ITEM 24 fail-honest path (batch-boundary fault): a response with no
     /// hex result (daemon error entry) is refused AT that item's height
     /// even when a later body in the same batch would verify — the prefix up
     /// to the fault folded, nothing past it does, and the caller's pin
-    /// (first_uncovered + 1) leaves the fault height honestly uncovered.
-    /// (A batch-level fault where NOTHING is verifiable — RPC error or size
-    /// mismatch — never reaches fold_backfill_batch: the caller pins
-    /// chunk_start + 1 directly. The asymmetry is documented on the fn.)
+    /// (entries.len() — ANY failure makes coverage non-contiguous) leaves
+    /// every absent coin honestly unresolvable until a full retry.
     #[test]
     fn backfill_batch_boundary_fault_reports_at_chunk_start() {
         let mut prev: Hash = [0x99u8; 32];
@@ -902,21 +1038,22 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
             first_uncovered, chunk_start,
             "the fault reports AT the offending item's height (= chunk_start here)"
         );
-        stg.utxo_floor_rel = stg.utxo_floor_rel.max(first_uncovered + 1);
+        // the caller's pin (boot_backfill's exact expression on ANY failure)
+        stg.utxo_floor_rel = stg.entries.len();
         let key8 = (blocks[8].vtx[0].hash(), 0u32);
         assert!(
             !stg.utxo.map.contains_key(&key8),
             "nothing past the fault may fold into the map"
         );
-        // full-success path for contrast: an all-true batch folds entirely;
-        // the pinned floor survives until the CALLER lowers it on overall
-        // success (only a fully-backfilled boot reaches floor 0)
+        // a later all-true batch folds entirely — but the floor stays at the
+        // window top: the hole at chunk_start keeps coverage non-contiguous
         let ok_chunk = vec![(9usize, hex_of(&blocks[9])), (10, hex_of(&blocks[10]))];
         let folded = fold_backfill_batch(&mut stg, &ok_chunk).expect("all-true batch");
         assert_eq!(folded, 2);
         assert_eq!(
-            stg.utxo_floor_rel, 8,
-            "batch success folds; only overall success lowers the floor"
+            stg.utxo_floor_rel,
+            stg.entries.len(),
+            "only a FULL pass (no holes) lowers the floor to 0"
         );
     }
 
@@ -1111,7 +1248,5 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
         let mut stg = synthetic_chain(100, 110);
         stg.utxo.map.insert(
             ([0x21u8; 32], 1),
-            crate::kernel::UtxoMeta {
-                height: 8,
 ```
 
