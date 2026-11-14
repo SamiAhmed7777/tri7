@@ -269,6 +269,13 @@ fn keypool_maintainer_loop(
 }
 
 const STALE_LINK_SECS: u64 = 90;
+/// (link-churn, 2026-11-13 operator request) Overlay transports (tor/i2p)
+/// get a longer silent-window than clearnet: circuit/tunnel rebuilds after
+/// an idle stretch routinely exceed 90s even for HEALTHY links (the laptop's
+/// tor lane churned drop→re-attach every ~2min while perfectly synced at the
+/// fleet tip). A truly dead overlay link still drops within this window and
+/// the dial rotation covers the gap; clearnet keeps the tight 90s cut.
+const STALE_LINK_SECS_OVERLAY: u64 = 300;
 const MAX_OUTSTANDING_GETDATA: usize = 64;
 const GETDATA_BATCH: usize = 32;
 /// (2026-11-13 boot-body-stall) Body-phase deadline for boot backfill.
@@ -13552,16 +13559,18 @@ pub fn main_args(argv: &[String]) -> i32 {
             }
         }
 
-        // drop silent peers (90s without any inbound traffic). ALWAYS via
-        // stale_link_reason → the reason line names transport, message
-        // count and connected_utc: a getpeerinfo disappearance with no
-        // matching drop line was the observability bug (i2p fleet defect),
+        // drop silent peers — 90s without inbound traffic on clearnet, 300s
+        // on overlay transports (tor/i2p links rebuild circuits/tunnels past
+        // the clearnet window even when healthy; operator link-churn fix).
+        // ALWAYS via stale_link_reason → the reason line names transport,
+        // message count and connected_utc: a getpeerinfo disappearance with
+        // no matching drop line was the observability bug (i2p fleet defect),
         // and the keepalive pings above are what keep an ANSWERING idle
         // session from ever crossing this gate.
-        let stale_cut = Duration::from_secs(STALE_LINK_SECS);
         let stale_now = Instant::now();
         let mut dropped_stale = 0usize;
         for p in peers.iter_mut() {
+            let stale_cut = stale_link_cut(p);
             if let Some(reason) = stale_link_reason(p, stale_cut, stale_now) {
                 log(&format!("stale link: {reason}"));
                 p.dead = true;
@@ -13700,11 +13709,21 @@ fn adoption_escalation_due(
     }
 }
 
-/// The loud reason a session crosses the stale-link gate, or None while it
-/// is KEPT. Pure over (last_traffic, now, cut) so the prune semantics are
-/// unit-testable: an idle session may only leave the peers table THROUGH
-/// this reason (the caller logs it verbatim with the transport), never
-/// silently. Saturating on clock skew (last_traffic in the future → kept).
+/// Transport-aware stale cut (link-churn, 2026-11-13): clearnet keeps the
+/// tight 90s window; overlay links (tor/i2p) get 300s because circuit/tunnel
+/// rebuilds after an idle stretch exceed the clearnet window even for
+/// healthy links.
+fn stale_link_cut(p: &Peer) -> Duration {
+    match p.transport {
+        Transport::Clearnet => Duration::from_secs(STALE_LINK_SECS),
+        Transport::Tor | Transport::I2p => Duration::from_secs(STALE_LINK_SECS_OVERLAY),
+    }
+}
+
+/// The ONLY way an idle session may leave the peers table: unit-testable,
+/// the caller logs the reason verbatim with the transport — never a silent
+/// disappearance. Saturating on clock skew (last_traffic in the future →
+/// kept).
 fn stale_link_reason(p: &Peer, cut: Duration, now: Instant) -> Option<String> {
     let idle = now.checked_duration_since(p.last_traffic)?;
     if idle < cut {
@@ -19321,6 +19340,31 @@ addnode=host:notaport
         // last_traffic in the future (skewed clock) → saturates to KEPT
         p.last_traffic = now + Duration::from_secs(30);
         assert!(stale_link_reason(&p, cut, now).is_none());
+        let _ = listener;
+    }
+
+    /// (link-churn) the stale cut is TRANSPORT-AWARE: clearnet keeps 90s,
+    /// overlay (tor/i2p) gets 300s — healthy overlay links rebuild circuits
+    /// past the clearnet window and must not churn.
+    #[test]
+    fn stale_link_cut_is_transport_aware() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut p = i2p_test_peer(stream);
+        let now = Instant::now();
+        // overlay (i2p fixture): idle 299s → KEPT, idle 301s → dropped
+        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS_OVERLAY - 1);
+        assert!(stale_link_reason(&p, stale_link_cut(&p), now).is_none());
+        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS_OVERLAY + 1);
+        assert!(stale_link_reason(&p, stale_link_cut(&p), now).is_some());
+        // clearnet peer: the OLD 90s cut still applies (91s idle → dropped)
+        let cl_stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut cl = i2p_test_peer(cl_stream);
+        cl.transport = Transport::Clearnet;
+        cl.last_traffic = now - Duration::from_secs(89);
+        assert!(stale_link_reason(&cl, stale_link_cut(&cl), now).is_none());
+        cl.last_traffic = now - Duration::from_secs(91);
+        assert!(stale_link_reason(&cl, stale_link_cut(&cl), now).is_some());
         let _ = listener;
     }
 

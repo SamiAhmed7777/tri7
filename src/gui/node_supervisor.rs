@@ -86,6 +86,26 @@ pub enum TorStatus {
     Unavailable,
 }
 
+/// Spawn a Windows helper process WITHOUT a console window.
+///
+/// The supervisor resolves the tor listener pid/path on a timer, and every one
+/// of those probes used to launch `powershell`/`cmd` in a fresh console — which
+/// flashed a window on the desktop roughly every 6-10 seconds (observed
+/// 2026-11-14: `tri7_wallet_gui.exe` spawning powershell repeatedly, each spawn
+/// pairing with a conhost window). CREATE_NO_WINDOW keeps the same diagnostics
+/// with no visible window.
+#[cfg(windows)]
+fn quiet_command(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+}
+
+/// Non-Windows builds have no console-window concept; keep one call shape.
+#[cfg(not(windows))]
+fn quiet_command(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd
+}
+
 impl TorStatus {
     /// status-bar label (directive formats): 'Tor: bundled (running)' /
     /// 'Tor: system (9050)' / 'Tor: unavailable' + the SOCKS port
@@ -550,15 +570,15 @@ impl TorSupervisor {
 
     /// primary Windows resolution: Get-NetTCPConnection + Get-Process Path,
     /// ONE query (judge r4 — no pid/path turnover pairing).
-    #[cfg(windows)]
+
+#[cfg(windows)]
     fn listener_of_socks_port_os_cmdlet(port: u16) -> Option<(u32, String)> {
         let q = format!(
             "$c = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \"{{0}}|{{1}}\" -f $c.OwningProcess, $p.Path }}"
         );
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &q])
-            .output()
-            .ok()?;
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-NoProfile", "-Command", &q]);
+        let out = quiet_command(&mut c).output().ok()?;
         let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let (pid, path) = line.split_once('|')?;
         let pid = pid.trim().parse::<u32>().ok()?;
@@ -583,10 +603,9 @@ impl TorSupervisor {
     #[cfg(windows)]
     fn listener_of_socks_port_os_netstat(port: u16) -> Option<(u32, String)> {
         let read_pid = || -> Option<u32> {
-            let out = std::process::Command::new("cmd")
-                .args(["/C", "netstat -ano"])
-                .output()
-                .ok()?;
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "netstat -ano"]);
+            let out = quiet_command(&mut c).output().ok()?;
             let rows: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .map(str::to_string)
@@ -595,10 +614,9 @@ impl TorSupervisor {
         };
         let pid1 = read_pid()?;
         let pq = format!("(Get-Process -Id {pid1} -ErrorAction SilentlyContinue).Path");
-        let uout = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &pq])
-            .output()
-            .ok()?;
+        let mut uc = std::process::Command::new("powershell");
+        uc.args(["-NoProfile", "-Command", &pq]);
+        let uout = quiet_command(&mut uc).output().ok()?;
         let path = String::from_utf8_lossy(&uout.stdout).trim().to_string();
         if path.is_empty() {
             return None;
