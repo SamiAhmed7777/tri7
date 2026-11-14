@@ -59,6 +59,9 @@ pub struct SeedFlow {
     /// How many keys to derive and write.
     pub key_count: usize,
     pub error: Option<String>,
+    /// UX audit (H2): true when create was auto-begun on first open — the
+    /// reveal screen then tells a restoring user how to get to Restore.
+    pub auto_began: bool,
 }
 
 impl SeedFlow {
@@ -72,6 +75,7 @@ impl SeedFlow {
             wallet_path: default_wallet_path,
             key_count: DEFAULT_KEY_COUNT,
             error: None,
+            auto_began: false,
         }
     }
 

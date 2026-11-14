@@ -21,9 +21,9 @@ pub const INPUT_BG: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C); // historical
 pub const ROW_ALT: Color32 = Color32::from_rgb(0x17, 0x11, 0x0F); // palette-derived
 pub const BORDER: Color32 = Color32::from_rgb(0x5B, 0x20, 0x13); // sampled red-brown
 pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(0x2D, 0x17, 0x12); // derived
-pub const BRAND_RED: Color32 = Color32::from_rgb(0xE3, 0x21, 0x05); // historical exact
+pub const BRAND_RED: Color32 = Color32::from_rgb(0xE6, 0x24, 0x0A); // WCAG AA with black labels (4.62:1; was historical E32105 at 4.49)
 pub const BRAND_RED_HOVER: Color32 = Color32::from_rgb(0xF0, 0x3A, 0x18); // modern derived
-pub const BRAND_RED_PRESSED: Color32 = Color32::from_rgb(0xC5, 0x1B, 0x04); // modern derived
+pub const BRAND_RED_PRESSED: Color32 = Color32::from_rgb(0xE8, 0x2A, 0x0A); // WCAG AA with black labels (4.77:1; hue-shift instead of darkening - a darker pressed red can never pass with black text)
 pub const DEEP_RED: Color32 = Color32::from_rgb(0x3D, 0x0E, 0x04); // historical exact
 pub const MENU_RED: Color32 = Color32::from_rgb(0xAF, 0x27, 0x2E); // historical exact
 pub const MENU_SELECTED: Color32 = Color32::from_rgb(0x9D, 0x0B, 0x17); // historical exact
@@ -31,11 +31,11 @@ pub const COPPER: Color32 = Color32::from_rgb(0xA6, 0x54, 0x30); // sampled wide
 pub const WARM_GOLD: Color32 = Color32::from_rgb(0xD3, 0x65, 0x32); // sampled wide wordmark
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF2, 0xE9, 0xE6); // modernized warm white
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xC8, 0xB7, 0xB2); // modernized warm gray
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8F, 0x77, 0x70); // modernized muted tier
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0xA3, 0x93, 0x90); // muted tier - WCAG AA >= 4.5:1 on PANEL_BG/ROW_ALT (was 8F7770 at 4.49:1)
 pub const MENU_TEXT: Color32 = Color32::from_rgb(0xDE, 0xEE, 0xF1); // historical exact
 pub const MENU_SELECTED_TEXT: Color32 = Color32::from_rgb(0xE9, 0xD9, 0xD8); // historical exact
 pub const DISABLED_BG: Color32 = Color32::from_rgb(0x16, 0x16, 0x16); // modern replacement
-pub const DISABLED_FG: Color32 = Color32::from_rgb(0x66, 0x53, 0x4E); // modern replacement
+pub const DISABLED_FG: Color32 = Color32::from_rgb(0xA6, 0x91, 0x89); // WCAG AA on DISABLED_BG/PANEL_BG (6.0+:1; was 66534E at 2.51:1)
 pub const SUCCESS: Color32 = Color32::from_rgb(0x55, 0xCC, 0x66);
 /// Received-coins amount green (Sami directive): warm money-green, primary.
 pub const TX_IN_GREEN: Color32 = Color32::from_rgb(0x3F, 0xA3, 0x4D);
@@ -916,10 +916,13 @@ mod tests {
         assert_eq!(TX_IN_GREEN_DARK, Color32::from_rgb(0x2E, 0x7D, 0x3B));
     }
 
-    /// §3 palette sanity: brand red + black shell anchors stay exact.
+    /// §3 palette sanity: brand red (WCAG AA-tuned) + black shell anchors stay exact.
     #[test]
     fn palette_anchors_match_spec() {
-        assert_eq!(BRAND_RED, Color32::from_rgb(0xE3, 0x21, 0x05));
+        // BRAND_RED: operator standing rule is WCAG AA >= 4.5:1 for text; the
+        // historical E32105 hit 4.49:1 with black button labels, so the anchor
+        // is E6240A (4.62:1). Decorative (non-text) uses keep the same value.
+        assert_eq!(BRAND_RED, Color32::from_rgb(0xE6, 0x24, 0x0A));
         assert_eq!(WINDOW_BG, Color32::from_rgb(0x00, 0x00, 0x00));
         assert_eq!(CONTENT_BG, Color32::from_rgb(0x09, 0x09, 0x09));
         assert_eq!(PANEL_BG, Color32::from_rgb(0x12, 0x12, 0x12));

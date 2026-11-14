@@ -447,7 +447,7 @@ pub struct Dialogs {
     /// pure view and every action goes through one tested entry point.
     pub passphrase: Option<PassphraseDialog>,
     /// result banner for the last passphrase action (Ok = message, Err = why)
-    pub encrypt: Option<String>,
+    pub encrypt: Option<(String, String)>,
     pub backup: Option<Result<String, String>>,
     pub save_tx_path: String,
     pub backup_path: String,
@@ -1946,6 +1946,9 @@ impl AppState {
     /// The Send dialog action: build + sign (NO broadcast — this build
     /// produces the signed hex only).
     pub fn build_send_action(&mut self, now: u32) {
+        // UX audit (H3): building the NEXT send clears the previous tx's
+        // broadcast notice so it can't be mistaken for this one's result.
+        self.broadcast.result = None;
         let Some(derived) = self.derived.clone() else {
             self.send_result = Some(Err("wallet not loaded".into()));
             return;
@@ -3107,14 +3110,29 @@ impl AppState {
             .live_rpc_addr()
             .ok_or("wallet encryption needs the node: set the RPC address (tri7d listens on loopback)")?;
         let reply = crate::gui::rpc_client::rpc_call(&addr, &method, &args)
-            .map_err(|e| format!("{method}: {e}"))?;
+            .map_err(|e| e)?;
         self.dialogs.passphrase = None;
         // the daemon owns the wallet file: re-read it so the UI reflects the
         // new state immediately (and never pretends a failed write landed)
         if let Err(e) = self.reload_wallet_keys() {
             self.status_log.push(format!("reload after {method}: {e}"));
         }
-        Ok(format!("{}: {}", dlg.mode.title(), reply))
+        // UX audit (M5): the result window used to echo "<mode>: <raw RPC
+        // value>" — say what actually happened, in the user's language.
+        let _ = reply;
+        Ok(match dlg.mode {
+            PassphraseMode::Encrypt => "Your wallet is now encrypted with your passphrase.".into(),
+            PassphraseMode::Change => {
+                "Your passphrase was changed. Use the new one next time the wallet asks."
+                    .into()
+            }
+            PassphraseMode::Unlock => {
+                "Wallet unlocked — staking and sending work until it locks again.".into()
+            }
+            PassphraseMode::Decrypt => {
+                "Encryption removed. The wallet file is no longer passphrase-protected.".into()
+            }
+        })
     }
 
     /// What the X button must do (the Options -> Display choice).
@@ -3438,11 +3456,11 @@ impl AppState {
     ///                          sub-1.0 progress — the red/warning bar lives
     ///                          ONLY while the daemon itself reports syncing
     ///   daemon syncing:false → 1.0 (green) with the daemon's LIVE height
-    ///                          (refresh_debug_info fills `sync` only while
-    ///                          syncing, so sync=None + a height means caught
-    ///                          up and following)
-    ///   no daemon            → 0.0, "no tri7d RPC" — honest; the local
-    ///                          snapshot is never resurrected as a fallback
+    ///                          ("Up to date (block N)")
+    ///   no daemon            → 0.0, "Starting your node…" — the local
+    ///                          snapshot is never resurrected as a fallback;
+    ///                          unreachable-after-polling says the node
+    ///                          stopped and is restarting (UX audit HIGH-1)
     pub fn daemon_sync_display(&self) -> (f32, String) {
         if let Some(di) = &self.debug_info {
             if di.reachable {
@@ -3456,18 +3474,23 @@ impl AppState {
                         return (s.fraction(), s.label());
                     }
                     if let Some(b) = di.blocks {
-                        return (1.0, format!("Synced · daemon {}", b));
+                        return (1.0, format!("Up to date (block {})", b));
                     }
-                    return (1.0, "Synced · daemon".into());
+                    return (1.0, "Up to date".into());
                 }
                 if let Some(b) = di.blocks {
-                    return (1.0, format!("Synced · daemon {}", b));
+                    return (1.0, format!("Up to date (block {})", b));
                 }
                 // reachable but no height snapshot yet (first poll in flight)
-                return (0.0, "daemon state pending".into());
+                return (0.0, "Connecting to the network…".into());
             }
+            // reachable=false after having polled before: the node died and
+            // the supervisor restarts it automatically (UX audit HIGH-1:
+            // "no tri7d RPC" could not distinguish starting from broken)
+            return (0.0, "The node stopped — restarting it…".into());
         }
-        (0.0, "no tri7d RPC".into())
+        // never polled yet: first launch / node still coming up
+        (0.0, "Starting your node…".into())
     }
 
     pub fn status_blocks_label(&self) -> String {

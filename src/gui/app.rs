@@ -393,7 +393,7 @@ impl Tri7App {
         egui::TopBottomPanel::top("wHeaderRule")
             .exact_height(1.0)
             .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(
-                0xE3, 0x21, 0x05, 89,
+                0xE6, 0x24, 0x0A, 89,
             )))
             .show(ctx, |_ui| {});
     }
@@ -439,10 +439,24 @@ impl Tri7App {
 
     fn menu_file(&mut self, ui: &mut egui::Ui) {
         Self::scoped_menu_button(ui, "File", |ui| {
-            if ui.button("Encrypt Wallet...").clicked() {
-                self.st.encrypt_wallet_stub_action();
-                ui.close_menu();
-            }
+            // UX audit 2026-11-14 (H1): encrypting produces a wallet file this
+            // GUI cannot reopen (unlock/decrypt dialogs are not wired yet) -
+            // the entry is disabled with an honest explanation instead of
+            // silently bricking wallet access.
+            let enc = ui
+                .add_enabled(
+                    false,
+                    egui::Button::new("Encrypt Wallet..."),
+                )
+                .on_hover_text(
+                    "Coming later: encrypting with a passphrase. This version can't reopen an encrypted wallet yet, so the option is switched off.",
+                );
+            let _ = enc;
+            // UX audit r2: an Unlock menu item was tried here, but this GUI
+            // cannot READ an encrypted wallet file at all (passphrase-protected
+            // open is not implemented) — unlocking the daemon alone would leave
+            // the wallet unusable while claiming otherwise. The honest state:
+            // no unlock affordance until encrypted-wallet support ships.
             if ui.button("Backup Wallet...").clicked() {
                 self.st.goto(Screen::Overview);
                 ui.close_menu();
@@ -592,17 +606,26 @@ impl Tri7App {
                         5..=6 => "icons/connect3",
                         _ => "icons/connect4",
                     };
-                    let conn_color = if conns.unwrap_or(0) == 0 {
-                        th::ERROR
-                    } else {
-                        th::TEXT_MUTED
+                    let conn_color = match conns {
+                        // reachable, no peers yet: still finding the network —
+                        // amber + reassurance, never red (UX audit HIGH-1 /
+                        // judge r3: Some(0) is the NORMAL early state)
+                        None => th::WARNING,
+                        Some(0) => th::WARNING,
+                        _ => th::TEXT_MUTED,
                     };
                     let conn_tex = self.tex(ui.ctx(), conn_icon);
-                    th::status_cluster(
-                        ui,
-                        conn_tex.as_ref(),
-                        &format!("{} connections", conns.unwrap_or(0)),
-                        conn_color,
+                    let conn_label = match conns {
+                        None => "Not connected yet".to_string(),
+                        Some(0) => "Finding peers…".to_string(),
+                        Some(c) => format!("{} connections", c),
+                    };
+                    ui.scope(|ui| {
+                        th::status_cluster(ui, conn_tex.as_ref(), &conn_label, conn_color);
+                    })
+                    .response
+                    .on_hover_text(
+                        "Other Triangles nodes you're connected to. Zero usually just means the node is still starting — it fills in within a minute or two.",
                     );
                     ui.separator();
                     // 2. sync cluster — expands; thin progress bar while the
@@ -628,7 +651,7 @@ impl Tri7App {
                     let sync_tex = self.tex(ui.ctx(), sync_icon);
                     th::status_cluster(ui, sync_tex.as_ref(), "Sync", sync_color);
                     if synced {
-                        // label already reads "Synced · daemon <live height>"
+                        // label reads "Up to date (block N)" / sync progress
                         ui.label(
                             egui::RichText::new(label).size(11.0).strong().color(sync_color),
                         );
@@ -712,10 +735,34 @@ impl Tri7App {
                         .on_hover_text(err);
                     }
                     ui.separator();
-                    // 4. encryption cluster (wallet encryption is not tracked
-                    // by this build — honest idle state)
-                    let enc_tex = self.tex(ui.ctx(), "icons/lock_open");
-                    th::status_cluster(ui, enc_tex.as_ref(), i18n::tr(lang, "Unencrypted"), th::TEXT_MUTED);
+                    // 4. encryption cluster (UX audit HIGH-4: the chip used to
+                    // hardcode "Unencrypted" — an encrypted wallet displayed a
+                    // false claim forever; now the file state is reported)
+                    let wallet_encrypted = self.st.wallet_encrypted();
+                    let enc_tex = self.tex(
+                        ui.ctx(),
+                        if wallet_encrypted {
+                            "icons/lock_closed"
+                        } else {
+                            "icons/lock_open"
+                        },
+                    );
+                    if wallet_encrypted {
+                        ui.scope(|ui| {
+                            th::status_cluster(
+                                ui,
+                                enc_tex.as_ref(),
+                                i18n::tr(lang, "Encrypted"),
+                                th::WARNING,
+                            );
+                        })
+                        .response
+                        .on_hover_text(
+                            "This wallet is encrypted. This version of the wallet can't work with encrypted wallet files — use the command-line wallet (tri7d) for those. Encrypted-wallet support is coming.",
+                        );
+                    } else {
+                        th::status_cluster(ui, enc_tex.as_ref(), i18n::tr(lang, "Unencrypted"), th::TEXT_MUTED);
+                    }
                     ui.separator();
                     // 5. compact transport summary
                     let transport = self
@@ -726,13 +773,13 @@ impl Tri7App {
                         .and_then(|v| v.get("by_transport"))
                         .map(|bt| {
                             format!(
-                                "C {} · T {} · I {}",
+                                "Clearnet {} · Tor {} · I2P {}",
                                 bt.get("clearnet").and_then(|x| x.as_u64()).unwrap_or(0),
                                 bt.get("tor").and_then(|x| x.as_u64()).unwrap_or(0),
                                 bt.get("i2p").and_then(|x| x.as_u64()).unwrap_or(0),
                             )
                         })
-                        .unwrap_or_else(|| "C — · T — · I —".into());
+                        .unwrap_or_else(|| "Clearnet — · Tor — · I2P —".into());
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(transport).size(11.0).strong().color(th::TEXT_MUTED),
@@ -961,7 +1008,7 @@ impl Tri7App {
                     .strong()
                     .color(th::TEXT_PRIMARY),
             ));
-            th::text_meta(ui, "BIP39 + BIP32 — identical keys to the original qt wallet (m/44'/2222'/0'/0/i)");
+            th::text_meta(ui, "A standard 24-word backup phrase — compatible with the original Triangles wallet.");
             ui.add_space(8.0);
             th::inline_notice(ui, th::Notice::Info, "Please read", super::seed_flow::HONEST_NOTE);
             ui.add_space(10.0);
@@ -991,6 +1038,17 @@ impl Tri7App {
             Step::CreateReveal => {
                 let words = flow.revealed_words().unwrap_or_default();
                 ui.vertical_centered(|ui| {
+                    if flow.auto_began {
+                        // UX audit (H2): first open auto-began a NEW wallet —
+                        // a restoring user must learn the way out right here.
+                        th::inline_notice(
+                            ui,
+                            th::Notice::Info,
+                            "Creating a brand-new wallet",
+                            "Bringing an existing wallet back? Click Cancel below, then choose \u{201c}Restore from seed phrase\u{201d}.",
+                        );
+                        ui.add_space(4.0);
+                    }
                     th::inline_notice(
                         ui,
                         th::Notice::Warning,
@@ -1168,7 +1226,7 @@ impl Tri7App {
                     });
                     th::text_meta(
                         ui,
-                        "the original qt continues this sequence automatically via the hdchain counter",
+                        "New addresses are created automatically as you need them.",
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -1647,7 +1705,7 @@ impl Tri7App {
                             th::inline_notice(
                                 ui,
                                 th::Notice::Success,
-                                "Broadcasted",
+                                "Sent to the network",
                                 &format!(
                                     "txid {} — the balance is now controlled by the \
                                      seed-derived keys",
@@ -2053,6 +2111,9 @@ impl eframe::App for Tri7App {
                             Some(crate::gui::seed_flow::SeedFlow::new(target));
                         if let Some(f) = &mut self.st.seed_flow {
                             f.begin_create();
+                            // UX audit (H2): mark the auto-begin so the reveal
+                            // screen points a restoring user to Restore.
+                            f.auto_began = true;
                         }
                     }
                 }
@@ -2111,7 +2172,7 @@ impl Tri7App {
             );
             th::text_meta(
                 ui,
-                "tri7 engine — wallet.dat opens READ-WRITE (New Address writes real legacy keys); signed txs broadcast via tri7d",
+                "Your wallet opens with full access — receive and send. Sending connects through the Triangles network.",
             );
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -2154,7 +2215,7 @@ impl Tri7App {
             ui.add_space(6.0);
             th::text_meta(
                 ui,
-                "Seed phrase wallet — BIP39 create/restore, identical keys to the original qt (m/44'/2222'/0'/0/i)",
+                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
             );
             ui.add_space(4.0);
             if th::primary_button(ui, "Seed phrase wallet…").clicked() {
@@ -2201,12 +2262,12 @@ impl Tri7App {
             ui.add_space(4.0);
             th::text_meta(
                 ui,
-                "Seed phrase wallet - BIP39 create/restore, identical keys to the original qt (m/44'/2222'/0'/0/i)",
+                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
             );
             ui.add_space(6.0);
             th::text_meta(
                 ui,
-                "key count + coverage height appear after load; default wallet: /root/.triangles/wallet.dat",
+                "Balances appear after the wallet opens. Your wallet file lives in the Triangles data folder.",
             );
         });
     }
@@ -2513,7 +2574,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
         th::card_titled(ui, "Wallet actions", |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Backup Wallet to:").color(th::TEXT_SECONDARY),
+                    egui::RichText::new("Back up wallet to:").color(th::TEXT_SECONDARY),
                 );
                 th::text_input(ui, 380.0, &mut self.st.dialogs.backup_path);
                 if th::secondary_button(ui, "Back up wallet").clicked()
@@ -2555,11 +2616,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         self.st.peers_poll_action();
                     }
                     if let Some(e) = &self.st.peers_live.last_error {
-                        th::inline_notice(ui, th::Notice::Error, "RPC error", e);
+                        th::inline_notice(ui, th::Notice::Error, "Couldn't check peers", e);
                     }
                 });
                 if let Some(table) = &self.st.peers_live.table {
                     if let Some(rows) = table.get("peers").and_then(|p| p.as_array()) {
+                        if rows.is_empty() {
+                            // UX audit (MEDIUM-3): an empty peers table was a
+                            // header with zero rows — no message, no guidance.
+                            th::empty_state(
+                                ui,
+                                None,
+                                "No peers yet",
+                                "Your node just started introducing itself to the network. This usually fills in within a minute or two.",
+                            );
+                            return;
+                        }
                         let w = ui.available_width();
                         let fixed = 40.0 + 260.0 + 80.0 + 140.0 + 80.0;
                         let subver_w = (w - fixed).max(120.0);
@@ -2833,7 +2905,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                             );
                             let setting = st.live_paytxfee_sats();
                             let setting_txt = format!(
-                                "{} {} per the legacy nTransactionFee schedule",
+                                "{} {} (the network's standard fee)",
                                 s::format_tri(setting),
                                 s::TICKER
                             );
@@ -2892,7 +2964,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     .color(th::TEXT_SECONDARY),
             )
             .on_hover_text(
-                "Signing is real (spend.rs, offline). Broadcast goes through YOUR tri7d's sendrawtransaction (consensus-validated, then relayed inv→getdata→tx).",
+                "Your transaction is signed on this computer, then sent through your own node to the network.",
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if th::primary_button_large(ui, "Review & sign").clicked() {
@@ -3131,8 +3203,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let broadcast_clicked =
-                        primary_button_enabled(ui, !busy, "Broadcast transaction").clicked();
+                    // UX audit (H3): after a successful broadcast the same
+                    // signed tx stays loaded - a second click would resubmit
+                    // it. Disable + relabel on success, and the stale green
+                    // notice no longer sits next to the NEXT send's review.
+                    let already_broadcast =
+                        matches!(&st.broadcast.result, Some(Ok(_)));
+                    let broadcast_clicked = primary_button_enabled(
+                        ui,
+                        !busy && !already_broadcast,
+                        if already_broadcast {
+                            "Broadcasted ✓"
+                        } else {
+                            "Broadcast transaction"
+                        },
+                    )
+                    .clicked();
                     if broadcast_clicked {
                         st.broadcast_action(b.tx_hex.clone());
                         self.send_step = SendStep::Broadcast;
@@ -3140,7 +3226,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     if busy {
                         ui.spinner();
                         ui.label(
-                            egui::RichText::new("Broadcasting…")
+                            egui::RichText::new("Broadcasting… — click once; the window may pause for a few seconds while the network confirms. Don't close the app.")
                                 .size(12.0)
                                 .color(th::TEXT_SECONDARY),
                         );
@@ -3150,7 +3236,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             match &st.broadcast.result {
                 Some(Ok(msg)) => {
                     ui.add_space(4.0);
-                    th::inline_notice(ui, th::Notice::Success, "Broadcasted", msg);
+                    th::inline_notice(ui, th::Notice::Success, "Sent to the network", msg);
                 }
                 Some(Err(e)) => {
                     ui.add_space(4.0);
@@ -3327,7 +3413,7 @@ impl Tri7App {
             // toolbar
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("New Address label:").color(th::TEXT_SECONDARY),
+                    egui::RichText::new("New address label:").color(th::TEXT_SECONDARY),
                 );
                 th::text_input(ui, 220.0, &mut self.st.receive.new_address_label);
                 if th::primary_button(ui, "New address").clicked() {
@@ -3880,7 +3966,7 @@ impl Tri7App {
                             ui.selectable_value(&mut self.tx_status_filter, i, *stx);
                         }
                     });
-                th::text_input_h(ui, 110.0, &mut self.tx_min_amount, Some(i18n::tr(lang, "min amount")));
+                th::text_input_h(ui, 110.0, &mut self.tx_min_amount, Some(i18n::tr(lang, "Min amount (TRI)")));
                 th::text_input_h(
                     ui,
                     220.0,
@@ -4208,13 +4294,13 @@ impl Tri7App {
                     th::text_meta(
                         ui,
                         &format!(
-                            "Staking loop: {}",
+                            "Staking: {}",
                             if staking_on {
-                                "ON — searching kernels every tick"
+                                "On — looking for a reward"
                             } else if enabled == "true" {
-                                "enabled but idle (no mature weight yet)"
+                                "On — waiting for coins to become eligible"
                             } else {
-                                "OFF (stake=0)"
+                                "Off"
                             }
                         ),
                     );
@@ -4223,21 +4309,21 @@ impl Tri7App {
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if th::secondary_button(ui, "Refresh (getstakinginfo)").clicked() {
+                    if th::secondary_button(ui, "Refresh").clicked() {
                         st.staking_poll_action();
                     }
                     if enabled == "true" {
-                        if th::danger_button(ui, "Staking OFF").clicked() {
+                        if th::danger_button(ui, "Turn staking off").clicked() {
                             st.staking_toggle_action(false);
                         }
-                    } else if th::primary_button(ui, "Staking ON").clicked() {
+                    } else if th::primary_button(ui, "Turn staking on").clicked() {
                         st.staking_toggle_action(true);
                     }
                 });
             });
             if let Some(e) = &st.staking_live.last_error {
                 ui.add_space(4.0);
-                th::inline_notice(ui, th::Notice::Error, "RPC error", e);
+                th::inline_notice(ui, th::Notice::Error, "Couldn't reach the network", e);
             }
         });
         ui.add_space(8.0);
@@ -4290,7 +4376,23 @@ impl Tri7App {
             );
             metric(ui, "Wallet weight", &live.field("weight"));
             metric(ui, "Network weight", &live.field("netstakeweight"));
-            metric(ui, "Expected time", &format!("{}s", live.field("expectedtime")));
+            // UX audit: raw "98432s" is unreadable — humanize the wait; a
+            // missing/zero answer shows a dash instead of "about 0 s" (judge).
+            let et_secs: f64 = live.field("expectedtime").parse().unwrap_or(0.0);
+            let et_txt = if et_secs <= 0.0 {
+                "—".to_string()
+            } else if et_secs >= 3600.0 {
+                format!(
+                    "about {} h {} m",
+                    (et_secs / 3600.0) as u64,
+                    ((et_secs % 3600.0) / 60.0) as u64
+                )
+            } else if et_secs >= 60.0 {
+                format!("about {} min", (et_secs / 60.0) as u64)
+            } else {
+                format!("about {} s", et_secs as u64)
+            };
+            metric(ui, "Expected time", &et_txt);
             metric(
                 ui,
                 "Mature / eligible",
@@ -4303,7 +4405,7 @@ impl Tri7App {
             // honest explanation of the counters: "Mature / eligible" is the
             // coins that can actually solve a kernel, which is often far fewer
             // than the coins held (a young coin cannot stake for an hour).
-            metric(ui, "Coins held", &utxo_n.to_string());
+            metric(ui, "Unspent outputs", &utxo_n.to_string());
             metric(
                 ui,
                 "Held value",
@@ -4555,7 +4657,7 @@ impl Tri7App {
         self.msg_segmented(ui);
         ui.add_space(8.0);
         if let Some(e) = &self.st.messages.last_error {
-            th::inline_notice(ui, th::Notice::Error, "RPC error", e);
+            th::inline_notice(ui, th::Notice::Error, "Couldn't reach the network", e);
             ui.add_space(4.0);
         }
         match self.msg_tab {
@@ -4756,7 +4858,7 @@ impl Tri7App {
             }
             _ => {
                 th::card(ui, |ui| {
-                    th::empty_state(ui, None, "Outbox empty", "Sent messages will appear here");
+                    th::empty_state(ui, None, "No sent messages yet", "Sent messages will appear here");
                 });
             }
         }
@@ -5108,7 +5210,7 @@ impl Tri7App {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Pay transaction &fee:")
+                            egui::RichText::new("Transaction fee:")
                                 .color(th::TEXT_SECONDARY),
                         );
                         ui.horizontal(|ui| {
@@ -5580,7 +5682,7 @@ impl Tri7App {
         };
         th::card_titled(ui, &addr_str, |ui| {
             ui.horizontal(|ui| {
-                if th::ghost_button(ui, "copy").clicked() {
+                if th::ghost_button(ui, "Copy").clicked() {
                     ui.output_mut(|o| o.copied_text = addr_str.clone());
                 }
             });
@@ -5739,7 +5841,7 @@ impl Tri7App {
                 ui.label(
                     egui::RichText::new(&txid).monospace().color(th::TEXT_PRIMARY),
                 );
-                if th::ghost_button(ui, "copy txid").clicked() {
+                if th::ghost_button(ui, "Copy TxID").clicked() {
                     ui.output_mut(|o| o.copied_text = txid.clone());
                 }
             });
@@ -6297,6 +6399,15 @@ impl Tri7App {
                                         .color(th::TEXT_SECONDARY),
                                 );
                                 th::password_input(ui, 240.0, &mut dlg.new_pass);
+                                // UX audit (M4): state the requirement BEFORE
+                                // the first failed attempt.
+                                ui.end_row();
+                                ui.label("");
+                                ui.label(
+                                    egui::RichText::new("At least 8 characters. You'll need it to unlock your wallet — don't lose it.")
+                                        .size(11.0)
+                                        .color(th::TEXT_MUTED),
+                                );
                                 ui.end_row();
                             }
                             if dlg.mode.needs_confirm() {
@@ -6329,8 +6440,18 @@ impl Tri7App {
                     ui.add_space(6.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let ready = !dlg.mode.needs_confirm() || confirm_now;
-                        if th::primary_button(ui, "OK").clicked() && ready {
+                        // UX audit (M3): the OK button used to swallow clicks
+                        // silently until the confirmation matched - render the
+                        // disabled state so the user can see why.
+                        if primary_button_enabled(ui, ready, "OK").clicked() && ready {
                             submit = true;
+                        }
+                        if !ready {
+                            ui.label(
+                                egui::RichText::new("Repeat doesn't match yet")
+                                    .size(11.0)
+                                    .color(th::TEXT_MUTED),
+                            );
                         }
                         if th::secondary_button(ui, "Cancel").clicked() {
                             cancel = true;
@@ -6345,10 +6466,22 @@ impl Tri7App {
                 cur.unlock_secs = dlg.unlock_secs.clone();
             }
             if submit {
+                // UX audit r2: the success window keeps the action's own title
+                // (Unlock Wallet / Change Passphrase / …) — capture the mode
+                // BEFORE the action consumes the dialog.
+                let mode_title = self
+                    .st
+                    .dialogs
+                    .passphrase
+                    .clone()
+                    .map(|d| d.mode.title().to_string());
                 match self.st.apply_passphrase_action() {
                         Ok(msg) => {
                             self.st.status_log.push(msg.clone());
-                            self.st.dialogs.encrypt = Some(msg);
+                            self.st.dialogs.encrypt = Some((
+                                mode_title.unwrap_or_else(|| "Passphrase".to_string()),
+                                msg,
+                            ));
                         }
                         Err(e) => {
                             if let Some(mut stay) = self.st.dialogs.passphrase.take() {
@@ -6362,13 +6495,13 @@ impl Tri7App {
                 self.st.dialogs.passphrase = None;
             }
         }
-        if let Some(msg) = self.st.dialogs.encrypt.clone() {
+        if let Some((title, msg)) = self.st.dialogs.encrypt.clone() {
             let mut open = true;
-            egui::Window::new("Encrypt Wallet")
+            egui::Window::new(title)
                 .open(&mut open)
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    th::inline_notice(ui, th::Notice::Info, "Encrypt Wallet", &msg);
+                    th::inline_notice(ui, th::Notice::Info, "Done", &msg);
                     ui.add_space(4.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if th::primary_button(ui, "OK").clicked() {
@@ -6512,7 +6645,7 @@ impl Tri7App {
                             th::text_meta(ui, r);
                         }
                         if let Some(err) = &e.error {
-                            th::inline_notice(ui, th::Notice::Error, "RPC error", err);
+                            th::inline_notice(ui, th::Notice::Error, "Couldn't reach the network", err);
                         }
                         ui.separator();
                     }

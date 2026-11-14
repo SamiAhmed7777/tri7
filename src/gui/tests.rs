@@ -2687,7 +2687,7 @@ fn attach_mode_sync_display_is_daemon_only() {
     });
     let (progress2, label2) = st.daemon_sync_display();
     assert_eq!(progress2, 1.0, "daemon syncing:false must be green");
-    assert!(label2.contains("Synced · daemon 2208687"), "{}", label2);
+    assert!(label2.contains("Up to date (block 2208687)"), "{}", label2);
     assert!(!label2.contains("2208662"), "local snapshot leaked: {}", label2);
     assert!(!label2.contains("blocks ("), "no local-figure format: {}", label2);
 
@@ -2695,25 +2695,28 @@ fn attach_mode_sync_display_is_daemon_only() {
     st.debug_info.as_mut().unwrap().sync = None;
     let (progress2b, label2b) = st.daemon_sync_display();
     assert_eq!(progress2b, 1.0, "daemon-synced fallback must be green");
-    assert!(label2b.contains("Synced · daemon 2208687"), "{}", label2b);
+    assert!(label2b.contains("Up to date (block 2208687)"), "{}", label2b);
     assert!(!label2b.contains("2208662"), "local snapshot leaked: {}", label2b);
 
-    // 3. daemon unreachable → honest "no tri7d RPC"; the local snapshot is
-    //    never resurrected as a fallback figure
+    // 3. daemon unreachable after having polled → the node stopped and the
+    //    supervisor restarts it (UX audit HIGH-1: distinguishable from
+    //    first-launch starting); the local snapshot is never resurrected as
+    //    a fallback figure
     st.debug_info = Some(DebugInfo {
         reachable: false,
         ..DebugInfo::default()
     });
     let (progress3, label3) = st.daemon_sync_display();
     assert_eq!(progress3, 0.0);
-    assert_eq!(label3, "no tri7d RPC");
+    assert_eq!(label3, "The node stopped — restarting it…");
     assert!(!label3.contains("2208662"), "local snapshot leaked: {}", label3);
 
-    // 4. never polled (debug_info None) → same honesty, still no local figure
+    // 4. never polled (debug_info None) → first-launch "starting" wording,
+    //    still no local figure
     st.debug_info = None;
     let (progress4, label4) = st.daemon_sync_display();
     assert_eq!(progress4, 0.0);
-    assert_eq!(label4, "no tri7d RPC");
+    assert_eq!(label4, "Starting your node…");
     assert!(!label4.contains("2208662"), "local snapshot leaked: {}", label4);
 }
 
