@@ -1,0 +1,475 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index cc28746..0a9b4fa 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -7019,6 +7019,11 @@ struct StakeState {
+     /// candidate stats of the last pass
+     coins_considered: u64,
+     coins_meeting_min_age: u64,
++    /// item 27 §16-RACED-MINT-AUTOHEAL: the impairment episode (its
++    /// `first_utc`) the in-process repair attempts are accounted against,
++    /// and how many have fired in it (capped; a fresh episode re-arms).
++    autoheal_episode: Option<String>,
++    autoheal_attempts: u32,
+ }
+ 
+ type SharedStake = Arc<Mutex<StakeState>>;
+@@ -7705,6 +7710,109 @@ fn note_stale_evidence(stg: &mut ChainState, stale_coins: &[StaleLiveView]) {
+     }
+ }
+ 
++/// item 27 §16-RACED-MINT-AUTOHEAL: max in-process repairwallet passes per
++/// impairment episode. Three matches the documented live heal discipline
++/// (a pass can lag the detector, and a re-arming phantom can need a second
++/// pass); beyond that the condition is NOT self-healing (store behind the
++/// tip, a persistent fork) and an operator must look — the
++/// STAKE: STALE LIVE VIEW line keeps firing on its loud cadence either way.
++const AUTOHEAL_MAX_ATTEMPTS: u32 = 3;
++
++/// Should this tick fire the in-process repair attempt? Pure policy so the
++/// cadence/cap tests need no store: fires on the impairment's loud re-log
++/// cadence (first sighting, then every 40th tick ≈10 min at the default
++/// 15s stake cadence), at most `AUTOHEAL_MAX_ATTEMPTS` times per episode —
++/// a fresh episode (the impairment fully cleared in between, new
++/// `first_utc`) re-arms the budget. Records the episode as a side effect.
++fn autoheal_due(impaired: &StaleLiveView, stake_st: &mut StakeState) -> bool {
++    if stake_st.autoheal_episode.as_deref() != Some(impaired.first_utc.as_str()) {
++        stake_st.autoheal_episode = Some(impaired.first_utc.clone());
++        stake_st.autoheal_attempts = 0;
++    }
++    if stake_st.autoheal_attempts >= AUTOHEAL_MAX_ATTEMPTS {
++        return false;
++    }
++    impaired.ticks == 1 || impaired.ticks % 40 == 0
++}
++
++/// One in-process `repairwallet` attempt, fired by the stake tick when its
++/// stale-evidence determination is live (item 27 §16-RACED-MINT-AUTOHEAL).
++///
++/// WHY: a secondary staker that races a heavier branch (item 17 by design,
++/// races are SAFE) holds coins minted in its own abandoned block; the fork
++/// adoption rolls back the chain but NOT the wallet live view, the resolver
++/// excludes the raced coins, and staking starves until an operator runs
++/// `repairwallet`. Live DNS3 2026-11-14: three raced-mint impairments in
++/// ~3.5 h (11:2x, 13:58, 14:21 UTC), each healed by hand with the same
++/// deterministic, bounded, purely-local remedy — so the daemon now runs it
++/// itself: the exact `repairwallet` RPC rebuild (WalletLive::seed replay
++/// over the block store + repair_diff + swap), fired on the impairment's
++/// loud re-log cadence via `autoheal_due`, and skipped WITHOUT burning an
++/// attempt while the store cannot serve the replay window yet (transient —
++/// bodies still landing). The RPC verb stays operator-visible and behaves
++/// identically; the detection path (resolve_stake_evidence /
++/// note_stale_evidence) and the STAKE: STALE LIVE VIEW log text are
++/// untouched, so every fleet grep and --status surface keeps its meaning.
++///
++/// Returns true when the live view was REBUILT — the caller re-resolves
++/// the candidates and clears the impairment when the evidence now matches.
++fn autoheal_stale_live_view(
++    stg: &mut ChainState,
++    wl: &mut WalletLive,
++    store: &BlockStore,
++    stake_st: &mut StakeState,
++) -> bool {
++    let Some(impaired) = stg.staking_impaired.as_ref() else {
++        return false;
++    };
++    if !autoheal_due(impaired, stake_st) {
++        return false;
++    }
++    // the exact repairwallet replay window (RPC verb): base = min of the
++    // view's seed base and the chain-state base — a forkchoice rollback can
++    // walk the chain-state base back below the view's seed base, and
++    // replaying only from the view's base would then miss the restored
++    // branch; tip = the chain tip
++    let base = wl.base.min(stg.base);
++    let tip_hint = stg.tip_height;
++    let has_body = |h: u64| store.block_by_height(h).ok().flatten().is_some();
++    let (replay_tip, back) = newest_replayable_tip(&has_body, base, tip_hint);
++    if replay_tip <= base {
++        // store behind the view — transient (bodies still landing); the
++        // next re-log tick retries WITHOUT burning the attempt budget
++        log(&format!(
++            "stake: AUTOHEAL skipped — no stored bodies in h{base}..h{tip_hint} — store behind the tip, retry on the next re-log tick"
++        ));
++        return false;
++    }
++    let fresh = match WalletLive::seed(store, wl.wallet.clone(), base, replay_tip) {
++        Ok(f) => f,
++        Err(e) => {
++            log(&format!(
++                "stake: AUTOHEAL replay failed: {e} — retry on the next re-log tick"
++            ));
++            return false;
++        }
++    };
++    stake_st.autoheal_attempts += 1;
++    let diff = {
++        let owns = |o: &LiveOut| wl.owns(o);
++        repair_diff(&wl.live, &fresh.live, &owns)
++    };
++    log(&format!(
++        "stake: AUTOHEAL — ran the repairwallet remedy in-process: rebuilt live view h{base}..h{replay_tip} (walked back {back} from tip h{tip_hint}) — {} owned-output mismatch(es) totalling {} sats ({} phantom, {} lost)",
++        diff.count(),
++        diff.amount(),
++        diff.phantom.len(),
++        diff.lost.len(),
++    ));
++    wl.live = fresh.live;
++    // the map now covers [base, replay_tip]: keep the view's claimed base
++    // consistent with what was actually replayed (same as the RPC verb)
++    wl.base = base;
++    true
++}
++
+ /// One kernel-search pass. Runs INSIDE the follow loop with the state lock
+ /// held (same discipline as a peer-validation batch — the RPC threads are
+ /// try_lock/mirror safe). Returns Ok(true) when a block was minted.
+@@ -7762,9 +7870,28 @@ fn stake_tick(
+     // determine the impairment, THEN apply the gates.
+     let (candidates, _no_key, _unloc, _nonstd) = wl.candidates();
+     stake_st.coins_considered = candidates.len() as u64;
+-    let (candidates_rel, stale_coins, unresolvable_coins) =
++    let (mut candidates_rel, mut stale_coins, mut unresolvable_coins) =
+         resolve_stake_evidence(stg, candidates);
+     note_stale_evidence(stg, &stale_coins);
++    if !stale_coins.is_empty() && autoheal_stale_live_view(stg, wl, store, stake_st) {
++        // item 27 §16-RACED-MINT-AUTOHEAL: the rebuild ran — re-resolve with
++        // the fresh view so THIS tick stakes on the restored coins instead of
++        // waiting a tick. A cleared evidence set clears the impairment (the
++        // next stake tick's CLEARED line stays silent — nothing to clear
++        // twice); a still-contradicted one keeps the impairment live for the
++        // next tick's determination.
++        let (c2, _nk, _ul, _ns) = wl.candidates();
++        let (c2_rel, stale2, unres2) = resolve_stake_evidence(stg, c2);
++        if stale2.is_empty() {
++            log(
++                "stake: AUTOHEAL — wallet evidence matches the chain again, impairment cleared in-process",
++            );
++            stg.staking_impaired = None;
++        }
++        candidates_rel = c2_rel;
++        stale_coins = stale2;
++        unresolvable_coins = unres2;
++    }
+     if wl.locked {
+         // Staking needs the private keys. An encrypted wallet that has not been
+         // unlocked cannot mint — say so once, then stay quiet. Evidence
+@@ -16485,6 +16612,8 @@ mod tests {
+             last_error: None,
+             coins_considered: 0,
+             coins_meeting_min_age: 0,
++            autoheal_episode: None,
++            autoheal_attempts: 0,
+         }
+     }
+ 
+@@ -19996,6 +20125,300 @@ addnode=host:notaport
+         assert_eq!(d0.amount(), 0);
+     }
+ 
++    // ---- item 27 §16-RACED-MINT-AUTOHEAL ----
++
++    /// A real block store h0..=h4 whose h2 body pays `pubkey` the honest
++    /// coin (block.time = the synthetic chain's entry time at h2), so a
++    /// WalletLive::seed replay over it reproduces that coin with exact
++    /// chain-slot facts — the autoheal rebuild fixture. Filler blocks carry
++    /// only an empty coinbase (value 0 + empty script → never enters a live
++    /// map), so the replay holds exactly ONE owned coin.
++    fn autoheal_store_with_honest_coin(
++        dir: &std::path::Path,
++        pubkey: &[u8],
++        value: i64,
++    ) -> std::sync::Arc<BlockStore> {
++        let script = tri7_core::spend::script_pubkey_p2pk(pubkey).unwrap();
++        let mut frames = Vec::new();
++        let mut hashes = Vec::new();
++        let mut prev = [0u8; 32];
++        for h in 0..=4u64 {
++            let mut b = Block {
++                version: 2,
++                prev_hash: prev,
++                merkle_root: [0u8; 32],
++                time: 1_700_000_000u32 + (h * 600) as u32,
++                bits: 0x2000_ffff,
++                nonce: 7,
++                vtx: vec![tri7_core::legacy::Tx {
++                    version: 1,
++                    time: 0,
++                    vin: vec![tri7_core::legacy::Vin {
++                        prev_hash: [0u8; 32],
++                        prev_n: u32::MAX,
++                        script_sig: vec![0x01],
++                        sequence: u32::MAX,
++                    }],
++                    vout: vec![tri7_core::legacy::Vout {
++                        value: 0,
++                        script_pubkey: vec![],
++                    }],
++                    locktime: 0,
++                }],
++                block_sig: vec![],
++            };
++            if h == 2 {
++                b.vtx = vec![tri7_core::legacy::Tx {
++                    version: 1,
++                    time: b.time,
++                    vin: vec![tri7_core::legacy::Vin {
++                        prev_hash: [0u8; 32],
++                        prev_n: u32::MAX,
++                        script_sig: vec![0x02],
++                        sequence: u32::MAX,
++                    }],
++                    vout: vec![tri7_core::legacy::Vout {
++                        value,
++                        script_pubkey: script.clone(),
++                    }],
++                    locktime: 0,
++                }];
++            }
++            b.merkle_root = b.merkle_root();
++            hashes.push(b.hash());
++            frames.extend_from_slice(&bin_frame(&b));
++            prev = b.hash();
++        }
++        let path = dir.join("blocks.bin");
++        std::fs::write(&path, &frames).unwrap();
++        let store = tri7_core::blockindex::BlockStore::new(Some(path), Some(dir.join("idx")));
++        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
++            base: 0,
++            hashes,
++            tip: 4,
++        }));
++        wait_store_ready(&store);
++        store
++    }
++
++    /// The raced-mint episode: chain h0..=h4 whose canonical map holds the
++    /// honest coin's meta plus a raced coin's meta, and a wallet live view
++    /// holding both — the raced coin with the ABANDONED block's
++    /// containing-block time (20s earlier, tx facts agreeing — the exact
++    /// DNS3 14:21:42Z shape). Returns (stg, wl, raced_key, store).
++    fn autoheal_fixture(
++        tag: &str,
++    ) -> (
++        ChainState,
++        WalletLive,
++        (Hash, u32),
++        std::sync::Arc<BlockStore>,
++    ) {
++        let (secret, pubkey) = tri7_core::spend::synthetic_key(tag);
++        let _ = secret;
++        let pubkey = pubkey.to_vec();
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-{}-{}-{}",
++            tag,
++            std::process::id(),
++            now_secs()
++        ));
++        std::fs::create_dir_all(&dir).unwrap();
++        let store = autoheal_store_with_honest_coin(
++            &dir,
++            &pubkey,
++            50 * tri7_core::consensus::COIN,
++        );
++        // the honest coin as the REPLAY sees it (exact chain-slot facts)
++        let wallet_keys = wallet_live_with(&[pubkey.clone()], vec![]).wallet;
++        let fresh0 = WalletLive::seed(&store, wallet_keys, 0, 4).unwrap();
++        let honest_key = *fresh0
++            .live
++            .keys()
++            .find(|k| fresh0.owns(&fresh0.live[k]))
++            .expect("honest coin in the replay");
++        let honest = fresh0.live[&honest_key].clone();
++        assert_eq!(honest.height, 2);
++        let mut stg = synthetic_chain(0, 4);
++        stg.utxo.map.insert(
++            honest_key,
++            crate::kernel::UtxoMeta {
++                height: 2,
++                tx_offset: honest.tx_offset,
++                tx_time: honest.tx_time,
++                value: honest.value,
++            },
++        );
++        let raced_key: (Hash, u32) = ([0x5Bu8; 32], 1);
++        stg.utxo.map.insert(
++            raced_key,
++            crate::kernel::UtxoMeta {
++                height: 2,
++                tx_offset: honest.tx_offset,
++                tx_time: honest.tx_time, // tx facts agree…
++                value: 250_592_524,
++            },
++        );
++        let mut wl = wallet_live_with(&[pubkey], vec![(honest_key, honest.clone())]);
++        wl.base = 0;
++        wl.live.insert(
++            raced_key,
++            LiveOut {
++                height: 2,
++                block_time: honest.block_time - 20, // …block_time contradicts
++                tx_time: honest.tx_time,
++                tx_offset: honest.tx_offset,
++                value: 250_592_524,
++                script: honest.script.clone(),
++                created_epoch: honest.block_time - 20,
++                coinstake: false,
++                coinbase: false,
++            },
++        );
++        (stg, wl, raced_key, store)
++    }
++
++    #[test]
++    fn autoheal_due_fires_on_first_sighting_relog_cadence_and_episode_cap() {
++        let mut stake_st = gate_stake_state();
++        let impaired = |ticks: u64, first: &str| StaleLiveView {
++            txid: "raced".into(),
++            n: 1,
++            wallet_height: 2,
++            wallet_block_time: 1,
++            chain_block_time: 2,
++            wallet_tx_time: 1,
++            chain_tx_time: 1,
++            absent: false,
++            coins: 1,
++            first_utc: first.into(),
++            ticks,
++        };
++        // first sighting fires; quiet ticks wait; the loud re-log cadence fires
++        assert!(autoheal_due(&impaired(1, "e1"), &mut stake_st));
++        assert!(!autoheal_due(&impaired(2, "e1"), &mut stake_st));
++        assert!(!autoheal_due(&impaired(39, "e1"), &mut stake_st));
++        assert!(autoheal_due(&impaired(40, "e1"), &mut stake_st));
++        assert!(!autoheal_due(&impaired(41, "e1"), &mut stake_st));
++        // the cap: three attempts inside one episode exhaust it…
++        stake_st.autoheal_attempts = AUTOHEAL_MAX_ATTEMPTS;
++        assert!(!autoheal_due(&impaired(80, "e1"), &mut stake_st));
++        // …a fresh episode (the impairment fully cleared, then re-armed)
++        // re-arms the budget
++        assert!(autoheal_due(&impaired(1, "e2"), &mut stake_st));
++        assert_eq!(stake_st.autoheal_attempts, 0, "new episode resets the budget");
++    }
++
++    #[test]
++    fn autoheal_store_behind_skips_without_burning_an_attempt() {
++        let mut stg = synthetic_chain(0, 4);
++        stg.staking_impaired = Some(StaleLiveView {
++            txid: "raced".into(),
++            n: 1,
++            wallet_height: 2,
++            wallet_block_time: 1,
++            chain_block_time: 2,
++            wallet_tx_time: 1,
++            chain_tx_time: 1,
++            absent: false,
++            coins: 1,
++            first_utc: "2026-11-14T14:21:42Z".into(),
++            ticks: 1,
++        });
++        let mut wl = wallet_live_with(&[vec![0x02u8; 33]], vec![]);
++        wl.base = 0;
++        // an empty store cannot serve the replay window — a TRANSIENT
++        // (bodies still landing): skip, and do NOT burn the attempt budget
++        let store = BlockStore::new(None, None);
++        let mut stake_st = gate_stake_state();
++        assert!(!autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert_eq!(stake_st.autoheal_attempts, 0);
++        assert_eq!(
++            stake_st.autoheal_episode.as_deref(),
++            Some("2026-11-14T14:21:42Z"),
++            "episode recorded even on a skip"
++        );
++        // a later re-log tick: same shape, still no burn
++        stg.staking_impaired.as_mut().unwrap().ticks = 40;
++        assert!(!autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert_eq!(stake_st.autoheal_attempts, 0);
++    }
++
++    #[test]
++    fn autoheal_rebuild_removes_the_raced_phantom_and_keeps_the_honest_coin() {
++        let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-rebuild");
++        // detect: the raced coin is the facts-MISMATCH class (absent:false)
++        let (cands, _nk, _ul, _ns) = wl.candidates();
++        assert_eq!(cands.len(), 2, "honest + raced, both candidates");
++        let (_rel, stale, _unres) = resolve_stake_evidence(&stg, cands);
++        assert_eq!(stale.len(), 1);
++        assert!(!stale[0].absent, "the raced-mint shape is a facts mismatch");
++        note_stale_evidence(&mut stg, &stale);
++        let first_utc = stg.staking_impaired.as_ref().unwrap().first_utc.clone();
++        let honest_before = wl.live.values().find(|o| o.height == 2 && o.value != 250_592_524).unwrap().clone();
++
++        // heal: one in-process pass removes the phantom, keeps the honest
++        // coin with identical facts, burns exactly one attempt
++        let mut stake_st = gate_stake_state();
++        assert!(autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert_eq!(stake_st.autoheal_attempts, 1);
++        assert_eq!(stake_st.autoheal_episode.as_deref(), Some(first_utc.as_str()));
++        assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
++        let kept = wl
++            .live
++            .values()
++            .find(|o| o.value != 250_592_524)
++            .expect("honest coin kept");
++        assert_eq!(kept.block_time, honest_before.block_time);
++        assert_eq!(kept.tx_time, honest_before.tx_time);
++        assert_eq!(kept.tx_offset, honest_before.tx_offset);
++        assert_eq!(kept.value, honest_before.value);
++
++        // re-resolve on the rebuilt view: evidence matches → clear
++        let (c2, _nk, _ul, _ns) = wl.candidates();
++        let (_rel2, stale2, _unres2) = resolve_stake_evidence(&stg, c2);
++        assert!(stale2.is_empty(), "rebuilt view matches the chain");
++        stg.staking_impaired = None;
++        assert!(stg.staking_impaired.is_none());
++    }
++
++    #[test]
++    fn stake_tick_autoheals_and_clears_even_while_locked() {
++        // the item-20 round-1 lesson runs both ways: detection runs BEFORE
++        // the gates, so the in-process heal must too — a LOCKED wallet with
++        // a raced live view still ends the tick healed (an unlocked one
++        // stakes on the restored coins in the SAME tick)
++        let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-locked");
++        wl.locked = true;
++        let cfg = gate_test_cfg();
++        let rpc = Rpc::new("127.0.0.1", 1, "", "");
++        let mut stats = Stats::default();
++        let mut pool = tri7_core::txpool::TxPool::new(4, 3600);
++        let mut stake_st = gate_stake_state();
++        let mut peers: Vec<Peer> = Vec::new();
++        let mut recent = RecentBlocks::new();
++        let out = stake_tick(
++            &cfg,
++            &mut stg,
++            &rpc,
++            &mut stats,
++            &mut wl,
++            &mut pool,
++            &mut stake_st,
++            &store,
++            &mut peers,
++            &mut recent,
++        )
++        .unwrap();
++        assert!(!out, "locked wallet cannot mint — but the heal still ran");
++        assert!(
++            stg.staking_impaired.is_none(),
++            "impairment cleared in the same tick, even while locked"
++        );
++        assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
++        assert_eq!(stake_st.autoheal_attempts, 1);
++    }
++
+     #[test]
+     fn repair_swap_replaces_the_live_map_atomically() {
+         // the repairwallet flow on a real WalletLive: drift the map (drop an
+@@ -20660,6 +21083,8 @@ addnode=host:notaport
+                 last_error: None,
+                 coins_considered: 0,
+                 coins_meeting_min_age: 0,
++                autoheal_episode: None,
++                autoheal_attempts: 0,
+             })),
+             announce: Arc::new(std::sync::Mutex::new(Default::default())),
+             peers_table: Arc::new(std::sync::Mutex::new(Vec::new())),
