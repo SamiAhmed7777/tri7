@@ -503,6 +503,7 @@ pub fn build_oracle(_tip: &TipInfo, path: &Path) -> Result<crate::blockindex::Bu
 // Wallet
 // ===========================================================================
 
+#[derive(Clone)]
 pub struct WalletData {
     pub path: String,
     pub keys: Vec<crate::wallet::WalletKey>,
@@ -540,6 +541,30 @@ pub fn load_wallet(path: &Path) -> Result<WalletData, String> {
         hd_chain_index: w.hd_chain_index.unwrap_or(0),
         seed_migrated: crate::wallet::seed_migration_done(path)?,
     })
+}
+
+/// Encrypted-wallet variant (UX pass: old encrypted Triangles wallets still
+/// work): returns the SKELETON (keys empty — they need the passphrase) plus
+/// the encrypted flag; pair with wallet_encrypt::decrypt_wallet.
+pub fn load_wallet_allow_encrypted(path: &Path) -> Result<(WalletData, bool), String> {
+    let w = crate::wallet::read_wallet_allow_encrypted(path)?;
+    let encrypted = w.encrypted;
+    Ok((
+        WalletData {
+            path: path.display().to_string(),
+            keys: w.keys,
+            names: w.names,
+            default_key: w.default_key,
+            version: w.version,
+            best_block: w.best_block,
+            scripts: w.scripts,
+            hd_mnemonic: w.hd_mnemonic,
+            hd_passphrase: w.hd_passphrase,
+            hd_chain_index: w.hd_chain_index.unwrap_or(0),
+            seed_migrated: crate::wallet::seed_migration_done(path)?,
+        },
+        encrypted,
+    ))
 }
 
 impl WalletData {

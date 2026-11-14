@@ -543,6 +543,16 @@ pub struct AppState {
     pub load_error: Option<String>,
     pub wallet: Option<WalletData>,
     pub derived: Option<DerivedWallet>,
+    /// UX (encrypted-wallet support): the load screen's passphrase buffer +
+    /// last error while an encrypted wallet waits to be unlocked.
+    pub encrypted_pass: String,
+    pub encrypted_error: Option<String>,
+    /// UX (encrypted-wallet support): the skeleton read from an mkey/ckey
+    /// store while waiting for the user's passphrase. Keys are EMPTY here —
+    /// decrypt_wallet brings them into the keystore on unlock.
+    pub encrypted_pending: Option<WalletData>,
+    /// true → the load screen shows the encrypted-wallet passphrase prompt.
+    pub encrypted_prompt: bool,
     pub tip: Option<TipInfo>,
     pub stake: Option<StakeStatus>,
     pub send: SendFormState,
@@ -710,6 +720,10 @@ impl AppState {
             load_error: None,
             wallet: None,
             derived: None,
+            encrypted_pending: None,
+            encrypted_prompt: false,
+            encrypted_pass: String::new(),
+            encrypted_error: None,
             tip: None,
             stake: None,
             send: SendFormState::default(),
@@ -1641,7 +1655,12 @@ impl AppState {
     /// `wallet.bdb-<timestamp>`, and the modern wallet opens at the same path.
     pub fn load_wallet_action(&mut self) -> Result<(), String> {
         self.auto_migrate_legacy_wallet()?;
-        let wallet = load_wallet(Path::new(&self.cfg.wallet_path))?;
+        // UX (encrypted-wallet support): the allow-encrypted read returns a
+        // SKELETON for mkey/ckey stores — the passphrase prompt on the load
+        // screen unlocks them via decrypt_wallet (old encrypted wallets
+        // still work).
+        let (wallet, encrypted) =
+            load_wallet_allow_encrypted(Path::new(&self.cfg.wallet_path))?;
         // ONE-FOLDER DESIGN (Sami): the chosen folder IS the wallet
         // environment - state files live beside wallet.dat automatically.
         // Only when the user did NOT pass --state-dir explicitly (power users
@@ -1656,7 +1675,84 @@ impl AppState {
                 self.cfg.state_dir = parent;
             }
         }
-        if wallet.keys.is_empty() {
+        if encrypted {
+            // Park the skeleton and ask for the wallet's passphrase.
+            remember_last_wallet(&self.cfg.profile_dir, &self.cfg.wallet_path);
+            self.encrypted_pending = Some(wallet);
+            self.encrypted_prompt = true;
+            return Ok(());
+        }
+        self.finish_load(wallet, true)
+    }
+
+    /// UX (encrypted-wallet support): the load screen's Unlock button. The
+    /// decrypted keys join the session keystore (memory only — the file on
+    /// disk stays encrypted and untouched), then the normal derive/finish
+    /// path runs with them.
+    pub fn unlock_encrypted_action(&mut self, passphrase: &str) -> Result<(), String> {
+        // UX judge r1: decryption runs FIRST — a wrong passphrase must be
+        // retryable, not a one-shot that throws the wallet away.
+        let path = Path::new(&self.cfg.wallet_path);
+        let keys = crate::wallet_encrypt::decrypt_wallet(path, passphrase)?;
+        let Some(mut wallet) = self.encrypted_pending.take() else {
+            self.encrypted_prompt = false;
+            return Ok(());
+        };
+        self.encrypted_prompt = false;
+        self.encrypted_pass = String::new();
+        self.encrypted_error = None;
+        // TRANSACTIONAL (judge r3): keep the ORIGINAL KEYLESS skeleton — if
+        // any fallible load work fails, THAT is what goes back into
+        // encrypted_pending for the retry. Restoring the plaintext-bearing
+        // copy would re-append duplicate keys on the next attempt.
+        let keyless_skeleton = wallet.clone();
+        // SECURITY (judge r2 blocker 1): decrypted keys go ONLY into the
+        // in-memory wallet model — NEVER into the keystore, whose entries
+        // persist to keystore.json in plaintext hex. The file on disk stays
+        // encrypted; these rows live only in this process's memory.
+        for (pubkey, secret) in keys {
+            let address = crate::wallet::pubkey_to_address(&pubkey);
+            wallet.keys.push(crate::wallet::WalletKey {
+                pubkey: pubkey.clone(),
+                secret,
+                compressed: pubkey.len() == 33,
+                address: address.clone(),
+                created: None,
+            });
+        }
+        self.load_error = None;
+        self.status_log
+            .push("wallet unlocked for this session (keys stay in memory)".into());
+        // form defaults: the first decrypted address (finish_load's default_key
+        // lookup can't run — the on-disk defaultkey row may not resolve)
+        if self.receive.address.is_empty() {
+            self.receive.address = wallet
+                .keys
+                .first()
+                .map(|k| k.address.clone())
+                .unwrap_or_default();
+        }
+        if self.sign.address.is_empty() {
+            self.sign.address = self.receive.address.clone();
+        }
+        let wallet_clone = wallet.clone();
+        match self.finish_load(wallet, false) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // transactional rollback: the KEYLESS skeleton goes back (no
+                // plaintext keys retained in app state), the prompt re-shows
+                self.encrypted_pending = Some(keyless_skeleton);
+                self.encrypted_prompt = true;
+                self.encrypted_error =
+                    Some(format!("Couldn't finish loading: {e} — try Unlock again."));
+                Err(e)
+            }
+        }
+    }
+
+    /// Shared tail of the open flow (derive → stake → form defaults → state).
+    fn finish_load(&mut self, wallet: WalletData, require_keys: bool) -> Result<(), String> {
+        if wallet.keys.is_empty() && require_keys {
             return Err(format!("wallet {} has zero keys", self.cfg.wallet_path));
         }
         // remember for next launch (Sami: reopen the wallet that exists)

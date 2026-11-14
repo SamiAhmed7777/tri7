@@ -179,6 +179,20 @@ pub fn pubkey_to_address(pubkey: &[u8]) -> String {
 
 /// Open a wallet file read-only and extract everything a spendable wallet needs.
 pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
+    read_wallet_inner(path, false)
+}
+
+/// Encrypted-wallet support (operator request 2026-11-14: "old encrypted
+/// Triangles wallets still work"): same scan, but an mkey/ckey container
+/// returns its SKELETON (balances/history rows; keys EMPTY — the ckey rows
+/// need the passphrase) instead of refusing. The GUI pairs this with
+/// wallet_encrypt::decrypt_wallet; the recovered keys live ONLY in the
+/// in-memory WalletData model (never persisted to disk or keystore.json).
+pub fn read_wallet_allow_encrypted(path: &Path) -> Result<WalletKeys, String> {
+    read_wallet_inner(path, true)
+}
+
+fn read_wallet_inner(path: &Path, allow_encrypted: bool) -> Result<WalletKeys, String> {
     let conn = rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("open sqlite: {}", e))?;
 
@@ -367,8 +381,10 @@ pub fn read_wallet(path: &Path) -> Result<WalletKeys, String> {
     }
     // Pool entries serve lowest-index-first; row scan order never matters.
     w.keypool.sort_by_key(|e| e.index);
-    // Encrypted wallets: a reader without crypto support must stop (spec §5.9).
-    if w.encrypted {
+    // Encrypted wallets: a reader without crypto support must stop (spec
+    // §5.9) — STRICT readers refuse; the GUI's encrypted path passes
+    // allow_encrypted=true and unlocks via wallet_encrypt::decrypt_wallet.
+    if w.encrypted && !allow_encrypted {
         return Err(
             "wallet is encrypted (mkey/ckey present) — passphrase-protected read not implemented"
                 .into(),

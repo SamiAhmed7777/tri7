@@ -2156,6 +2156,60 @@ impl Tri7App {
     }
 
     fn load_screen(&mut self, ui: &mut egui::Ui) {
+        // UX (encrypted-wallet support): an mkey/ckey store parks here for its
+        // passphrase — the prompt replaces the normal load options.
+        if self.st.encrypted_prompt {
+            ui.vertical_centered(|ui| {
+                ui.add_space(48.0);
+                if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
+                    ui.add(img(&tex, Vec2::new(371.0, 78.0)));
+                }
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new("This wallet is encrypted")
+                        .size(20.0)
+                        .strong()
+                        .color(th::TEXT_PRIMARY),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Enter the wallet's passphrase to use it here. Your keys stay in memory only while the app runs — the file on disk stays encrypted.",
+                    )
+                    .size(13.0)
+                    .color(th::TEXT_SECONDARY),
+                );
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width(420.0);
+                    th::password_input(ui, 420.0, &mut self.st.encrypted_pass);
+                    if let Some(e) = &self.st.encrypted_error {
+                        ui.add_space(4.0);
+                        th::inline_notice(ui, th::Notice::Error, "Couldn't unlock", e);
+                    }
+                    ui.add_space(10.0);
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if th::primary_button(ui, "Unlock wallet").clicked() {
+                                match self.st.unlock_encrypted_action(&self.st.encrypted_pass.clone())
+                                {
+                                    Ok(()) => {}
+                                    Err(e) => self.st.encrypted_error = Some(e),
+                                }
+                            }
+                            if th::secondary_button(ui, "Cancel").clicked() {
+                                self.st.encrypted_prompt = false;
+                                self.st.encrypted_pending = None;
+                                self.st.encrypted_pass = String::new();
+                                self.st.encrypted_error = None;
+                            }
+                        },
+                    );
+                });
+            });
+            return;
+        }
         ui.vertical_centered(|ui| {
             ui.add_space(48.0);
             if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
