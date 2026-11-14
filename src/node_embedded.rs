@@ -5492,6 +5492,314 @@ fn fold_backfill_block(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// (item 25) stake-modifier chain divergence — detect + heal + containment
+//
+// The live 2026-11-14 DNS3 incident: a node's persisted stake-modifier chain
+// diverged from canonical at a generated-modifier height; the boot path
+// loads modifiers VERBATIM and the load-time checksum chain cannot catch the
+// class because the poison was COMPUTED in-session (the checksums above the
+// divergence were rebuilt from the wrong modifier — stepwise-cumulative,
+// internally consistent, load passes). The validator then hard-rejected
+// every inbound block whose kernel modifier walk reached the diverged
+// region, and that rejection EXITED the daemon (EXIT_VALIDATE) → ~50-boot
+// crash-loop wedge. The stored proofs/hashes/times were byte-identical
+// fleet-wide — ONLY the generated modifier values differ — so the canonical
+// chain is recoverable locally: the modifier chain is a deterministic
+// function of the stored entries (compute_next_stake_modifier_era), and the
+// stored proofs encode which modifier values were canonical when each block
+// was accepted.
+// ---------------------------------------------------------------------------
+
+/// How many kernels the sample audit recomputes across the records range.
+const ITEM25_SAMPLE_COUNT: usize = 32;
+
+/// The failure classes where OUR kernel state (modifier chain / output map /
+/// oracle readback) can be the wrong side of a validation disagreement —
+/// the wedge class. A genuinely invalid block can also land in these (the
+/// audit then finds a clean window and the peer is simply dropped), but a
+/// transport failure never does.
+fn is_kernel_state_failure(e: &str) -> bool {
+    e.contains("KERNEL TARGET FAIL")
+        || e.contains("kernel guard")
+        || e.contains("stake-modifier checksum divergence")
+        || e.contains("bad modifierchecksum")
+        || e.contains("modifier computation")
+        || e.contains("empty checksum chain")
+}
+
+/// Forward replay of the stake-modifier chain over the loaded window — the
+/// exact computation advance_with_block ran in-session
+/// (compute_next_stake_modifier_era over the stored entries). DETECT: the
+/// first generated height whose stored modifier disagrees with the replay
+/// from the canonical chain below it is the divergence point (above it the
+/// poison is self-consistent and reproduces — only the entry where the
+/// canonical input first feeds a stored value disagrees).
+struct ModifierScan {
+    /// generated heights actually compared (full selection lookback)
+    compared: usize,
+    /// window-relative height of the first disagreement (None = clean)
+    first_bad: Option<usize>,
+    /// first window-relative height whose selection lookback reaches below
+    /// the window base. Below this the replay cannot be trusted (candidate
+    /// set truncated by the window) and the stored values are KEPT — a
+    /// divergence confined to that zone is detectable only via the sample
+    /// audit and is not healable in place (fail-honest: loud log, the peer
+    /// containment still prevents any exit).
+    replay_floor: usize,
+    /// first GENERATED height at/above replay_floor — where a heal may
+    /// start rewriting (everything above is recomputable in order)
+    rewrite_start: usize,
+}
+
+fn scan_modifier_chain(st: &ChainState) -> ModifierScan {
+    let n = st.entries.len();
+    // replay_floor: the smallest i whose candidate lookback
+    // (sel_start = bucket(prev_time) - selection interval) is fully inside
+    // the window, i.e. entries[0].time < sel_start. Monotonic in i.
+    let mut replay_floor = n;
+    for i in 1..n {
+        let interval: u32 = if st.base + (i as u64) < 17692 { 1200 } else { 300 };
+        let sel = tri7_core::kernel::selection_interval_with(interval) as i64;
+        let prev_time = st.entries[i - 1].time as i64;
+        let sel_start = (prev_time / interval as i64) * interval as i64 - sel;
+        if (st.entries[0].time as i64) < sel_start {
+            replay_floor = i;
+            break;
+        }
+    }
+    if replay_floor >= n {
+        return ModifierScan {
+            compared: 0,
+            first_bad: None,
+            replay_floor: n,
+            rewrite_start: n,
+        };
+    }
+    let rewrite_start = (replay_floor..n)
+        .find(|&i| st.entries[i].generated_stake_modifier)
+        .unwrap_or(n);
+    let idx = st.rel_index();
+    let mut compared = 0usize;
+    let mut first_bad: Option<usize> = None;
+    for i in rewrite_start..n {
+        if !st.entries[i].generated_stake_modifier {
+            continue;
+        }
+        let interval: u32 = if st.base + (i as u64) < 17692 { 1200 } else { 300 };
+        // The replay input (nearest generated modifier ≤ i-1) is stored
+        // canonical below the divergence; above it the recomputed value
+        // tracks the poison exactly like the stored chain, so the compare
+        // stays clean there — first_bad is the divergence point itself.
+        let computed = match tri7_core::kernel::compute_next_stake_modifier_era(
+            &idx,
+            Some(i - 1),
+            interval,
+        ) {
+            Ok((m, _g)) => m,
+            Err(_) => continue, // not replayable here — skip, never a false mismatch
+        };
+        compared += 1;
+        if computed != st.entries[i].stake_modifier && first_bad.is_none() {
+            first_bad = Some(i);
+        }
+    }
+    ModifierScan {
+        compared,
+        first_bad,
+        replay_floor,
+        rewrite_start,
+    }
+}
+
+/// (item 25c) HEAL — re-seed {stake_modifier, generated} for every entry
+/// from `rewrite_start` forward by replaying the canonical computation in
+/// place, then rebuild the stepwise-cumulative checksum chain over the
+/// rewritten span (the live-surgery constraint: once a checksum changes,
+/// every checksum above it changes — the chain must be rebuilt in full).
+/// {hash, prev_hash, time, bits, pos, entropy, proof} are kept VERBATIM —
+/// the incident class is a generated-modifier divergence only (the stored
+/// proofs are byte-identical fleet-wide; verified live in the DNS3
+/// surgery). Returns the number of entries whose (modifier, generated)
+/// pair changed.
+fn rebase_modifier_chain(
+    st: &mut ChainState,
+    rewrite_start: usize,
+) -> Result<usize, String> {
+    let n = st.entries.len();
+    if n == 0 || rewrite_start >= n {
+        return Ok(0);
+    }
+    let mut changed = 0usize;
+    let mut cs_prev: Option<u32> = if rewrite_start > 0 {
+        Some(st.checksums[rewrite_start - 1])
+    } else {
+        None
+    };
+    for i in rewrite_start..n {
+        let interval: u32 = if st.base + (i as u64) < 17692 { 1200 } else { 300 };
+        // compute from the CURRENT entries — every input entry (< i) is
+        // already re-seeded by the time this iteration runs, so the replay
+        // propagates canonical values instead of reproducing the poison
+        // (computing over a pre-rewrite snapshot would rebuild the poison
+        // verbatim above the divergence)
+        let computed = if i == 0 {
+            Ok((0u64, true))
+        } else {
+            {
+                let idx = st.rel_index();
+                tri7_core::kernel::compute_next_stake_modifier_era(&idx, Some(i - 1), interval)
+            }
+            .map_err(|e| format!("h{}: heal replay: {}", st.base + (i as u64), e))
+        };
+        let (modifier, generated) = computed?;
+        let (pos, entropy, proof) = {
+            let e = &st.entries[i];
+            (e.is_proof_of_stake, e.entropy_bit, e.hash_proof_of_stake)
+        };
+        if modifier != st.entries[i].stake_modifier
+            || generated != st.entries[i].generated_stake_modifier
+        {
+            changed += 1;
+        }
+        st.entries[i].stake_modifier = modifier;
+        st.entries[i].generated_stake_modifier = generated;
+        let flags = tri7_core::kernel::index_flags(pos, entropy, generated);
+        let cs = tri7_core::kernel::stake_modifier_checksum(
+            cs_prev,
+            flags,
+            &proof,
+            modifier,
+        );
+        st.checksums[i] = cs;
+        cs_prev = Some(cs);
+    }
+    Ok(changed)
+}
+
+/// (item 25b) DETECT — sample audit: recompute sampled kernels from the
+/// RECORDS range against the loaded index and compare with the stored
+/// proofs. The canonical chain is the one whose stored proofs the loaded
+/// walk reproduces (the stored proofs are byte-identical fleet-wide —
+/// verified live). BlockRec carries spends without tx attribution, so every
+/// resolvable spend of the block is an eligible candidate and ANY candidate
+/// reproducing the stored proof passes the sample (the true coinstake input
+/// is one of them; a wrong candidate's hash cannot collide with the stored
+/// proof). Returns mismatch descriptions; empty = clean. Unresolvable
+/// inputs (outside the kernel map) skip the sample — never a false
+/// mismatch.
+fn audit_kernel_samples(st: &ChainState, k: usize) -> Vec<String> {
+    let mut bad = Vec::new();
+    if st.records.is_empty() || k == 0 {
+        return bad;
+    }
+    let step = ((st.records.len() - 1) / k.min(st.records.len())) + 1;
+    let idx = st.rel_index();
+    for rec_i in (0..st.records.len()).step_by(step) {
+        let rec = &st.records[rec_i];
+        if rec.height < st.base {
+            continue;
+        }
+        let rel = (rec.height - st.base) as usize;
+        let Some(entry) = st.entries.get(rel) else {
+            continue;
+        };
+        if !entry.is_proof_of_stake || entry.hash_proof_of_stake == [0u8; 32] {
+            continue; // assume-valid era / PoW — no stored proof to reproduce
+        }
+        let block_time = entry.time;
+        let mut eligible = 0usize;
+        let mut reproduced = false;
+        for (txid_disp, prev_n) in &rec.spends {
+            let Ok(txid) = tri7_core::p2p::display_to_internal(txid_disp) else {
+                continue;
+            };
+            let Ok(h) = tri7_core::kernel::recompute_stake_kernel(
+                &idx,
+                &st.utxo,
+                (txid, *prev_n),
+                block_time,
+            ) else {
+                continue; // unresolvable / guard failure — skip, not a mismatch
+            };
+            eligible += 1;
+            if h == entry.hash_proof_of_stake {
+                reproduced = true;
+                break;
+            }
+        }
+        if eligible > 0 && !reproduced {
+            bad.push(format!(
+                "h{}: kernel recompute disagrees with the stored proof ({} eligible input(s), none reproduced)",
+                rec.height, eligible
+            ));
+        }
+    }
+    bad
+}
+
+/// (item 25) DETECT + HEAL. Runs the replay scan + the sample audit; on
+/// disagreement re-seeds the window from the first recomputable generated
+/// height and re-verifies by replay (must be clean) + fresh samples (the
+/// stored proofs must reproduce under the healed walk). Returns true when a
+/// heal was applied AND verified — the caller persists. Pure computation
+/// over the window (no IO) — safe under the state lock. A clean window is a
+/// verified no-op (the DNS2/Pi unregressed shape).
+fn detect_and_heal_modifier_chain(st: &mut ChainState, trigger: &str) -> bool {
+    let scan = scan_modifier_chain(st);
+    let samples = audit_kernel_samples(st, ITEM25_SAMPLE_COUNT);
+    if scan.first_bad.is_none() && samples.is_empty() {
+        log(&format!(
+            "item25: modifier chain audit clean ({} generated heights compared, replay floor rel {}, {} samples) [{}]",
+            scan.compared, scan.replay_floor, ITEM25_SAMPLE_COUNT, trigger
+        ));
+        return false;
+    }
+    log(&format!(
+        "item25: MODIFIER CHAIN DIVERGENCE DETECTED [{}]: replay first mismatch at rel {} (abs h{}), {} sample mismatch(es): {}",
+        trigger,
+        scan.first_bad.map(|r| r.to_string()).unwrap_or_else(|| "none".into()),
+        scan.first_bad
+            .map(|r| st.base + r as u64)
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "n/a".into()),
+        samples.len(),
+        samples.first().map(|s| s.as_str()).unwrap_or(""),
+    ));
+    if scan.rewrite_start >= st.entries.len() {
+        log(
+            "item25: divergence sits below the replay floor (selection lookback truncated by the window) — NOT healable in place; keeping the contained posture (peers drop, node polls, NO exit). Recovery needs a peer window re-seed (the live-surgery lane).",
+        );
+        return false;
+    }
+    let changed = match rebase_modifier_chain(st, scan.rewrite_start) {
+        Ok(c) => c,
+        Err(e) => {
+            log(&format!("item25: heal replay failed: {} — window left unchanged, contained posture kept", e));
+            return false;
+        }
+    };
+    let scan2 = scan_modifier_chain(st);
+    let samples2 = audit_kernel_samples(st, ITEM25_SAMPLE_COUNT);
+    if scan2.first_bad.is_some() || !samples2.is_empty() {
+        log(&format!(
+            "item25: RE-SEED FAILED VERIFICATION ({} replay mismatches, {} sample mismatches after rewrite) — window left rewritten-and-loud, contained posture kept, NO exit",
+            scan2.first_bad.is_some() as u8,
+            samples2.len()
+        ));
+        return false;
+    }
+    log(&format!(
+        "item25: MODIFIER CHAIN RE-SEEDED from rel {} (abs h{}): {} entr{} rewritten, replay clean, {} samples reproduce the stored proofs — resuming validation",
+        scan.rewrite_start,
+        st.base + scan.rewrite_start as u64,
+        changed,
+        if changed == 1 { "y" } else { "ies" },
+        ITEM25_SAMPLE_COUNT
+    ));
+    true
+}
+
 /// Fetch the window's hashes via RPC, the raw blocks via P2P getdata (verified
 /// byte-for-byte locally), then seed the modifier state via the daemon index.
 fn seed_from_network(
@@ -10361,7 +10669,43 @@ fn handle_message(
                         refresh_body_request_clock(body_tries, &hash);
                         return Ok(());
                     }
-                    Err(e) => return Err(e),
+                    // (item 25a) a received-BLOCK validation failure must
+                    // NEVER exit the daemon — the third exit-on-peer-failure
+                    // wedge (DNS3 2026-11-14: a kernel-target rejection of a
+                    // relayed block hit the outbound-is-fatal branch and
+                    // crash-looped ~50 boots on the same relayed block).
+                    // Contain: warn + drop the peer + keep polling. A
+                    // kernel-state class additionally runs the detect+heal
+                    // lane and re-injects the cached payload so the (likely
+                    // canonical) block applies after the repair.
+                    Err(e) => {
+                        log(&format!(
+                            "block validation failure from {} (transport {}): {} — CONTAINED (peer dropped, node keeps polling, NO exit)",
+                            peer.label,
+                            peer.transport.as_str(),
+                            e
+                        ));
+                        if is_kernel_state_failure(&e)
+                            && detect_and_heal_modifier_chain(st, "inbound-block-kernel-failure")
+                        {
+                            if let Err(w) = write_state_atomic(cfg, &st.to_file()) {
+                                log(&format!("item25: healed window persist deferred: {}", w));
+                            }
+                            if let Some((_h, raw)) = recent.get(&hash) {
+                                log(&format!(
+                                    "re-injecting h{} after the modifier-chain heal",
+                                    height_abs
+                                ));
+                                reinject.push(tri7_core::p2p::RawMessage {
+                                    command: "block-reinject".to_string(),
+                                    payload: raw.clone(),
+                                });
+                            }
+                        }
+                        peer.dead = true;
+                        peer.sess.shutdown();
+                        return Ok(());
+                    }
                 };
                 // The chain advances FIRST: the index may only be applied
                 // once the block is part of the chain this node serves. The
@@ -10378,7 +10722,36 @@ fn handle_message(
                         refresh_body_request_clock(body_tries, &hash);
                         return Ok(());
                     }
-                    return Err(e);
+                    // (item 25a) same containment rule for the apply phase —
+                    // a stake-modifier checksum divergence / modifier
+                    // computation failure is the same local-state class and
+                    // must never exit either (the DNS3 wedge's second gate).
+                    log(&format!(
+                        "block apply failure from {} (transport {}): {} — CONTAINED (peer dropped, node keeps polling, NO exit)",
+                        peer.label,
+                        peer.transport.as_str(),
+                        e
+                    ));
+                    if is_kernel_state_failure(&e)
+                        && detect_and_heal_modifier_chain(st, "inbound-block-apply-failure")
+                    {
+                        if let Err(w) = write_state_atomic(cfg, &st.to_file()) {
+                            log(&format!("item25: healed window persist deferred: {}", w));
+                        }
+                        if let Some((_h, raw)) = recent.get(&hash) {
+                            log(&format!(
+                                "re-injecting h{} after the modifier-chain heal",
+                                height_abs
+                            ));
+                            reinject.push(tri7_core::p2p::RawMessage {
+                                command: "block-reinject".to_string(),
+                                payload: raw.clone(),
+                            });
+                        }
+                    }
+                    peer.dead = true;
+                    peer.sess.shutdown();
+                    return Ok(());
                 }
                 addrindex_apply(&b, height_abs);
                 stats.blocks_validated_live += 1;
@@ -11355,6 +11728,17 @@ pub fn main_args(argv: &[String]) -> i32 {
         // unresolvable); the follow-loop retry lane completes the coverage
         // once the RPC listener is up.
         boot_backfill_kernel_window(&mut loaded, &rpc);
+        // (item 25) boot-time modifier-chain audit: a persisted chain can be
+        // internally consistent (self-rebuilt checksums — the load gate
+        // above cannot catch the class) yet diverged from the canonical
+        // values its own stored proofs encode — the DNS3 crash-loop wedge
+        // class. Detect + heal BEFORE any validation runs; a clean window is
+        // a verified no-op. Persist the heal so no restart re-loads poison.
+        if detect_and_heal_modifier_chain(&mut loaded, "boot") {
+            if let Err(e) = write_state_atomic(&cfg, &loaded.to_file()) {
+                log(&format!("item25: healed window persist deferred: {}", e));
+            }
+        }
         loaded
     } else if from_zero {
         // fresh state from genesis: fetch block 0, pin it to the compiled-in
@@ -20841,5 +21225,607 @@ addnode=host:notaport
             Transport::Clearnet
         );
         assert_eq!(transport_of_advertised(None), Transport::Clearnet);
+    }
+
+    // ---- (item 25) stake-modifier chain divergence: detect + heal + contain ----
+
+    /// A canonical window with REAL kernel facts: every entry is PoS, its
+    /// stored proof is the stake_kernel_hash the chain's own walk produces
+    /// for the coin that entry stakes, the modifier chain is the sequential
+    /// compute_next_stake_modifier_era replay, and the checksum chain is
+    /// rebuilt stepwise from genesis — exactly what a healthy in-session
+    /// window holds. Each entry (i ≥ 76) stakes a DIFFERENT coin so the
+    /// sample audit's walk landing zones spread across the window (the
+    /// single-coin node shape would leave most generated heights untested).
+    /// Block spacing is 60 s (= TARGET_SPACING) so the live-era difficulty
+    /// EMA holds the fixture entries' bits at the limit — the assembled
+    /// integration block passes the nBits gate unchanged.
+    fn item25_fixture(base: u64, n: usize) -> ChainState {
+        let t0 = 1_700_000_000u32;
+        // the coin entry i stakes: created at window-relative rel_c
+        // (≥ 70 entries back = ≥ 4200 s > the 3600 s min-age)
+        let coin_input_for = |i: usize| -> (tri7_core::legacy::Hash, usize, u32) {
+            let rel_c = if i >= 86 { i - 70 - (i % 17) } else { 0 };
+            let txid = tri7_core::legacy::sha256d(&(rel_c as u64).to_le_bytes());
+            (txid, rel_c, 0u32)
+        };
+        let mut entries: Vec<IndexEntry> = Vec::with_capacity(n);
+        let mut checksums: Vec<u32> = Vec::with_capacity(n);
+        let mut utxo = WindowOutputs::new();
+        let mut records: Vec<BlockRec> = Vec::with_capacity(n);
+        let mut prev = [0xAAu8; 32];
+        for i in 0..n {
+            let h_abs = base + i as u64;
+            let hash = tri7_core::legacy::sha256d(&h_abs.to_le_bytes());
+            let time = t0 + (i as u32) * 60;
+            let interval: u32 = if h_abs < 17692 { 1200 } else { 300 };
+            let (modifier, generated) = if i == 0 {
+                (0u64, true)
+            } else {
+                let idx = ReplayIndex::borrowed(&entries);
+                tri7_core::kernel::compute_next_stake_modifier_era(&idx, Some(i - 1), interval)
+                    .expect("fixture replay")
+            };
+            let (txid_c, rel_c, n_c) = coin_input_for(i);
+            // the stored proof is what CheckProofOfStake hashes at accept
+            // time: the walk from the INPUT's height to the first generated
+            // modifier past input-time + 600 s — NOT the modifier generated
+            // at this height. While the prefix is too short to walk safely
+            // (i ≤ 95) the proof stays zero (assume-valid-style; the audit
+            // skips zero-proof entries).
+            let proof_modifier = if i > 95 {
+                let idx = ReplayIndex::borrowed(&entries);
+                tri7_core::kernel::get_kernel_stake_modifier(&idx, rel_c)
+                    .expect("fixture kernel walk")
+            } else {
+                0
+            };
+            let proof = if i > 95 {
+                tri7_core::consensus::stake_kernel_hash(
+                    proof_modifier,
+                    t0 + (rel_c as u32) * 60, // input's containing-block time
+                    181,                       // tx_offset
+                    t0 + (rel_c as u32) * 60, // input tx time == its block time
+                    n_c,
+                    time,
+                )
+            } else {
+                [0u8; 32]
+            };
+            let entropy = hash[0] & 1;
+            let cs = tri7_core::kernel::stake_modifier_checksum(
+                checksums.last().copied(),
+                tri7_core::kernel::index_flags(true, entropy, generated),
+                &proof,
+                modifier,
+            );
+            utxo.map.insert(
+                (txid_c, n_c),
+                crate::kernel::UtxoMeta {
+                    height: rel_c,
+                    tx_offset: 181,
+                    tx_time: t0 + (rel_c as u32) * 60,
+                    value: 50 * tri7_core::consensus::COIN,
+                },
+            );
+            records.push(BlockRec {
+                height: h_abs,
+                spends: vec![(tri7_core::p2p::internal_to_display(&txid_c), n_c)],
+                outs: vec![],
+            });
+            entries.push(IndexEntry {
+                height: i,
+                hash,
+                prev_hash: prev,
+                time,
+                bits: 0x2000_ffff, // the live era limit — the EMA holds it
+                is_proof_of_stake: true,
+                entropy_bit: entropy,
+                stake_modifier: modifier,
+                generated_stake_modifier: generated,
+                hash_proof_of_stake: proof,
+            });
+            checksums.push(cs);
+            prev = hash;
+        }
+        // a dense resolvable pool: one kernel-meta coin at every pool height
+        // (insert-only map — only the staked subset is referenced by the
+        // records' spends; the extra coins give the integration test's
+        // solver enough candidates to hit the era-limit target surely)
+        for c in 16..n.saturating_sub(20) {
+            let txid = tri7_core::legacy::sha256d(&(c as u64).to_le_bytes());
+            utxo.map.entry((txid, 0u32)).or_insert(crate::kernel::UtxoMeta {
+                height: c,
+                tx_offset: 181,
+                tx_time: t0 + (c as u32) * 60,
+                value: 50 * tri7_core::consensus::COIN,
+            });
+        }
+        ChainState {
+            base,
+            entries,
+            checksums,
+            utxo,
+            records,
+            pending_headers: HashMap::new(),
+            tip_height: base + (n as u64 - 1),
+            tip_hash: tri7_core::legacy::sha256d(&(base + (n as u64 - 1)).to_le_bytes()),
+            daemon_tip: Some((base + n as u64 - 1) as i64),
+            no_trim: false,
+            last_advance_utc: String::new(),
+            peers_connected: 0,
+            last_peer_utc: None,
+            staking_impaired: None,
+            utxo_floor_rel: 0,
+        }
+    }
+
+    /// The self-consistent divergence: flip one generated modifier, then let
+    /// the in-session computation propagate the poison upward exactly like
+    /// the live incident did (every later generated value is computed FROM
+    /// the poisoned one), rebuilding the checksum chain over the poisoned
+    /// span — the load-time checksum gate passes (stepwise-cumulative chains
+    /// verify against their own poison), which is exactly why the DNS3 wedge
+    /// was invisible at every boot.
+    fn item25_poison(st: &mut ChainState, at_rel: usize) {
+        st.entries[at_rel].stake_modifier ^= 0x0000_0000_A5A5_0001;
+        let mut cs_prev = if at_rel > 0 {
+            Some(st.checksums[at_rel - 1])
+        } else {
+            None
+        };
+        for i in at_rel..st.entries.len() {
+            if i > at_rel {
+                let interval: u32 = if st.base + (i as u64) < 17692 { 1200 } else { 300 };
+                let (modifier, generated) = {
+                    let idx = st.rel_index();
+                    tri7_core::kernel::compute_next_stake_modifier_era(&idx, Some(i - 1), interval)
+                        .expect("poison propagation replay")
+                };
+                st.entries[i].stake_modifier = modifier;
+                st.entries[i].generated_stake_modifier = generated;
+            }
+            let e = &st.entries[i];
+            let flags = tri7_core::kernel::index_flags(
+                e.is_proof_of_stake,
+                e.entropy_bit,
+                e.generated_stake_modifier,
+            );
+            let cs = tri7_core::kernel::stake_modifier_checksum(
+                cs_prev,
+                flags,
+                &e.hash_proof_of_stake,
+                e.stake_modifier,
+            );
+            st.checksums[i] = cs;
+            cs_prev = Some(cs);
+        }
+    }
+
+    /// The canonical window audits CLEAN: the replay reproduces every
+    /// stored modifier and the samples reproduce the stored proofs — the
+    /// DNS2/Pi unregressed shape (the deploy must be a verified no-op).
+    #[test]
+    fn item25_healthy_window_scan_and_sample_audit_are_clean() {
+        let stg = item25_fixture(22_000_000, 420);
+        let scan = scan_modifier_chain(&stg);
+        assert!(
+            scan.first_bad.is_none(),
+            "canonical fixture must replay clean"
+        );
+        assert!(scan.compared > 30, "fixture must compare real generated heights");
+        assert!(
+            scan.rewrite_start < stg.entries.len(),
+            "fixture must have a recomputable generated height"
+        );
+        assert!(
+            audit_kernel_samples(&stg, ITEM25_SAMPLE_COUNT).is_empty(),
+            "stored proofs must reproduce under the canonical walk"
+        );
+        let mut noop = item25_fixture(22_000_000, 420);
+        assert!(!detect_and_heal_modifier_chain(&mut noop, "test"));
+    }
+
+    /// THE ITEM-25 SHAPE: a self-consistent divergence (poisoned modifier +
+    /// rebuilt checksums — passes the load gate) is detected at exactly the
+    /// poisoned height, healed in place, and the healed window is
+    /// indistinguishable from canonical (modifiers, generated flags,
+    /// checksums) with the sample audit clean again.
+    #[test]
+    fn item25_self_consistent_divergence_detected_healed_and_verified() {
+        let n = 420;
+        let canonical = item25_fixture(22_000_000, n);
+        let poisoned_rel = scan_modifier_chain(&canonical).rewrite_start + 30;
+        assert!(
+            canonical.entries[poisoned_rel].generated_stake_modifier,
+            "poison target must be a generated height"
+        );
+        let mut stg = item25_fixture(22_000_000, n);
+        item25_poison(&mut stg, poisoned_rel);
+
+        // DETECT: exactly the poisoned height (above it the poison is
+        // self-consistent and reproduces — the first disagreement is the
+        // divergence point itself)
+        let scan = scan_modifier_chain(&stg);
+        assert_eq!(scan.first_bad, Some(poisoned_rel));
+        // the sample audit independently flags samples whose walks land in
+        // the diverged region
+        let samples = audit_kernel_samples(&stg, ITEM25_SAMPLE_COUNT);
+        assert!(
+            !samples.is_empty(),
+            "the audit must catch samples walking the diverged region"
+        );
+
+        // HEAL + VERIFY
+        assert!(detect_and_heal_modifier_chain(&mut stg, "test"));
+        assert_eq!(
+            stg.entries.len(),
+            canonical.entries.len(),
+            "heal must not change the window span"
+        );
+        for i in 0..n {
+            assert_eq!(
+                stg.entries[i].stake_modifier,
+                canonical.entries[i].stake_modifier,
+                "healed modifier at rel {} must equal canonical",
+                i
+            );
+            assert_eq!(
+                stg.entries[i].generated_stake_modifier,
+                canonical.entries[i].generated_stake_modifier
+            );
+            assert_eq!(stg.checksums[i], canonical.checksums[i]);
+        }
+        // untouched evidence: hashes/times/proofs stay byte-identical
+        for i in 0..n {
+            assert_eq!(stg.entries[i].hash, canonical.entries[i].hash);
+            assert_eq!(stg.entries[i].hash_proof_of_stake, canonical.entries[i].hash_proof_of_stake);
+        }
+        assert!(audit_kernel_samples(&stg, ITEM25_SAMPLE_COUNT).is_empty());
+    }
+
+    /// A divergence BELOW the replay floor (selection lookback truncated by
+    /// the window) is detected by the sample audit but is NOT healable in
+    /// place: fail-honest — no rewrite of the poisoned zone, no exit, loud.
+    #[test]
+    fn item25_divergence_below_the_replay_floor_is_fail_honest() {
+        let mut stg = item25_fixture(22_000_000, 420);
+        let scan = scan_modifier_chain(&stg);
+        let floor = scan.replay_floor;
+        // find a below-floor generated height a sample kernel walk actually
+        // LANDS on — walks skip over generated entries whose time sits under
+        // coin-time + 600 s, so a poison at an unreachable height is
+        // invisible to every kernel (and harmless); search descending
+        let mut poisoned_rel = None;
+        for cand in (floor.saturating_sub(60)..floor).rev() {
+            if !stg.entries[cand].generated_stake_modifier {
+                continue;
+            }
+            let mut trial = item25_fixture(22_000_000, 420);
+            item25_poison(&mut trial, cand);
+            if !audit_kernel_samples(&trial, ITEM25_SAMPLE_COUNT).is_empty() {
+                poisoned_rel = Some(cand);
+                break;
+            }
+        }
+        let poisoned_rel = poisoned_rel
+            .expect("fixture must have a sample-reachable generated height below the floor");
+        item25_poison(&mut stg, poisoned_rel);
+        // the replay scan cannot compare below the floor — clean
+        let scan2 = scan_modifier_chain(&stg);
+        assert!(scan2.first_bad.is_none());
+        // but the sample audit still sees walks landing in the poisoned zone
+        assert!(!audit_kernel_samples(&stg, ITEM25_SAMPLE_COUNT).is_empty());
+        // fail-honest: no heal, poisoned value untouched, no panic
+        let poisoned_before = stg.entries[poisoned_rel].stake_modifier;
+        assert!(!detect_and_heal_modifier_chain(&mut stg, "test"));
+        assert_eq!(stg.entries[poisoned_rel].stake_modifier, poisoned_before);
+    }
+
+    /// The kernel-state failure classifier: exactly the wedge classes, never
+    /// transport/garbage errors.
+    #[test]
+    fn item25_kernel_state_failure_classifier() {
+        for e in [
+            "h2211526: KERNEL TARGET FAIL modifier=… block_from(abs h2211472) …",
+            "h2211526: kernel guard: CheckStakeKernelHash: min age violation",
+            "h2211527: stake-modifier checksum divergence: computed 0a0b0c0d daemon 0e0f1011",
+            "h2211527: bad modifierchecksum: invalid hex",
+            "h2211527: modifier computation: reached best block at height 4599",
+            "empty checksum chain in advance",
+        ] {
+            assert!(is_kernel_state_failure(e), "must classify: {}", e);
+        }
+        for e in [
+            "block parse: unexpected end",
+            "send block: Broken pipe (os error 32)",
+            "h2211526: NBITS FAIL block=20700000 expected=207fffff",
+            "validate: merkle root mismatch",
+            "h2211526: block sig: bad signature",
+            "backfill: no blocks validated",
+        ] {
+            assert!(!is_kernel_state_failure(e), "must NOT classify: {}", e);
+        }
+    }
+
+    /// THE LIVE INCIDENT END TO END: a poisoned (self-consistent) window
+    /// hard-rejects a canonical relayed block — and the node must NOT exit:
+    /// the failure is contained (Ok + peer dropped), the detect+heal lane
+    /// repairs the window, and the re-injected block applies through the
+    /// normal validated path (tip advances). The DNS3 crash-loop shape,
+    /// fixed.
+    #[test]
+    fn item25_inbound_kernel_failure_contained_healed_and_block_applies() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut cfg = gate_test_cfg();
+        let state_dir = std::env::temp_dir().join("tri7-item25-containment-test");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        cfg.state_dir = state_dir.clone();
+
+        // canonical next block assembled on the healthy fixture
+        let stg0 = item25_fixture(base, n);
+        let tip_rel = n - 1;
+        let (secret, pubkey_vec) = tri7_core::spend::synthetic_key("item25-staker");
+        // the solver works the dense pool (one resolvable coin per height):
+        // at the era-limit target each attempt hits with p ≈ 2^-8, so the
+        // pooled attempts make the solve certain. bits = the difficulty
+        // walk's own output over the fixture (the compact round-trip of the
+        // era limit is not identity) — the nBits gate then holds exactly.
+        let bits = tri7_core::difficulty::get_next_target_required(&stg0.rel_index(), true);
+        // the solver pool sits ABOVE the replay floor so the poison (which
+        // only exists in the healable span) can reach the block's kernel walk
+        let rewrite_floor = scan_modifier_chain(&stg0).rewrite_start;
+        let mut cands: Vec<tri7_core::stake::StakeCandidate> = Vec::new();
+        for rc in (rewrite_floor + 40)..(tip_rel - 70) {
+            cands.push(tri7_core::stake::StakeCandidate {
+                txid: tri7_core::legacy::sha256d(&(rc as u64).to_le_bytes()),
+                n: 0,
+                value: 50 * tri7_core::consensus::COIN,
+                script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey_vec).unwrap(),
+                block_height: rc,
+                block_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_offset: 181,
+                secret,
+                pubkey: pubkey_vec.clone(),
+            });
+        }
+        let probe = 1_700_000_000u32 + (tip_rel as u32) * 60 + 7_200;
+        let (plan_res, _) = tri7_core::stake::create_coinstake(
+            &stg0.rel_index(),
+            &cands,
+            bits,
+            0,
+            probe,
+            tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
+            60 * tri7_core::consensus::COIN,
+            (tip_rel + 1) as usize,
+        )
+        .expect("search");
+        let plan = plan_res.expect("the pooled coins must solve on the era-limit target");
+        let prev_entry0 = stg0.entries[tip_rel].clone();
+        let mut block = tri7_core::stake::assemble_pos_block(
+            &prev_entry0,
+            prev_entry0.time,
+            &plan.tx,
+            &[],
+            bits,
+        )
+        .expect("assemble");
+        tri7_core::stake::sign_block(&mut block, &plan.signer.secret).expect("sign");
+        let block_hash = block.hash();
+        // sanity: the canonical chain ACCEPTS the block through the full
+        // live gate (this is the block DNS2 relayed)
+        {
+            let mut stats = Stats::default();
+            let stg = item25_fixture(base, n);
+            let ctx = BlockCtx {
+                height_abs: base + n as u64,
+                header: None,
+                prev_entry: stg.entries[tip_rel].clone(),
+                live: true,
+            };
+            validate_block(&stg, &rpc, &mut stats, &block, &ctx)
+                .expect("canonical chain must accept the canonical block");
+        }
+
+        // find a poison that flips the kernel verdict: the propagated poison
+        // (item25_poison) corrupts every generated value ABOVE the poisoned
+        // height, so poisoning any generated entry between the replay floor
+        // and the block's coin region changes what the block's kernel walk
+        // reads (each candidate is a deterministic 50% coin-flip vs the
+        // era-limit target; the search is deterministic per build)
+        let coin_h = plan.signer.block_height; // window-relative: the solved coin
+        let mut poison_at = None;
+        for cand in (rewrite_floor + 1)..=(coin_h + 30) {
+            if !stg0.entries[cand].generated_stake_modifier {
+                continue;
+            }
+            let mut trial = item25_fixture(base, n);
+            item25_poison(&mut trial, cand);
+            let mut stats = Stats::default();
+            let ctx = BlockCtx {
+                height_abs: base + n as u64,
+                header: None,
+                prev_entry: trial.entries[tip_rel].clone(),
+                live: true,
+            };
+            if validate_block(&trial, &rpc, &mut stats, &block, &ctx).is_err() {
+                poison_at = Some(cand);
+                break;
+            }
+        }
+        let poison_at = poison_at
+            .unwrap_or_else(|| panic!("no poison variant flipped the kernel verdict — fixture invariant broken"));
+
+        // the LIVE shape: poisoned window + relayed canonical block
+        let mut stg = item25_fixture(base, n);
+        item25_poison(&mut stg, poison_at);
+        {
+            let mut stats = Stats::default();
+            let ctx = BlockCtx {
+                height_abs: base + n as u64,
+                header: None,
+                prev_entry: stg.entries[tip_rel].clone(),
+                live: true,
+            };
+            let err = match validate_block(&stg, &rpc, &mut stats, &block, &ctx) {
+                Err(e) => e,
+                Ok(_) => panic!("poisoned chain must reject the canonical block"),
+            };
+            assert!(
+                is_kernel_state_failure(&err),
+                "the rejection must be the kernel-state class: {}",
+                err
+            );
+        }
+
+        // drive handle_message with the block over a loopback peer
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _holder = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item25-peer".into(),
+            outbound: true, // the DNS3 wedge shape: the relay came over an OUTBOUND link
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+        };
+        let payload = block.serialize();
+        let msg = tri7_core::p2p::RawMessage {
+            command: "block".into(),
+            payload: payload.clone(),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: std::collections::HashSet<Hash> =
+            std::collections::HashSet::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+
+        // PASS 1 — the rejection must be CONTAINED: Ok (never Err/exit),
+        // peer dropped, tip unchanged, heal fired, re-inject queued
+        let res = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(
+            res.is_ok(),
+            "an inbound kernel failure must NEVER be a fatal error: {:?}",
+            res.err()
+        );
+        assert!(peer.dead, "the peer must be dropped");
+        assert_eq!(
+            stg.tip_height,
+            base + n as u64 - 1,
+            "the rejected block must not extend the tip"
+        );
+        assert!(
+            !reinject.is_empty(),
+            "the healed window must re-inject the cached block"
+        );
+        // the window is canonical again
+        let canonical = item25_fixture(base, n);
+        for i in 0..n {
+            assert_eq!(stg.entries[i].stake_modifier, canonical.entries[i].stake_modifier);
+        }
+
+        // PASS 2 — the pump drains the reinject queue: the block now takes
+        // the full validated path and APPLIES (the wedge is broken end to end)
+        let msg2 = reinject.remove(0);
+        assert_eq!(msg2.command, "block-reinject");
+        let res2 = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg2,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(res2.is_ok(), "healed re-inject must validate: {:?}", res2.err());
+        assert_eq!(stg.tip_height, base + n as u64, "the block must apply");
+        assert_eq!(stg.tip_hash, block_hash, "tip must be the relayed block");
+    }
+
+    /// The recompute_stake_kernel parity property: the fact-only helper
+    /// reproduces check_proof_of_stake's hash for the same (chain, input,
+    /// block_time) — the sample audit hashes exactly what the validator
+    /// hashes.
+    #[test]
+    fn item25_kernel_recompute_parity_with_the_validator() {
+        let stg = item25_fixture(22_000_000, 420);
+        for i in [110usize, 200, 300, 419] {
+            let (txid_c, rel_c, n_c) = (
+                tri7_core::legacy::sha256d(&((i - 70 - (i % 17)) as u64).to_le_bytes()),
+                i - 70 - (i % 17),
+                0u32,
+            );
+            let via_helper = tri7_core::kernel::recompute_stake_kernel(
+                &stg.rel_index(),
+                &stg.utxo,
+                (txid_c, n_c),
+                stg.entries[i].time,
+            )
+            .expect("resolvable coin must recompute");
+            assert_eq!(via_helper, stg.entries[i].hash_proof_of_stake);
+        }
     }
 }

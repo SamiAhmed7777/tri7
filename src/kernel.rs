@@ -724,6 +724,43 @@ pub fn check_proof_of_stake<R: KernelOutputResolver>(
     })
 }
 
+/// (item 25) kernel-hash reproduction for one coinstake from window state
+/// alone — the exact hash check_proof_of_stake computes for a coinstake
+/// spending `input`, with the same guards (kernel.cpp:314-318) and the same
+/// loaded-modifier walk. The BlockRec records carry no parsed transactions,
+/// so the modifier-chain sample audit cannot build a `Block`; it resolves
+/// the recorded spends instead and reproduces the kernel on the resolved
+/// facts. Byte-equivalent to the check_proof_of_stake branch for the same
+/// (chain, input, block_time) — pinned by a node-level parity test.
+pub fn recompute_stake_kernel<R: KernelOutputResolver>(
+    idx: &ReplayIndex,
+    outputs: &R,
+    input: (Hash, u32),
+    block_time: u32,
+) -> Result<Hash, String> {
+    let meta = outputs
+        .kernel_meta(&input)
+        .ok_or_else(|| "CheckProofOfStake: coinstake input not a tracked UTXO".to_string())?;
+    let tx_prev_block = &idx.entries[meta.height];
+    // CheckStakeKernelHash guards (kernel.cpp:314-318) — same strings as
+    // check_proof_of_stake.
+    if block_time < meta.tx_time {
+        return Err("CheckStakeKernelHash: nTime violation".into());
+    }
+    if tx_prev_block.time as i64 + STAKE_MIN_AGE as i64 > block_time as i64 {
+        return Err("CheckStakeKernelHash: min age violation".into());
+    }
+    let modifier = get_kernel_stake_modifier(idx, meta.height)?;
+    Ok(stake_kernel_hash(
+        modifier,
+        tx_prev_block.time,
+        meta.tx_offset,
+        meta.tx_time,
+        input.1,
+        block_time,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
