@@ -17273,6 +17273,31 @@ mod tests {
         );
     }
 
+    /// (CI hardening, 2026-11-14) Bound the TOTAL wait, not a single read:
+    /// in blocking mode with SO_RCVTIMEO the read can still return 0 bytes
+    /// when the frame lands after the timeout expiry — which surfaces as
+    /// TimedOut (or WouldBlock on some platforms) and a bare
+    /// `unwrap_or(0)`-style read would flake on a loaded macOS runner.
+    fn read_frame_bounded(sock: &mut TcpStream, buf: &mut [u8]) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match sock.read(buf) {
+                Ok(n) => return n,
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+                {
+                    if Instant::now() >= deadline {
+                        return 0;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => return 0,
+            }
+        }
+    }
+
     /// (item 21, r2) CONTROL-FLOW proof: the resolved target for an
     /// adopted inbound branch is the advertiser's REAL session, and a getdata
     /// sent through it physically arrives on the advertiser's socket while
@@ -17316,9 +17341,14 @@ mod tests {
         ] {
             l.set_nonblocking(true).unwrap();
             let (mut sock, _) = l.accept().expect("accept ok");
+            // On BSD/macOS an accepted socket INHERITS the listener's
+            // O_NONBLOCK (Linux does not) — without this the read below
+            // returns immediately with no data (same macOS-runner failure
+            // gui/tests.rs guards against).
+            sock.set_nonblocking(false).expect("blocking socket");
             sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
             let mut buf = [0u8; 4096];
-            let n = sock.read(&mut buf).unwrap_or(0);
+            let n = read_frame_bounded(&mut sock, &mut buf);
             if expect_data {
                 assert!(n > 0, "the {name} socket must receive the getdata frame");
                 let frame = tri7_core::p2p::encode_message("getdata", &tri7_core::p2p::build_getdata(&batch)).unwrap();
@@ -17372,14 +17402,19 @@ mod tests {
 
         l_out.set_nonblocking(true).unwrap();
         let (mut sock, _) = l_out.accept().expect("accept ok");
+        // BSD/macOS: the accepted socket inherits O_NONBLOCK from the
+        // listener — restore blocking or the read returns WouldBlock
+        // immediately (same macOS-runner failure gui/tests.rs guards).
+        sock.set_nonblocking(false).expect("blocking socket");
         sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = [0u8; 4096];
-        let n = sock.read(&mut buf).unwrap_or(0);
+        let n = read_frame_bounded(&mut sock, &mut buf);
         assert!(n > 0, "the rotated target's socket must receive the getdata");
         l_adv.set_nonblocking(true).unwrap();
         let (mut adv_sock, _) = l_adv.accept().expect("accept ok");
+        adv_sock.set_nonblocking(false).expect("blocking socket");
         adv_sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
-        let n_adv = adv_sock.read(&mut buf).unwrap_or(0);
+        let n_adv = read_frame_bounded(&mut adv_sock, &mut buf);
         assert_eq!(n_adv, 0, "the avoided advertiser must stay silent");
     }
 
