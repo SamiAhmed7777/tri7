@@ -610,10 +610,19 @@ impl TorSupervisor {
     #[cfg(windows)]
     fn powershell_command() -> std::process::Command {
         const ABS: &str = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-        match std::path::Path::new(ABS).exists() {
+        let mut c = match std::path::Path::new(ABS).exists() {
             true => std::process::Command::new(ABS),
             false => std::process::Command::new("powershell"),
-        }
+        };
+        // A scheduled-task-launched process can inherit a STRIPPED
+        // environment (no SystemRoot/SystemDrive/PATH) — powershell.exe
+        // then exits instantly with no output and every lookup returns
+        // nothing (2026-11-16, Sami's PC: "UNRESOLVED" while tor was
+        // bootstrapped 100%). Supply the minimum PS needs to initialize.
+        c.env("SystemRoot", "C:\\Windows");
+        c.env("SystemDrive", "C:");
+        c.env("windir", "C:\\Windows");
+        c
     }
 
     #[cfg(windows)]
@@ -648,8 +657,13 @@ impl TorSupervisor {
     #[cfg(windows)]
     fn listener_of_socks_port_os_netstat(port: u16) -> Option<(u32, String)> {
         let read_pid = || -> Option<u32> {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "netstat -ano"]);
+            // ABSOLUTE netstat, no cmd wrapper: the task-launched
+            // environment can lack PATH entries for both "cmd" and
+            // "netstat" (2026-11-16, Sami's PC — same stripped-env class
+            // as the powershell fix above).
+            let mut c = std::process::Command::new("C:\\Windows\\System32\\NETSTAT.EXE");
+            c.args(["-ano"]);
+            c.env("SystemRoot", "C:\\Windows");
             let out = quiet_command(&mut c).output().ok()?;
             let rows: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
