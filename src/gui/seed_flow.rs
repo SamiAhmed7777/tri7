@@ -28,6 +28,13 @@ pub const HONEST_NOTE: &str = "Seed phrases cannot be added to an existing walle
      creates a NEW wallet or restores an existing phrase — and the 24 words then become the \
      ONLY backup of every address that wallet will ever derive.";
 
+/// UX pass 2 (first run): the brand-new user never had a pre-HD wallet, so the
+/// HONEST_NOTE above is noise to them — what they need is what the words DO.
+/// Shown when the flow was entered from the welcome menu.
+pub const FIRST_RUN_NOTE: &str = "Write the 24 words on paper and keep them somewhere safe. \
+     Anyone who has them can spend your coins, and no one — not even tri7 — can recover them \
+     for you if the paper is lost.";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SeedFlowStep {
     /// Choose create vs restore.
@@ -62,6 +69,10 @@ pub struct SeedFlow {
     /// UX audit (H2): true when create was auto-begun on first open — the
     /// reveal screen then tells a restoring user how to get to Restore.
     pub auto_began: bool,
+    /// UX pass 2: entered from the first-run welcome menu. The seed screen then
+    /// speaks to someone who has never held a wallet (FIRST_RUN_NOTE) instead
+    /// of explaining pre-HD key internals they will never meet.
+    pub first_run: bool,
 }
 
 impl SeedFlow {
@@ -76,6 +87,7 @@ impl SeedFlow {
             key_count: DEFAULT_KEY_COUNT,
             error: None,
             auto_began: false,
+            first_run: false,
         }
     }
 
@@ -105,8 +117,10 @@ impl SeedFlow {
     /// CreateReveal → CreateConfirm (gated on the "I saved it" checkbox).
     pub fn confirm_saved(&mut self) {
         if !self.saved_confirmed {
-            self.error =
-                Some("tick the box to confirm you wrote the words down before continuing".into());
+            self.error = Some(
+                "Tick the box to confirm you wrote the words down — this is the only copy."
+                    .into(),
+            );
             return;
         }
         self.error = None;
@@ -125,8 +139,8 @@ impl SeedFlow {
         let got = crate::seed::split_words(&self.words_input);
         if want != got {
             self.error = Some(format!(
-                "the words you typed do not match ({} of {} entered) — a mismatched \
-                 confirmation means the backup is wrong",
+                "The words do not match ({} of {} entered). That means the copy on paper is \
+                 wrong somewhere — check it against the words above before continuing.",
                 got.len(),
                 want.len()
             ));
@@ -148,8 +162,9 @@ impl SeedFlow {
             }
             _ => {
                 self.error = Some(
-                    "invalid mnemonic: unknown word or bad checksum (12/15/18/21/24 words \
-                     from the BIP39 English wordlist)"
+                    "That phrase did not check out: a word is misspelled, or the words are in \
+                     the wrong order. Type the 12 or 24 words again, exactly as they were \
+                     written down."
                         .into(),
                 );
             }
@@ -281,7 +296,7 @@ mod tests {
         f.words_input = "not a real phrase at all".into();
         f.submit_restore();
         assert_eq!(f.step, SeedFlowStep::RestoreInput);
-        assert!(f.error.as_deref().unwrap().contains("invalid mnemonic"));
+        assert!(f.error.as_deref().unwrap().contains("did not check out"));
 
         // a checksum-corrupted phrase is refused
         f.words_input = MN12.replace("about", "actor");

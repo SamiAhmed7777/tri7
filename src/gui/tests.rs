@@ -4062,13 +4062,18 @@ fn sweep_key_match_refuses_when_only_a_string_colliding_key_exists() {
 // GUI i18n (phase 1): Language + tr() + options.json persistence.
 // ---------------------------------------------------------------------------
 
-/// COMPLETENESS: every non-English table's key set must be EXACTLY the
-/// phase-1 key set — a missing (or extra) key in any language fails here,
-/// keeping all 11 tables in sync as the source strings evolve. Every output
-/// must also be non-empty.
+/// COMPLETENESS: every non-English table's key set must be EXACTLY
+/// PHASE1_KEYS + PHASE2_KEYS — a missing (or extra) key in any language fails
+/// here, keeping all 11 tables in sync as the source strings evolve. Every
+/// output must also be non-empty. Pass 2 (first-run + send/receive wording)
+/// extended the set rather than starting a second mechanism.
 #[test]
-fn i18n_tables_are_complete_over_the_phase1_key_set() {
-    let mut want: Vec<&str> = i18n::PHASE1_KEYS.to_vec();
+fn i18n_tables_are_complete_over_the_full_key_set() {
+    let mut want: Vec<&str> = i18n::PHASE1_KEYS
+        .iter()
+        .chain(i18n::PHASE2_KEYS.iter())
+        .copied()
+        .collect();
     want.sort_unstable();
     let tables = [
         ("es", i18n::SPANISH_TABLE),
@@ -4086,10 +4091,27 @@ fn i18n_tables_are_complete_over_the_phase1_key_set() {
     for (code, table) in tables {
         let mut got: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
         got.sort_unstable();
-        assert_eq!(got, want, "language {code}: key set differs from PHASE1_KEYS");
-        for key in i18n::PHASE1_KEYS {
-            let out = i18n::tr(i18n::parse_language(code).unwrap(), key);
-            assert!(!out.is_empty(), "{code}: empty output for key {key:?}");
+        assert!(
+            got == want,
+            "language {code}: key set differs from PHASE1_KEYS + PHASE2_KEYS"
+        );
+        let lang = i18n::parse_language(code).unwrap();
+        for key in i18n::PHASE1_KEYS.iter().chain(i18n::PHASE2_KEYS.iter()) {
+            assert!(
+                !i18n::tr(lang, key).is_empty(),
+                "{code}: empty output for key {key:?}"
+            );
+        }
+        // Pass-2 copy must be really translated: an entry that just echoes the
+        // English is a missed translation (the fallback is for UNKNOWN keys,
+        // not for undone work). Phase-1 keys are exempt — brand nouns like
+        // "Staking" and "⇗ Tor / I2P" are identical in every language.
+        for key in i18n::PHASE2_KEYS {
+            assert_ne!(
+                i18n::tr(lang, key),
+                *key,
+                "{code}: untranslated pass-2 entry for key {key:?}"
+            );
         }
     }
 }
@@ -4780,5 +4802,253 @@ fn encrypted_wallet_load_prompt_retry_and_unlock() {
         !st.keystore.iter().any(|e| e.address == addr),
         "decrypted secret leaked into the persistable keystore"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// UX pass 2 — the plain-language layer (src/gui/plain_words.rs): first-run
+// doors, the empty-balance state and the send/receive wording. These are the
+// strings a brand-new user meets first, so they are asserted here rather than
+// eyeballed in a screenshot.
+// ---------------------------------------------------------------------------
+
+/// Every string wired into the UI must ALSO be an i18n key. A constant missing
+/// from PHASE2_KEYS still renders (English fallback) but silently drops out of
+/// all 11 languages — that is the regression this catches.
+#[test]
+fn plain_words_strings_are_all_i18n_phase2_keys() {
+    use crate::gui::plain_words as pw;
+    let wired = [
+        pw::WELCOME_TITLE,
+        pw::WELCOME_BODY,
+        pw::CREATE_WALLET,
+        pw::RESTORE_WALLET,
+        pw::OPEN_WALLET_FILE,
+        pw::NO_COINS_TITLE,
+        pw::NO_COINS_BODY,
+        pw::NO_COINS_SEND,
+        pw::SEND_TO,
+        pw::HOW_MUCH,
+        pw::NETWORK_FEE,
+        pw::FEE_HINT,
+        pw::AMOUNT_HINT,
+        pw::REVIEW_SEND,
+        pw::SEND_NOW,
+        pw::LOCAL_SIGNING_LINE,
+        pw::NEW_ADDRESS,
+        pw::COPY_ADDRESS,
+        pw::YOUR_ADDRESS,
+        pw::SEED_BACKUP_LINE,
+        pw::FILE_BACKUP_LINE,
+    ];
+    for s in wired {
+        assert!(
+            i18n::PHASE2_KEYS.contains(&s),
+            "pass-2 string is not an i18n key: {s:?}"
+        );
+    }
+    for ep in pw::first_run_entry_points() {
+        assert!(
+            i18n::PHASE2_KEYS.contains(&ep.label),
+            "first-run door label is not keyed: {:?}",
+            ep.label
+        );
+        assert!(
+            i18n::PHASE2_KEYS.contains(&ep.hint),
+            "first-run door hint is not keyed: {:?}",
+            ep.hint
+        );
+    }
+}
+
+/// The copy must stay free of the words this pass exists to remove. (Brand
+/// nouns — Triangles, TRI, wallet, address — are deliberately NOT on the list.)
+#[test]
+fn pass_two_copy_avoids_internal_jargon() {
+    use crate::gui::plain_words as pw;
+    const JARGON: [&str; 14] = [
+        "mnemonic",
+        "BIP39",
+        "HD wallet",
+        "pre-HD",
+        "UTXO",
+        "input",
+        "inputs",
+        "checksum",
+        "derivation",
+        "m/44",
+        "ksats",
+        "sats",
+        "txid",
+        "hex",
+    ];
+    let mut all: Vec<&str> = vec![
+        pw::WELCOME_TITLE,
+        pw::WELCOME_BODY,
+        pw::CREATE_WALLET,
+        pw::RESTORE_WALLET,
+        pw::OPEN_WALLET_FILE,
+        pw::NO_COINS_TITLE,
+        pw::NO_COINS_BODY,
+        pw::NO_COINS_SEND,
+        pw::SEND_TO,
+        pw::HOW_MUCH,
+        pw::NETWORK_FEE,
+        pw::FEE_HINT,
+        pw::AMOUNT_HINT,
+        pw::REVIEW_SEND,
+        pw::SEND_NOW,
+        pw::LOCAL_SIGNING_LINE,
+        pw::NEW_ADDRESS,
+        pw::COPY_ADDRESS,
+        pw::YOUR_ADDRESS,
+        pw::SEED_BACKUP_LINE,
+        pw::FILE_BACKUP_LINE,
+    ];
+    let doors = pw::first_run_entry_points();
+    for d in doors.iter() {
+        all.push(d.label);
+        all.push(d.hint);
+    }
+    for s in all {
+        let lower = s.to_lowercase();
+        for bad in JARGON {
+            assert!(
+                !lower.contains(&bad.to_lowercase()),
+                "{bad:?} leaked into pass-2 copy: {s:?}"
+            );
+        }
+    }
+}
+
+/// FIRST RUN: the welcome owns the screen only while a run is genuinely
+/// pending. A loaded wallet or a live seed flow always wins — a welcome menu on
+/// top of an open wallet would be a regression, not a nicety.
+#[test]
+fn welcome_visible_only_for_a_pending_first_run() {
+    use crate::gui::plain_words as pw;
+    assert!(pw::welcome_visible(true, false, false));
+    assert!(!pw::welcome_visible(false, false, false), "not a first run");
+    assert!(!pw::welcome_visible(true, true, false), "a wallet is loaded");
+    assert!(
+        !pw::welcome_visible(true, false, true),
+        "a seed flow already replaced the screen"
+    );
+    assert!(!pw::welcome_visible(false, true, true));
+}
+
+/// The three doors: create / restore / open-a-file, all distinct, each with a
+/// hint that says what the user needs in hand for that door.
+#[test]
+fn first_run_doors_are_three_plain_choices() {
+    use crate::gui::plain_words as pw;
+    let doors = pw::first_run_entry_points();
+    assert_eq!(doors.len(), 3);
+    assert_eq!(doors[0].label, pw::CREATE_WALLET);
+    assert_eq!(doors[1].label, pw::RESTORE_WALLET);
+    assert_eq!(doors[2].label, pw::OPEN_WALLET_FILE);
+    let mut seen: Vec<&str> = Vec::new();
+    for d in doors.iter() {
+        assert!(!d.hint.is_empty());
+        assert!(!seen.contains(&d.label), "duplicate door: {:?}", d.label);
+        seen.push(d.label);
+    }
+    // the restore door must mention the words, not the mechanism
+    assert!(doors[1].hint.contains("24 words"));
+    // the open-a-file door must name the FILE: that is what the user has
+    assert!(doors[2].hint.contains("wallet.dat"));
+}
+
+/// The footer names the actual wallet path when one is configured, and stays
+/// generic (no empty " — ") when it is not.
+#[test]
+fn welcome_footer_names_the_wallet_file_or_stays_generic() {
+    use crate::gui::plain_words as pw;
+    let bare = pw::welcome_footer("");
+    assert!(!bare.contains(" — ."), "{bare}");
+    assert!(!bare.contains("— "), "dangling em dash: {bare}");
+    let named = pw::welcome_footer("/home/sami/.triangles/wallet.dat");
+    assert!(named.contains("/home/sami/.triangles/wallet.dat"), "{named}");
+}
+
+/// EMPTY BALANCE: only a LOADED wallet with nothing at all gets the notice —
+/// not the load screen (it has its own voice), and not a wallet with one
+/// immature coin.
+#[test]
+fn empty_balance_notice_only_for_a_loaded_empty_wallet() {
+    use crate::gui::plain_words as pw;
+    assert_eq!(pw::empty_balance_notice(false, 0), None);
+    assert_eq!(pw::empty_balance_notice(false, 5_000_000), None);
+    assert_eq!(
+        pw::empty_balance_notice(true, 0).map(|(t, _)| t),
+        Some(pw::NO_COINS_TITLE)
+    );
+    assert!(pw::empty_balance_notice(true, 1).is_none(), "one coin is not empty");
+    assert!(pw::empty_balance_notice(true, 5_000_000).is_none());
+    // pointing the user at Receive is the whole job of both bodies
+    assert!(pw::NO_COINS_BODY.contains("Receive Coins"));
+    assert!(pw::NO_COINS_SEND.contains("Receive Coins"));
+}
+
+/// FEE wording: the cost line carries the real amounts, speaks of "addresses"
+/// (the word "input" is the codebase's noun, not the payer's), and handles the
+/// single-source case in the singular.
+#[test]
+fn fee_cost_line_says_addresses_not_inputs() {
+    use crate::gui::plain_words as pw;
+    let one = pw::fee_cost_line(420, 400, 1);
+    assert!(one.contains("0.000420 TRI"), "{one}");
+    assert!(one.contains("0.000400 TRI"), "{one}");
+    assert!(!one.contains("input"), "jargon: {one}");
+    assert!(one.contains("your own address"), "singular wording: {one}");
+    let many = pw::fee_cost_line(1_250_000, 400, 3);
+    assert!(many.contains("1.250000 TRI"), "{many}");
+    assert!(many.contains("3 of your addresses"), "{many}");
+    assert!(!many.contains("input"), "jargon: {many}");
+    // a zero-source plan (nothing selectable yet) still renders, never panics
+    assert!(!pw::fee_cost_line(0, 400, 0).is_empty());
+}
+
+/// The amount hint and the smallest unit must agree with the formatter —
+/// "6 decimals" and "0.000001" are the same claim about TRI.
+#[test]
+fn amount_hint_matches_the_amount_formatter() {
+    use crate::gui::plain_words as pw;
+    assert!(pw::AMOUNT_HINT.contains("0.000001"));
+    assert_eq!(crate::gui::state::format_tri(1), "0.000001");
+}
+
+/// A seeded wallet's backup line must not LEAD with the derivation path — the
+/// path stays available on demand (see seed_derivation_path).
+#[test]
+fn seed_backup_line_leads_with_the_words_not_the_path() {
+    use crate::gui::plain_words as pw;
+    assert!(pw::SEED_BACKUP_LINE.starts_with("Backed up by your 24 words"));
+    assert!(!pw::SEED_BACKUP_LINE.contains("m/44"));
+    assert_eq!(pw::seed_derivation_path(7), "m/44'/2222'/0'/0/7");
+}
+
+/// The seed flow's first-run voice is OPT-IN: a flow created for an existing
+/// wallet keeps the technical note, and only the welcome doors set the flag.
+#[test]
+fn seed_flow_first_run_voice_is_opt_in() {
+    let f = crate::gui::seed_flow::SeedFlow::new("/tmp/tri7_first_run/wallet.dat".into());
+    assert!(!f.first_run, "a plain seed flow is not a first run");
+    // the two notes answer different questions — neither may drift into the
+    // other's job
+    assert!(crate::gui::seed_flow::FIRST_RUN_NOTE.contains("24 words"));
+    assert!(!crate::gui::seed_flow::FIRST_RUN_NOTE.contains("pre-HD"));
+    assert!(crate::gui::seed_flow::HONEST_NOTE.contains("pre-HD"));
+    assert!(crate::gui::seed_flow::HONEST_NOTE.contains("cannot be added"));
+}
+
+/// The first-run state lives on AppState and starts OFF: an app that already
+/// knows its wallet must never show the welcome menu.
+#[test]
+fn first_run_welcome_flag_defaults_off() {
+    // constructed through the same fixture every other GUI state test uses:
+    // an app that already knows its wallet must never show the welcome menu.
+    let (st, dir) = options_state_with_unreachable_node("first-run-flag");
+    assert!(!st.first_run_welcome);
     let _ = std::fs::remove_dir_all(&dir);
 }

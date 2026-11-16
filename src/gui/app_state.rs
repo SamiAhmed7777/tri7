@@ -553,6 +553,10 @@ pub struct AppState {
     pub encrypted_pending: Option<WalletData>,
     /// true → the load screen shows the encrypted-wallet passphrase prompt.
     pub encrypted_prompt: bool,
+    /// UX pass 2 (first run): TRUE until the brand-new user picks a door on
+    /// the welcome menu (create / restore / open an existing file). The load
+    /// screen renders the welcome and returns; every door clears this.
+    pub first_run_welcome: bool,
     pub tip: Option<TipInfo>,
     pub stake: Option<StakeStatus>,
     pub send: SendFormState,
@@ -722,6 +726,7 @@ impl AppState {
             derived: None,
             encrypted_pending: None,
             encrypted_prompt: false,
+            first_run_welcome: false,
             encrypted_pass: String::new(),
             encrypted_error: None,
             tip: None,

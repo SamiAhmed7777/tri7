@@ -1002,15 +1002,46 @@ impl Tri7App {
         let mut consumed = false;
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
+            // UX pass 2: a first-run user has never owned a pre-HD wallet, so
+            // the technical HONEST_NOTE (why a phrase cannot be retro-fitted)
+            // is noise to them — they get what the words DO instead. The
+            // technical note still shows when the flow was opened from an
+            // existing wallet, where that question is the live one.
+            let first_run = flow.first_run;
+            let (title, subtitle) = if first_run {
+                (
+                    "Your 24 words",
+                    "This is the backup of your wallet. Read the next screen before you close it.",
+                )
+            } else {
+                (
+                    "24-word wallet",
+                    "A standard backup phrase — the same one the original Triangles wallet uses.",
+                )
+            };
             ui.add(egui::Label::new(
-                egui::RichText::new("Seed phrase wallet")
+                egui::RichText::new(title)
                     .size(22.0)
                     .strong()
                     .color(th::TEXT_PRIMARY),
             ));
-            th::text_meta(ui, "A standard 24-word backup phrase — compatible with the original Triangles wallet.");
+            th::text_meta(ui, subtitle);
             ui.add_space(8.0);
-            th::inline_notice(ui, th::Notice::Info, "Please read", super::seed_flow::HONEST_NOTE);
+            match (first_run, &flow.step) {
+                (true, Step::CreateReveal) | (true, Step::CreateConfirm) => th::inline_notice(
+                    ui,
+                    th::Notice::Warning,
+                    "Before you write them down",
+                    super::seed_flow::FIRST_RUN_NOTE,
+                ),
+                (true, _) => {}
+                (false, _) => th::inline_notice(
+                    ui,
+                    th::Notice::Info,
+                    "Please read",
+                    super::seed_flow::HONEST_NOTE,
+                ),
+            }
             ui.add_space(10.0);
         });
 
@@ -1019,10 +1050,16 @@ impl Tri7App {
                 ui.vertical_centered(|ui| {
                     ui.add_space(16.0);
                     ui.horizontal(|ui| {
-                        if th::primary_button(ui, "Create new wallet (24 words)").clicked() {
+                        let lang = self.st.options.language;
+                        if th::primary_button(ui, i18n::tr(lang, crate::gui::plain_words::CREATE_WALLET))
+                            .clicked()
+                        {
                             flow.begin_create();
                         }
-                        if ui.button("Restore from seed phrase").clicked() {
+                        if ui
+                            .button(i18n::tr(lang, crate::gui::plain_words::RESTORE_WALLET))
+                            .clicked()
+                        {
                             flow.begin_restore();
                         }
                         if ui.button("Back").clicked() {
@@ -1150,11 +1187,11 @@ impl Tri7App {
                     th::inline_notice(
                         ui,
                         th::Notice::Info,
-                        "Restore a wallet from its seed phrase",
-                        "Paste or type the 12/24 words in order, then the optional \
-                         passphrase (\"25th word\") if the wallet was created with one. \
-                         The words must match EXACTLY — including the passphrase — or a \
-                         different (empty) wallet is derived.",
+                        "Type the words you wrote down",
+                        "Paste or type them in the order you saved them. If you also set a \
+                         passphrase (sometimes called the 25th word), enter it exactly as \
+                         you did before — with a different passphrase you get a different, \
+                         empty wallet.",
                     );
                     ui.add_space(8.0);
                     ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
@@ -1191,9 +1228,9 @@ impl Tri7App {
                     th::inline_notice(
                         ui,
                         th::Notice::Success,
-                        "Phrase validated",
-                        "The mnemonic checksum is valid. Choose the wallet file and how \
-                         many addresses to derive, then write the wallet.",
+                        "The words check out",
+                        "Now choose where this wallet is saved and how many addresses to \
+                         prepare. You can create more at any time later.",
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -1255,17 +1292,19 @@ impl Tri7App {
                     th::inline_notice(
                         ui,
                         th::Notice::Success,
-                        "Wallet written and verified",
+                        "Your wallet is ready",
                         &format!(
-                            "{} seed-derived addresses written in the exact legacy record \
-                             format (the original qt wallet reads this file). The seed \
-                             phrase is now your ONLY backup — keep it safe.",
+                            "{} addresses are ready to use. The 24 words are the only backup — \
+                             anyone who has them can restore this wallet, so keep them safe.",
                             addresses.len()
                         ),
                     );
                     if !addresses.is_empty() {
-                        th::text_meta(ui, &format!("first address: {}", addresses[0]));
-                        th::text_meta(ui, &format!("last address:  {}", addresses[addresses.len() - 1]));
+                        th::text_meta(ui, &format!("First address: {}", addresses[0]));
+                        th::text_meta(
+                            ui,
+                            &format!("Last address:  {}", addresses[addresses.len() - 1]),
+                        );
                     }
                     ui.add_space(8.0);
                     if th::primary_button(ui, "Open this wallet").clicked() {
@@ -1575,33 +1614,32 @@ impl Tri7App {
                                     .monospace()
                                     .color(th::TEXT_PRIMARY));
                                     ui.end_row();
-                                    ui.label(egui::RichText::new("Inputs:")
+                                    ui.label(egui::RichText::new("Paid from:")
                                         .color(th::TEXT_SECONDARY));
                                     ui.label(egui::RichText::new(format!(
-                                        "{} UTXOs — no change output, the sweep \
-                                         consolidates everything",
+                                        "{} separate coin payments — the whole balance moves \
+                                         at once, nothing is left behind",
                                         plan.inputs.len()
                                     ))
                                     .color(th::TEXT_PRIMARY));
                                     ui.end_row();
-                                    ui.label(egui::RichText::new("Keys written:")
+                                    ui.label(egui::RichText::new("Addresses prepared:")
                                         .color(th::TEXT_SECONDARY));
                                     ui.label(egui::RichText::new(format!(
-                                        "{} new + {} already in wallet.dat (seed row set, \
-                                         hdchain at {})",
+                                        "{} new + {} already in this wallet ({} ready to use)",
                                         plan.keys_inserted,
                                         plan.keys_already_present,
                                         flow.addresses.len()
                                     ))
                                     .color(th::TEXT_PRIMARY));
                                     ui.end_row();
-                                    ui.label(egui::RichText::new("TxID:")
+                                    ui.label(egui::RichText::new("Payment ID:")
                                         .color(th::TEXT_SECONDARY));
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(&plan.txid_display)
                                             .monospace()
                                             .color(th::TEXT_PRIMARY));
-                                        if th::ghost_button(ui, "Copy TxID").clicked() {
+                                        if th::ghost_button(ui, "Copy payment ID").clicked() {
                                             ui.output_mut(|o| {
                                                 o.copied_text = plan.txid_display.clone()
                                             });
@@ -1614,7 +1652,7 @@ impl Tri7App {
                             let w = ui.available_width();
                             let cols = [
                                 th::TableCol::new("#", 30.0, false),
-                                th::TableCol::new("Seed-derived address", w - 30.0 - 170.0, false),
+                                th::TableCol::new("Your address", w - 30.0 - 170.0, false),
                                 th::TableCol::new("Amount", 170.0, true),
                             ];
                             th::table_header(ui, &cols, w);
@@ -1633,7 +1671,7 @@ impl Tri7App {
                             // inputs, collapsed by default
                             let inputs = plan.inputs.clone();
                             egui::CollapsingHeader::new(format!(
-                                "Inputs swept ({})",
+                                "Coins moved ({})",
                                 inputs.len()
                             ))
                             .default_open(false)
@@ -1663,7 +1701,7 @@ impl Tri7App {
                                 }
                             });
                             let raw = plan.tx_hex.clone();
-                            egui::CollapsingHeader::new("Raw signed transaction")
+                            egui::CollapsingHeader::new("The payment as raw data (for support)")
                                 .default_open(false)
                                 .show(ui, |ui| {
                                     ui.add(egui::Label::new(
@@ -1673,7 +1711,7 @@ impl Tri7App {
                                             .color(th::TEXT_SECONDARY),
                                     )
                                     .wrap());
-                                    if th::ghost_button(ui, "Copy hex to clipboard").clicked() {
+                                    if th::ghost_button(ui, "Copy the raw data").clicked() {
                                         ui.output_mut(|o| o.copied_text = raw.clone());
                                     }
                                 });
@@ -1715,7 +1753,7 @@ impl Tri7App {
                         }
                         if let Some(e) = &flow.error {
                             ui.add_space(4.0);
-                            th::inline_notice(ui, th::Notice::Error, "Broadcast failed", e);
+                            th::inline_notice(ui, th::Notice::Error, "The network did not take it", e);
                         }
                     });
                 }
@@ -2104,17 +2142,13 @@ impl eframe::App for Tri7App {
                         }
                     }
                     _ => {
-                        // FIRST OPEN: auto-begin wallet generation (24 words
-                        // revealed on the seed screen; confirm -> created)
-                        let target = self.st.cfg.wallet_path.clone();
-                        self.st.seed_flow =
-                            Some(crate::gui::seed_flow::SeedFlow::new(target));
-                        if let Some(f) = &mut self.st.seed_flow {
-                            f.begin_create();
-                            // UX audit (H2): mark the auto-begin so the reveal
-                            // screen points a restoring user to Restore.
-                            f.auto_began = true;
-                        }
+                        // FIRST OPEN (UX pass 2): a brand-new user used to be
+                        // dropped straight into 24 freshly generated words —
+                        // someone who came to RESTORE had to guess that the way
+                        // out was Cancel. Nothing is generated now: the welcome
+                        // menu offers create / restore / open-a-file and the
+                        // user chooses.
+                        self.st.first_run_welcome = true;
                     }
                 }
             }
@@ -2153,6 +2187,81 @@ impl Tri7App {
         // state IS the sync display — one implementation in AppState, no
         // local tipstate figure anywhere in this path
         self.st.daemon_sync_display()
+    }
+
+    // -----------------------------------------------------------------------
+    // First-run welcome (UX pass 2) — the three doors
+    //
+    // Shown INSTEAD of the load screen while a first run is pending: no wallet
+    // is loaded, nothing was remembered, and no seed flow has started yet.
+    // The copy lives in plain_words so `cargo test --lib gui::` can assert it;
+    // this function is only the layout.
+    // -----------------------------------------------------------------------
+    fn first_run_screen(&mut self, ui: &mut egui::Ui) {
+        use crate::gui::plain_words as pw;
+        let lang = self.st.options.language;
+        let doors = pw::first_run_entry_points();
+        let footer = pw::welcome_footer(&self.st.cfg.wallet_path);
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
+                ui.add(img(&tex, Vec2::new(371.0, 78.0))); // 1199x252 aspect-true
+            }
+            ui.add_space(16.0);
+            ui.add(egui::Label::new(
+                egui::RichText::new(i18n::tr(lang, pw::WELCOME_TITLE))
+                    .size(25.0)
+                    .strong()
+                    .color(th::TEXT_PRIMARY),
+            ));
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(640.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(i18n::tr(lang, pw::WELCOME_BODY))
+                            .size(13.0)
+                            .color(th::TEXT_SECONDARY),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(560.0);
+                // 1. create — the common case, primary
+                if th::primary_button(ui, i18n::tr(lang, doors[0].label)).clicked() {
+                    self.st.first_run_welcome = false;
+                    let mut flow = crate::gui::seed_flow::SeedFlow::new(
+                        self.st.cfg.wallet_path.clone(),
+                    );
+                    flow.first_run = true;
+                    flow.begin_create();
+                    self.st.seed_flow = Some(flow);
+                }
+                th::text_meta(ui, i18n::tr(lang, doors[0].hint));
+                ui.add_space(10.0);
+                // 2. restore
+                if th::secondary_button(ui, i18n::tr(lang, doors[1].label)).clicked() {
+                    self.st.first_run_welcome = false;
+                    let mut flow = crate::gui::seed_flow::SeedFlow::new(
+                        self.st.cfg.wallet_path.clone(),
+                    );
+                    flow.first_run = true;
+                    flow.begin_restore();
+                    self.st.seed_flow = Some(flow);
+                }
+                th::text_meta(ui, i18n::tr(lang, doors[1].hint));
+                ui.add_space(10.0);
+                // 3. open an existing file — the classical load screen
+                if th::secondary_button(ui, i18n::tr(lang, doors[2].label)).clicked() {
+                    self.st.first_run_welcome = false;
+                }
+                th::text_meta(ui, i18n::tr(lang, doors[2].hint));
+            });
+            ui.add_space(18.0);
+            th::text_micro(ui, &footer);
+        });
     }
 
     fn load_screen(&mut self, ui: &mut egui::Ui) {
@@ -2210,6 +2319,16 @@ impl Tri7App {
             });
             return;
         }
+        // UX pass 2 — FIRST RUN: whoever has no wallet yet picks a door on the
+        // welcome menu first (welcome_visible owns the rule; it is unit-tested).
+        if crate::gui::plain_words::welcome_visible(
+            self.st.first_run_welcome,
+            self.st.loaded(),
+            self.st.seed_flow.is_some(),
+        ) {
+            self.first_run_screen(ui);
+            return;
+        }
         ui.vertical_centered(|ui| {
             ui.add_space(48.0);
             if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
@@ -2226,7 +2345,7 @@ impl Tri7App {
             );
             th::text_meta(
                 ui,
-                "Your wallet opens with full access — receive and send. Sending connects through the Triangles network.",
+                "Open a wallet file you already have. New to Triangles? Use the 24-word option below.",
             );
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -2253,7 +2372,7 @@ impl Tri7App {
                     .color(th::TEXT_SECONDARY),
             );
             ui.add_space(8.0);
-            if th::primary_button(ui, "Open Wallet").clicked() {
+            if th::primary_button(ui, "Open this wallet").clicked() {
                 if let Err(e) = self.st.load_wallet_action() {
                     self.st.load_error = Some(e);
                 } else {
@@ -2262,17 +2381,23 @@ impl Tri7App {
             }
             if let Some(e) = &self.st.load_error {
                 ui.add_space(4.0);
-                th::inline_notice(ui, th::Notice::Error, "Could not open wallet", e);
+                th::inline_notice(
+                    ui,
+                    th::Notice::Error,
+                    "That wallet file did not open",
+                    &format!("{e}. Check the path, or pick the file again."),
+                );
             }
             ui.add_space(18.0);
             ui.separator();
             ui.add_space(6.0);
             th::text_meta(
                 ui,
-                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
+                "No wallet file yet? A wallet backed up by 24 words can be started \
+                 right here — a new one, or one you made earlier.",
             );
             ui.add_space(4.0);
-            if th::primary_button(ui, "Seed phrase wallet…").clicked() {
+            if th::primary_button(ui, "Create or restore from 24 words…").clicked() {
                 let default_path = if self.st.cfg.wallet_path.trim().is_empty() {
                     "seed_wallet.dat".to_string()
                 } else {
@@ -2284,44 +2409,14 @@ impl Tri7App {
                 self.st.seed_flow =
                     Some(crate::gui::seed_flow::SeedFlow::new(default_path));
             }
-            ui.add_space(4.0);
-            th::text_meta(
-                ui,
-                "Seed migration — give ANY existing wallet a seed phrase: its balance is \
-                 swept in one transaction to the phrase's own addresses",
-            );
-            ui.add_space(4.0);
-            let migrated = self
-                .st
-                .wallet
-                .as_ref()
-                .map(|w| w.seed_migrated)
-                .unwrap_or(false);
-            if migrated {
-                th::inline_notice(
-                    ui,
-                    th::Notice::Success,
-                    "This wallet already has a seed phrase",
-                    "Seed migration already ran: the balance lives on the phrase's own \
-                     derived addresses. Another phrase is disabled to prevent a \
-                     double-sweep.",
-                );
-            } else if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
-                .clicked()
-            {
-                if let Err(e) = self.st.begin_seed_migration_action() {
-                    self.st.load_error = Some(e);
-                }
-            }
-            ui.add_space(4.0);
-            th::text_meta(
-                ui,
-                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
-            );
+            // UX pass 2: the seed-migration entry used to sit here too. This
+            // screen only renders when NO wallet is loaded, so "this wallet's
+            // balance" never existed and the button could only fail — the flow
+            // lives on Receive, where a loaded wallet can actually sweep.
             ui.add_space(6.0);
             th::text_meta(
                 ui,
-                "Balances appear after the wallet opens. Your wallet file lives in the Triangles data folder.",
+                "Nothing is sent anywhere until a wallet is open. Balances appear once it opens.",
             );
         });
     }
@@ -2395,9 +2490,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             .and_then(|d| d.daemon_balance_sats);
         th::card_titled(ui, "Wallet", |ui| {
             let Some(derived) = st.derived.clone() else {
-                th::empty_state(ui, None, "No wallet loaded", "Open a wallet to see balances");
+                th::empty_state(ui, None, "No wallet open yet", "Open or create one to see balances");
                 return;
             };
+            // UX pass 2: an empty wallet used to show five zero rows and
+            // nothing else — true, and useless. Say what "no coins" means and
+            // where coins come from. The rule is plain_words' (unit-tested).
+            let (_sp0, _stake0, _unc0, _imm0, total0, _tip0) = st.balance_split();
+            if let Some((title, body)) = crate::gui::plain_words::empty_balance_notice(true, total0) {
+                th::inline_notice(
+                    ui,
+                    th::Notice::Info,
+                    i18n::tr(lang, title),
+                    i18n::tr(lang, body),
+                );
+                ui.add_space(8.0);
+            }
             // daemon height wins: the local tipstate file is optional in the
             // one-folder design, and a missing one used to make tip 0, which
             // made EVERY coin depth 0 -> the whole balance "Unconfirmed"
@@ -2756,10 +2864,12 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
     // §10.2 Send Coins — Details → Review signed transaction → Broadcast
     // -----------------------------------------------------------------------
     fn send_step_rail(&mut self, ui: &mut egui::Ui, step: SendStep) {
+        // UX pass 2: the rail is the user's map — it says what THEY do at each
+        // stop, not what the code does (sign / broadcast are our verbs).
         let steps = [
-            (SendStep::Details, "1", "Details"),
-            (SendStep::Review, "2", "Review signed transaction"),
-            (SendStep::Broadcast, "3", "Broadcast"),
+            (SendStep::Details, "1", "Who and how much"),
+            (SendStep::Review, "2", "Check it over"),
+            (SendStep::Broadcast, "3", "Sent"),
         ];
         ui.horizontal(|ui| {
             for (i, (st_, num, label)) in steps.iter().enumerate() {
@@ -2803,7 +2913,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
         th::page_header(
             ui,
             i18n::tr(lang, "Send Coins"),
-            "Create, review, sign, and broadcast a Triangles transaction",
+            "Choose who to pay and how much. Nothing reaches the network until you send.",
         );
         let step = match (&self.st.send_result, &self.st.broadcast.result, self.send_step) {
             (_, Some(_), _) if self.send_step == SendStep::Broadcast => SendStep::Broadcast,
@@ -2813,9 +2923,21 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
         };
         self.send_step_rail(ui, step);
         ui.add_space(8.0);
+        // UX pass 2 — a loaded wallet with no coins: the form can only fail,
+        // so say why and point at the page that fixes it (this screen only
+        // renders for a LOADED wallet, so "empty" really means empty).
+        if self.st.funded_addresses().is_empty() {
+            th::inline_notice(
+                ui,
+                th::Notice::Info,
+                i18n::tr(lang, crate::gui::plain_words::NO_COINS_TITLE),
+                i18n::tr(lang, crate::gui::plain_words::NO_COINS_SEND),
+            );
+            ui.add_space(8.0);
+        }
 
         // ---- Details card ----
-        th::card_titled(ui, "Details", |ui| {
+        th::card_titled(ui, "The payment", |ui| {
             let st = &mut self.st;
             egui::Grid::new("send_grid")
                 .num_columns(2)
@@ -2827,7 +2949,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     let funded = st.funded_addresses();
                     let from = &mut st.send.from;
                     let sel = if from.is_empty() {
-                        "select a funded address".to_string()
+                        "choose an address with coins".to_string()
                     } else {
                         format!(
                             "{} — {} {}",
@@ -2855,7 +2977,8 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                             }
                         });
                     from_resp.response.on_hover_text(
-                        "Full-width funded-address combo — available balance shown right",
+                        "Coins arrive at addresses. Pick the address that holds enough for this \
+                         payment — each one shows what it can spend.",
                     );
                     let avail_bal = funded
                         .iter()
@@ -2864,7 +2987,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     if let Some(av) = avail_bal {
                         ui.label(
                             egui::RichText::new(format!(
-                                "available: {} {}",
+                                "you have {} {} here",
                                 s::format_tri(av),
                                 s::TICKER
                             ))
@@ -2876,9 +2999,15 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     }
                     ui.end_row();
 
-                    ui.label(egui::RichText::new("Pay to:").color(th::TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::SEND_TO))
+                            .color(th::TEXT_SECONDARY),
+                    );
                     ui.horizontal(|ui| {
                         th::text_input(ui, 480.0, &mut st.send.dest);
+                        // the picker stays adjacent: pasting an address is the
+                        // common path, the book is the convenience
+
                         // address-book picker (view-only; fills the dest field)
                         let book: Vec<String> = st
                             .all_book_rows()
@@ -2902,22 +3031,29 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     });
                     ui.end_row();
 
-                    ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::HOW_MUCH))
+                            .color(th::TEXT_SECONDARY),
+                    );
                     ui.horizontal(|ui| {
                         th::text_input(ui, 180.0, &mut st.send.amount);
                         ui.label(
-                            egui::RichText::new(format!("{} (6 decimals)", s::TICKER))
-                                .color(th::TEXT_MUTED),
-                        );
+                            egui::RichText::new(s::TICKER).color(th::TEXT_SECONDARY),
+                        )
+                        .on_hover_text(i18n::tr(lang, crate::gui::plain_words::AMOUNT_HINT));
                     });
                     ui.end_row();
+                    ui.label("");
+                    th::text_meta(ui, i18n::tr(lang, crate::gui::plain_words::AMOUNT_HINT));
+                    ui.end_row();
 
-                    ui.label(egui::RichText::new("Label:").color(th::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("Note to yourself:").color(th::TEXT_SECONDARY));
                     th::disabled_input(
                         ui,
                         480.0,
                         "—",
-                        "Recipient labels are not stored by this build yet",
+                        "A note on a payment is not saved yet. To keep a name with an address, \
+                         add it in the Address Book.",
                     );
                     ui.end_row();
                 });
@@ -2929,11 +3065,13 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         egui::Button::new(egui::RichText::new("Add recipient")),
                     );
                 resp.on_disabled_hover_text(
-                    "Multi-recipient sends are not supported by this build yet",
+                    "Sending to several addresses at once is not available yet — send one at a \
+                     time.",
                 );
             });
-            // Fee + custom change under an Advanced disclosure
-            egui::CollapsingHeader::new("Advanced")
+            // Fee + custom change under an "optional" disclosure (UX pass 2:
+            // most people never open it, so the heading says so).
+            egui::CollapsingHeader::new("Fee and change — optional")
                 .default_open(false)
                 .show(ui, |ui| {
                     let st = &mut self.st;
@@ -2942,56 +3080,74 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         .spacing([12.0, 12.0])
                         .show(ui, |ui| {
                             ui.label(
-                                egui::RichText::new("Fee (optional floor):")
-                                    .color(th::TEXT_SECONDARY),
-                            );
+                                egui::RichText::new(i18n::tr(
+                                    lang,
+                                    crate::gui::plain_words::NETWORK_FEE,
+                                ))
+                                .color(th::TEXT_SECONDARY),
+                            )
+                            .on_hover_text(i18n::tr(
+                                lang,
+                                crate::gui::plain_words::FEE_HINT,
+                            ));
                             ui.horizontal(|ui| {
                                 th::text_input(ui, 180.0, &mut st.send.fee);
                             });
                             ui.end_row();
+                            ui.label("");
+                            th::text_meta(ui, i18n::tr(lang, crate::gui::plain_words::FEE_HINT));
+                            ui.end_row();
                             // Live estimate: the SAME function the builder
                             // charges with, the node's live fee setting, and the
                             // shape this form actually implies (selected inputs
-                            // or the coins the selector would need).
+                            // or the coins the selector would need). One
+                            // sentence, no "inputs" — plain_words owns it.
                             ui.label(
-                                egui::RichText::new("Estimated network fee:")
+                                egui::RichText::new("What this send will cost:")
                                     .color(th::TEXT_SECONDARY),
+                            )
+                            .on_hover_text(
+                                "The fee is paid to the network, not to anyone in particular. It is \
+                                 what makes the payment travel.",
                             );
                             let setting = st.live_paytxfee_sats();
-                            let setting_txt = format!(
-                                "{} {} (the network's standard fee)",
-                                s::format_tri(setting),
-                                s::TICKER
-                            );
                             match st.send_fee_estimate_sats() {
                                 Some(est) => {
                                     let n_in = st.send_estimate_inputs().unwrap_or(0);
                                     ui.label(
-                                        egui::RichText::new(format!(
-                                            "{} {}  ({} input{}, {})",
-                                            s::format_tri(est),
-                                            s::TICKER,
-                                            n_in,
-                                            if n_in == 1 { "" } else { "s" },
-                                            setting_txt
-                                        ))
+                                        egui::RichText::new(
+                                            crate::gui::plain_words::fee_cost_line(
+                                                est, setting, n_in,
+                                            ),
+                                        )
                                         .color(th::TEXT_MUTED),
                                     );
                                 }
                                 None => {
                                     let why = st
                                         .send_plan_error()
-                                        .unwrap_or_else(|| "enter an amount".into());
+                                        .unwrap_or_else(|| "enter an amount first".into());
                                     ui.label(
-                                        egui::RichText::new(format!("{}  ({})", why, setting_txt))
-                                            .color(th::TEXT_MUTED),
+                                        egui::RichText::new(format!(
+                                            "Not worked out yet — {}. The network's standard fee \
+                                             is {} {}.",
+                                            why,
+                                            s::format_tri(setting),
+                                            s::TICKER
+                                        ))
+                                        .color(th::TEXT_MUTED),
                                     );
                                 }
                             }
                             ui.end_row();
-                            ui.label(egui::RichText::new("Change:").color(th::TEXT_SECONDARY));
+                            ui.label(
+                                egui::RichText::new("Your change:").color(th::TEXT_SECONDARY),
+                            );
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut st.send.use_custom_change, "custom change address");
+                                ui.checkbox(
+                                    &mut st.send.use_custom_change,
+                                    "send the change to a different address",
+                                );
                                 if st.send.use_custom_change {
                                     th::text_input(ui, 300.0, &mut st.send.custom_change);
                                 }
@@ -3013,15 +3169,24 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                 ui.add(img(&tex, Vec2::splat(16.0)));
             }
             ui.label(
-                egui::RichText::new("Signing happens locally. Broadcasting uses your connected tri7d.")
-                    .size(12.0)
-                    .color(th::TEXT_SECONDARY),
+                egui::RichText::new(i18n::tr(
+                    lang,
+                    crate::gui::plain_words::LOCAL_SIGNING_LINE,
+                ))
+                .size(12.0)
+                .color(th::TEXT_SECONDARY),
             )
             .on_hover_text(
-                "Your transaction is signed on this computer, then sent through your own node to the network.",
+                "Technically: the payment is signed with your keys on this computer, then handed \
+                 to your own tri7d node, which passes it to the other nodes.",
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if th::primary_button_large(ui, "Review & sign").clicked() {
+                if th::primary_button_large(
+                    ui,
+                    i18n::tr(lang, crate::gui::plain_words::REVIEW_SEND),
+                )
+                .clicked()
+                {
                     self.st.build_send_action(now_u32());
                     self.send_step = SendStep::Review;
                 }
@@ -3037,7 +3202,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             self.send_review(ui, step, &b);
         } else if let Some(Err(e)) = &self.st.send_result {
             ui.add_space(8.0);
-            th::inline_notice(ui, th::Notice::Error, "Could not build transaction", e);
+            th::inline_notice(ui, th::Notice::Error, "That payment is not ready yet", e);
         }
     }
 
@@ -3157,18 +3322,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
     fn send_review(&mut self, ui: &mut egui::Ui, step: SendStep, b: &s::SendBuild) {
         let busy = self.st.broadcast.busy;
         ui.add_space(12.0);
-        th::card_titled(ui, "Review signed transaction", |ui| {
+        let lang = self.st.options.language;
+        th::card_titled(ui, "Check it over before it goes", |ui| {
             let st = &mut self.st;
             egui::Grid::new("review_grid")
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Pay to:").color(th::TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::SEND_TO))
+                            .color(th::TEXT_SECONDARY),
+                    );
                     ui.label(
                         egui::RichText::new(&st.send.dest).monospace().color(th::TEXT_PRIMARY),
                     );
                     ui.end_row();
-                    ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("They receive:").color(th::TEXT_SECONDARY));
                     ui.label(
                         egui::RichText::new(format!(
                             "{} {} (fee {} {})",
@@ -3181,7 +3350,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         .color(th::TEXT_PRIMARY),
                     );
                     ui.end_row();
-                    ui.label(egui::RichText::new("Change:").color(th::TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new("Change back to you:").color(th::TEXT_SECONDARY),
+                    );
                     ui.label(
                         egui::RichText::new(format!(
                             "{} {}",
@@ -3192,11 +3363,14 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         .color(th::TEXT_PRIMARY),
                     );
                     ui.end_row();
-                    ui.label(egui::RichText::new("Inputs:").color(th::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("Paid from:").color(th::TEXT_SECONDARY));
                     ui.label(
-                        egui::RichText::new(format!("{}", b.inputs.len()))
-                            .monospace()
-                            .color(th::TEXT_PRIMARY),
+                        egui::RichText::new(format!(
+                            "{} of your addresses",
+                            b.inputs.len()
+                        ))
+                        .monospace()
+                        .color(th::TEXT_PRIMARY),
                     );
                     ui.end_row();
                     ui.label(egui::RichText::new("Size:").color(th::TEXT_SECONDARY));
@@ -3204,23 +3378,27 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         egui::RichText::new(format!("{} bytes", b.n_bytes))
                             .monospace()
                             .color(th::TEXT_PRIMARY),
+                    )
+                    .on_hover_text(
+                        "How much space the payment takes on the network — the fee is charged by \
+                         size.",
                     );
                     ui.end_row();
-                    ui.label(egui::RichText::new("TxID:").color(th::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("Payment ID:").color(th::TEXT_SECONDARY));
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(&b.txid_display)
                                 .monospace()
                                 .color(th::TEXT_PRIMARY),
                         );
-                        if th::ghost_button(ui, "Copy TxID").clicked() {
+                        if th::ghost_button(ui, "Copy payment ID").clicked() {
                             ui.output_mut(|o| o.copied_text = b.txid_display.clone());
                         }
                     });
                     ui.end_row();
                 });
             let raw = b.tx_hex.clone();
-            egui::CollapsingHeader::new("Raw signed transaction")
+            egui::CollapsingHeader::new("The payment as raw data (for support)")
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.add(
@@ -3229,7 +3407,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         )
                         .wrap(),
                     );
-                    if th::ghost_button(ui, "Copy hex to clipboard").clicked() {
+                    if th::ghost_button(ui, "Copy the raw data").clicked() {
                         ui.output_mut(|o| o.copied_text = raw.clone());
                     }
                 });
@@ -3243,9 +3421,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     ui,
                     300.0,
                     &mut st.dialogs.save_tx_path,
-                    Some("path to save signed tx"),
+                    Some("folder and file to save the payment in"),
                 );
-                if th::secondary_button(ui, "Save signed transaction").clicked()
+                if th::secondary_button(ui, "Save to a file").clicked()
                     && !st.dialogs.save_tx_path.is_empty()
                 {
                     let p = st.dialogs.save_tx_path.clone();
@@ -3267,9 +3445,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                         ui,
                         !busy && !already_broadcast,
                         if already_broadcast {
-                            "Broadcasted ✓"
+                            "Sent ✓"
                         } else {
-                            "Broadcast transaction"
+                            i18n::tr(lang, crate::gui::plain_words::SEND_NOW)
                         },
                     )
                     .clicked();
@@ -3280,9 +3458,12 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
                     if busy {
                         ui.spinner();
                         ui.label(
-                            egui::RichText::new("Broadcasting… — click once; the window may pause for a few seconds while the network confirms. Don't close the app.")
-                                .size(12.0)
-                                .color(th::TEXT_SECONDARY),
+                            egui::RichText::new(
+                                "Sending… — click once. The window may stop responding for a few \
+                                 seconds while the network takes the payment; don't close the app.",
+                            )
+                            .size(12.0)
+                            .color(th::TEXT_SECONDARY),
                         );
                     }
                 });
@@ -3290,12 +3471,17 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
             match &st.broadcast.result {
                 Some(Ok(msg)) => {
                     ui.add_space(4.0);
-                    th::inline_notice(ui, th::Notice::Success, "Sent to the network", msg);
+                    th::inline_notice(ui, th::Notice::Success, "On its way", msg);
                 }
                 Some(Err(e)) => {
                     ui.add_space(4.0);
                     // signed transaction is preserved; retry allowed
-                    th::inline_notice(ui, th::Notice::Error, "Broadcast failed", e);
+                    th::inline_notice(ui, th::Notice::Error, "The network did not take it", e);
+                    th::text_meta(
+                        ui,
+                        "The payment is still here, signed and unchanged — you can send it \
+                         again without losing anything.",
+                    );
                 }
                 None => {}
             }
@@ -3363,11 +3549,14 @@ impl Tri7App {
         th::page_header(
             ui,
             i18n::tr(lang, "Receive Coins"),
-            "Manage receiving addresses and create payment requests",
+            "Share an address to get paid. Each one has its own QR code.",
         );
-        // HD seed status strip: what this wallet's keys derive from (or the
-        // honest no-seed note for pre-HD random-key wallets) + the seed
-        // migration state and its entry point.
+        // Backup status strip (UX pass 2): what backs this wallet up, in words
+        // that answer "what happens if this computer dies". The derivation path
+        // is still on screen — as a parenthetical at the END, for whoever wants
+        // it, instead of leading with "m/44'/2222'/0'/0/7".
+        use crate::gui::plain_words as pw;
+        let lang = self.st.options.language;
         let migrated = self
             .st
             .wallet
@@ -3378,10 +3567,11 @@ impl Tri7App {
             th::inline_notice(
                 ui,
                 th::Notice::Success,
-                "Seed migration complete",
-                "The balance is on seed-derived addresses (m/44'/2222'/0'/0/i) and the \
-                 'seedmigrated' marker refuses a second sweep. The old random keys remain \
-                 in wallet.dat — harmless, now empty. The seed phrase is the backup.",
+                "Your 24 words back this wallet up",
+                "The whole balance sits on addresses created from them. That is why the one-time \
+                 move to seed addresses cannot run again — there is nothing left to move. The \
+                 wallet's original random keys are still in the file; they are empty and \
+                 harmless.",
             );
             ui.add_space(4.0);
         } else {
@@ -3390,21 +3580,35 @@ impl Tri7App {
                 self.st.wallet.as_ref().map(|w| w.hd_chain_index).unwrap_or(0),
             ) {
                 (Some(_), next) => Some(format!(
-                    "Seed-derived wallet — new addresses derive at m/44'/2222'/0'/0/{} from the stored phrase (passphrase: {}); any coins still on the old random keys can be swept to the seed addresses below.",
+                    "{} Any coins still on this wallet's original random keys can be moved to \
+                     these addresses below. (Technical detail: addresses derive from the words \
+                     at m/44'/2222'/0'/0/{}{}.)",
+                    i18n::tr(lang, pw::SEED_BACKUP_LINE),
                     next,
-                    self.st
+                    if self
+                        .st
                         .wallet
                         .as_ref()
-                        .map(|w| if w.hd_passphrase.is_some() { "set" } else { "none" })
-                        .unwrap_or("none")
+                        .map(|w| w.hd_passphrase.is_some())
+                        .unwrap_or(false)
+                    {
+                        "; a passphrase is set"
+                    } else {
+                        ""
+                    }
                 )),
                 (None, _) if self.st.loaded() => None,
                 _ => None,
             };
             if let Some(line) = hd_line {
-                th::inline_notice(ui, th::Notice::Info, "HD wallet", &line);
+                th::inline_notice(
+                    ui,
+                    th::Notice::Info,
+                    i18n::tr(lang, "Backed up by your 24 words"),
+                    &line,
+                );
                 ui.add_space(4.0);
-                if th::secondary_button(ui, "Sweep remaining balance to the seed addresses…")
+                if th::secondary_button(ui, "Move the rest of my coins to these addresses…")
                     .clicked()
                 {
                     if let Err(e) = self.st.begin_seed_migration_action() {
@@ -3416,28 +3620,15 @@ impl Tri7App {
                 th::inline_notice(
                     ui,
                     th::Notice::Info,
-                    "Backup",
-                    "This wallet uses individual backup keys - back it up by copying \
-                     wallet.dat itself. Or give it a seed phrase: one sweep transaction \
-                     moves the balance to seed-derived addresses.",
+                    i18n::tr(lang, "Backup"),
+                    i18n::tr(lang, pw::FILE_BACKUP_LINE),
                 );
                 ui.add_space(4.0);
-                let migrated = self
-                    .st
-                    .wallet
-                    .as_ref()
-                    .map(|w| w.seed_migrated)
-                    .unwrap_or(false);
-                if migrated {
-                    th::inline_notice(
-                        ui,
-                        th::Notice::Success,
-                        "This wallet already has a seed phrase",
-                        "Seed migration already ran: the whole balance now lives on the \
-                         phrase's own derived addresses (see Receive). Adding another \
-                         phrase would double-sweep, so it's disabled.",
-                    );
-                } else if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
+                // A wallet with no phrase cannot also be seed_migrated (that is
+                // the same flag), so the success branch that used to live here
+                // was unreachable — only the entry point remains.
+                if th::secondary_button(ui, "Give this wallet 24 words (one-time move)…").clicked()
+                {
                     if let Err(e) = self.st.begin_seed_migration_action() {
                         self.st.status_log.push(format!("seed migration: {}", e));
                     }
@@ -3462,15 +3653,18 @@ impl Tri7App {
     }
 
     fn receive_addresses(&mut self, ui: &mut egui::Ui) {
+        use crate::gui::plain_words as pw;
+        let lang = self.st.options.language;
         let copy_icon = self.tex(ui.ctx(), "menu_16/copy");
         th::card(ui, |ui| {
             // toolbar
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("New address label:").color(th::TEXT_SECONDARY),
+                    egui::RichText::new("Name this address (optional):")
+                        .color(th::TEXT_SECONDARY),
                 );
                 th::text_input(ui, 220.0, &mut self.st.receive.new_address_label);
-                if th::primary_button(ui, "New address").clicked() {
+                if th::primary_button(ui, i18n::tr(lang, pw::NEW_ADDRESS)).clicked() {
                     let label = self.st.receive.new_address_label.clone();
                     match self.st.new_address_action(label) {
                         Ok(addr) => {
@@ -3483,10 +3677,10 @@ impl Tri7App {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if th::secondary_button(ui, "Copy Address").clicked() {
+                if th::secondary_button(ui, i18n::tr(lang, pw::COPY_ADDRESS)).clicked() {
                     ui.output_mut(|o| o.copied_text = self.st.receive.address.clone());
                 }
-                if th::ghost_button(ui, "Edit Label").clicked() {
+                if th::ghost_button(ui, "Rename this address").clicked() {
                     let addr = self.st.receive.address.clone();
                     let draft = self.st.label_of(&addr).unwrap_or_default().to_string();
                     self.ab_edit = Some((addr, draft));
@@ -3501,8 +3695,9 @@ impl Tri7App {
                 th::inline_notice(
                     ui,
                     th::Notice::Info,
-                    "wallet.dat is not writable this session",
-                    "new keys go to the GUI keystore (see status log)",
+                    "The wallet file can't be written right now",
+                    "New addresses are kept inside tri7 instead, so they still work — they just \
+                     won't travel with the wallet file. Check the status log for the reason.",
                 );
                 ui.add_space(4.0);
             }
@@ -3524,7 +3719,7 @@ impl Tri7App {
             let cols = [
                 th::TableCol::new("Label", label_w, false),
                 th::TableCol::new("Address", w - label_w - 110.0, false),
-                th::TableCol::new("Source", 110.0, false),
+                th::TableCol::new("Stored in", 110.0, false),
             ];
             th::table_header(ui, &cols, w);
             egui::ScrollArea::vertical()
@@ -3560,20 +3755,25 @@ impl Tri7App {
     }
 
     fn receive_request(&mut self, ui: &mut egui::Ui) {
+        let lang = self.st.options.language;
         let qr_tex = self.qr_texture(ui.ctx());
         let st = &mut self.st;
-        th::card_titled(ui, "Payment request", |ui| {
+        th::card_titled(ui, "Get paid", |ui| {
             if st.receive.address.is_empty() {
                 th::empty_state(
                     ui,
                     None,
-                    "No address selected",
-                    "Select a receiving address on the left",
+                    "Pick an address first",
+                    "Choose one of your addresses on the left — the QR code and the words around \
+                     it follow the one you pick.",
                 );
                 return;
             }
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Address:").color(th::TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::YOUR_ADDRESS))
+                        .color(th::TEXT_SECONDARY),
+                );
                 ui.label(
                     egui::RichText::new(&st.receive.address)
                         .monospace()
@@ -3615,6 +3815,10 @@ impl Tri7App {
                         ui.add(img(tex, Vec2::splat(220.0)));
                     });
             }
+            th::text_meta(
+                ui,
+                "They can scan this code with a wallet app, or you can send them the text below.",
+            );
             if !st.receive.uri.is_empty() {
                 ui.add(
                     egui::Label::new(
@@ -3742,7 +3946,7 @@ impl Tri7App {
             let cols = [
                 th::TableCol::new("Label", label_w, false),
                 th::TableCol::new("Address", addr_w, false),
-                th::TableCol::new("Source", 110.0, false),
+                th::TableCol::new("Stored in", 110.0, false),
                 th::TableCol::new("Actions", 330.0, true),
             ];
             th::table_header(ui, &cols, w);
@@ -4292,7 +4496,7 @@ impl Tri7App {
                 });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if th::secondary_button(ui, "Copy TxID").clicked() {
+                if th::secondary_button(ui, "Copy payment ID").clicked() {
                     ui.output_mut(|o| o.copied_text = txid.clone());
                 }
                 if th::secondary_button(ui, "Open in Block Explorer").clicked() {
@@ -5895,7 +6099,7 @@ impl Tri7App {
                 ui.label(
                     egui::RichText::new(&txid).monospace().color(th::TEXT_PRIMARY),
                 );
-                if th::ghost_button(ui, "Copy TxID").clicked() {
+                if th::ghost_button(ui, "Copy payment ID").clicked() {
                     ui.output_mut(|o| o.copied_text = txid.clone());
                 }
             });

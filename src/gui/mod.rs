@@ -20,6 +20,7 @@ pub mod autostart;
 pub mod explorer;
 pub mod node_supervisor;
 pub mod notify;
+pub mod plain_words;
 pub mod rpc_client;
 pub mod seed_flow;
 pub mod state;
