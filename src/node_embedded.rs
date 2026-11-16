@@ -7416,6 +7416,40 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
         tri7_core::rpc::WalletProvider::set_paytxfee(self.snap.as_ref(), sats)
     }
 
+    fn live_wallet_total(
+        &self,
+    ) -> Option<tri7_core::rpc::LiveWalletTotal> {
+        // The wallet's OWN unspent set, ready and current — tier 1.5. NO
+        // base==0 filter here (that gate guards the balance() fallback
+        // policy against wallets whose records predate the chain window);
+        // this tier is gated by FRESHNESS instead: the caller only prefers
+        // it over the snapshot pair when its replay tip is at or past the
+        // pair's coverage, and a seed that reconstructed the wallet's whole
+        // record history (Sami's tri7-native wallet: 115 owned outputs,
+        // cross-checked against DNS2's independent index) is exactly the
+        // figure the overview must show.
+        let g = self.wl.lock().ok()?;
+        let w = g.as_ref()?;
+        if w.live.is_empty() {
+            return None;
+        }
+        let tip = match self.st.try_lock() {
+            Ok(s) => s.tip_height,
+            // follow loop holds the state mutex (validation batch) — fall
+            // back to the snapshot's coverage (same fallback balance() uses)
+            Err(_) => self
+                .snap
+                .balance()
+                .map(|bv| bv.coverage_height)
+                .unwrap_or(0),
+        };
+        Some(tri7_core::rpc::LiveWalletTotal {
+            sats: w.balance(),
+            utxos: w.live.len(),
+            coverage_height: tip,
+        })
+    }
+
     fn default_key(&self) -> Option<Vec<u8>> {
         tri7_core::rpc::WalletProvider::default_key(self.snap.as_ref())
     }

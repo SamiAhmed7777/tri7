@@ -427,6 +427,20 @@ pub trait WalletProvider: Send + Sync {
     fn balance(&self) -> Option<BalanceView>;
     /// (coverage height, coverage hash) of the loaded snapshots.
     fn coverage(&self) -> Option<(u64, String)>;
+    /// The wallet's OWN live view total — the seeded/replayed owned-output
+    /// set — when it is ready and current. `LiveWalletProvider` answers from
+    /// `WalletLive`; snapshot-only providers answer None (no live view).
+    /// Tier 1.5 in `wallet_total`: a READY live view outranks a snapshot pair
+    /// whose coverage is at-or-behind its own replay tip. Live incident
+    /// 2026-11-16 (Sami's PC): the resumed-from-own-state live view held the
+    /// TRUE wallet total (14.53 TRI, independently confirmed on DNS2) while
+    /// the stale pair answered 1531-3192 TRI from rows counting outputs the
+    /// wallet's keys do not own — the overview showed a figure ~100x wrong.
+    /// The pair is the boot-time estimate; the live view is the wallet's own
+    /// unspent set, and the fresher of the two wins.
+    fn live_wallet_total(&self) -> Option<LiveWalletTotal> {
+        None
+    }
     fn address_entries(&self) -> Vec<AddressEntry>;
     /// lifetime regular-tx receipts (daemon getreceivedbyaddress semantics:
     /// P2PKH-script outputs only). None = never received → treated as 0.
@@ -1117,6 +1131,11 @@ fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
 ///
 ///   1. LIVE-INDEX — the address index, PROVEN authoritative (finished, and
 ///      it applied exactly the chain this node serves: same height AND hash).
+///   1.5 WALLET-LIVE — the wallet's own seeded/replayed unspent set, when
+///      ready and at least as fresh as the snapshot pair's coverage. The
+///      pair is the boot-time estimate; the live view is the wallet's own
+///      unspent set (2026-11-16: the stale pair answered 1531-3192 TRI for
+///      Sami's wallet while the ready live view held the true 14.53).
 ///   2. SNAPSHOT-PAIR — balances.json + wallet_utxos.json at one replay
 ///      coverage. The daemon's wallet provider REBUILDS the UTXO side of the
 ///      pair with the live window, so the pair's rows are the freshest
@@ -1126,7 +1145,7 @@ fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
 ///      the tier that froze Sami's total. It carries NO UTXO list —
 ///      listunspent intentionally refuses there rather than serve rows from
 ///      a different source, so the "total == sum(list)" equality holds at
-///      the tiers that publish a list (1 and 2) and is vacuous, not
+///      the tiers that publish a list (1, 1.5 and 2) and is vacuous, not
 ///      violated, at this one.
 ///
 /// A coverage/partial state is carried on the answer (see [`WalletTotal`]):
@@ -1135,6 +1154,7 @@ fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TotalSource {
     LiveIndex,
+    LiveWallet,
     SnapshotPair,
     SnapshotAggregate,
 }
@@ -1144,10 +1164,21 @@ impl TotalSource {
     pub(crate) fn tag(self) -> &'static str {
         match self {
             TotalSource::LiveIndex => "live-index",
+            TotalSource::LiveWallet => "wallet-live",
             TotalSource::SnapshotPair => "snapshot-pair",
             TotalSource::SnapshotAggregate => "snapshot-aggregate",
         }
     }
+}
+
+/// The wallet live view's whole-unspent answer — tier 1.5 payload (see
+/// [`WalletProvider::live_wallet_total`]).
+#[derive(Clone, Copy, Debug)]
+pub struct LiveWalletTotal {
+    pub sats: i64,
+    pub utxos: usize,
+    /// the replay tip the live view covers (the node tip it has applied)
+    pub coverage_height: u64,
 }
 
 /// One wallet-total answer: the figure AND the facts that say how fresh it
@@ -1282,6 +1313,38 @@ pub(crate) fn wallet_total(deps: &Deps) -> Option<WalletTotal> {
         }
     }
     let (index_height, index_complete, index_chain_tip) = index_facts(deps);
+    // ---- TIER 1.5: the wallet's OWN live view, ready and at least as ----
+    // ---- fresh as the snapshot pair ------------------------------------
+    //
+    // The pair is the boot-time estimate; the live view is the wallet's own
+    // unspent set (seeded from the wallet's records and advanced by every
+    // replayed block). When the live view is ready and its replay tip is at
+    // or past the pair's coverage, it outranks the pair. 2026-11-16: the
+    // stale pair answered 1531-3192 TRI (rows counting outputs the wallet's
+    // keys do not own) while the ready live view held the true 14.53 —
+    // this tier is what makes the overview show the wallet's own figure.
+    let pair_cov = deps.wallet.coverage();
+    if let Some(lw) = deps.wallet.live_wallet_total() {
+        if lw.utxos > 0 {
+            let live_at_least_as_fresh = pair_cov
+                .as_ref()
+                .map(|(cov_h, _)| lw.coverage_height >= *cov_h)
+                .unwrap_or(true);
+            if live_at_least_as_fresh {
+                return Some(WalletTotal {
+                    sats: lw.sats,
+                    utxos: lw.utxos,
+                    source: TotalSource::LiveWallet,
+                    coverage_height: Some(lw.coverage_height),
+                    coverage_hash: None,
+                    partial: false,
+                    index_height,
+                    index_complete,
+                    index_chain_tip,
+                });
+            }
+        }
+    }
     // ---- TIER 2: the snapshot PAIR (the rows listunspent serves) -------
     //
     // The SAME gate and the SAME rows listunspent's snapshot path uses, so
@@ -1291,7 +1354,7 @@ pub(crate) fn wallet_total(deps: &Deps) -> Option<WalletTotal> {
     // (getbalance_equals_sum_of_listunspent_at_every_tier_that_serves_a_list).
     // When the pair is missing or torn (mixed generations of the two files)
     // the gate returns None and the hierarchy falls through.
-    if let Some((cov_h, cov_hash)) = deps.wallet.coverage() {
+    if let Some((cov_h, cov_hash)) = pair_cov {
         let rows = deps.wallet.utxos();
         let sats = rows.iter().map(|r| r.value_sats).sum::<i64>();
         let partial = match deps.wallet.balance() {
@@ -5322,8 +5385,14 @@ mod tests {
         /// the startup aggregate's total (balance()) — None = none loaded
         aggregate: Option<i64>,
         rows: Vec<UtxoRow>,
+        /// the wallet's own live view answer (live_wallet_total) — None =
+        /// no ready live view
+        live: Option<LiveWalletTotal>,
     }
     impl WalletProvider for TierWallet {
+        fn live_wallet_total(&self) -> Option<LiveWalletTotal> {
+            self.live.clone()
+        }
         fn balance(&self) -> Option<BalanceView> {
             self.aggregate.map(|sats| {
                 let (coverage_height, coverage_hash) =
@@ -5494,6 +5563,7 @@ mod tests {
                 pair: Some(pair.clone()),
                 aggregate: Some(stale_aggregate),
                 rows: rows.clone(),
+                live: None,
             };
             let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
             let listed: i64 = call(&d, "listunspent", json!([]))["result"]
@@ -5551,7 +5621,7 @@ mod tests {
             assert_eq!(info1["index_behind"], 0, "variant {v}");
 
             // ---- TIER 3: NO pair — the aggregate is all there is ---------
-            let w3 = TierWallet { pair: None, aggregate: Some(stale_aggregate), rows };
+            let w3 = TierWallet { pair: None, aggregate: Some(stale_aggregate), rows, live: None };
             let d3 = Deps { tip: &t, wallet: &w3, blocks: &b, proxy: None, ops: None };
             let lu3 = call(&d3, "listunspent", json!([]));
             assert!(
@@ -5588,6 +5658,7 @@ mod tests {
         let w = TierWallet {
             pair: Some((pair_h, tip_hash_at(pair_h))),
             aggregate: Some(999_000_000), // must never win over the pair
+            live: None,
             rows: vec![
                 UtxoRow {
                     txid: format!("{:064x}", 1u64),
@@ -5668,6 +5739,7 @@ mod tests {
         let w = TierWallet {
             pair: Some((pair_h, tip_hash_at(pair_h))),
             aggregate: Some(999_000_000),
+            live: None,
             rows: vec![UtxoRow {
                 txid: format!("{:064x}", 1u64),
                 n: 0,
@@ -5733,6 +5805,7 @@ mod tests {
         let w = TierWallet {
             pair: Some((pair_h, tip_hash_at(pair_h))),
             aggregate: Some(250_000_000), // the frozen 250.0
+            live: None,
             rows: vec![
                 UtxoRow {
                     txid: format!("{:064x}", 1u64),
@@ -5801,7 +5874,7 @@ mod tests {
         assert_eq!(info_a["index_behind"], 0);
 
         // the aggregate tier labels itself and stays flagged
-        let w3 = TierWallet { pair: None, aggregate: Some(250_000_000), rows: vec![] };
+        let w3 = TierWallet { pair: None, aggregate: Some(250_000_000), rows: vec![], live: None };
         let d3 = Deps { tip: &t, wallet: &w3, blocks: &b, proxy: None, ops: None };
         let info3 = call(&d3, "getwalletinfo", json!([]))["result"].clone();
         assert_eq!(info3["balance_source"], "snapshot-aggregate");

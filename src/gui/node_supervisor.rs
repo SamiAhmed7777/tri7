@@ -383,6 +383,21 @@ impl TorSupervisor {
             // unresolvable listeners are ALL spared).
             let resolved = Self::resolve_listener(self.listener_resolver.as_deref(), port);
             if !Self::listener_is_wallet_tor(&resolved, &exe) {
+                // 2026-11-16 (Sami's PC): the refusal fired twice while the
+                // bundled tor had BOOTSTRAPPED 100% — the log never said what
+                // the resolver saw, so the lane was undebuggable live. Name
+                // the resolution: pid + path (or None), and whether a second
+                // look changes it (a transient cmdlet/netstat failure looks
+                // identical to a foreign resident from out here).
+                self.tlog(&format!(
+                    "tor: listener resolution on the pinned port: {}",
+                    match &resolved {
+                        Some((lpid, lpath)) => {
+                            format!("pid={lpid} path={lpath}")
+                        }
+                        None => "UNRESOLVED (no listener or lookup failed)".to_string(),
+                    }
+                ));
                 self.tlog(
                     "tor: spawn failed and the pinned port is NOT held by a wallet-owned tor — NOT killing anything; remedy: close the stale Tor holding the state dir or reboot",
                 );
@@ -479,6 +494,19 @@ impl TorSupervisor {
                     return (Some(child), true, String::new());
                 }
                 saw_foreign_answer = true;
+                // name the mismatch live: what the resolver saw vs the child
+                // pid we spawned (2026-11-16: attribution failed on Sami's PC
+                // while the bundled tor bootstrapped to 100% — undebuggable
+                // without this line)
+                self.tlog(&format!(
+                    "tor: socks answered on {} but attribution failed: resolver={}, child pid={}",
+                    port,
+                    match &resolved {
+                        Some((lpid, lpath)) => format!("pid={lpid} path={lpath}"),
+                        None => "UNRESOLVED".to_string(),
+                    },
+                    child.id()
+                ));
             }
             std::thread::sleep(Duration::from_millis(500));
         }
