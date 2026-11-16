@@ -600,11 +600,28 @@ impl TorSupervisor {
     /// ONE query (judge r4 — no pid/path turnover pairing).
 
 #[cfg(windows)]
+    /// Resolve PowerShell by ABSOLUTE path: a scheduled-task-launched
+    /// wallet can inherit an environment whose PATH does not carry
+    /// System32\WindowsPowerShell, and Command::new("powershell") then
+    /// fails INSTANTLY (2026-11-16, Sami's PC: every resolver call returned
+    /// nothing and the bundled tor was refused as "UNRESOLVED" while it was
+    /// bootstrapped 100%). System32 is present on every Windows baseline
+    /// this wallet ships to; the bare-name fallback covers exotic installs.
+    #[cfg(windows)]
+    fn powershell_command() -> std::process::Command {
+        const ABS: &str = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        match std::path::Path::new(ABS).exists() {
+            true => std::process::Command::new(ABS),
+            false => std::process::Command::new("powershell"),
+        }
+    }
+
+    #[cfg(windows)]
     fn listener_of_socks_port_os_cmdlet(port: u16) -> Option<(u32, String)> {
         let q = format!(
             "$c = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \"{{0}}|{{1}}\" -f $c.OwningProcess, $p.Path }}"
         );
-        let mut c = std::process::Command::new("powershell");
+        let mut c = Self::powershell_command();
         c.args(["-NoProfile", "-Command", &q]);
         let out = quiet_command(&mut c).output().ok()?;
         let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -642,7 +659,7 @@ impl TorSupervisor {
         };
         let pid1 = read_pid()?;
         let pq = format!("(Get-Process -Id {pid1} -ErrorAction SilentlyContinue).Path");
-        let mut uc = std::process::Command::new("powershell");
+        let mut uc = Self::powershell_command();
         uc.args(["-NoProfile", "-Command", &pq]);
         let uout = quiet_command(&mut uc).output().ok()?;
         let path = String::from_utf8_lossy(&uout.stdout).trim().to_string();
