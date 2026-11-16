@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:nzzaogduou6eqaqnogjdfhpuvakqxrfmpv2h2y3sevsvyg2ezgfa
+{
+  "blocking": [
+    "No captured post-push macOS CI run on the fix commit; before merge-adjacent promotion, confirm the fix commit's macos-build job is green (the local Linux suite cannot exercise the WouldBlock race by construction)"
+  ],
+  "polish": [
+    "Consider guarding the dead fixture in gui/tests.rs (~4459) anyway or deleting it in a follow-up, since dead test code that contains the same latent hazard invites copy-paste revival",
+    "The 'Linux-no-op' comment could note the discarded Result is intentional (let _ =) to preempt future clippy/error-handling cleanup passes from 'fixing' it",
+    "Optionally assert the set_nonblocking(false) result or add a debug_assert in the flaked test's stub to surface unexpected fcntl failures rather than silently degrading back to the race"
+  ]
+}

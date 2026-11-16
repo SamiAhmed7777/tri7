@@ -1,0 +1,208 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 15e4e13..0b48095 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -5332,14 +5332,28 @@ fn load_state(cfg: &Config) -> Result<ChainState, String> {
+ /// (the whole window resolves); a partial backfill leaves the floor at the
+ /// first unfetched height so the resolver keeps classifying below-floor
+ /// coins as unresolvable (a kernel-coverage fact — never "repairwallet").
+-fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
++///
++/// (item 29) GRACEFUL STOP: `stop` is polled per height (pass 1) and per
++/// batch (pass 2) — a SIGTERM mid-backfill ends the pass at a height
++/// boundary, pins the floor at the window top (the exact item-24-r2 partial
++/// semantics: coverage is non-contiguous by construction, so every absent
++/// coin stays honestly unresolvable until the retry lane completes it) and
++/// returns true so the caller can finish cleanly instead of holding the
++/// stop for minutes on Pi-class hardware. Heights already folded STAY in
++/// the insert-only kernel map; the idempotent retry re-runs the whole pass.
++/// Returns true when stopped for shutdown, false on normal completion.
++fn boot_backfill_kernel_window(
++    st: &mut ChainState,
++    rpc: &Rpc,
++    stop: &dyn Fn() -> bool,
++) -> bool {
+     let first_record_abs = st
+         .records
+         .first()
+         .map(|r| r.height)
+         .unwrap_or(st.tip_height + 1);
+     if first_record_abs <= st.base {
+-        return; // records already span the window (or the chain is young)
++        return false; // records already span the window (or the chain is young)
+     }
+     // defensive: a corrupted records head (first_record past the tip) must
+     // not walk past the window — clamp to the threaded range
+@@ -5355,6 +5369,16 @@ fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
+     {
+         let store = live_store();
+         for rel in 0..want {
++            // (item 29) graceful stop checkpoint — one atomic load per height
++            if stop() {
++                st.utxo_floor_rel = st.entries.len();
++                log(&format!(
++                    "kernel-window backfill: graceful stop at h{} (SIGTERM) — {} block(s) folded this pass stay in the map, floor pinned at the window top (retry lane resumes coverage)",
++                    st.base + rel as u64,
++                    store_folded
++                ));
++                return true;
++            }
+             let h = st.base + rel as u64;
+             let body = store.as_ref().and_then(|s| {
+                 match s.raw_body_by_height(h) {
+@@ -5390,6 +5414,16 @@ fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
+     const BATCH: usize = 200;
+     let mut idx = 0usize;
+     while idx < need_rpc.len() {
++        // (item 29) graceful stop checkpoint — per batch, before the RPC
++        if stop() {
++            st.utxo_floor_rel = st.entries.len();
++            log(&format!(
++                "kernel-window backfill: graceful stop in pass 2 before h{} (SIGTERM) — {} block(s) folded this pass stay in the map, floor pinned at the window top (retry lane resumes coverage)",
++                st.base + need_rpc[idx] as u64,
++                store_folded + rpc_folded
++            ));
++            return true;
++        }
+         let chunk_rel = &need_rpc[idx..(idx + BATCH).min(need_rpc.len())];
+         idx += BATCH;
+         let calls: Vec<(u64, &str, serde_json::Value)> = chunk_rel
+@@ -5488,6 +5522,7 @@ fn boot_backfill_kernel_window(st: &mut ChainState, rpc: &Rpc) {
+             first_hole.unwrap(),
+         ));
+     }
++    false // (item 29) ran to completion — not a shutdown stop
+ }
+ 
+ /// Fold ONE fetched batch [(rel, hex)] into the kernel map, stopping at the
+@@ -11928,7 +11963,23 @@ pub fn main_args(argv: &[String]) -> i32 {
+         // pass pins the floor at the window top (every absent coin honestly
+         // unresolvable); the follow-loop retry lane completes the coverage
+         // once the RPC listener is up.
+-        boot_backfill_kernel_window(&mut loaded, &rpc);
++        // (item 29) graceful stop: SIGTERM during the backfill fold ends the
++        // pass at a height boundary, pins the floor at the window top
++        // (item-24-r2 partial semantics) and the boot EXITS CLEANLY (0) —
++        // systemd's stop no longer waits out the 90 s to a SIGKILL.
++        // Tipstate is unchanged on disk; the next boot resumes.
++        if boot_backfill_kernel_window(&mut loaded, &rpc, &|| {
++            tri7_core::shutdown::requested()
++        }) {
++            finish(
++                &cfg,
++                &loaded,
++                &stats,
++                &rpc,
++                0,
++                "clean stop during boot kernel-window backfill (SIGTERM) — tipstate unchanged on disk, floor pinned at the window top, resumable",
++            );
++        }
+         // (item 25) boot-time modifier-chain audit: a persisted chain can be
+         // internally consistent (self-rebuilt checksums — the load gate
+         // above cannot catch the class) yet diverged from the canonical
+@@ -13906,16 +13957,29 @@ pub fn main_args(argv: &[String]) -> i32 {
+                     backfill_tries += 1;
+                     let mut stg = st_shared.lock().unwrap();
+                     let floor_before = stg.utxo_floor_rel;
+-                    boot_backfill_kernel_window(&mut stg, &rpc);
+-                    let floor_after = stg.utxo_floor_rel;
+-                    if floor_after != floor_before || backfill_tries == 1 || backfill_tries % 10 == 0 {
+-                        log(&format!(
+-                            "kernel-window backfill retry #{}: floor {} → {}",
+-                            backfill_tries, floor_before, floor_after
+-                        ));
+-                    }
+-                    if floor_after == 0 {
+-                        backfill_complete = true;
++                    // (item 29) a SIGTERM mid-backfill pins the floor at the
++                    // window top inside the call; skip the bookkeeping — the
++                    // loop's exit gate finishes cleanly right after
++                    let stopped = boot_backfill_kernel_window(&mut stg, &rpc, &|| {
++                        tri7_core::shutdown::requested()
++                    });
++                    if stopped {
++                        drop(stg);
++                        log("kernel-window backfill retry: stopped for shutdown — clean exit follows");
++                    } else {
++                        let floor_after = stg.utxo_floor_rel;
++                        if floor_after != floor_before
++                            || backfill_tries == 1
++                            || backfill_tries % 10 == 0
++                        {
++                            log(&format!(
++                                "kernel-window backfill retry #{}: floor {} → {}",
++                                backfill_tries, floor_before, floor_after
++                            ));
++                        }
++                        if floor_after == 0 {
++                            backfill_complete = true;
++                        }
+                     }
+                 }
+             }
+@@ -18731,6 +18795,65 @@ mod tests {
+         );
+     }
+ 
++    /// (item 29) graceful stop mid-backfill: the stop predicate fires part
++    /// way through pass 1 — the pass returns true, the floor is pinned at
++    /// the window top (item-24-r2 partial semantics: every absent coin
++    /// honestly unresolvable until the retry lane completes coverage), and
++    /// the heights folded before the stop STAY in the insert-only map. A
++    /// follow-up pass with no stop completes normally (false).
++    #[test]
++    fn backfill_graceful_stop_pins_the_floor_and_reports_the_stop() {
++        let mut prev: Hash = [0xABu8; 32];
++        let mut blocks: Vec<Block> = Vec::new();
++        for h in 0..=30u64 {
++            let b = mk_body_block(
++                prev,
++                0x60 + h as u8,
++                0x2000_ffff,
++                1_700_000_000u32 + (h * 600) as u32,
++            );
++            prev = b.hash();
++            blocks.push(b);
++        }
++        let mut stg = chain_state_from_window(0, &blocks);
++        // records [15..=30]: the backfill folds [0..15) in pass 1
++        stg.records = blocks[15..]
++            .iter()
++            .enumerate()
++            .map(|(i, b)| stg.record_of(b, 15 + i as u64))
++            .collect();
++        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port: pass 2 never answers
++        // stop AFTER 4 heights folded (one call per pass-1 height)
++        let calls = std::sync::atomic::AtomicUsize::new(0);
++        let stopped = boot_backfill_kernel_window(&mut stg, &rpc, &|| {
++            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            n >= 4
++        });
++        assert!(stopped, "the stop predicate must end the pass with true");
++        assert_eq!(
++            stg.utxo_floor_rel,
++            stg.entries.len(),
++            "floor pinned at the window top — honest non-contiguous coverage"
++        );
++        // the checkpoint fires PER HEIGHT: called at rel 0..=4 (stop on the
++        // 5th) — four heights were queued for pass 2 (no live store in
++        // tests: pass-1 folds come from the store only)
++        assert_eq!(
++            calls.load(std::sync::atomic::Ordering::SeqCst),
++            5,
++            "one checkpoint call per pass-1 height before the stop"
++        );
++        // a fresh pass with no stop runs to completion (false) — pass 2
++        // finds no listener and the floor stays pinned honestly
++        let stopped2 = boot_backfill_kernel_window(&mut stg, &rpc, &|| false);
++        assert!(!stopped2, "an un-stopped pass reports false");
++        assert_eq!(
++            stg.utxo_floor_rel,
++            stg.entries.len(),
++            "pass 2 finds no listener — floor stays pinned honestly"
++        );
++    }
++
+ 
+ 
+     /// (item-23 never-pin rule, socket-level) a FAILED send never happened:

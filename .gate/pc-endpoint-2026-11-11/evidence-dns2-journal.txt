@@ -1,0 +1,10 @@
+# RAW command-scoped DNS2 journal — ONE identified post-hygiene boot (last 'Started tri7d.service')
+# addnode-handling filter (command shown); a SEPARATE count line for addnode ignore-warnings follows
+# command-A: journalctl -u tri7d --no-pager --since '2026-11-11T01:51:01' | grep -E 'Started tri7d|addnode'
+Nov 11 01:51:01 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 11 01:51:01 vmi3080415 follow_tip[3613030]: [2026-11-11T09:51:01Z] addnode=mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113 accepted (i2p)
+
+# command-B: journalctl -u tri7d --no-pager --since '2026-11-11T01:51:01' | grep -c 'ignored: only'  (addnode ignore-warnings)
+count: 0
+# command-C: journalctl -u tri7d --no-pager --since '2026-11-11T01:51:01' | grep -cE 'failed: socks|SOCKS reply|unreachable'  (dead-dial evidence — scoped to these explicit failure phrases; not the daemon's complete failure vocabulary)
+count: 0

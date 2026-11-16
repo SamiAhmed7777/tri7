@@ -99,6 +99,9 @@ fn main() {
     }
     if let Some(v) = get("--wallet", &args) {
         cfg.wallet_path = v;
+        // explicit launch target: the persisted last-wallet session must not
+        // override it (resolve_first_run_target enforces the precedence)
+        cfg.wallet_path_explicit = true;
     }
     if let Some(v) = get("--state-dir", &args) {
         cfg.state_dir = v;

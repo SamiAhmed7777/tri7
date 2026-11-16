@@ -140,6 +140,13 @@ impl Screen {
 #[derive(Debug, Clone)]
 pub struct UiConfig {
     pub wallet_path: String,
+    /// explicit --wallet was passed on this launch: the persisted
+    /// last-wallet session must NOT override it (CLI-flag only). Live
+    /// incident 2026-11-16: the app was launched `--wallet E:\Coins\TRI\wallet.dat`
+    /// and silently reopened the remembered Roaming wallet instead — the fused
+    /// node then replayed the chain for the WRONG key set. Sami's rule: the
+    /// wallet he points the app at IS the wallet that opens.
+    pub wallet_path_explicit: bool,
     pub state_dir: String, // tipstate.json, wallet_utxos.json, blk0001.dat, index/
     /// explicit --state-dir was passed: the one-folder auto-derivation (from
     /// the wallet file's parent) must NOT override it (CLI-flag only)
@@ -167,6 +174,7 @@ impl Default for UiConfig {
                 .unwrap_or_else(|_| format!("{}\\AppData\\Local", std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into())));
             UiConfig {
                 wallet_path: format!("{appdata}\\Triangles\\wallet.dat"),
+                wallet_path_explicit: false,
                 state_dir: format!("{local}\\Tri7Wallet\\state"),
                 state_dir_explicit: false,
                 stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
@@ -179,6 +187,7 @@ impl Default for UiConfig {
         } else {
             UiConfig {
                 wallet_path: "/root/.triangles/wallet.dat".into(),
+                wallet_path_explicit: false,
                 state_dir: "/var/lib/tri7".into(),
                 state_dir_explicit: false,
                 stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),

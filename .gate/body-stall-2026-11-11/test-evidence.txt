@@ -1,0 +1,27 @@
+== reproducibility (r6 run) ==
+repository: github.com/SamiAhmed7777/tri7 (branch master; the base commit is pushed there)
+BASE commit (full SHA, immutable): f08d29d8eb5ec10c512217f573b2a2aa254be0a3
+OFFLINE exact reconstruction (no repo/network/toolchain needed):
+  patch -p1 base-node_embedded-f08d29d.rs < adoption-body-stall.diff
+  -> byte-for-byte equal to patched-node_embedded-r6.rs (see verify-offline.sh
+     and transcript.txt; sha256 1b587b850eb8cae8293e1d5e32741c1aaba833c6a0dd98ba7474fc9a79b06741)
+patched src/node_embedded.rs sha256: 1b587b850eb8cae8293e1d5e32741c1aaba833c6a0dd98ba7474fc9a79b06741
+command: cargo test --lib
+expected: test result: ok. 731 passed; 0 failed; 1 ignored
+
+== full-suite tail (this tree, r6 run) ==
+
+test result: ok. 731 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 80.48s
+
+== the item-23 test set (10 tests, r6 run) ==
+test node_embedded::tests::failed_groups_requeue_in_one_globally_chain_ordered_operation ... ok
+test node_embedded::tests::mixed_retry_histories_split_the_batch_per_hash ... ok
+test node_embedded::tests::out_of_order_requested_block_is_kept_and_refreshed_not_dropped ... ok
+test node_embedded::tests::cached_successor_is_found_after_the_predecessor_lands ... ok
+test node_embedded::tests::body_source_choice_prefers_the_recon_advertiser_over_healthy_outbound ... ok
+test node_embedded::tests::failed_reinjection_stays_in_flight_and_redispatches_after_timeout ... ok
+test node_embedded::tests::unanswered_bodies_age_out_in_chain_order_and_keep_rotation_memory ... ok
+test node_embedded::tests::requeued_unsent_batch_lands_in_chain_order_at_the_front ... ok
+test node_embedded::tests::aged_body_requeue_rotates_off_the_silent_advertisers_socket ... ok
+test node_embedded::tests::adopted_body_getdata_arrives_on_the_advertisers_socket_not_the_outbounds ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 722 filtered out; finished in 0.33s

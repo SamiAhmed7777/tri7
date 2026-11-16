@@ -1743,6 +1743,7 @@ fn derivation_falls_back_to_snapshot_without_index() {
     .unwrap();
     let cfg = UiConfig {
         wallet_path: "/nonexistent/wallet.dat".into(),
+        wallet_path_explicit: false,
         state_dir: dir.join("state").display().to_string(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -1777,6 +1778,7 @@ fn keystore_side_files_persist_new_addresses() {
     let dir = std::env::temp_dir().join(format!("tri7gui_keystore_{}", std::process::id()));
     let cfg = UiConfig {
         wallet_path: "/nonexistent".into(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -1909,6 +1911,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
     let wallet = synth_wallet_file(&dir, "wallet.dat");
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -1949,6 +1952,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
     // wallet.dat — no keystore involvement
     let cfg2 = UiConfig {
         wallet_path: wallet.display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -1974,6 +1978,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
     let wallet = synth_wallet_file(&dir, "wallet.dat");
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -2032,6 +2037,7 @@ fn locked_wallet_falls_back_to_keystore() {
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let cfg = UiConfig {
         wallet_path: wallet.display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -2061,6 +2067,7 @@ fn locked_wallet_falls_back_to_keystore() {
 fn upd_test_cfg(dir: &std::path::Path) -> UiConfig {
     UiConfig {
         wallet_path: dir.join("wallet.dat").display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -2254,6 +2261,7 @@ fn updater_options_line_reports_state() {
 fn sweep_test_cfg(dir: &std::path::Path, rpc_addr: Option<String>) -> UiConfig {
     UiConfig {
         wallet_path: dir.join("wallet.dat").display().to_string(),
+        wallet_path_explicit: false,
         state_dir: "/nonexistent".into(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),
@@ -3318,6 +3326,64 @@ fn remembered_wallet_roundtrip_and_first_open_logic() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Explicit --wallet beats the persisted last-wallet session (Sami
+/// 2026-11-16: "it should actually use the existing wallets in the locations
+/// I give you"). Live incident: `--wallet E:\Coins\TRI\wallet.dat` launched
+/// while last_wallet.txt still held the Roaming path — the app opened the
+/// Roaming wallet and the fused node replayed the chain for the wrong key
+/// set. The resolver must rank the explicit flag first, and a missing
+/// explicit target must land on the welcome screen, never on some other
+/// wallet.
+#[test]
+fn cli_wallet_flag_beats_remembered_wallet() {
+    use crate::gui::app_state::{resolve_first_run_target, FirstRunTarget};
+    let dir = std::env::temp_dir().join(format!("tri7gui_cliwallet_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let remembered_path = dir.join("roaming\\wallet.dat");
+    std::fs::create_dir_all(remembered_path.parent().unwrap()).unwrap();
+    std::fs::write(&remembered_path, b"x").unwrap();
+    let cli_path = dir.join("ecoins\\wallet.dat");
+    std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
+    std::fs::write(&cli_path, b"x").unwrap();
+
+    // 1. explicit --wallet + target exists -> the CLI target, never the session
+    match resolve_first_run_target(
+        true,
+        cli_path.to_str().unwrap(),
+        Some(remembered_path.to_str().unwrap().to_string()),
+    ) {
+        FirstRunTarget::Target => {}
+        other => panic!("explicit --wallet must win, got {:?}", other),
+    }
+    // 2. explicit --wallet + target MISSING -> welcome, never another wallet
+    match resolve_first_run_target(
+        true,
+        dir.join("missing\\wallet.dat").to_str().unwrap(),
+        Some(remembered_path.to_str().unwrap().to_string()),
+    ) {
+        FirstRunTarget::Welcome => {}
+        other => panic!("missing explicit target must show welcome, got {:?}", other),
+    }
+    // 3. no flag -> the remembered session still reopens (unchanged behavior)
+    match resolve_first_run_target(
+        false,
+        cli_path.to_str().unwrap(),
+        Some(remembered_path.to_str().unwrap().to_string()),
+    ) {
+        FirstRunTarget::Remembered(p) => {
+            assert_eq!(std::path::Path::new(&p), remembered_path.as_path());
+        }
+        other => panic!("no-flag launch must reopen the remembered wallet, got {:?}", other),
+    }
+    // 4. no flag, nothing remembered, target exists -> auto-open the target
+    match resolve_first_run_target(false, cli_path.to_str().unwrap(), None) {
+        FirstRunTarget::Target => {}
+        other => panic!("default auto-open must survive, got {:?}", other),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The Transactions date order must flip newest<->oldest cleanly: the sort
 /// key is (tx_time, height, txid, n) and the toggle only reverses it, so the
 /// same set is shown in the exact reverse sequence both ways (Sami: "oldest
@@ -3539,6 +3605,7 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
     .unwrap();
     let cfg = UiConfig {
         wallet_path: wallet_path.display().to_string(),
+        wallet_path_explicit: false,
         state_dir: dir.join("state").display().to_string(),
         state_dir_explicit: true,
         stake_dryrun_path: "/nonexistent".into(),

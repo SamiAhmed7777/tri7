@@ -1,0 +1,17 @@
+--- /root/.hermes/skills/tri7-fleet-chain-state/SKILL.md
++++ /root/.hermes/skills/tri7-fleet-chain-state/SKILL.md
+@@ (after the existing "(2026-11-13, live DNS2) repairwallet pass-1 miss" bullet)
++- **(2026-11-13 02:2xZ, live DNS2) A frozen `stale_live_view` during a heal
++  loop is NOT proof of heal failure — and the phantom set can rotate mid-loop.**
++  Across a 4-pass `repairwallet` loop `getstakinginfo` served a byte-identical
++  dict (same example_txid, same `first_utc` 01:50:45Z, `ticks` stuck at 92)
++  while `attempts` climbed ~70k between probes — yet the journal recorded
++  `stale live view CLEARED … (repairwallet took effect)` MID-LOOP (02:14:52Z):
++  the RPC view can lag the detector state. And clearing one phantom can
++  immediately re-arm the view with a NEWER one (6b423eea…:1 claiming h2210753,
++  fresh `first_utc` 02:16:12Z — DNS2 raced again and lost) — an identical dict
++  with a FRESH `first_utc` is a new phantom, not the old one. Account for both:
++  correlate with the journal `STALE LIVE VIEW`/`CLEARED` lines and the
++  `first_utc`/`ticks` freshness, keep passing until `stale_live_view` is null
++  on a FRESH (non-frozen) view; one extra pass after a frozen stretch cleared
++  it (repaired 3 / 26.793238 → §16 BOTH hold verified).

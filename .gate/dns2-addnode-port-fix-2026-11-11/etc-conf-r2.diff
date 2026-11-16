@@ -1,0 +1,10 @@
+--- conf-etc-before.conf	2026-11-10 21:44:19.926852036 -0800
++++ conf-etc-after.conf	2026-11-10 21:44:19.936852076 -0800
+@@ -24,6 +24,7 @@
+ addnode=100.85.236.10:24112
+ addnode=100.106.76.60:24113
+ addnode=i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112
++addnode=mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113
+ noantispam=1
+ addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112
+ i2psam=127.0.0.1:7656

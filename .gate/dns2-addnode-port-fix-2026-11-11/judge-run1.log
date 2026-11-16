@@ -1,0 +1,13 @@
+GRADE=B urn=urn:ump:tq7xkbxskbfkwxttk2fsdpajoqgrfpruydhmtcp7jqrwuen5ez3q
+{
+  "blocking": [
+    "Fork-height bookkeeping inconsistency: the BRIEF says the fork is at h2209485 with 8 blocks above it, while E1 shows hashes diverging at h2209489+ and E2's PC log says 'competing branch h2209486..h2209493 (7 blk)' \u2014 2209486..2209493 inclusive is 8 heights labeled as 7 blk, and it contradicts the stated fork height. One of these is mislabeled; since the fix is fork-height-agnostic this does not block promotion, but it must be corrected in the record.",
+    "conf-before.conf shows staking=0/forcestaking=0, yet the procedure's step 4 re-enables staking only via RPC (non-persistent across future restarts given the conf). Flag that the RPC 'staking on' does not survive a conf-level staking=0 on the next restart."
+  ],
+  "polish": [
+    "Reconcile the fork-height/block-count numbers across BRIEF, E1, and E2 in a post-fix errata note.",
+    "After restart, capture the promised verification artifacts (getpeerinfo outbound 100.85.236.10:24113, journal adoption-or-lighter line, four-way parity hash) into the evidence bundle to complete the loop.",
+    "Consider also fixing (or explicitly disabling) the stale sami-pc onion/i2p addnode entries in a follow-up so the addnode set matches reality; the PC onion is confirmed dead in E6.",
+    "Note in the runbook that the PC's ~10-min chronic restart loop (E9) may repeatedly drop its own outbound dial; DNS2's persistent addnode outbound is the durable side of the pairing, which the fix correctly provides."
+  ]
+}

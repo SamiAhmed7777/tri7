@@ -1,0 +1,13 @@
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test smsg_net::tests::scan_buckets_redelivers_relay_messages_to_inbox ... ok
+
+test result: ok. 768 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 98.00s
+
+EXIT=0

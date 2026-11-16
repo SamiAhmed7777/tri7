@@ -1,0 +1,19 @@
+# pristine-run.txt — the shipped fix.diff applied to a pristine clone of pushed HEAD 1075100
+# command: git clone -q /root/tri7 /root/.hermes/cache/scratch/tri7-pristine-30
+#          git -C /root/.hermes/cache/scratch/tri7-pristine-30 checkout -q 1075100
+#          patch -p1 --dry-run < fix.diff && patch -p1 < fix.diff
+#          then per-filter cargo test --lib <name> in the applied tree
+clone HEAD: 1075100
+checking file src/gui/node_supervisor.rs
+patching file src/gui/node_supervisor.rs
+=== applied-tree per-filter runs ===
+--- filter: tor_probe_requires_a_valid_socks5_greeting
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.01s
+--- filter: tor_supervisor_adopts_only_real_socks_system_tor
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.10s
+--- filter: i2p_supervisor_status_transitions_spawn_less
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.00s
+--- filter: i2p_system_adoption_never_claims_a_stale_wallet_destination
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 0.03s
+--- filter: in_process_node_answers_rpc
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 804 filtered out; finished in 3.07s

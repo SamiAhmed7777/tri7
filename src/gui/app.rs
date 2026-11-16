@@ -2126,28 +2126,38 @@ impl eframe::App for Tri7App {
             if self.st.wallet.is_none() && self.st.seed_flow.is_none() {
                 let profile = self.st.cfg.profile_dir.clone();
                 let remembered = crate::gui::app_state::remembered_wallet_path(&profile);
-                let target_exists = Path::new(&self.st.cfg.wallet_path).exists();
-                match remembered {
-                    Some(p) if Path::new(&p).exists() => {
-                        // reopen the remembered wallet silently
+                // precedence lives in resolve_first_run_target: an explicit
+                // --wallet launch target ALWAYS beats the persisted session
+                // (live incident 2026-11-16: the remembered Roaming wallet
+                // silently outranked --wallet E:\Coins\TRI\wallet.dat)
+                match crate::gui::app_state::resolve_first_run_target(
+                    self.st.cfg.wallet_path_explicit,
+                    &self.st.cfg.wallet_path,
+                    remembered,
+                ) {
+                    crate::gui::app_state::FirstRunTarget::Remembered(p) => {
+                        // reopen the remembered wallet silently (no --wallet
+                        // flag on this launch)
                         self.st.cfg.wallet_path = p;
                         if let Err(e) = self.st.load_wallet_action() {
                             self.st.load_error = Some(e);
                         }
                     }
-                    _ if target_exists => {
+                    crate::gui::app_state::FirstRunTarget::Target => {
                         // the --wallet/default path exists: auto-open it
                         if let Err(e) = self.st.load_wallet_action() {
                             self.st.load_error = Some(e);
                         }
                     }
-                    _ => {
+                    crate::gui::app_state::FirstRunTarget::Welcome => {
                         // FIRST OPEN (UX pass 2): a brand-new user used to be
                         // dropped straight into 24 freshly generated words —
                         // someone who came to RESTORE had to guess that the way
                         // out was Cancel. Nothing is generated now: the welcome
                         // menu offers create / restore / open-a-file and the
-                        // user chooses.
+                        // user chooses. (Also: an explicit --wallet whose file
+                        // is missing lands here rather than silently opening
+                        // some other wallet.)
                         self.st.first_run_welcome = true;
                     }
                 }

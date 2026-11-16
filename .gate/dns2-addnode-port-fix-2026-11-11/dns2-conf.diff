@@ -1,0 +1,11 @@
+--- conf-before.conf	2026-11-10 21:33:34.331370627 -0800
++++ conf-after.conf	2026-11-10 21:34:48.802646459 -0800
+@@ -21,7 +21,7 @@
+ #addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112
+ # moved to samihost 2026-09-25 (wallet+onion carried)
+ addnode=100.98.140.83:24112
+-addnode=100.85.236.10:24112
++addnode=100.85.236.10:24113
+ addnode=100.106.76.60:24113
+ addnode=i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112
+ noantispam=1

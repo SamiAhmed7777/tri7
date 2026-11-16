@@ -1,0 +1,1283 @@
+=== cargo test --lib ===
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+
+failures:
+
+---- gui::node_supervisor::tests::tor_live_node_wiring_socks_argv_and_conf stdout ----
+[1794570974] [tor-supervisor] tor: adopted surviving bundled tor — SOCKS 127.0.0.1:58033 (pinned)
+
+thread 'gui::node_supervisor::tests::tor_live_node_wiring_socks_argv_and_conf' (2194027) panicked at src/gui/node_supervisor.rs:2783:9:
+assertion `left == right` failed: tor spawned exactly once
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gui::node_supervisor::tests::tor_live_node_wiring_socks_argv_and_conf
+
+test result: FAILED. 767 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 97.05s
+
+error: test failed, to rerun pass `--lib`
+EXIT_TEST=101
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 05s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 35s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+
+failures:
+
+---- gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness stdout ----
+[1794576209] [tor-supervisor] tor: bundled tor up — SOCKS 127.0.0.1:44011 (torrc /root/.hermes/cache/scratch/tororphx2274430/state/torrc)
+
+thread 'gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness' (2274582) panicked at src/gui/node_supervisor.rs:2499:9:
+assertion `left == right` failed: an unidentified pinned-port resident must never be adopted: Bundled(44011)
+  left: Bundled(44011)
+ right: Unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness
+
+test result: FAILED. 769 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 116.69s
+
+error: test failed, to rerun pass `--lib`
+EXIT_TEST=101
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.40s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 40s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+
+test result: ok. 770 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 115.70s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.73s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 1m 33s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `tri7-core` (lib test) generated 60 warnings
+warning: tri7-core@7.0.3: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.3: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.3:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.3:       |                        ^~~
+warning: tri7-core@7.0.3: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.3: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.3:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.3:       |                        ^~~
+warning: tri7-core@7.0.3: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+error: could not compile `tri7-core` (lib test) due to 2 previous errors; 60 warnings emitted
+EXIT_TEST=101
+=== GUI featureful check ===
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 2 previous errors; 125 warnings emitted
+EXIT_GUI=101
+=== windows-gnu release all bins ===
+warning: tri7-core@7.0.3: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 2 previous errors; 35 warnings emitted
+EXIT_WIN=101
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+
+failures:
+
+---- gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness stdout ----
+[1794578475] [tor-supervisor] tor: bundled tor up — SOCKS 127.0.0.1:36733 (torrc /root/.hermes/cache/scratch/tororphx2307770/state/torrc)
+
+thread 'gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness' (2308007) panicked at src/gui/node_supervisor.rs:2606:9:
+assertion `left == right` failed: an unidentified pinned-port resident must never be adopted: Bundled(36733)
+  left: Bundled(36733)
+ right: Unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gui::node_supervisor::tests::tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness
+
+test result: FAILED. 770 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 122.56s
+
+error: test failed, to rerun pass `--lib`
+EXIT_TEST=101
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 00s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 50s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 771 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 94.80s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.63s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "spend_dryrun") generated 2 warnings (run `cargo fix --bin "spend_dryrun" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 1m 57s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+
+test result: ok. 771 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 148.82s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 44.52s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 5m 34s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[HISTORY MOVED (history in gates-history.log; this file = the FINAL tree single-run record)
+2026-11-13]
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 771 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 87.36s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.76s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 33s
+EXIT_WIN=0
+=== GATES DONE ===
+2026-11-13]
+=== cargo test --lib ===
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+
+test result: ok. 771 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 154.82s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 50.66s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 49s
+EXIT_WIN=0
+=== GATES DONE ===
+2026-11-13]
+=== cargo test --lib ===
+test sweep::tests::roundtrip_through_a_fresh_wallet_file_reproduces_addresses ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+
+test result: ok. 774 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 112.55s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.62s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 41s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[HISTORY (this file = exactly ONE gate run for the final tree; earlier runs live in gates-history.log)
+]
+=== cargo test --lib ===
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 100.54s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.00s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 3m 10s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::seed_tests::key_row_is_exact_legacy_214b_der_shape ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test smsg_net::tests::tampered_identity_rejected_by_decrypt ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 135.20s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.83s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "sig_probe") generated 1 warning (run `cargo fix --bin "sig_probe" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 3m 07s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 124.03s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 50.16s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "sig_probe") generated 1 warning (run `cargo fix --bin "sig_probe" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 27s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test smsg_net::tests::outbox_rows_show_the_recipient_and_decrypt_with_the_sender_key ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 132.52s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.48s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 3m 30s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 108.51s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4249 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.77s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2.87s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test sweep::tests::roundtrip_through_a_fresh_wallet_file_reproduces_addresses ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 775 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 105.71s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4245 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.00s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 4m 38s
+EXIT_WIN=0
+=== GATES DONE ===
+=== cargo test --lib ===
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+
+test result: ok. 789 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 157.49s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 148 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 34.31s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: tri7-core@7.0.3: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+error: could not compile `tri7-core` (lib) due to 3 previous errors; 35 warnings emitted
+EXIT_WIN=101
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test smsg_net::tests::purge_drops_expired_and_keeps_fresh ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+
+test result: ok. 789 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 124.75s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.88s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.32s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test smsg_net::tests::purge_drops_expired_and_keeps_fresh ... ok
+
+test result: ok. 791 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 127.65s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.70s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 3m 15s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+
+test result: ok. 791 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 189.26s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 40.04s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "spend_dryrun") generated 2 warnings (run `cargo fix --bin "spend_dryrun" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 3m 11s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test sweep::tests::roundtrip_through_a_fresh_wallet_file_reproduces_addresses ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+
+test result: ok. 791 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 120.24s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.67s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "sig_probe") generated 1 warning (run `cargo fix --bin "sig_probe" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 23s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::seed_replacement_and_second_seed_are_refused ... ok
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+
+test result: ok. 792 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 111.01s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.00s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "spend_dryrun") generated 2 warnings (run `cargo fix --bin "spend_dryrun" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 42s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test smsg_net::tests::reply_path_b_to_a_uses_learned_pubkey ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet_encrypt::tests::encrypted_wallet_roundtrip_and_strict_refusal ... ok
+
+test result: ok. 793 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 147.51s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 150 warnings (run `cargo fix --lib -p tri7-core` to apply 109 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.32s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "spend_dryrun") generated 2 warnings (run `cargo fix --bin "spend_dryrun" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "tri7_wallet_gui") generated 3 warnings (run `cargo fix --bin "tri7_wallet_gui" -p tri7-core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 21s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet_encrypt::tests::encrypted_wallet_roundtrip_and_strict_refusal ... ok
+
+test result: ok. 794 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 164.93s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.72s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 3m 12s
+EXIT_WIN=0
+=== GATES DONE ===
+
+
+[MOVED ]
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::seed_tests::restore_into_existing_random_key_wallet_preserves_keys ... ok
+test wallet::tests::advance_hdchain_to_is_an_idempotent_raise ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet_encrypt::tests::encrypted_wallet_roundtrip_and_strict_refusal ... ok
+test wallet_encrypt::uncompressed_tests::decrypt_wallet_supports_uncompressed_legacy_keys ... ok
+
+test result: ok. 795 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 128.12s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 149 warnings (run `cargo fix --lib -p tri7-core` to apply 108 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.82s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+
+warning: `tri7-core` (bin "validate_pos") generated 1 warning (run `cargo fix --bin "validate_pos" -p tri7-core` to apply 1 suggestion)
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 23s
+EXIT_WIN=0
+=== GATES DONE ===

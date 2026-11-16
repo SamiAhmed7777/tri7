@@ -3764,6 +3764,56 @@ pub fn remember_last_wallet(profile_dir: &str, wallet_path: &str) {
     let _ = std::fs::write(dir.join("last_wallet.txt"), wallet_path);
 }
 
+/// What the first-run flow should open. Explicit CLI beats the persisted
+/// session — Sami 2026-11-16: "it should actually use the existing wallets
+/// in the locations I give you not the locations you want to move them to".
+/// Precedence:
+///   1. `--wallet` passed and that file exists        -> open the CLI target
+///   2. `--wallet` passed but the file does not exist -> welcome (NEVER
+///      silently open a different wallet than the one named on the command
+///      line — live incident 2026-11-16: `--wallet E:\Coins\TRI\wallet.dat`
+///      launched, the remembered Roaming wallet opened instead, and the
+///      fused node replayed the chain for the wrong key set for days)
+///   3. no flag, remembered wallet exists on disk     -> reopen the remembered
+///   4. no flag, default target exists               -> auto-open it
+///   5. otherwise                                    -> welcome
+#[derive(Debug)]
+pub enum FirstRunTarget {
+    /// open this path (persisted last-wallet session)
+    Remembered(String),
+    /// open cfg.wallet_path (explicit flag or platform default target)
+    Target,
+    /// nothing to auto-open: show the welcome menu (create / restore / open)
+    Welcome,
+}
+
+pub fn resolve_first_run_target(
+    wallet_path_explicit: bool,
+    wallet_path: &str,
+    remembered: Option<String>,
+) -> FirstRunTarget {
+    let target_exists = Path::new(wallet_path).exists();
+    if wallet_path_explicit {
+        // Sami's rule: the wallet he points the app at IS the wallet that
+        // opens — remembered sessions never outrank an explicit launch flag,
+        // and a missing explicit target is surfaced, not papered over.
+        return if target_exists {
+            FirstRunTarget::Target
+        } else {
+            FirstRunTarget::Welcome
+        };
+    }
+    if let Some(p) = remembered {
+        if Path::new(&p).exists() {
+            return FirstRunTarget::Remembered(p);
+        }
+    }
+    if target_exists {
+        return FirstRunTarget::Target;
+    }
+    FirstRunTarget::Welcome
+}
+
 pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
     let t0 = std::time::Instant::now();
     let mut report = serde_json::Map::new();

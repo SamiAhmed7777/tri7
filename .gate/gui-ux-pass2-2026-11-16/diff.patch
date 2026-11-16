@@ -1,0 +1,1944 @@
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index a99b19a..86d14f9 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -1002,15 +1002,46 @@ impl Tri7App {
+         let mut consumed = false;
+         ui.vertical_centered(|ui| {
+             ui.add_space(24.0);
++            // UX pass 2: a first-run user has never owned a pre-HD wallet, so
++            // the technical HONEST_NOTE (why a phrase cannot be retro-fitted)
++            // is noise to them — they get what the words DO instead. The
++            // technical note still shows when the flow was opened from an
++            // existing wallet, where that question is the live one.
++            let first_run = flow.first_run;
++            let (title, subtitle) = if first_run {
++                (
++                    "Your 24 words",
++                    "This is the backup of your wallet. Read the next screen before you close it.",
++                )
++            } else {
++                (
++                    "24-word wallet",
++                    "A standard backup phrase — the same one the original Triangles wallet uses.",
++                )
++            };
+             ui.add(egui::Label::new(
+-                egui::RichText::new("Seed phrase wallet")
++                egui::RichText::new(title)
+                     .size(22.0)
+                     .strong()
+                     .color(th::TEXT_PRIMARY),
+             ));
+-            th::text_meta(ui, "A standard 24-word backup phrase — compatible with the original Triangles wallet.");
++            th::text_meta(ui, subtitle);
+             ui.add_space(8.0);
+-            th::inline_notice(ui, th::Notice::Info, "Please read", super::seed_flow::HONEST_NOTE);
++            match (first_run, &flow.step) {
++                (true, Step::CreateReveal) | (true, Step::CreateConfirm) => th::inline_notice(
++                    ui,
++                    th::Notice::Warning,
++                    "Before you write them down",
++                    super::seed_flow::FIRST_RUN_NOTE,
++                ),
++                (true, _) => {}
++                (false, _) => th::inline_notice(
++                    ui,
++                    th::Notice::Info,
++                    "Please read",
++                    super::seed_flow::HONEST_NOTE,
++                ),
++            }
+             ui.add_space(10.0);
+         });
+ 
+@@ -1019,10 +1050,16 @@ impl Tri7App {
+                 ui.vertical_centered(|ui| {
+                     ui.add_space(16.0);
+                     ui.horizontal(|ui| {
+-                        if th::primary_button(ui, "Create new wallet (24 words)").clicked() {
++                        let lang = self.st.options.language;
++                        if th::primary_button(ui, i18n::tr(lang, crate::gui::plain_words::CREATE_WALLET))
++                            .clicked()
++                        {
+                             flow.begin_create();
+                         }
+-                        if ui.button("Restore from seed phrase").clicked() {
++                        if ui
++                            .button(i18n::tr(lang, crate::gui::plain_words::RESTORE_WALLET))
++                            .clicked()
++                        {
+                             flow.begin_restore();
+                         }
+                         if ui.button("Back").clicked() {
+@@ -1150,11 +1187,11 @@ impl Tri7App {
+                     th::inline_notice(
+                         ui,
+                         th::Notice::Info,
+-                        "Restore a wallet from its seed phrase",
+-                        "Paste or type the 12/24 words in order, then the optional \
+-                         passphrase (\"25th word\") if the wallet was created with one. \
+-                         The words must match EXACTLY — including the passphrase — or a \
+-                         different (empty) wallet is derived.",
++                        "Type the words you wrote down",
++                        "Paste or type them in the order you saved them. If you also set a \
++                         passphrase (sometimes called the 25th word), enter it exactly as \
++                         you did before — with a different passphrase you get a different, \
++                         empty wallet.",
+                     );
+                     ui.add_space(8.0);
+                     ui.allocate_ui(Vec2::new(ui.available_width().min(760.0), 150.0), |ui| {
+@@ -1191,9 +1228,9 @@ impl Tri7App {
+                     th::inline_notice(
+                         ui,
+                         th::Notice::Success,
+-                        "Phrase validated",
+-                        "The mnemonic checksum is valid. Choose the wallet file and how \
+-                         many addresses to derive, then write the wallet.",
++                        "The words check out",
++                        "Now choose where this wallet is saved and how many addresses to \
++                         prepare. You can create more at any time later.",
+                     );
+                     ui.add_space(8.0);
+                     ui.horizontal(|ui| {
+@@ -1255,17 +1292,19 @@ impl Tri7App {
+                     th::inline_notice(
+                         ui,
+                         th::Notice::Success,
+-                        "Wallet written and verified",
++                        "Your wallet is ready",
+                         &format!(
+-                            "{} seed-derived addresses written in the exact legacy record \
+-                             format (the original qt wallet reads this file). The seed \
+-                             phrase is now your ONLY backup — keep it safe.",
++                            "{} addresses are ready to use. The 24 words are the only backup — \
++                             anyone who has them can restore this wallet, so keep them safe.",
+                             addresses.len()
+                         ),
+                     );
+                     if !addresses.is_empty() {
+-                        th::text_meta(ui, &format!("first address: {}", addresses[0]));
+-                        th::text_meta(ui, &format!("last address:  {}", addresses[addresses.len() - 1]));
++                        th::text_meta(ui, &format!("First address: {}", addresses[0]));
++                        th::text_meta(
++                            ui,
++                            &format!("Last address:  {}", addresses[addresses.len() - 1]),
++                        );
+                     }
+                     ui.add_space(8.0);
+                     if th::primary_button(ui, "Open this wallet").clicked() {
+@@ -1575,33 +1614,32 @@ impl Tri7App {
+                                     .monospace()
+                                     .color(th::TEXT_PRIMARY));
+                                     ui.end_row();
+-                                    ui.label(egui::RichText::new("Inputs:")
++                                    ui.label(egui::RichText::new("Paid from:")
+                                         .color(th::TEXT_SECONDARY));
+                                     ui.label(egui::RichText::new(format!(
+-                                        "{} UTXOs — no change output, the sweep \
+-                                         consolidates everything",
++                                        "{} separate coin payments — the whole balance moves \
++                                         at once, nothing is left behind",
+                                         plan.inputs.len()
+                                     ))
+                                     .color(th::TEXT_PRIMARY));
+                                     ui.end_row();
+-                                    ui.label(egui::RichText::new("Keys written:")
++                                    ui.label(egui::RichText::new("Addresses prepared:")
+                                         .color(th::TEXT_SECONDARY));
+                                     ui.label(egui::RichText::new(format!(
+-                                        "{} new + {} already in wallet.dat (seed row set, \
+-                                         hdchain at {})",
++                                        "{} new + {} already in this wallet ({} ready to use)",
+                                         plan.keys_inserted,
+                                         plan.keys_already_present,
+                                         flow.addresses.len()
+                                     ))
+                                     .color(th::TEXT_PRIMARY));
+                                     ui.end_row();
+-                                    ui.label(egui::RichText::new("TxID:")
++                                    ui.label(egui::RichText::new("Payment ID:")
+                                         .color(th::TEXT_SECONDARY));
+                                     ui.horizontal(|ui| {
+                                         ui.label(egui::RichText::new(&plan.txid_display)
+                                             .monospace()
+                                             .color(th::TEXT_PRIMARY));
+-                                        if th::ghost_button(ui, "Copy TxID").clicked() {
++                                        if th::ghost_button(ui, "Copy payment ID").clicked() {
+                                             ui.output_mut(|o| {
+                                                 o.copied_text = plan.txid_display.clone()
+                                             });
+@@ -1614,7 +1652,7 @@ impl Tri7App {
+                             let w = ui.available_width();
+                             let cols = [
+                                 th::TableCol::new("#", 30.0, false),
+-                                th::TableCol::new("Seed-derived address", w - 30.0 - 170.0, false),
++                                th::TableCol::new("Your address", w - 30.0 - 170.0, false),
+                                 th::TableCol::new("Amount", 170.0, true),
+                             ];
+                             th::table_header(ui, &cols, w);
+@@ -1633,7 +1671,7 @@ impl Tri7App {
+                             // inputs, collapsed by default
+                             let inputs = plan.inputs.clone();
+                             egui::CollapsingHeader::new(format!(
+-                                "Inputs swept ({})",
++                                "Coins moved ({})",
+                                 inputs.len()
+                             ))
+                             .default_open(false)
+@@ -1663,7 +1701,7 @@ impl Tri7App {
+                                 }
+                             });
+                             let raw = plan.tx_hex.clone();
+-                            egui::CollapsingHeader::new("Raw signed transaction")
++                            egui::CollapsingHeader::new("The payment as raw data (for support)")
+                                 .default_open(false)
+                                 .show(ui, |ui| {
+                                     ui.add(egui::Label::new(
+@@ -1673,7 +1711,7 @@ impl Tri7App {
+                                             .color(th::TEXT_SECONDARY),
+                                     )
+                                     .wrap());
+-                                    if th::ghost_button(ui, "Copy hex to clipboard").clicked() {
++                                    if th::ghost_button(ui, "Copy the raw data").clicked() {
+                                         ui.output_mut(|o| o.copied_text = raw.clone());
+                                     }
+                                 });
+@@ -1715,7 +1753,7 @@ impl Tri7App {
+                         }
+                         if let Some(e) = &flow.error {
+                             ui.add_space(4.0);
+-                            th::inline_notice(ui, th::Notice::Error, "Broadcast failed", e);
++                            th::inline_notice(ui, th::Notice::Error, "The network did not take it", e);
+                         }
+                     });
+                 }
+@@ -2104,17 +2142,13 @@ impl eframe::App for Tri7App {
+                         }
+                     }
+                     _ => {
+-                        // FIRST OPEN: auto-begin wallet generation (24 words
+-                        // revealed on the seed screen; confirm -> created)
+-                        let target = self.st.cfg.wallet_path.clone();
+-                        self.st.seed_flow =
+-                            Some(crate::gui::seed_flow::SeedFlow::new(target));
+-                        if let Some(f) = &mut self.st.seed_flow {
+-                            f.begin_create();
+-                            // UX audit (H2): mark the auto-begin so the reveal
+-                            // screen points a restoring user to Restore.
+-                            f.auto_began = true;
+-                        }
++                        // FIRST OPEN (UX pass 2): a brand-new user used to be
++                        // dropped straight into 24 freshly generated words —
++                        // someone who came to RESTORE had to guess that the way
++                        // out was Cancel. Nothing is generated now: the welcome
++                        // menu offers create / restore / open-a-file and the
++                        // user chooses.
++                        self.st.first_run_welcome = true;
+                     }
+                 }
+             }
+@@ -2155,6 +2189,81 @@ impl Tri7App {
+         self.st.daemon_sync_display()
+     }
+ 
++    // -----------------------------------------------------------------------
++    // First-run welcome (UX pass 2) — the three doors
++    //
++    // Shown INSTEAD of the load screen while a first run is pending: no wallet
++    // is loaded, nothing was remembered, and no seed flow has started yet.
++    // The copy lives in plain_words so `cargo test --lib gui::` can assert it;
++    // this function is only the layout.
++    // -----------------------------------------------------------------------
++    fn first_run_screen(&mut self, ui: &mut egui::Ui) {
++        use crate::gui::plain_words as pw;
++        let lang = self.st.options.language;
++        let doors = pw::first_run_entry_points();
++        let footer = pw::welcome_footer(&self.st.cfg.wallet_path);
++        ui.vertical_centered(|ui| {
++            ui.add_space(40.0);
++            if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
++                ui.add(img(&tex, Vec2::new(371.0, 78.0))); // 1199x252 aspect-true
++            }
++            ui.add_space(16.0);
++            ui.add(egui::Label::new(
++                egui::RichText::new(i18n::tr(lang, pw::WELCOME_TITLE))
++                    .size(25.0)
++                    .strong()
++                    .color(th::TEXT_PRIMARY),
++            ));
++            ui.add_space(6.0);
++            ui.vertical(|ui| {
++                ui.set_max_width(640.0);
++                ui.add(
++                    egui::Label::new(
++                        egui::RichText::new(i18n::tr(lang, pw::WELCOME_BODY))
++                            .size(13.0)
++                            .color(th::TEXT_SECONDARY),
++                    )
++                    .wrap(),
++                );
++            });
++            ui.add_space(20.0);
++            ui.vertical(|ui| {
++                ui.set_max_width(560.0);
++                // 1. create — the common case, primary
++                if th::primary_button(ui, i18n::tr(lang, doors[0].label)).clicked() {
++                    self.st.first_run_welcome = false;
++                    let mut flow = crate::gui::seed_flow::SeedFlow::new(
++                        self.st.cfg.wallet_path.clone(),
++                    );
++                    flow.first_run = true;
++                    flow.begin_create();
++                    self.st.seed_flow = Some(flow);
++                }
++                th::text_meta(ui, i18n::tr(lang, doors[0].hint));
++                ui.add_space(10.0);
++                // 2. restore
++                if th::secondary_button(ui, i18n::tr(lang, doors[1].label)).clicked() {
++                    self.st.first_run_welcome = false;
++                    let mut flow = crate::gui::seed_flow::SeedFlow::new(
++                        self.st.cfg.wallet_path.clone(),
++                    );
++                    flow.first_run = true;
++                    flow.begin_restore();
++                    self.st.seed_flow = Some(flow);
++                }
++                th::text_meta(ui, i18n::tr(lang, doors[1].hint));
++                ui.add_space(10.0);
++                // 3. open an existing file — the classical load screen
++                if th::secondary_button(ui, i18n::tr(lang, doors[2].label)).clicked() {
++                    self.st.first_run_welcome = false;
++                }
++                th::text_meta(ui, i18n::tr(lang, doors[2].hint));
++            });
++            ui.add_space(18.0);
++            th::text_micro(ui, &footer);
++        });
++    }
++
+     fn load_screen(&mut self, ui: &mut egui::Ui) {
+         // UX (encrypted-wallet support): an mkey/ckey store parks here for its
+         // passphrase — the prompt replaces the normal load options.
+@@ -2210,6 +2319,16 @@ impl Tri7App {
+             });
+             return;
+         }
++        // UX pass 2 — FIRST RUN: whoever has no wallet yet picks a door on the
++        // welcome menu first (welcome_visible owns the rule; it is unit-tested).
++        if crate::gui::plain_words::welcome_visible(
++            self.st.first_run_welcome,
++            self.st.loaded(),
++            self.st.seed_flow.is_some(),
++        ) {
++            self.first_run_screen(ui);
++            return;
++        }
+         ui.vertical_centered(|ui| {
+             ui.add_space(48.0);
+             if let Some(tex) = self.tex(ui.ctx(), "brand/header") {
+@@ -2226,7 +2345,7 @@ impl Tri7App {
+             );
+             th::text_meta(
+                 ui,
+-                "Your wallet opens with full access — receive and send. Sending connects through the Triangles network.",
++                "Open a wallet file you already have. New to Triangles? Use the 24-word option below.",
+             );
+             ui.add_space(16.0);
+             ui.horizontal(|ui| {
+@@ -2253,7 +2372,7 @@ impl Tri7App {
+                     .color(th::TEXT_SECONDARY),
+             );
+             ui.add_space(8.0);
+-            if th::primary_button(ui, "Open Wallet").clicked() {
++            if th::primary_button(ui, "Open this wallet").clicked() {
+                 if let Err(e) = self.st.load_wallet_action() {
+                     self.st.load_error = Some(e);
+                 } else {
+@@ -2262,17 +2381,23 @@ impl Tri7App {
+             }
+             if let Some(e) = &self.st.load_error {
+                 ui.add_space(4.0);
+-                th::inline_notice(ui, th::Notice::Error, "Could not open wallet", e);
++                th::inline_notice(
++                    ui,
++                    th::Notice::Error,
++                    "That wallet file did not open",
++                    &format!("{e}. Check the path, or pick the file again."),
++                );
+             }
+             ui.add_space(18.0);
+             ui.separator();
+             ui.add_space(6.0);
+             th::text_meta(
+                 ui,
+-                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
++                "No wallet file yet? A wallet backed up by 24 words can be started \
++                 right here — a new one, or one you made earlier.",
+             );
+             ui.add_space(4.0);
+-            if th::primary_button(ui, "Seed phrase wallet…").clicked() {
++            if th::primary_button(ui, "Create or restore from 24 words…").clicked() {
+                 let default_path = if self.st.cfg.wallet_path.trim().is_empty() {
+                     "seed_wallet.dat".to_string()
+                 } else {
+@@ -2284,44 +2409,14 @@ impl Tri7App {
+                 self.st.seed_flow =
+                     Some(crate::gui::seed_flow::SeedFlow::new(default_path));
+             }
+-            ui.add_space(4.0);
+-            th::text_meta(
+-                ui,
+-                "Seed migration — give ANY existing wallet a seed phrase: its balance is \
+-                 swept in one transaction to the phrase's own addresses",
+-            );
+-            ui.add_space(4.0);
+-            let migrated = self
+-                .st
+-                .wallet
+-                .as_ref()
+-                .map(|w| w.seed_migrated)
+-                .unwrap_or(false);
+-            if migrated {
+-                th::inline_notice(
+-                    ui,
+-                    th::Notice::Success,
+-                    "This wallet already has a seed phrase",
+-                    "Seed migration already ran: the balance lives on the phrase's own \
+-                     derived addresses. Another phrase is disabled to prevent a \
+-                     double-sweep.",
+-                );
+-            } else if th::secondary_button(ui, "Add seed phrase to this wallet (sweep migration)…")
+-                .clicked()
+-            {
+-                if let Err(e) = self.st.begin_seed_migration_action() {
+-                    self.st.load_error = Some(e);
+-                }
+-            }
+-            ui.add_space(4.0);
+-            th::text_meta(
+-                ui,
+-                "Create a new wallet with a 24-word backup phrase, or restore an existing one.",
+-            );
++            // UX pass 2: the seed-migration entry used to sit here too. This
++            // screen only renders when NO wallet is loaded, so "this wallet's
++            // balance" never existed and the button could only fail — the flow
++            // lives on Receive, where a loaded wallet can actually sweep.
+             ui.add_space(6.0);
+             th::text_meta(
+                 ui,
+-                "Balances appear after the wallet opens. Your wallet file lives in the Triangles data folder.",
++                "Nothing is sent anywhere until a wallet is open. Balances appear once it opens.",
+             );
+         });
+     }
+@@ -2395,9 +2490,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+             .and_then(|d| d.daemon_balance_sats);
+         th::card_titled(ui, "Wallet", |ui| {
+             let Some(derived) = st.derived.clone() else {
+-                th::empty_state(ui, None, "No wallet loaded", "Open a wallet to see balances");
++                th::empty_state(ui, None, "No wallet open yet", "Open or create one to see balances");
+                 return;
+             };
++            // UX pass 2: an empty wallet used to show five zero rows and
++            // nothing else — true, and useless. Say what "no coins" means and
++            // where coins come from. The rule is plain_words' (unit-tested).
++            let (_sp0, _stake0, _unc0, _imm0, total0, _tip0) = st.balance_split();
++            if let Some((title, body)) = crate::gui::plain_words::empty_balance_notice(true, total0) {
++                th::inline_notice(
++                    ui,
++                    th::Notice::Info,
++                    i18n::tr(lang, title),
++                    i18n::tr(lang, body),
++                );
++                ui.add_space(8.0);
++            }
+             // daemon height wins: the local tipstate file is optional in the
+             // one-folder design, and a missing one used to make tip 0, which
+             // made EVERY coin depth 0 -> the whole balance "Unconfirmed"
+@@ -2756,10 +2864,12 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+     // §10.2 Send Coins — Details → Review signed transaction → Broadcast
+     // -----------------------------------------------------------------------
+     fn send_step_rail(&mut self, ui: &mut egui::Ui, step: SendStep) {
++        // UX pass 2: the rail is the user's map — it says what THEY do at each
++        // stop, not what the code does (sign / broadcast are our verbs).
+         let steps = [
+-            (SendStep::Details, "1", "Details"),
+-            (SendStep::Review, "2", "Review signed transaction"),
+-            (SendStep::Broadcast, "3", "Broadcast"),
++            (SendStep::Details, "1", "Who and how much"),
++            (SendStep::Review, "2", "Check it over"),
++            (SendStep::Broadcast, "3", "Sent"),
+         ];
+         ui.horizontal(|ui| {
+             for (i, (st_, num, label)) in steps.iter().enumerate() {
+@@ -2803,7 +2913,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+         th::page_header(
+             ui,
+             i18n::tr(lang, "Send Coins"),
+-            "Create, review, sign, and broadcast a Triangles transaction",
++            "Choose who to pay and how much. Nothing reaches the network until you send.",
+         );
+         let step = match (&self.st.send_result, &self.st.broadcast.result, self.send_step) {
+             (_, Some(_), _) if self.send_step == SendStep::Broadcast => SendStep::Broadcast,
+@@ -2813,9 +2923,21 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+         };
+         self.send_step_rail(ui, step);
+         ui.add_space(8.0);
++        // UX pass 2 — a loaded wallet with no coins: the form can only fail,
++        // so say why and point at the page that fixes it (this screen only
++        // renders for a LOADED wallet, so "empty" really means empty).
++        if self.st.funded_addresses().is_empty() {
++            th::inline_notice(
++                ui,
++                th::Notice::Info,
++                i18n::tr(lang, crate::gui::plain_words::NO_COINS_TITLE),
++                i18n::tr(lang, crate::gui::plain_words::NO_COINS_SEND),
++            );
++            ui.add_space(8.0);
++        }
+ 
+         // ---- Details card ----
+-        th::card_titled(ui, "Details", |ui| {
++        th::card_titled(ui, "The payment", |ui| {
+             let st = &mut self.st;
+             egui::Grid::new("send_grid")
+                 .num_columns(2)
+@@ -2827,7 +2949,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     let funded = st.funded_addresses();
+                     let from = &mut st.send.from;
+                     let sel = if from.is_empty() {
+-                        "select a funded address".to_string()
++                        "choose an address with coins".to_string()
+                     } else {
+                         format!(
+                             "{} — {} {}",
+@@ -2855,7 +2977,8 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                             }
+                         });
+                     from_resp.response.on_hover_text(
+-                        "Full-width funded-address combo — available balance shown right",
++                        "Coins arrive at addresses. Pick the address that holds enough for this \
++                         payment — each one shows what it can spend.",
+                     );
+                     let avail_bal = funded
+                         .iter()
+@@ -2864,7 +2987,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     if let Some(av) = avail_bal {
+                         ui.label(
+                             egui::RichText::new(format!(
+-                                "available: {} {}",
++                                "you have {} {} here",
+                                 s::format_tri(av),
+                                 s::TICKER
+                             ))
+@@ -2876,9 +2999,15 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     }
+                     ui.end_row();
+ 
+-                    ui.label(egui::RichText::new("Pay to:").color(th::TEXT_SECONDARY));
++                    ui.label(
++                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::SEND_TO))
++                            .color(th::TEXT_SECONDARY),
++                    );
+                     ui.horizontal(|ui| {
+                         th::text_input(ui, 480.0, &mut st.send.dest);
++                        // the picker stays adjacent: pasting an address is the
++                        // common path, the book is the convenience
++
+                         // address-book picker (view-only; fills the dest field)
+                         let book: Vec<String> = st
+                             .all_book_rows()
+@@ -2902,22 +3031,29 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     });
+                     ui.end_row();
+ 
+-                    ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
++                    ui.label(
++                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::HOW_MUCH))
++                            .color(th::TEXT_SECONDARY),
++                    );
+                     ui.horizontal(|ui| {
+                         th::text_input(ui, 180.0, &mut st.send.amount);
+                         ui.label(
+-                            egui::RichText::new(format!("{} (6 decimals)", s::TICKER))
+-                                .color(th::TEXT_MUTED),
+-                        );
++                            egui::RichText::new(s::TICKER).color(th::TEXT_SECONDARY),
++                        )
++                        .on_hover_text(i18n::tr(lang, crate::gui::plain_words::AMOUNT_HINT));
+                     });
+                     ui.end_row();
++                    ui.label("");
++                    th::text_meta(ui, i18n::tr(lang, crate::gui::plain_words::AMOUNT_HINT));
++                    ui.end_row();
+ 
+-                    ui.label(egui::RichText::new("Label:").color(th::TEXT_SECONDARY));
++                    ui.label(egui::RichText::new("Note to yourself:").color(th::TEXT_SECONDARY));
+                     th::disabled_input(
+                         ui,
+                         480.0,
+                         "—",
+-                        "Recipient labels are not stored by this build yet",
++                        "A note on a payment is not saved yet. To keep a name with an address, \
++                         add it in the Address Book.",
+                     );
+                     ui.end_row();
+                 });
+@@ -2929,11 +3065,13 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         egui::Button::new(egui::RichText::new("Add recipient")),
+                     );
+                 resp.on_disabled_hover_text(
+-                    "Multi-recipient sends are not supported by this build yet",
++                    "Sending to several addresses at once is not available yet — send one at a \
++                     time.",
+                 );
+             });
+-            // Fee + custom change under an Advanced disclosure
+-            egui::CollapsingHeader::new("Advanced")
++            // Fee + custom change under an "optional" disclosure (UX pass 2:
++            // most people never open it, so the heading says so).
++            egui::CollapsingHeader::new("Fee and change — optional")
+                 .default_open(false)
+                 .show(ui, |ui| {
+                     let st = &mut self.st;
+@@ -2942,56 +3080,74 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         .spacing([12.0, 12.0])
+                         .show(ui, |ui| {
+                             ui.label(
+-                                egui::RichText::new("Fee (optional floor):")
+-                                    .color(th::TEXT_SECONDARY),
+-                            );
++                                egui::RichText::new(i18n::tr(
++                                    lang,
++                                    crate::gui::plain_words::NETWORK_FEE,
++                                ))
++                                .color(th::TEXT_SECONDARY),
++                            )
++                            .on_hover_text(i18n::tr(
++                                lang,
++                                crate::gui::plain_words::FEE_HINT,
++                            ));
+                             ui.horizontal(|ui| {
+                                 th::text_input(ui, 180.0, &mut st.send.fee);
+                             });
+                             ui.end_row();
++                            ui.label("");
++                            th::text_meta(ui, i18n::tr(lang, crate::gui::plain_words::FEE_HINT));
++                            ui.end_row();
+                             // Live estimate: the SAME function the builder
+                             // charges with, the node's live fee setting, and the
+                             // shape this form actually implies (selected inputs
+-                            // or the coins the selector would need).
++                            // or the coins the selector would need). One
++                            // sentence, no "inputs" — plain_words owns it.
+                             ui.label(
+-                                egui::RichText::new("Estimated network fee:")
++                                egui::RichText::new("What this send will cost:")
+                                     .color(th::TEXT_SECONDARY),
++                            )
++                            .on_hover_text(
++                                "The fee is paid to the network, not to anyone in particular. It is \
++                                 what makes the payment travel.",
+                             );
+                             let setting = st.live_paytxfee_sats();
+-                            let setting_txt = format!(
+-                                "{} {} (the network's standard fee)",
+-                                s::format_tri(setting),
+-                                s::TICKER
+-                            );
+                             match st.send_fee_estimate_sats() {
+                                 Some(est) => {
+                                     let n_in = st.send_estimate_inputs().unwrap_or(0);
+                                     ui.label(
+-                                        egui::RichText::new(format!(
+-                                            "{} {}  ({} input{}, {})",
+-                                            s::format_tri(est),
+-                                            s::TICKER,
+-                                            n_in,
+-                                            if n_in == 1 { "" } else { "s" },
+-                                            setting_txt
+-                                        ))
++                                        egui::RichText::new(
++                                            crate::gui::plain_words::fee_cost_line(
++                                                est, setting, n_in,
++                                            ),
++                                        )
+                                         .color(th::TEXT_MUTED),
+                                     );
+                                 }
+                                 None => {
+                                     let why = st
+                                         .send_plan_error()
+-                                        .unwrap_or_else(|| "enter an amount".into());
++                                        .unwrap_or_else(|| "enter an amount first".into());
+                                     ui.label(
+-                                        egui::RichText::new(format!("{}  ({})", why, setting_txt))
+-                                            .color(th::TEXT_MUTED),
++                                        egui::RichText::new(format!(
++                                            "Not worked out yet — {}. The network's standard fee \
++                                             is {} {}.",
++                                            why,
++                                            s::format_tri(setting),
++                                            s::TICKER
++                                        ))
++                                        .color(th::TEXT_MUTED),
+                                     );
+                                 }
+                             }
+                             ui.end_row();
+-                            ui.label(egui::RichText::new("Change:").color(th::TEXT_SECONDARY));
++                            ui.label(
++                                egui::RichText::new("Your change:").color(th::TEXT_SECONDARY),
++                            );
+                             ui.horizontal(|ui| {
+-                                ui.checkbox(&mut st.send.use_custom_change, "custom change address");
++                                ui.checkbox(
++                                    &mut st.send.use_custom_change,
++                                    "send the change to a different address",
++                                );
+                                 if st.send.use_custom_change {
+                                     th::text_input(ui, 300.0, &mut st.send.custom_change);
+                                 }
+@@ -3013,15 +3169,24 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                 ui.add(img(&tex, Vec2::splat(16.0)));
+             }
+             ui.label(
+-                egui::RichText::new("Signing happens locally. Broadcasting uses your connected tri7d.")
+-                    .size(12.0)
+-                    .color(th::TEXT_SECONDARY),
++                egui::RichText::new(i18n::tr(
++                    lang,
++                    crate::gui::plain_words::LOCAL_SIGNING_LINE,
++                ))
++                .size(12.0)
++                .color(th::TEXT_SECONDARY),
+             )
+             .on_hover_text(
+-                "Your transaction is signed on this computer, then sent through your own node to the network.",
++                "Technically: the payment is signed with your keys on this computer, then handed \
++                 to your own tri7d node, which passes it to the other nodes.",
+             );
+             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+-                if th::primary_button_large(ui, "Review & sign").clicked() {
++                if th::primary_button_large(
++                    ui,
++                    i18n::tr(lang, crate::gui::plain_words::REVIEW_SEND),
++                )
++                .clicked()
++                {
+                     self.st.build_send_action(now_u32());
+                     self.send_step = SendStep::Review;
+                 }
+@@ -3037,7 +3202,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+             self.send_review(ui, step, &b);
+         } else if let Some(Err(e)) = &self.st.send_result {
+             ui.add_space(8.0);
+-            th::inline_notice(ui, th::Notice::Error, "Could not build transaction", e);
++            th::inline_notice(ui, th::Notice::Error, "That payment is not ready yet", e);
+         }
+     }
+ 
+@@ -3157,18 +3322,22 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+     fn send_review(&mut self, ui: &mut egui::Ui, step: SendStep, b: &s::SendBuild) {
+         let busy = self.st.broadcast.busy;
+         ui.add_space(12.0);
+-        th::card_titled(ui, "Review signed transaction", |ui| {
++        let lang = self.st.options.language;
++        th::card_titled(ui, "Check it over before it goes", |ui| {
+             let st = &mut self.st;
+             egui::Grid::new("review_grid")
+                 .num_columns(2)
+                 .spacing([12.0, 6.0])
+                 .show(ui, |ui| {
+-                    ui.label(egui::RichText::new("Pay to:").color(th::TEXT_SECONDARY));
++                    ui.label(
++                        egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::SEND_TO))
++                            .color(th::TEXT_SECONDARY),
++                    );
+                     ui.label(
+                         egui::RichText::new(&st.send.dest).monospace().color(th::TEXT_PRIMARY),
+                     );
+                     ui.end_row();
+-                    ui.label(egui::RichText::new("Amount:").color(th::TEXT_SECONDARY));
++                    ui.label(egui::RichText::new("They receive:").color(th::TEXT_SECONDARY));
+                     ui.label(
+                         egui::RichText::new(format!(
+                             "{} {} (fee {} {})",
+@@ -3181,7 +3350,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         .color(th::TEXT_PRIMARY),
+                     );
+                     ui.end_row();
+-                    ui.label(egui::RichText::new("Change:").color(th::TEXT_SECONDARY));
++                    ui.label(
++                        egui::RichText::new("Change back to you:").color(th::TEXT_SECONDARY),
++                    );
+                     ui.label(
+                         egui::RichText::new(format!(
+                             "{} {}",
+@@ -3192,11 +3363,14 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         .color(th::TEXT_PRIMARY),
+                     );
+                     ui.end_row();
+-                    ui.label(egui::RichText::new("Inputs:").color(th::TEXT_SECONDARY));
++                    ui.label(egui::RichText::new("Paid from:").color(th::TEXT_SECONDARY));
+                     ui.label(
+-                        egui::RichText::new(format!("{}", b.inputs.len()))
+-                            .monospace()
+-                            .color(th::TEXT_PRIMARY),
++                        egui::RichText::new(format!(
++                            "{} of your addresses",
++                            b.inputs.len()
++                        ))
++                        .monospace()
++                        .color(th::TEXT_PRIMARY),
+                     );
+                     ui.end_row();
+                     ui.label(egui::RichText::new("Size:").color(th::TEXT_SECONDARY));
+@@ -3204,23 +3378,27 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         egui::RichText::new(format!("{} bytes", b.n_bytes))
+                             .monospace()
+                             .color(th::TEXT_PRIMARY),
++                    )
++                    .on_hover_text(
++                        "How much space the payment takes on the network — the fee is charged by \
++                         size.",
+                     );
+                     ui.end_row();
+-                    ui.label(egui::RichText::new("TxID:").color(th::TEXT_SECONDARY));
++                    ui.label(egui::RichText::new("Payment ID:").color(th::TEXT_SECONDARY));
+                     ui.horizontal(|ui| {
+                         ui.label(
+                             egui::RichText::new(&b.txid_display)
+                                 .monospace()
+                                 .color(th::TEXT_PRIMARY),
+                         );
+-                        if th::ghost_button(ui, "Copy TxID").clicked() {
++                        if th::ghost_button(ui, "Copy payment ID").clicked() {
+                             ui.output_mut(|o| o.copied_text = b.txid_display.clone());
+                         }
+                     });
+                     ui.end_row();
+                 });
+             let raw = b.tx_hex.clone();
+-            egui::CollapsingHeader::new("Raw signed transaction")
++            egui::CollapsingHeader::new("The payment as raw data (for support)")
+                 .default_open(false)
+                 .show(ui, |ui| {
+                     ui.add(
+@@ -3229,7 +3407,7 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         )
+                         .wrap(),
+                     );
+-                    if th::ghost_button(ui, "Copy hex to clipboard").clicked() {
++                    if th::ghost_button(ui, "Copy the raw data").clicked() {
+                         ui.output_mut(|o| o.copied_text = raw.clone());
+                     }
+                 });
+@@ -3243,9 +3421,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     ui,
+                     300.0,
+                     &mut st.dialogs.save_tx_path,
+-                    Some("path to save signed tx"),
++                    Some("folder and file to save the payment in"),
+                 );
+-                if th::secondary_button(ui, "Save signed transaction").clicked()
++                if th::secondary_button(ui, "Save to a file").clicked()
+                     && !st.dialogs.save_tx_path.is_empty()
+                 {
+                     let p = st.dialogs.save_tx_path.clone();
+@@ -3267,9 +3445,9 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                         ui,
+                         !busy && !already_broadcast,
+                         if already_broadcast {
+-                            "Broadcasted ✓"
++                            "Sent ✓"
+                         } else {
+-                            "Broadcast transaction"
++                            i18n::tr(lang, crate::gui::plain_words::SEND_NOW)
+                         },
+                     )
+                     .clicked();
+@@ -3280,9 +3458,12 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+                     if busy {
+                         ui.spinner();
+                         ui.label(
+-                            egui::RichText::new("Broadcasting… — click once; the window may pause for a few seconds while the network confirms. Don't close the app.")
+-                                .size(12.0)
+-                                .color(th::TEXT_SECONDARY),
++                            egui::RichText::new(
++                                "Sending… — click once. The window may stop responding for a few \
++                                 seconds while the network takes the payment; don't close the app.",
++                            )
++                            .size(12.0)
++                            .color(th::TEXT_SECONDARY),
+                         );
+                     }
+                 });
+@@ -3290,12 +3471,17 @@ fn page_overview(&mut self, ui: &mut egui::Ui) {
+             match &st.broadcast.result {
+                 Some(Ok(msg)) => {
+                     ui.add_space(4.0);
+-                    th::inline_notice(ui, th::Notice::Success, "Sent to the network", msg);
++                    th::inline_notice(ui, th::Notice::Success, "On its way", msg);
+                 }
+                 Some(Err(e)) => {
+                     ui.add_space(4.0);
+                     // signed transaction is preserved; retry allowed
+-                    th::inline_notice(ui, th::Notice::Error, "Broadcast failed", e);
++                    th::inline_notice(ui, th::Notice::Error, "The network did not take it", e);
++                    th::text_meta(
++                        ui,
++                        "The payment is still here, signed and unchanged — you can send it \
++                         again without losing anything.",
++                    );
+                 }
+                 None => {}
+             }
+@@ -3363,11 +3549,14 @@ impl Tri7App {
+         th::page_header(
+             ui,
+             i18n::tr(lang, "Receive Coins"),
+-            "Manage receiving addresses and create payment requests",
++            "Share an address to get paid. Each one has its own QR code.",
+         );
+-        // HD seed status strip: what this wallet's keys derive from (or the
+-        // honest no-seed note for pre-HD random-key wallets) + the seed
+-        // migration state and its entry point.
++        // Backup status strip (UX pass 2): what backs this wallet up, in words
++        // that answer "what happens if this computer dies". The derivation path
++        // is still on screen — as a parenthetical at the END, for whoever wants
++        // it, instead of leading with "m/44'/2222'/0'/0/7".
++        use crate::gui::plain_words as pw;
++        let lang = self.st.options.language;
+         let migrated = self
+             .st
+             .wallet
+@@ -3378,10 +3567,11 @@ impl Tri7App {
+             th::inline_notice(
+                 ui,
+                 th::Notice::Success,
+-                "Seed migration complete",
+-                "The balance is on seed-derived addresses (m/44'/2222'/0'/0/i) and the \
+-                 'seedmigrated' marker refuses a second sweep. The old random keys remain \
+-                 in wallet.dat — harmless, now empty. The seed phrase is the backup.",
++                "Your 24 words back this wallet up",
++                "The whole balance sits on addresses created from them. That is why the one-time \
++                 move to seed addresses cannot run again — there is nothing left to move. The \
++                 wallet's original random keys are still in the file; they are empty and \
++                 harmless.",
+             );
+             ui.add_space(4.0);
+         } else {
+@@ -3390,21 +3580,35 @@ impl Tri7App {
+                 self.st.wallet.as_ref().map(|w| w.hd_chain_index).unwrap_or(0),
+             ) {
+                 (Some(_), next) => Some(format!(
+-                    "Seed-derived wallet — new addresses derive at m/44'/2222'/0'/0/{} from the stored phrase (passphrase: {}); any coins still on the old random keys can be swept to the seed addresses below.",
++                    "{} Any coins still on this wallet's original random keys can be moved to \
++                     these addresses below. (Technical detail: addresses derive from the words \
++                     at m/44'/2222'/0'/0/{}{}.)",
++                    i18n::tr(lang, pw::SEED_BACKUP_LINE),
+                     next,
+-                    self.st
++                    if self
++                        .st
+                         .wallet
+                         .as_ref()
+-                        .map(|w| if w.hd_passphrase.is_some() { "set" } else { "none" })
+-                        .unwrap_or("none")
++                        .map(|w| w.hd_passphrase.is_some())
++                        .unwrap_or(false)
++                    {
++                        "; a passphrase is set"
++                    } else {
++                        ""
++                    }
+                 )),
+                 (None, _) if self.st.loaded() => None,
+                 _ => None,
+             };
+             if let Some(line) = hd_line {
+-                th::inline_notice(ui, th::Notice::Info, "HD wallet", &line);
++                th::inline_notice(
++                    ui,
++                    th::Notice::Info,
++                    i18n::tr(lang, "Backed up by your 24 words"),
++                    &line,
++                );
+                 ui.add_space(4.0);
+-                if th::secondary_button(ui, "Sweep remaining balance to the seed addresses…")
++                if th::secondary_button(ui, "Move the rest of my coins to these addresses…")
+                     .clicked()
+                 {
+                     if let Err(e) = self.st.begin_seed_migration_action() {
+@@ -3416,28 +3620,15 @@ impl Tri7App {
+                 th::inline_notice(
+                     ui,
+                     th::Notice::Info,
+-                    "Backup",
+-                    "This wallet uses individual backup keys - back it up by copying \
+-                     wallet.dat itself. Or give it a seed phrase: one sweep transaction \
+-                     moves the balance to seed-derived addresses.",
++                    i18n::tr(lang, "Backup"),
++                    i18n::tr(lang, pw::FILE_BACKUP_LINE),
+                 );
+                 ui.add_space(4.0);
+-                let migrated = self
+-                    .st
+-                    .wallet
+-                    .as_ref()
+-                    .map(|w| w.seed_migrated)
+-                    .unwrap_or(false);
+-                if migrated {
+-                    th::inline_notice(
+-                        ui,
+-                        th::Notice::Success,
+-                        "This wallet already has a seed phrase",
+-                        "Seed migration already ran: the whole balance now lives on the \
+-                         phrase's own derived addresses (see Receive). Adding another \
+-                         phrase would double-sweep, so it's disabled.",
+-                    );
+-                } else if th::secondary_button(ui, "Add seed phrase (sweep migration)…").clicked() {
++                // A wallet with no phrase cannot also be seed_migrated (that is
++                // the same flag), so the success branch that used to live here
++                // was unreachable — only the entry point remains.
++                if th::secondary_button(ui, "Give this wallet 24 words (one-time move)…").clicked()
++                {
+                     if let Err(e) = self.st.begin_seed_migration_action() {
+                         self.st.status_log.push(format!("seed migration: {}", e));
+                     }
+@@ -3462,15 +3653,18 @@ impl Tri7App {
+     }
+ 
+     fn receive_addresses(&mut self, ui: &mut egui::Ui) {
++        use crate::gui::plain_words as pw;
++        let lang = self.st.options.language;
+         let copy_icon = self.tex(ui.ctx(), "menu_16/copy");
+         th::card(ui, |ui| {
+             // toolbar
+             ui.horizontal(|ui| {
+                 ui.label(
+-                    egui::RichText::new("New address label:").color(th::TEXT_SECONDARY),
++                    egui::RichText::new("Name this address (optional):")
++                        .color(th::TEXT_SECONDARY),
+                 );
+                 th::text_input(ui, 220.0, &mut self.st.receive.new_address_label);
+-                if th::primary_button(ui, "New address").clicked() {
++                if th::primary_button(ui, i18n::tr(lang, pw::NEW_ADDRESS)).clicked() {
+                     let label = self.st.receive.new_address_label.clone();
+                     match self.st.new_address_action(label) {
+                         Ok(addr) => {
+@@ -3483,10 +3677,10 @@ impl Tri7App {
+             });
+             ui.add_space(4.0);
+             ui.horizontal(|ui| {
+-                if th::secondary_button(ui, "Copy Address").clicked() {
++                if th::secondary_button(ui, i18n::tr(lang, pw::COPY_ADDRESS)).clicked() {
+                     ui.output_mut(|o| o.copied_text = self.st.receive.address.clone());
+                 }
+-                if th::ghost_button(ui, "Edit Label").clicked() {
++                if th::ghost_button(ui, "Rename this address").clicked() {
+                     let addr = self.st.receive.address.clone();
+                     let draft = self.st.label_of(&addr).unwrap_or_default().to_string();
+                     self.ab_edit = Some((addr, draft));
+@@ -3501,8 +3695,9 @@ impl Tri7App {
+                 th::inline_notice(
+                     ui,
+                     th::Notice::Info,
+-                    "wallet.dat is not writable this session",
+-                    "new keys go to the GUI keystore (see status log)",
++                    "The wallet file can't be written right now",
++                    "New addresses are kept inside tri7 instead, so they still work — they just \
++                     won't travel with the wallet file. Check the status log for the reason.",
+                 );
+                 ui.add_space(4.0);
+             }
+@@ -3524,7 +3719,7 @@ impl Tri7App {
+             let cols = [
+                 th::TableCol::new("Label", label_w, false),
+                 th::TableCol::new("Address", w - label_w - 110.0, false),
+-                th::TableCol::new("Source", 110.0, false),
++                th::TableCol::new("Stored in", 110.0, false),
+             ];
+             th::table_header(ui, &cols, w);
+             egui::ScrollArea::vertical()
+@@ -3560,20 +3755,25 @@ impl Tri7App {
+     }
+ 
+     fn receive_request(&mut self, ui: &mut egui::Ui) {
++        let lang = self.st.options.language;
+         let qr_tex = self.qr_texture(ui.ctx());
+         let st = &mut self.st;
+-        th::card_titled(ui, "Payment request", |ui| {
++        th::card_titled(ui, "Get paid", |ui| {
+             if st.receive.address.is_empty() {
+                 th::empty_state(
+                     ui,
+                     None,
+-                    "No address selected",
+-                    "Select a receiving address on the left",
++                    "Pick an address first",
++                    "Choose one of your addresses on the left — the QR code and the words around \
++                     it follow the one you pick.",
+                 );
+                 return;
+             }
+             ui.horizontal(|ui| {
+-                ui.label(egui::RichText::new("Address:").color(th::TEXT_SECONDARY));
++                ui.label(
++                    egui::RichText::new(i18n::tr(lang, crate::gui::plain_words::YOUR_ADDRESS))
++                        .color(th::TEXT_SECONDARY),
++                );
+                 ui.label(
+                     egui::RichText::new(&st.receive.address)
+                         .monospace()
+@@ -3615,6 +3815,10 @@ impl Tri7App {
+                         ui.add(img(tex, Vec2::splat(220.0)));
+                     });
+             }
++            th::text_meta(
++                ui,
++                "They can scan this code with a wallet app, or you can send them the text below.",
++            );
+             if !st.receive.uri.is_empty() {
+                 ui.add(
+                     egui::Label::new(
+@@ -3742,7 +3946,7 @@ impl Tri7App {
+             let cols = [
+                 th::TableCol::new("Label", label_w, false),
+                 th::TableCol::new("Address", addr_w, false),
+-                th::TableCol::new("Source", 110.0, false),
++                th::TableCol::new("Stored in", 110.0, false),
+                 th::TableCol::new("Actions", 330.0, true),
+             ];
+             th::table_header(ui, &cols, w);
+@@ -4292,7 +4496,7 @@ impl Tri7App {
+                 });
+             ui.add_space(6.0);
+             ui.horizontal(|ui| {
+-                if th::secondary_button(ui, "Copy TxID").clicked() {
++                if th::secondary_button(ui, "Copy payment ID").clicked() {
+                     ui.output_mut(|o| o.copied_text = txid.clone());
+                 }
+                 if th::secondary_button(ui, "Open in Block Explorer").clicked() {
+@@ -5895,7 +6099,7 @@ impl Tri7App {
+                 ui.label(
+                     egui::RichText::new(&txid).monospace().color(th::TEXT_PRIMARY),
+                 );
+-                if th::ghost_button(ui, "Copy TxID").clicked() {
++                if th::ghost_button(ui, "Copy payment ID").clicked() {
+                     ui.output_mut(|o| o.copied_text = txid.clone());
+                 }
+             });
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index ebf3651..7e1b3fe 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -553,6 +553,10 @@ pub struct AppState {
+     pub encrypted_pending: Option<WalletData>,
+     /// true → the load screen shows the encrypted-wallet passphrase prompt.
+     pub encrypted_prompt: bool,
++    /// UX pass 2 (first run): TRUE until the brand-new user picks a door on
++    /// the welcome menu (create / restore / open an existing file). The load
++    /// screen renders the welcome and returns; every door clears this.
++    pub first_run_welcome: bool,
+     pub tip: Option<TipInfo>,
+     pub stake: Option<StakeStatus>,
+     pub send: SendFormState,
+@@ -722,6 +726,7 @@ impl AppState {
+             derived: None,
+             encrypted_pending: None,
+             encrypted_prompt: false,
++            first_run_welcome: false,
+             encrypted_pass: String::new(),
+             encrypted_error: None,
+             tip: None,
+diff --git a/src/gui/i18n.rs b/src/gui/i18n.rs
+index 0a7509d..763aa0e 100644
+--- a/src/gui/i18n.rs
++++ b/src/gui/i18n.rs
+@@ -199,6 +199,30 @@ pub const SPANISH_TABLE: Table = &[
+     ("Staking off", "Staking desactivado"),
+     ("Unencrypted", "Sin cifrar"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Bienvenido a Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Una cartera guarda tus claves y tus monedas. Crear una tarda alrededor de un minuto: recibes 24 palabras para escribir, y esas palabras son la única forma de recuperar tus monedas si este ordenador se pierde o se rompe."),
++    ("Create a new wallet", "Crear una cartera nueva"),
++    ("Restore a wallet you already have", "Restaurar una cartera que ya tienes"),
++    ("Open a wallet file", "Abrir un archivo de cartera"),
++    ("New to Triangles. You will see 24 words to write down.", "Si es tu primera vez en Triangles verás 24 palabras para escribir."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Tienes las 24 palabras (o 12) de una cartera creada antes."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Tienes un archivo wallet.dat en este ordenador o en una memoria USB."),
++    ("No coins yet", "Aún no hay monedas"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Las monedas que recibas aparecerán aquí. Abre Recibir monedas para obtener una dirección que puedas compartir."),
++    ("Send to:", "Enviar a:"),
++    ("How much:", "¿Cuánto?:"),
++    ("Network fee:", "Comisión de red:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Opcional. Si lo dejas vacío, la cartera paga la comisión estándar de la red."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Hasta 6 decimales — 0,000001 es la cantidad más pequeña."),
++    ("Review before sending", "Revisar antes de enviar"),
++    ("Send now", "Enviar ahora"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Nada sale de este ordenador hasta que pulses Enviar ahora. Tu cartera firma el pago aquí y luego lo entrega a la red."),
++    ("Create a new address", "Crear una dirección nueva"),
++    ("Copy address", "Copiar dirección"),
++    ("Your address to share", "Tu dirección para compartir"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Respaldada por tus 24 palabras. Las direcciones nuevas se crean a partir de ellas automáticamente: guarda bien las palabras y podrás recuperar todas las direcciones (y todas las monedas) en cualquier ordenador."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Esta cartera no tiene respaldo de 24 palabras: copia su archivo de cartera para proteger las claves. Ese archivo es la única copia; sin él las monedas no se pueden recuperar."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Todavía no tienes monedas para enviar. Abre Recibir monedas para obtener una dirección que puedas compartir: las monedas que lleguen a ella aparecerán en Resumen."),
+ ];
+ 
+ pub const GERMAN_TABLE: Table = &[
+@@ -242,6 +266,30 @@ pub const GERMAN_TABLE: Table = &[
+     ("Staking off", "Staking aus"),
+     ("Unencrypted", "Unverschlüsselt"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Willkommen bei Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Eine Wallet enthält Ihre Schlüssel und Ihre Münzen. Das Erstellen dauert etwa eine Minute: Sie erhalten 24 Wörter zum Aufschreiben, und nur mit diesen Wörtern kommen Sie wieder an Ihre Münzen, wenn dieser Computer verloren geht oder kaputtgeht."),
++    ("Create a new wallet", "Neue Wallet erstellen"),
++    ("Restore a wallet you already have", "Bestehende Wallet wiederherstellen"),
++    ("Open a wallet file", "Wallet-Datei öffnen"),
++    ("New to Triangles. You will see 24 words to write down.", "Zum ersten Mal bei Triangles? Sie sehen 24 Wörter, die Sie aufschreiben."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Sie haben die 24 (oder 12) Wörter einer früher erstellten Wallet."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Sie haben eine wallet.dat-Datei auf diesem Computer oder einem USB-Stick."),
++    ("No coins yet", "Noch keine Münzen"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Münzen, die Sie empfangen, erscheinen hier. Öffnen Sie Münzen empfangen, um eine Adresse zum Weitergeben zu erhalten."),
++    ("Send to:", "Senden an:"),
++    ("How much:", "Wie viel:"),
++    ("Network fee:", "Netzwerkgebühr:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Optional. Bleibt das Feld leer, zahlt die Wallet die übliche Netzwerkgebühr."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Bis zu 6 Nachkommastellen — 0,000001 ist der kleinste Betrag."),
++    ("Review before sending", "Vor dem Senden prüfen"),
++    ("Send now", "Jetzt senden"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Nichts verlässt diesen Computer, bevor Sie auf Jetzt senden klicken. Ihre Wallet signiert die Zahlung hier und übergibt sie dann dem Netzwerk."),
++    ("Create a new address", "Neue Adresse erstellen"),
++    ("Copy address", "Adresse kopieren"),
++    ("Your address to share", "Ihre Adresse zum Weitergeben"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Durch Ihre 24 Wörter gesichert. Neue Adressen entstehen automatisch daraus — bewahren Sie die Wörter gut auf, dann lassen sich alle Adressen (und alle Münzen) auf jedem Computer wiederherstellen."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Diese Wallet hat keine 24-Wörter-Sicherung: Kopieren Sie ihre Wallet-Datei, um die Schlüssel zu sichern. Diese Datei ist die einzige Kopie — ohne sie sind die Münzen nicht wiederherstellbar."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Sie haben noch keine Münzen zum Senden. Öffnen Sie Münzen empfangen, um eine Adresse zum Weitergeben zu erhalten — Münzen, die dort ankommen, erscheinen in der Übersicht."),
+ ];
+ 
+ pub const FRENCH_TABLE: Table = &[
+@@ -285,6 +333,30 @@ pub const FRENCH_TABLE: Table = &[
+     ("Staking off", "Staking arrêté"),
+     ("Unencrypted", "Non chiffré"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Bienvenue dans Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Un portefeuille contient vos clés et vos pièces. Le créer prend environ une minute : vous recevez 24 mots à noter, et ces mots sont le seul moyen de récupérer vos pièces si cet ordinateur est perdu ou tombe en panne."),
++    ("Create a new wallet", "Créer un nouveau portefeuille"),
++    ("Restore a wallet you already have", "Restaurer un portefeuille existant"),
++    ("Open a wallet file", "Ouvrir un fichier de portefeuille"),
++    ("New to Triangles. You will see 24 words to write down.", "Première visite dans Triangles ? Vous verrez 24 mots à noter."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Vous avez les 24 mots (ou 12) d'un portefeuille créé plus tôt."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Vous avez un fichier wallet.dat sur cet ordinateur ou sur une clé USB."),
++    ("No coins yet", "Pas encore de pièces"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Les pièces que vous recevez apparaîtront ici. Ouvrez Recevoir des pièces pour obtenir une adresse à partager."),
++    ("Send to:", "Envoyer à :"),
++    ("How much:", "Combien :"),
++    ("Network fee:", "Frais de réseau :"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Facultatif. Laissez vide : le portefeuille paie les frais standard du réseau."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Jusqu'à 6 décimales — 0,000001 est le plus petit montant."),
++    ("Review before sending", "Vérifier avant l'envoi"),
++    ("Send now", "Envoyer maintenant"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Rien ne quitte cet ordinateur avant que vous cliquiez sur Envoyer maintenant. Votre portefeuille signe le paiement ici, puis le remet au réseau."),
++    ("Create a new address", "Créer une nouvelle adresse"),
++    ("Copy address", "Copier l'adresse"),
++    ("Your address to share", "Votre adresse à partager"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Sauvegardé par vos 24 mots. Les nouvelles adresses en sont créées automatiquement — gardez les mots en sécurité et toutes les adresses (et toutes les pièces) pourront être restaurées sur n'importe quel ordinateur."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Ce portefeuille n'a pas de sauvegarde en 24 mots : copiez son fichier de portefeuille pour protéger les clés. Ce fichier est l'unique copie — sans lui, les pièces sont irrécupérables."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Vous n'avez pas encore de pièces à envoyer. Ouvrez Recevoir des pièces pour obtenir une adresse à partager : les pièces reçues apparaîtront dans Aperçu."),
+ ];
+ 
+ pub const PORTUGUESE_TABLE: Table = &[
+@@ -328,6 +400,30 @@ pub const PORTUGUESE_TABLE: Table = &[
+     ("Staking off", "Staking desativado"),
+     ("Unencrypted", "Não criptografado"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Bem-vindo ao Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Uma carteira guarda as suas chaves e as suas moedas. Criar uma leva cerca de um minuto: você recebe 24 palavras para anotar, e essas palavras são a única forma de recuperar as suas moedas se este computador se perder ou quebrar."),
++    ("Create a new wallet", "Criar uma carteira nova"),
++    ("Restore a wallet you already have", "Restaurar uma carteira que já tem"),
++    ("Open a wallet file", "Abrir um arquivo de carteira"),
++    ("New to Triangles. You will see 24 words to write down.", "Primeira vez no Triangles? Você verá 24 palavras para anotar."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Você tem as 24 palavras (ou 12) de uma carteira criada antes."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Você tem um arquivo wallet.dat neste computador ou num pendrive."),
++    ("No coins yet", "Ainda não há moedas"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "As moedas que você receber aparecerão aqui. Abra Receber moedas para obter um endereço para compartilhar."),
++    ("Send to:", "Enviar para:"),
++    ("How much:", "Quanto:"),
++    ("Network fee:", "Taxa de rede:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Opcional. Deixe vazio e a carteira paga a taxa padrão da rede."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Até 6 casas decimais — 0,000001 é o menor valor."),
++    ("Review before sending", "Revisar antes de enviar"),
++    ("Send now", "Enviar agora"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Nada sai deste computador até você clicar em Enviar agora. A sua carteira assina o pagamento aqui e depois o entrega à rede."),
++    ("Create a new address", "Criar um novo endereço"),
++    ("Copy address", "Copiar endereço"),
++    ("Your address to share", "Seu endereço para compartilhar"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Protegida pelas suas 24 palavras. Os novos endereços são criados a partir delas automaticamente — guarde bem as palavras e todos os endereços (e todas as moedas) podem ser restaurados em qualquer computador."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Esta carteira não tem backup de 24 palavras: copie o arquivo da carteira para proteger as chaves. Esse arquivo é a única cópia — sem ele as moedas não podem ser recuperadas."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Você ainda não tem moedas para enviar. Abra Receber moedas para obter um endereço para compartilhar — as moedas que chegarem nele aparecerão no Resumo."),
+ ];
+ 
+ pub const RUSSIAN_TABLE: Table = &[
+@@ -371,6 +467,30 @@ pub const RUSSIAN_TABLE: Table = &[
+     ("Staking off", "Стейкинг выключен"),
+     ("Unencrypted", "Не зашифрован"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Добро пожаловать в Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Кошелёк хранит ваши ключи и ваши монеты. Создание занимает около минуты: вы получаете 24 слова, которые нужно записать, и только они вернут ваши монеты, если этот компьютер потеряется или сломается."),
++    ("Create a new wallet", "Создать новый кошелёк"),
++    ("Restore a wallet you already have", "Восстановить существующий кошелёк"),
++    ("Open a wallet file", "Открыть файл кошелька"),
++    ("New to Triangles. You will see 24 words to write down.", "Впервые в Triangles? Вы увидите 24 слова, которые нужно записать."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "У вас есть 24 слова (или 12) от кошелька, созданного раньше."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "У вас есть файл wallet.dat на этом компьютере или на флешке."),
++    ("No coins yet", "Монет пока нет"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Полученные монеты появятся здесь. Откройте Получить монеты, чтобы получить адрес, которым можно поделиться."),
++    ("Send to:", "Кому:"),
++    ("How much:", "Сколько:"),
++    ("Network fee:", "Комиссия сети:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Необязательно. Если оставить пустым, кошелёк заплатит стандартную комиссию сети."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "До 6 знаков после запятой — 0,000001 это минимальная сумма."),
++    ("Review before sending", "Проверить перед отправкой"),
++    ("Send now", "Отправить сейчас"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Ничего не покидает этот компьютер, пока вы не нажмёте Отправить сейчас. Кошелёк подписывает платёж здесь, а затем передаёт его сети."),
++    ("Create a new address", "Создать новый адрес"),
++    ("Copy address", "Копировать адрес"),
++    ("Your address to share", "Ваш адрес для отправки другим"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Защищено вашими 24 словами. Новые адреса создаются из них автоматически — сохраните слова, и все адреса (и все монеты) можно будет восстановить на любом компьютере."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "У этого кошелька нет резервной копии из 24 слов: скопируйте его файл кошелька, чтобы сохранить ключи. Этот файл — единственная копия; без него монеты не восстановить."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "У вас пока нет монет для отправки. Откройте Получить монеты, чтобы получить адрес, которым можно поделиться — полученные монеты появятся в Обзоре."),
+ ];
+ 
+ pub const CHINESE_SIMPLIFIED_TABLE: Table = &[
+@@ -414,6 +534,30 @@ pub const CHINESE_SIMPLIFIED_TABLE: Table = &[
+     ("Staking off", "质押已停止"),
+     ("Unencrypted", "未加密"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "欢迎使用 Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "钱包保存您的密钥和硬币。创建大约需要一分钟：您会得到 24 个单词并需要抄写下来；如果这台电脑丢失或损坏，这些单词是找回硬币的唯一方法。"),
++    ("Create a new wallet", "创建新钱包"),
++    ("Restore a wallet you already have", "恢复现有钱包"),
++    ("Open a wallet file", "打开钱包文件"),
++    ("New to Triangles. You will see 24 words to write down.", "第一次使用 Triangles？您会看到 24 个需要抄写的单词。"),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "您有之前创建的钱包的 24 个（或 12 个）单词。"),
++    ("You have a wallet.dat file on this computer or a USB stick.", "您在这台电脑或 U 盘上有一个 wallet.dat 文件。"),
++    ("No coins yet", "还没有硬币"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "您收到的硬币会显示在这里。打开“接收硬币”获取可以分享的地址。"),
++    ("Send to:", "发送到:"),
++    ("How much:", "金额:"),
++    ("Network fee:", "网络手续费:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "可选。留空时钱包会支付网络的标准手续费。"),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "最多 6 位小数 — 0.000001 是最小金额。"),
++    ("Review before sending", "发送前核对"),
++    ("Send now", "立即发送"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "在您点击立即发送之前，什么都不会离开这台电脑。您的钱包在这里签署付款，然后把它交给网络。"),
++    ("Create a new address", "创建新地址"),
++    ("Copy address", "复制地址"),
++    ("Your address to share", "你的收款地址"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "由您的 24 个单词备份。新地址会由它们自动创建 — 妥善保管单词，就能在任何电脑上恢复所有地址（以及所有硬币）。"),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "此钱包没有 24 个单词的备份：请复制钱包文件来保存密钥。该文件是唯一的副本 — 没有它，硬币将无法找回。"),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "您还没有可以发送的硬币。打开“接收硬币”获取可以分享的地址 — 收到的硬币会显示在概览中。"),
+ ];
+ 
+ pub const JAPANESE_TABLE: Table = &[
+@@ -457,6 +601,30 @@ pub const JAPANESE_TABLE: Table = &[
+     ("Staking off", "ステーキング停止"),
+     ("Unencrypted", "未暗号化"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Triangles へようこそ"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "ウォレットには鍵とコインが入っています。作成は約 1 分です。24 個の単語が表示されるので書き留めてください。このパソコンを失ったり壊れたりしたとき、コインを取り戻す唯一の方法がその単語です。"),
++    ("Create a new wallet", "新しいウォレットを作成"),
++    ("Restore a wallet you already have", "既存のウォレットを復元"),
++    ("Open a wallet file", "ウォレットファイルを開く"),
++    ("New to Triangles. You will see 24 words to write down.", "Triangles は初めてですか。書き留める 24 個の単語が表示されます。"),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "以前に作成したウォレットの 24 個（または 12 個）の単語があります。"),
++    ("You have a wallet.dat file on this computer or a USB stick.", "このパソコンまたは USB メモリに wallet.dat ファイルがあります。"),
++    ("No coins yet", "まだコインがありません"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "受け取ったコインはここに表示されます。コインを受け取るを開いて、共有できるアドレスを取得してください。"),
++    ("Send to:", "送金先:"),
++    ("How much:", "金額:"),
++    ("Network fee:", "ネットワーク手数料:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "任意です。空欄のままにすると、ウォレットがネットワークの標準手数料を支払います。"),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "小数点以下 6 桁まで — 0.000001 が最小単位です。"),
++    ("Review before sending", "送信前に確認"),
++    ("Send now", "今すぐ送信"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "今すぐ送信をクリックするまで、このパソコンの外には何も出ません。ウォレットがここで支払いに署名し、その後ネットワークに渡します。"),
++    ("Create a new address", "新しいアドレスを作成"),
++    ("Copy address", "アドレスをコピー"),
++    ("Your address to share", "共有するあなたのアドレス"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "24 個の単語でバックアップされています。新しいアドレスはそこから自動的に作られます。単語を大切に保管すれば、どのパソコンでもすべてのアドレス（とすべてのコイン）を復元できます。"),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "このウォレットには 24 個の単語のバックアップがありません。鍵を守るためにウォレットファイルをコピーしてください。そのファイルが唯一のコピーで、なければコインは取り戻せません。"),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "送信できるコインがまだありません。コインを受け取るを開いて共有できるアドレスを取得してください。届いたコインは概要に表示されます。"),
+ ];
+ 
+ pub const TURKISH_TABLE: Table = &[
+@@ -500,6 +668,30 @@ pub const TURKISH_TABLE: Table = &[
+     ("Staking off", "Staking kapalı"),
+     ("Unencrypted", "Şifrelenmemiş"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Triangles'a hoş geldiniz"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Cüzdan anahtarlarınızı ve coinlerinizi tutar. Oluşturmak yaklaşık bir dakika sürer: yazmanız için 24 kelime verilir ve bu bilgisayar kaybolur veya bozulursa coinlerinizi geri almanın tek yolu o kelimelerdir."),
++    ("Create a new wallet", "Yeni cüzdan oluştur"),
++    ("Restore a wallet you already have", "Mevcut cüzdanı geri yükle"),
++    ("Open a wallet file", "Cüzdan dosyası aç"),
++    ("New to Triangles. You will see 24 words to write down.", "Triangles'ta ilk kez misiniz? Yazacağınız 24 kelime göreceksiniz."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Daha önce oluşturduğunuz bir cüzdanın 24 (veya 12) kelimesi sizde."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Bu bilgisayarda veya bir USB bellekte wallet.dat dosyanız var."),
++    ("No coins yet", "Henüz coin yok"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Aldığınız coinler burada görünecek. Paylaşabileceğiniz bir adres için Coin Al sayfasını açın."),
++    ("Send to:", "Alıcı:"),
++    ("How much:", "Ne kadar:"),
++    ("Network fee:", "Ağ ücreti:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "İsteğe bağlı. Boş bırakırsanız cüzdan ağın standart ücretini öder."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "En fazla 6 ondalık — 0,000001 en küçük tutardır."),
++    ("Review before sending", "Göndermeden önce gözden geçir"),
++    ("Send now", "Şimdi gönder"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Şimdi gönder düğmesine basana kadar bu bilgisayardan hiçbir şey çıkmaz. Cüzdanınız ödemeyi burada imzalar, sonra ağa teslim eder."),
++    ("Create a new address", "Yeni adres oluştur"),
++    ("Copy address", "Adresi kopyala"),
++    ("Your address to share", "Paylaşacağınız adresiniz"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "24 kelimenizle yedekleniyor. Yeni adresler otomatik olarak bunlardan üretilir — kelimeleri güvende tutun, böylece tüm adresler (ve tüm coinler) herhangi bir bilgisayarda geri yüklenebilir."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Bu cüzdanın 24 kelimelik yedeği yok: anahtarları korumak için cüzdan dosyasını kopyalayın. Bu dosya tek kopyadır — onsuz coinler kurtarılamaz."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Henüz gönderecek coininiz yok. Paylaşabileceğiniz bir adres için Coin Al sayfasını açın — o adrese gelen coinler Genel Bakış'ta görünür."),
+ ];
+ 
+ pub const ITALIAN_TABLE: Table = &[
+@@ -543,6 +735,30 @@ pub const ITALIAN_TABLE: Table = &[
+     ("Staking off", "Staking fermo"),
+     ("Unencrypted", "Non cifrato"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Benvenuto in Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Un portafoglio contiene le tue chiavi e le tue monete. Crearlo richiede circa un minuto: ricevi 24 parole da annotare, e quelle parole sono l'unico modo per riavere le tue monete se questo computer si perde o si rompe."),
++    ("Create a new wallet", "Crea un nuovo portafoglio"),
++    ("Restore a wallet you already have", "Ripristina un portafoglio esistente"),
++    ("Open a wallet file", "Apri un file di portafoglio"),
++    ("New to Triangles. You will see 24 words to write down.", "Prima volta in Triangles? Vedrai 24 parole da annotare."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Hai le 24 parole (o 12) di un portafoglio creato in precedenza."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Hai un file wallet.dat su questo computer o su una chiavetta USB."),
++    ("No coins yet", "Ancora nessuna moneta"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Le monete che ricevi compariranno qui. Apri Ricevi monete per ottenere un indirizzo da condividere."),
++    ("Send to:", "Invia a:"),
++    ("How much:", "Quanto:"),
++    ("Network fee:", "Commissione di rete:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Facoltativo. Se lo lasci vuoto, il portafoglio paga la commissione standard della rete."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Fino a 6 decimali — 0,000001 è l'importo più piccolo."),
++    ("Review before sending", "Controlla prima di inviare"),
++    ("Send now", "Invia ora"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Niente esce da questo computer finché non clicchi Invia ora. Il portafoglio firma il pagamento qui, poi lo consegna alla rete."),
++    ("Create a new address", "Crea un nuovo indirizzo"),
++    ("Copy address", "Copia indirizzo"),
++    ("Your address to share", "Il tuo indirizzo da condividere"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Protetto dalle tue 24 parole. I nuovi indirizzi vengono creati automaticamente da esse — conserva le parole e tutti gli indirizzi (e tutte le monete) potranno essere ripristinati su qualsiasi computer."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Questo portafoglio non ha un backup di 24 parole: copia il suo file di portafoglio per mettere al sicuro le chiavi. Quel file è l'unica copia — senza di esso le monete non si possono recuperare."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Non hai ancora monete da inviare. Apri Ricevi monete per ottenere un indirizzo da condividere — le monete che arrivano lì compaiono in Panoramica."),
+ ];
+ 
+ pub const DUTCH_TABLE: Table = &[
+@@ -586,6 +802,30 @@ pub const DUTCH_TABLE: Table = &[
+     ("Staking off", "Staking uit"),
+     ("Unencrypted", "Onversleuteld"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Welkom bij Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Een portemonnee bevat uw sleutels en uw munten. Aanmaken duurt ongeveer een minuut: u krijgt 24 woorden om op te schrijven, en die woorden zijn de enige manier om uw munten terug te krijgen als deze computer kwijtraakt of kapotgaat."),
++    ("Create a new wallet", "Nieuwe portemonnee aanmaken"),
++    ("Restore a wallet you already have", "Bestaande portemonnee herstellen"),
++    ("Open a wallet file", "Portemonnee-bestand openen"),
++    ("New to Triangles. You will see 24 words to write down.", "Voor het eerst in Triangles? U krijgt 24 woorden te zien om op te schrijven."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "U hebt de 24 (of 12) woorden van een eerder gemaakte portemonnee."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "U hebt een wallet.dat-bestand op deze computer of op een USB-stick."),
++    ("No coins yet", "Nog geen munten"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Munten die u ontvangt verschijnen hier. Open Munten ontvangen voor een adres dat u kunt delen."),
++    ("Send to:", "Naar:"),
++    ("How much:", "Hoeveel:"),
++    ("Network fee:", "Netwerkkosten:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Optioneel. Laat u het leeg, dan betaalt de portemonnee de standaard netwerkkosten."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Tot 6 decimalen — 0,000001 is het kleinste bedrag."),
++    ("Review before sending", "Controleren voor het verzenden"),
++    ("Send now", "Nu verzenden"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Er verlaat niets deze computer voordat u op Nu verzenden klikt. Uw portemonnee ondertekent de betaling hier en geeft hem daarna aan het netwerk."),
++    ("Create a new address", "Nieuw adres aanmaken"),
++    ("Copy address", "Adres kopiëren"),
++    ("Your address to share", "Uw adres om te delen"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Gedekt door uw 24 woorden. Nieuwe adressen worden er automatisch uit gemaakt — bewaar de woorden goed, dan kunnen alle adressen (en alle munten) op elke computer worden hersteld."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Deze portemonnee heeft geen back-up van 24 woorden: kopieer het portemonnee-bestand om de sleutels veilig te stellen. Dat bestand is de enige kopie — zonder dat bestand zijn de munten niet terug te halen."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "U hebt nog geen munten om te versturen. Open Munten ontvangen voor een adres dat u kunt delen — munten die daar aankomen verschijnen in Overzicht."),
+ ];
+ 
+ pub const POLISH_TABLE: Table = &[
+@@ -629,6 +869,30 @@ pub const POLISH_TABLE: Table = &[
+     ("Staking off", "Staking wyłączony"),
+     ("Unencrypted", "Niezaszyfrowane"),
+     ("⇗ Tor / I2P", "⇗ Tor / I2P"),
++    ("Welcome to Triangles", "Witamy w Triangles"),
++    ("A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.", "Portfel przechowuje Twoje klucze i monety. Utworzenie zajmuje około minuty: otrzymujesz 24 słowa do zapisania i tylko one pozwolą odzyskać monety, jeśli ten komputer zginie lub się zepsuje."),
++    ("Create a new wallet", "Utwórz nowy portfel"),
++    ("Restore a wallet you already have", "Przywróć istniejący portfel"),
++    ("Open a wallet file", "Otwórz plik portfela"),
++    ("New to Triangles. You will see 24 words to write down.", "Pierwszy raz w Triangles? Zobaczysz 24 słowa do zapisania."),
++    ("You have the 24 words (or 12) from a wallet created earlier.", "Masz 24 słowa (lub 12) z wcześniej utworzonego portfela."),
++    ("You have a wallet.dat file on this computer or a USB stick.", "Masz plik wallet.dat na tym komputerze lub na pendrive."),
++    ("No coins yet", "Jeszcze brak monet"),
++    ("Coins you receive will appear here. Open Receive Coins to get an address you can share.", "Otrzymane monety pojawią się tutaj. Otwórz Odbierz monety, aby uzyskać adres do udostępnienia."),
++    ("Send to:", "Wyślij do:"),
++    ("How much:", "Ile:"),
++    ("Network fee:", "Opłata sieciowa:"),
++    ("Optional. Leave it empty and the wallet pays the network's standard fee.", "Opcjonalne. Jeśli zostawisz puste, portfel zapłaci standardową opłatę sieciową."),
++    ("Up to 6 decimals — 0.000001 is the smallest amount.", "Do 6 miejsc po przecinku — 0,000001 to najmniejsza kwota."),
++    ("Review before sending", "Sprawdź przed wysłaniem"),
++    ("Send now", "Wyślij teraz"),
++    ("Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.", "Nic nie opuszcza tego komputera, dopóki nie klikniesz Wyślij teraz. Twój portfel podpisuje płatność tutaj, a potem przekazuje ją sieci."),
++    ("Create a new address", "Utwórz nowy adres"),
++    ("Copy address", "Kopiuj adres"),
++    ("Your address to share", "Twój adres do udostępnienia"),
++    ("Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.", "Zabezpieczony Twoimi 24 słowami. Nowe adresy powstają z nich automatycznie — przechowuj słowa bezpiecznie, a wszystkie adresy (i wszystkie monety) będzie można odtworzyć na dowolnym komputerze."),
++    ("This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.", "Ten portfel nie ma kopii zapasowej z 24 słów: skopiuj plik portfela, aby chronić klucze. Ten plik to jedyna kopia — bez niego monet nie da się odzyskać."),
++    ("You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.", "Nie masz jeszcze monet do wysłania. Otwórz Odbierz monety, aby uzyskać adres do udostępnienia — monety, które na niego przyjdą, pojawią się w Przeglądzie."),
+ ];
+ 
+ /// The phase-1 key set — the EXACT English source strings wired through
+@@ -684,3 +948,35 @@ pub const PHASE1_KEYS: &[&str] = &[
+     "Unencrypted",
+     "⇗ Tor / I2P",
+ ];
++
++
++/// The phase-2 key set (UX pass 2) — first-run doors, empty-balance state
++/// and the send/receive wording, all sourced from `plain_words` constants so
++/// the English source string exists in exactly one place. The completeness
++/// test requires every language table to cover PHASE1_KEYS + PHASE2_KEYS.
++pub const PHASE2_KEYS: &[&str] = &[
++    "Welcome to Triangles",
++    "A wallet holds your keys and your coins. Creating one takes about a minute: you get 24 words to write down, and those words are the only way to get your coins back if this computer is lost or broken.",
++    "Create a new wallet",
++    "Restore a wallet you already have",
++    "Open a wallet file",
++    "New to Triangles. You will see 24 words to write down.",
++    "You have the 24 words (or 12) from a wallet created earlier.",
++    "You have a wallet.dat file on this computer or a USB stick.",
++    "No coins yet",
++    "Coins you receive will appear here. Open Receive Coins to get an address you can share.",
++    "Send to:",
++    "How much:",
++    "Network fee:",
++    "Optional. Leave it empty and the wallet pays the network's standard fee.",
++    "Up to 6 decimals — 0.000001 is the smallest amount.",
++    "Review before sending",
++    "Send now",
++    "Nothing leaves this computer until you click Send now. Your wallet signs the payment here, then hands it to the network.",
++    "Create a new address",
++    "Copy address",
++    "Your address to share",
++    "Backed up by your 24 words. New addresses are created from them automatically — keep the words safe and every address (and every coin) can be restored on any computer.",
++    "This wallet has no 24-word backup: copy its wallet file to keep the keys safe. That file is the only copy — without it the coins cannot be recovered.",
++    "You have no coins to send yet. Open Receive Coins to get an address you can share — coins sent to it appear on the Overview.",
++];
+diff --git a/src/gui/mod.rs b/src/gui/mod.rs
+index 83f0e87..f85f25b 100644
+--- a/src/gui/mod.rs
++++ b/src/gui/mod.rs
+@@ -20,6 +20,7 @@ pub mod autostart;
+ pub mod explorer;
+ pub mod node_supervisor;
+ pub mod notify;
++pub mod plain_words;
+ pub mod rpc_client;
+ pub mod seed_flow;
+ pub mod state;
+diff --git a/src/gui/seed_flow.rs b/src/gui/seed_flow.rs
+index d80f727..6890ad1 100644
+--- a/src/gui/seed_flow.rs
++++ b/src/gui/seed_flow.rs
+@@ -28,6 +28,13 @@ pub const HONEST_NOTE: &str = "Seed phrases cannot be added to an existing walle
+      creates a NEW wallet or restores an existing phrase — and the 24 words then become the \
+      ONLY backup of every address that wallet will ever derive.";
+ 
++/// UX pass 2 (first run): the brand-new user never had a pre-HD wallet, so the
++/// HONEST_NOTE above is noise to them — what they need is what the words DO.
++/// Shown when the flow was entered from the welcome menu.
++pub const FIRST_RUN_NOTE: &str = "Write the 24 words on paper and keep them somewhere safe. \
++     Anyone who has them can spend your coins, and no one — not even tri7 — can recover them \
++     for you if the paper is lost.";
++
+ #[derive(Debug, Clone, PartialEq)]
+ pub enum SeedFlowStep {
+     /// Choose create vs restore.
+@@ -62,6 +69,10 @@ pub struct SeedFlow {
+     /// UX audit (H2): true when create was auto-begun on first open — the
+     /// reveal screen then tells a restoring user how to get to Restore.
+     pub auto_began: bool,
++    /// UX pass 2: entered from the first-run welcome menu. The seed screen then
++    /// speaks to someone who has never held a wallet (FIRST_RUN_NOTE) instead
++    /// of explaining pre-HD key internals they will never meet.
++    pub first_run: bool,
+ }
+ 
+ impl SeedFlow {
+@@ -76,6 +87,7 @@ impl SeedFlow {
+             key_count: DEFAULT_KEY_COUNT,
+             error: None,
+             auto_began: false,
++            first_run: false,
+         }
+     }
+ 
+@@ -105,8 +117,10 @@ impl SeedFlow {
+     /// CreateReveal → CreateConfirm (gated on the "I saved it" checkbox).
+     pub fn confirm_saved(&mut self) {
+         if !self.saved_confirmed {
+-            self.error =
+-                Some("tick the box to confirm you wrote the words down before continuing".into());
++            self.error = Some(
++                "Tick the box to confirm you wrote the words down — this is the only copy."
++                    .into(),
++            );
+             return;
+         }
+         self.error = None;
+@@ -125,8 +139,8 @@ impl SeedFlow {
+         let got = crate::seed::split_words(&self.words_input);
+         if want != got {
+             self.error = Some(format!(
+-                "the words you typed do not match ({} of {} entered) — a mismatched \
+-                 confirmation means the backup is wrong",
++                "The words do not match ({} of {} entered). That means the copy on paper is \
++                 wrong somewhere — check it against the words above before continuing.",
+                 got.len(),
+                 want.len()
+             ));
+@@ -148,8 +162,9 @@ impl SeedFlow {
+             }
+             _ => {
+                 self.error = Some(
+-                    "invalid mnemonic: unknown word or bad checksum (12/15/18/21/24 words \
+-                     from the BIP39 English wordlist)"
++                    "That phrase did not check out: a word is misspelled, or the words are in \
++                     the wrong order. Type the 12 or 24 words again, exactly as they were \
++                     written down."
+                         .into(),
+                 );
+             }
+@@ -281,7 +296,7 @@ mod tests {
+         f.words_input = "not a real phrase at all".into();
+         f.submit_restore();
+         assert_eq!(f.step, SeedFlowStep::RestoreInput);
+-        assert!(f.error.as_deref().unwrap().contains("invalid mnemonic"));
++        assert!(f.error.as_deref().unwrap().contains("did not check out"));
+ 
+         // a checksum-corrupted phrase is refused
+         f.words_input = MN12.replace("about", "actor");
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index a5a9089..9c2c481 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -4062,13 +4062,18 @@ fn sweep_key_match_refuses_when_only_a_string_colliding_key_exists() {
+ // GUI i18n (phase 1): Language + tr() + options.json persistence.
+ // ---------------------------------------------------------------------------
+ 
+-/// COMPLETENESS: every non-English table's key set must be EXACTLY the
+-/// phase-1 key set — a missing (or extra) key in any language fails here,
+-/// keeping all 11 tables in sync as the source strings evolve. Every output
+-/// must also be non-empty.
++/// COMPLETENESS: every non-English table's key set must be EXACTLY
++/// PHASE1_KEYS + PHASE2_KEYS — a missing (or extra) key in any language fails
++/// here, keeping all 11 tables in sync as the source strings evolve. Every
++/// output must also be non-empty. Pass 2 (first-run + send/receive wording)
++/// extended the set rather than starting a second mechanism.
+ #[test]
+-fn i18n_tables_are_complete_over_the_phase1_key_set() {
+-    let mut want: Vec<&str> = i18n::PHASE1_KEYS.to_vec();
++fn i18n_tables_are_complete_over_the_full_key_set() {
++    let mut want: Vec<&str> = i18n::PHASE1_KEYS
++        .iter()
++        .chain(i18n::PHASE2_KEYS.iter())
++        .copied()
++        .collect();
+     want.sort_unstable();
+     let tables = [
+         ("es", i18n::SPANISH_TABLE),
+@@ -4086,10 +4091,27 @@ fn i18n_tables_are_complete_over_the_phase1_key_set() {
+     for (code, table) in tables {
+         let mut got: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
+         got.sort_unstable();
+-        assert_eq!(got, want, "language {code}: key set differs from PHASE1_KEYS");
+-        for key in i18n::PHASE1_KEYS {
+-            let out = i18n::tr(i18n::parse_language(code).unwrap(), key);
+-            assert!(!out.is_empty(), "{code}: empty output for key {key:?}");
++        assert!(
++            got == want,
++            "language {code}: key set differs from PHASE1_KEYS + PHASE2_KEYS"
++        );
++        let lang = i18n::parse_language(code).unwrap();
++        for key in i18n::PHASE1_KEYS.iter().chain(i18n::PHASE2_KEYS.iter()) {
++            assert!(
++                !i18n::tr(lang, key).is_empty(),
++                "{code}: empty output for key {key:?}"
++            );
++        }
++        // Pass-2 copy must be really translated: an entry that just echoes the
++        // English is a missed translation (the fallback is for UNKNOWN keys,
++        // not for undone work). Phase-1 keys are exempt — brand nouns like
++        // "Staking" and "⇗ Tor / I2P" are identical in every language.
++        for key in i18n::PHASE2_KEYS {
++            assert_ne!(
++                i18n::tr(lang, key),
++                *key,
++                "{code}: untranslated pass-2 entry for key {key:?}"
++            );
+         }
+     }
+ }
+@@ -4782,3 +4804,251 @@ fn encrypted_wallet_load_prompt_retry_and_unlock() {
+     );
+     let _ = std::fs::remove_dir_all(&dir);
+ }
++
++// ---------------------------------------------------------------------------
++// UX pass 2 — the plain-language layer (src/gui/plain_words.rs): first-run
++// doors, the empty-balance state and the send/receive wording. These are the
++// strings a brand-new user meets first, so they are asserted here rather than
++// eyeballed in a screenshot.
++// ---------------------------------------------------------------------------
++
++/// Every string wired into the UI must ALSO be an i18n key. A constant missing
++/// from PHASE2_KEYS still renders (English fallback) but silently drops out of
++/// all 11 languages — that is the regression this catches.
++#[test]
++fn plain_words_strings_are_all_i18n_phase2_keys() {
++    use crate::gui::plain_words as pw;
++    let wired = [
++        pw::WELCOME_TITLE,
++        pw::WELCOME_BODY,
++        pw::CREATE_WALLET,
++        pw::RESTORE_WALLET,
++        pw::OPEN_WALLET_FILE,
++        pw::NO_COINS_TITLE,
++        pw::NO_COINS_BODY,
++        pw::NO_COINS_SEND,
++        pw::SEND_TO,
++        pw::HOW_MUCH,
++        pw::NETWORK_FEE,
++        pw::FEE_HINT,
++        pw::AMOUNT_HINT,
++        pw::REVIEW_SEND,
++        pw::SEND_NOW,
++        pw::LOCAL_SIGNING_LINE,
++        pw::NEW_ADDRESS,
++        pw::COPY_ADDRESS,
++        pw::YOUR_ADDRESS,
++        pw::SEED_BACKUP_LINE,
++        pw::FILE_BACKUP_LINE,
++    ];
++    for s in wired {
++        assert!(
++            i18n::PHASE2_KEYS.contains(&s),
++            "pass-2 string is not an i18n key: {s:?}"
++        );
++    }
++    for ep in pw::first_run_entry_points() {
++        assert!(
++            i18n::PHASE2_KEYS.contains(&ep.label),
++            "first-run door label is not keyed: {:?}",
++            ep.label
++        );
++        assert!(
++            i18n::PHASE2_KEYS.contains(&ep.hint),
++            "first-run door hint is not keyed: {:?}",
++            ep.hint
++        );
++    }
++}
++
++/// The copy must stay free of the words this pass exists to remove. (Brand
++/// nouns — Triangles, TRI, wallet, address — are deliberately NOT on the list.)
++#[test]
++fn pass_two_copy_avoids_internal_jargon() {
++    use crate::gui::plain_words as pw;
++    const JARGON: [&str; 14] = [
++        "mnemonic",
++        "BIP39",
++        "HD wallet",
++        "pre-HD",
++        "UTXO",
++        "input",
++        "inputs",
++        "checksum",
++        "derivation",
++        "m/44",
++        "ksats",
++        "sats",
++        "txid",
++        "hex",
++    ];
++    let mut all: Vec<&str> = vec![
++        pw::WELCOME_TITLE,
++        pw::WELCOME_BODY,
++        pw::CREATE_WALLET,
++        pw::RESTORE_WALLET,
++        pw::OPEN_WALLET_FILE,
++        pw::NO_COINS_TITLE,
++        pw::NO_COINS_BODY,
++        pw::NO_COINS_SEND,
++        pw::SEND_TO,
++        pw::HOW_MUCH,
++        pw::NETWORK_FEE,
++        pw::FEE_HINT,
++        pw::AMOUNT_HINT,
++        pw::REVIEW_SEND,
++        pw::SEND_NOW,
++        pw::LOCAL_SIGNING_LINE,
++        pw::NEW_ADDRESS,
++        pw::COPY_ADDRESS,
++        pw::YOUR_ADDRESS,
++        pw::SEED_BACKUP_LINE,
++        pw::FILE_BACKUP_LINE,
++    ];
++    let doors = pw::first_run_entry_points();
++    for d in doors.iter() {
++        all.push(d.label);
++        all.push(d.hint);
++    }
++    for s in all {
++        let lower = s.to_lowercase();
++        for bad in JARGON {
++            assert!(
++                !lower.contains(&bad.to_lowercase()),
++                "{bad:?} leaked into pass-2 copy: {s:?}"
++            );
++        }
++    }
++}
++
++/// FIRST RUN: the welcome owns the screen only while a run is genuinely
++/// pending. A loaded wallet or a live seed flow always wins — a welcome menu on
++/// top of an open wallet would be a regression, not a nicety.
++#[test]
++fn welcome_visible_only_for_a_pending_first_run() {
++    use crate::gui::plain_words as pw;
++    assert!(pw::welcome_visible(true, false, false));
++    assert!(!pw::welcome_visible(false, false, false), "not a first run");
++    assert!(!pw::welcome_visible(true, true, false), "a wallet is loaded");
++    assert!(
++        !pw::welcome_visible(true, false, true),
++        "a seed flow already replaced the screen"
++    );
++    assert!(!pw::welcome_visible(false, true, true));
++}
++
++/// The three doors: create / restore / open-a-file, all distinct, each with a
++/// hint that says what the user needs in hand for that door.
++#[test]
++fn first_run_doors_are_three_plain_choices() {
++    use crate::gui::plain_words as pw;
++    let doors = pw::first_run_entry_points();
++    assert_eq!(doors.len(), 3);
++    assert_eq!(doors[0].label, pw::CREATE_WALLET);
++    assert_eq!(doors[1].label, pw::RESTORE_WALLET);
++    assert_eq!(doors[2].label, pw::OPEN_WALLET_FILE);
++    let mut seen: Vec<&str> = Vec::new();
++    for d in doors.iter() {
++        assert!(!d.hint.is_empty());
++        assert!(!seen.contains(&d.label), "duplicate door: {:?}", d.label);
++        seen.push(d.label);
++    }
++    // the restore door must mention the words, not the mechanism
++    assert!(doors[1].hint.contains("24 words"));
++    // the open-a-file door must name the FILE: that is what the user has
++    assert!(doors[2].hint.contains("wallet.dat"));
++}
++
++/// The footer names the actual wallet path when one is configured, and stays
++/// generic (no empty " — ") when it is not.
++#[test]
++fn welcome_footer_names_the_wallet_file_or_stays_generic() {
++    use crate::gui::plain_words as pw;
++    let bare = pw::welcome_footer("");
++    assert!(!bare.contains(" — ."), "{bare}");
++    assert!(!bare.contains("— "), "dangling em dash: {bare}");
++    let named = pw::welcome_footer("/home/sami/.triangles/wallet.dat");
++    assert!(named.contains("/home/sami/.triangles/wallet.dat"), "{named}");
++}
++
++/// EMPTY BALANCE: only a LOADED wallet with nothing at all gets the notice —
++/// not the load screen (it has its own voice), and not a wallet with one
++/// immature coin.
++#[test]
++fn empty_balance_notice_only_for_a_loaded_empty_wallet() {
++    use crate::gui::plain_words as pw;
++    assert_eq!(pw::empty_balance_notice(false, 0), None);
++    assert_eq!(pw::empty_balance_notice(false, 5_000_000), None);
++    assert_eq!(
++        pw::empty_balance_notice(true, 0).map(|(t, _)| t),
++        Some(pw::NO_COINS_TITLE)
++    );
++    assert!(pw::empty_balance_notice(true, 1).is_none(), "one coin is not empty");
++    assert!(pw::empty_balance_notice(true, 5_000_000).is_none());
++    // pointing the user at Receive is the whole job of both bodies
++    assert!(pw::NO_COINS_BODY.contains("Receive Coins"));
++    assert!(pw::NO_COINS_SEND.contains("Receive Coins"));
++}
++
++/// FEE wording: the cost line carries the real amounts, speaks of "addresses"
++/// (the word "input" is the codebase's noun, not the payer's), and handles the
++/// single-source case in the singular.
++#[test]
++fn fee_cost_line_says_addresses_not_inputs() {
++    use crate::gui::plain_words as pw;
++    let one = pw::fee_cost_line(420, 400, 1);
++    assert!(one.contains("0.000420 TRI"), "{one}");
++    assert!(one.contains("0.000400 TRI"), "{one}");
++    assert!(!one.contains("input"), "jargon: {one}");
++    assert!(one.contains("your own address"), "singular wording: {one}");
++    let many = pw::fee_cost_line(1_250_000, 400, 3);
++    assert!(many.contains("1.250000 TRI"), "{many}");
++    assert!(many.contains("3 of your addresses"), "{many}");
++    assert!(!many.contains("input"), "jargon: {many}");
++    // a zero-source plan (nothing selectable yet) still renders, never panics
++    assert!(!pw::fee_cost_line(0, 400, 0).is_empty());
++}
++
++/// The amount hint and the smallest unit must agree with the formatter —
++/// "6 decimals" and "0.000001" are the same claim about TRI.
++#[test]
++fn amount_hint_matches_the_amount_formatter() {
++    use crate::gui::plain_words as pw;
++    assert!(pw::AMOUNT_HINT.contains("0.000001"));
++    assert_eq!(crate::gui::state::format_tri(1), "0.000001");
++}
++
++/// A seeded wallet's backup line must not LEAD with the derivation path — the
++/// path stays available on demand (see seed_derivation_path).
++#[test]
++fn seed_backup_line_leads_with_the_words_not_the_path() {
++    use crate::gui::plain_words as pw;
++    assert!(pw::SEED_BACKUP_LINE.starts_with("Backed up by your 24 words"));
++    assert!(!pw::SEED_BACKUP_LINE.contains("m/44"));
++    assert_eq!(pw::seed_derivation_path(7), "m/44'/2222'/0'/0/7");
++}
++
++/// The seed flow's first-run voice is OPT-IN: a flow created for an existing
++/// wallet keeps the technical note, and only the welcome doors set the flag.
++#[test]
++fn seed_flow_first_run_voice_is_opt_in() {
++    let f = crate::gui::seed_flow::SeedFlow::new("/tmp/tri7_first_run/wallet.dat".into());
++    assert!(!f.first_run, "a plain seed flow is not a first run");
++    // the two notes answer different questions — neither may drift into the
++    // other's job
++    assert!(crate::gui::seed_flow::FIRST_RUN_NOTE.contains("24 words"));
++    assert!(!crate::gui::seed_flow::FIRST_RUN_NOTE.contains("pre-HD"));
++    assert!(crate::gui::seed_flow::HONEST_NOTE.contains("pre-HD"));
++    assert!(crate::gui::seed_flow::HONEST_NOTE.contains("cannot be added"));
++}
++
++/// The first-run state lives on AppState and starts OFF: an app that already
++/// knows its wallet must never show the welcome menu.
++#[test]
++fn first_run_welcome_flag_defaults_off() {
++    // constructed through the same fixture every other GUI state test uses:
++    // an app that already knows its wallet must never show the welcome menu.
++    let (st, dir) = options_state_with_unreachable_node("first-run-flag");
++    assert!(!st.first_run_welcome);
++    let _ = std::fs::remove_dir_all(&dir);
++}

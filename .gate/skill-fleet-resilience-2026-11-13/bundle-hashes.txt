@@ -1,0 +1,11 @@
+# bundle-hashes.txt — SHA256 of the AS-SHIPPED content files (final bytes)
+# NOTE: the frontmatter-target copy (the live SKILL.md) gains wrapper-
+# managed codex_grade lines AT WRAPPER EXIT by design, so its post-review
+# bytes intentionally differ from the pre-review hash recorded here.
+# bundle-hashes.txt itself is excluded (self-hash is undefined).
+7333dc98ee050e0b65723f91415da99f2cd07b50f9759b535822e9a2480c7573  BRIEF.md
+f107832579285cdada7afddc86d9aa70b26f5b485832bb310b314a570ac3f1f8  SKILL.md
+f0fd44aa5fae3c7685d65e0bdc26b8f8631e53e5d574543a22470004418ceb24  SKILL-baseline.md
+9c7fc7c742255c47444bdb3f5e2f73996bcf5751bf7aa01f17c24ebbba342b4e  skill-diff.md
+a5d1080bb0b9e722e5bbd04abfb8608cd489b7fa3101bb0eda5a29e9f0c9e2ca  commit-fb6e875-stat.txt
+cfb25ac58619c68bd29c71d7c9363cb2641f94332bfa8b6d6112f6a47ec44ff3  commit-fb6e875-src-diff.patch

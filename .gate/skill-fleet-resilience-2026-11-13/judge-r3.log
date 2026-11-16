@@ -1,0 +1,3 @@
+frontmatter target /root/.hermes/skills/triangles-modernization/SKILL.md (canonical: /root/.hermes/skills/triangles-modernization/SKILL.md) is outside the reviewed set; refusing
+  include it via --files or --dirs to permit frontmatter backfill
+EXIT=78

@@ -1,0 +1,3 @@
+curl: (7) Failed to connect to 127.0.0.1 port 4317 after 0 ms: Couldn't connect to server
+UMP write failed (HTTP 000); aborting before dual-verify
+WRAPPER_EXIT=75

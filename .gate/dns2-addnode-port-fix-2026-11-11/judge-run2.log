@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:y4blr2yfe33r34ytgwsgizuh4pnkq43eue4avetubrpxmob2hjrq
+{
+  "blocking": [],
+  "polish": [
+    "Reconcile the brief's inline diff position with etc-conf-r2.diff (authoritative)",
+    "Remove the two now-ignored cleartext-IP addnode lines (Pi/DNS3) in a later pass",
+    "Note that PC's ~10-min restart churn may delay first successful i2p dial; consider stating an expected max wait in the verification plan"
+  ]
+}

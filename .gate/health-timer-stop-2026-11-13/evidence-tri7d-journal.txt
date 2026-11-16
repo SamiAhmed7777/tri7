@@ -1,0 +1,46 @@
+Nov 13 08:34:15 vmi3080415 follow_tip[2438251]: [2026-11-13T16:34:15Z] no outbound peer after state load — HEADLESS mode (retrying each poll)
+Nov 13 08:34:15 vmi3080415 follow_tip[2438251]: [2026-11-13T16:34:15Z] state: tip h2211156 981fdecc2156dfb214f673639a236d33069c709811c5e11035030c80d1e361ad · daemon getblockcount -1
+Nov 13 08:34:15 vmi3080415 follow_tip[2438251]: [2026-11-13T16:34:15Z] backfill skipped — no outbound peer (headless mode)
+Nov 13 08:34:24 vmi3080415 follow_tip[2438251]: [2026-11-13T16:34:24Z] p2p: CANNOT bind inbound listener 127.0.0.1:24113: Address already in use (os error 98) — no inbound peers this run
+Nov 13 08:35:01 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 08:36:32 vmi3080415 systemd[1]: tri7d.service: Killing process 2438251 (follow_tip) with signal SIGKILL.
+Nov 13 08:36:32 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 08:40:01 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 08:40:52 vmi3080415 follow_tip[2446077]: [2026-11-13T16:40:52Z] no outbound target reachable (6 configured) — starting HEADLESS (native RPCs from persisted state)
+Nov 13 08:41:31 vmi3080415 systemd[1]: tri7d.service: Killing process 2446077 (follow_tip) with signal SIGKILL.
+Nov 13 08:41:32 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 08:45:00 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 08:46:21 vmi3080415 follow_tip[2450297]: [2026-11-13T16:46:21Z] handshake ok: ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 — peer version 70206 (/Cryptographic Triangles:6.2.6.7/) start height 2204150 services 3
+Nov 13 08:46:30 vmi3080415 systemd[1]: tri7d.service: Killing process 2450297 (follow_tip) with signal SIGKILL.
+Nov 13 08:46:30 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 08:48:39 vmi3080415 follow_tip[2453578]: [2026-11-13T16:48:39Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2211147 services 1
+Nov 13 08:50:01 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 08:51:31 vmi3080415 systemd[1]: tri7d.service: Killing process 2453578 (follow_tip) with signal SIGKILL.
+Nov 13 08:51:32 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 08:54:49 vmi3080415 follow_tip[2456437]: [2026-11-13T16:54:49Z] handshake ok: 46.62.249.20:443 — peer version 70206 (/tri7:7.0.0/) start height 2211147 services 1
+Nov 13 08:55:00 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 08:56:30 vmi3080415 follow_tip[2456437]: [2026-11-13T16:56:30Z] handshake ok: 46.62.249.20:443 — peer version 70206 (/tri7:7.0.0/) start height 2211147 services 1
+Nov 13 08:56:30 vmi3080415 follow_tip[2456437]: [2026-11-13T16:56:30Z] state: tip h2211156 981fdecc2156dfb214f673639a236d33069c709811c5e11035030c80d1e361ad · daemon getblockcount -1
+Nov 13 08:56:30 vmi3080415 follow_tip[2456437]: [2026-11-13T16:56:30Z] backfill: requesting headers from h2208156 (locator e73b97824bd6ad5e6ffe966eb248cb02c47319bf5410532b8f566a0750154b9f)
+Nov 13 08:56:30 vmi3080415 systemd[1]: tri7d.service: Killing process 2456437 (follow_tip) with signal SIGKILL.
+Nov 13 08:56:30 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 08:56:34 vmi3080415 follow_tip[2459756]: [2026-11-13T16:56:34Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2211147 services 1
+Nov 13 09:00:01 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 09:00:20 vmi3080415 follow_tip[2459756]: [2026-11-13T17:00:20Z] no outbound peer after state load — HEADLESS mode (retrying each poll)
+Nov 13 09:00:20 vmi3080415 follow_tip[2459756]: [2026-11-13T17:00:20Z] state: tip h2211156 981fdecc2156dfb214f673639a236d33069c709811c5e11035030c80d1e361ad · daemon getblockcount -1
+Nov 13 09:00:20 vmi3080415 follow_tip[2459756]: [2026-11-13T17:00:20Z] backfill skipped — no outbound peer (headless mode)
+Nov 13 09:00:40 vmi3080415 follow_tip[2459756]: [2026-11-13T17:00:40Z] p2p: CANNOT bind inbound listener 127.0.0.1:24113: Address already in use (os error 98) — no inbound peers this run
+Nov 13 09:01:31 vmi3080415 follow_tip[2459756]: [2026-11-13T17:01:31Z] handshake ok: ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 — peer version 70206 (/Cryptographic Triangles:6.2.6.7/) start height 2204150 services 3
+Nov 13 09:01:31 vmi3080415 systemd[1]: tri7d.service: Killing process 2459756 (follow_tip) with signal SIGKILL.
+Nov 13 09:01:31 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 09:03:27 vmi3080415 follow_tip[2463890]: [2026-11-13T17:03:27Z] handshake ok: qgrkbxy7j2vuu5flhnyvho7chk7pfzk4o72p5pgdb6nrf72mz7kq.b32.i2p:24112 — peer version 70206 (/Cryptographic Triangles:6.2.6.7/) start height 2204150 services 3
+Nov 13 09:04:41 vmi3080415 follow_tip[2463890]: [2026-11-13T17:04:40Z] handshake ok: 46.62.249.20:443 — peer version 70206 (/tri7:7.0.0/) start height 2211147 services 1
+Nov 13 09:04:41 vmi3080415 follow_tip[2463890]: [2026-11-13T17:04:41Z] state: tip h2211156 981fdecc2156dfb214f673639a236d33069c709811c5e11035030c80d1e361ad · daemon getblockcount -1
+Nov 13 09:04:41 vmi3080415 follow_tip[2463890]: [2026-11-13T17:04:41Z] backfill: requesting headers from h2208156 (locator e73b97824bd6ad5e6ffe966eb248cb02c47319bf5410532b8f566a0750154b9f)
+Nov 13 09:05:00 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 09:06:30 vmi3080415 systemd[1]: tri7d.service: Killing process 2463890 (follow_tip) with signal SIGKILL.
+Nov 13 09:06:30 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).
+Nov 13 09:07:51 vmi3080415 follow_tip[2466993]: [2026-11-13T17:07:51Z] handshake ok: ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 — peer version 70206 (/Cryptographic Triangles:6.2.6.7/) start height 2204150 services 3
+Nov 13 09:10:05 vmi3080415 systemd[1]: Stopping tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)...
+Nov 13 09:11:35 vmi3080415 systemd[1]: tri7d.service: Killing process 2466993 (follow_tip) with signal SIGKILL.
+Nov 13 09:11:35 vmi3080415 systemd[1]: Started tri7d.service - tri7 daemon (DNS2 primary: native RPC + P2P listener + relay).

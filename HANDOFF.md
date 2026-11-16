@@ -511,3 +511,101 @@ probe scripts).
   (h2209617..24, heavier by work) is being reconciled by the deployed judges
   themselves (claim-divergence recons live in both journals) — the designed
   reorg-world behavior, no manual surgery.
+
+## 2026-11-13 fleet-resilience code lane (fb6e875, grade B urn:ump:ilhtwodj2mhdgst3uink3yhyqkqe7mwebw4z2pk3ckwvx6fr5hma)
+Live session: laptop froze beside a stale peer entry (reconnect defect, OPEN DEV ITEM 1) + stallwatch force-kills tore a store hole at h2210955; PC had TWO i2pd instances with the trusted one's SOCKS 4447 dead; laptop tor orphan healthy on the old port while every newer session's spawn died on its DataDirectory lock (chip lied 'Tor unavailable'); DNS2 adoption-body starved at h2210963 ('no live peer can take' forever). CODE FIXES committed fb6e875: fresh_outbound_present rotation gate (240s window), adoption_escalation_due fresh-seed dial (60s grace/spacing), tor PINNED SOCKS 58033 + process-bound listener identity (pid+exe path, one PowerShell query, Windows fail-closed) for orphan adoption/child health/spawn attribution + ownership-safe recovery (taskkill /PID the wallet-owned listener only), i2p child health probes 4447 (process liveness lied). Judge chain r1 wedged / r2 F / r3 F / r4 C / r5 B-zero-blockers (verdict write lost to 4317 outage — ump-audit-writer restarted 06:44 local) / r6 B. 771/0/1 lib, GUI check, windows-gnu release green. CI run 43448551449 watching. DEPLOY PENDING: Windows boxes (PC + laptop) from CI artifacts; DNS2 restart onto the new binary after CI; laptop gapfix h2210955 (store_gapfix from a canonical peer) + PC i2pd duplicate cleanup are the ops follow-ups.
+
+## 2026-11-13 fleet recovery + no-clearnet enforcement (a07d6e3 lane)
+
+Laptop tor never came up because its OS `Get-NetTCPConnection` cannot see
+loopback LISTEN sockets; fail-closed identity (r4) was RIGHT to refuse
+attribution. Fix: netstat -ano fallback parsed in Rust (pure, tested),
+pid double-read turnover guard, 127.0.0.1-only. Judge chain r1 D -> r2/r3/r4 C
+-> r5 A-in-text (wrapper parser artifact, no JSON verdict) -> r6 A
+urn:ump:2id4s6fwbout2ptlqfsvhvg6elcjjfgxvmg7jalrchaj3laeghia. Commit a07d6e3.
+
+Fleet topology fixes found along the way:
+- DNS2 ran BOTH generations: old C++ `trianglesd` squatted 0.0.0.0:24113 +
+  [::1]:19112 and was DEAF to inbound handshakes (the fleet-wide "verack
+  timeout" cascade); new follow_tip ran dial-only (port race lost). Stopped
+  trianglesd, swapped follow_tip to the current build (df3ae146 netstat tree),
+  loopback-only bind restored.
+- Pi: old local ARM build + repeated headless boots ("no outbound target
+  reachable (11 configured)") — boot-window reachability requires ONE
+  successful handshake or the node starts HEADLESS (RPC-only, no listeners).
+  Native rebuild (ARM aarch64 — do NOT scp x86 binaries there, Exec format
+  error), then boot landed during DNS2 serving: non-headless, 443+onion+i2p.
+- Operator policy ENFORCED: "Triangles should not be on clearnet".
+  All P2P listeners loopback-only (DNS2 24113, Pi 443); nftables
+  tri7_p2p_policy drops 24113/443 from non-lo/non-tailscale0 on both boxes,
+  persisted via tri7-p2p-policy.service. NOTE: node code already rejects
+  cleartext-IP `addnode=` (node_embedded "only .onion / .b32.i2p addnode
+  hosts are accepted"); DEFAULT_PEER_SEEDS still contains two clearnet
+  seeds (46.62.249.20:443, 100.85.236.10:24113) — candidate for a judged
+  policy purge later.
+- Laptop peer set: peers.json IS the store; GUI node dials conf addnodes
+  (onion/i2p only) + compiled seeds + store peers. tailscale-IP addnodes are
+  ignored by the parser (policy). Laptop links resume via onion/i2p once the
+  a07d6e3 exe deploys (tor 58033 + i2p 4447 supervision with netstat
+  fallback).
+- TRI-pi repo (Pi's distribution bundle /root/tri-pi-v5.4.4-arm64): refreshed
+  with latest ARM daemon (08f47108) + store_gapfix + tri7d.service.example +
+  install-tri7.sh + README rewrite (legacy kept under README-v5.4.4-legacy.md).
+- PC: duplicate i2pd twins already dead; stray orphan tor 2840 killed.
+  Laptop tri7gui-stallwatch task retired (deleted).
+
+## 2026-11-13 laptop resolution (post-a07d6e3 deploy)
+
+The laptop's Windows OS TCP-pid attribution layer is BROKEN AT THE OS LEVEL:
+`Get-NetTCPConnection` returns nothing AND `netstat -ano` prints PID 0 on
+every row (verified). No pid-based listener attribution can ever succeed
+there — the bundled-tor spawn lane will always fail-closed. The design's
+answer worked out of the box: ATTACH LANES. Installed:
+- System tor service (`tor --service install`, torrc-sys: SocksPort 9050,
+  ClientOnly) from the existing C:\Coins\TRI-LAPTOP\tor\tor.exe — the
+  supervisor probes 9050 first and attaches (never spawns a second one).
+- Result: laptop follows the fleet via tor onion peers, tip tracks (h2211345),
+  staking true, ZERO clearnet. Link churn observed (peers drop at ~90s idle,
+  re-attach next rotation) — blocks flow continuously; tuning candidate, not
+  a blocker.
+- i2pd on the laptop PARKED: mingw build dies silently ~1-2min in (no logs),
+  Windows Defender flagged the zip (exclusions added but instability
+  persists). Retry later with the official setup.exe variant.
+- a07d6e3 (netstat fallback) CI green run 43513497572; deployed to the laptop.
+  Seed purge 23ec1a5 (overlay-only DEFAULT_PEER_SEEDS + DEFAULT_PEER/
+  FALLBACK_PEER aliased to FLEET_ONION_SEED/I2P_SEED, policy regression test)
+  graded B urn:ump:64wauya4uy7qh2r6b5f3zxg3hvxo5dgyguf3f3cfwpdlw7b6bbxa,
+  pushed, CI run 43524683399.
+- OS repair candidate (needs operator go): `netsh winsock reset` + reboot to
+  restore the TCP-pid mapping on the laptop.
+
+## 2026-11-14 UX pass + encrypted-wallet support (897024c, 2736c59)
+
+Operator directive: "make sure all of the user interface is actually usable
+to ordinary people" + "old encrypted Triangles wallets still work".
+
+- UX pass (897024c, grade B smswd7jgocajbjowuvyg7i4shbtu3di74ksh23jir3yxrk36f7mq):
+  three source audits (~100 findings) -> encrypt-brick disabled, broadcast
+  double-click fixed, real lock chip, passphrase dialog feedback, first-run
+  create-vs-restore guidance, RPC error humanization in rpc_client
+  (humanize_error), 20+ jargon strings rewritten, WCAG AA contrast fixes
+  (DISABLED_FG/TEXT_MUTED/BRAND_RED/BRAND_RED_PRESSED; palette anchor test
+  updated). Known follow-up: RPC calls still run on the UI thread (up to
+  ~16s pause on send) - threading is the structural fix.
+- Encrypted-wallet support (2736c59, grade B
+  qfgws6kxag2emsyu72ykvtuekklgd3gyagyaaubffc2uhba5szmq): the load screen
+  detects an mkey/ckey store, asks for the passphrase, decrypts via the
+  legacy crypter (wallet_encrypt::decrypt_wallet, now TESTED - roundtrip +
+  wrong-passphrase + uncompressed 65-byte keys), injects keys into the
+  in-memory WalletData only (NEVER the persistable keystore - judge r2
+  caught the plaintext-keystore.json leak), transactional on finish_load
+  failure (keyless skeleton restored for retry). The strict reader
+  contract (keytool/bdb) preserved.
+- Deployed: laptop runs 897024c (UX build); PC has it installed for next
+  start. 2736c59 deploys to both when its CI is green.
+- Fleet state 2026-11-14: DNS2 minting at tip; Pi v7.0.3 overlay-only
+  (onion+i2p, loopback listener, nft tri7_p2p_policy); DNS3 healed
+  (kernel-chain divergence fixed by bbd48cd, at the lead tip); laptop on
+  tor+i2p attach lanes (system tor 9050 + i2pd 4447 services); winsock
+  reset applied on the laptop (Get-NetTCPConnection remains broken on that
+  box - attach lanes are the workaround).

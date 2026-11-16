@@ -1,0 +1,83 @@
+===== Evidence transcript — DNS2 addnode port fix, 2026-11-11 05:11-05:40Z =====
+
+--- [E1] Fork divergence, DNS2 RPC 127.0.0.1:19112 vs sami-pc RPC 127.0.0.1:19114 (via ssh)
+h2209490 DNS2: ce1f073c60308dcdb13389271d9b2f8eef4b2ff7ca63a71ddd021a48fddb3ab9
+h2209490 PC:   0bc7de5e2ff079ac350d2e858b885de608e465732f929fbba34e29bbdec2570f
+h2209489 DNS2: 9cfa7b976133dc75e210b0a71242bb1851a2144e6ee1f183d68ce0e2b07905de
+h2209489 PC:   db2fcc518e1a976ded368e808b9e001a99cbb83cde8da92d896c342f628689e5
+h2209466 all four (DNS2/Pi/DNS3/PC): db9a85053a6b1dbebdebaa3ae005bfbbe0083fc6b0e157dfd9173bd8dfe5b79a  <- shared ancestor region
+Tips at 05:23:14Z: DNS2=2209493 Pi=2209493 DNS3=2209493 PC=2209493 (heights equal, hashes differ at 2209489+)
+h2209493: DNS2/DNS3 = 665cb7a43e6e02128d32526e9f8c6da797bc26e609fead171f2a9abef92d1cb3, PC = a31d9eaaea04bbdb2d1680fe614c7cd15a82fb71649c34d3b0067629dd7dc971
+
+--- [E2] sami-pc judge lines (state2.log, verbatim) — PC fetched canonical competitor, computed work, refused lighter
+[2026-11-11T05:12:09Z] recon: competing branch h2209486..h2209491 (5 blk, work 2598866491994301559472128) is NOT heavier than ours h2209493 (work 4886304598023397301026816) above the fork — ignored, reconciliation closed
+[2026-11-11T05:22:19Z] recon: competing branch h2209486..h2209493 (7 blk, work 3429674055254025890168832) is NOT heavier than ours h2209493 (work 4886304598023397301026816) above the fork — ignored, reconciliation closed
+(canonical 3.429674e24 < PC 4.886305e24 — PC branch is ~1.42x heavier above the fork)
+
+--- [E3] sami-pc connectivity of its own (getpeerinfo at 05:19Z) — 1 peer, OUTBOUND via tor to DNS2's onion
+{"count":1,"peers":[{"connected_utc":"2026-11-11T05:16:12Z","endpoint":"gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113","inbound":false,"start_height":2209491,"subver":"/tri7:7.0.0/","transport":"tor"}]}
+PC staking: enabled:true, attempts:0 (fresh boot), difficulty 7.991087733181001e-7
+DNS2 staking at same moment: enabled:true, attempts 10.89M->11.32M, difficulty 4.686651515479719e-7 / 3.732219402652669e-7, last_hit 05:21:48Z
+
+--- [E4] DNS2 getpeerinfo at 05:26Z — NO outbound tailscale peers; inbound tunnel/onion peers only
+{"by_transport":{"clearnet":3,"i2p":0,"tor":1},"count":4,"peers":[
+ {"endpoint":"127.0.0.1:54032 (/tri7:7.0.0/ h2209310)","inbound":true,"start_height":2209310},
+ {"endpoint":"127.0.0.1:41446 (/tri7:7.0.0/ h2208645)","inbound":true,"start_height":2208645},
+ {"endpoint":"ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112","inbound":false,"start_height":2209455,"transport":"tor"},
+ {"endpoint":"127.0.0.1:40888 (/tri7:7.0.0/ h2209493)","inbound":true,"start_height":2209493}]}
+
+--- [E5] DNS2 journal last 40 min: DNS2 minted h2209481..h2209493 itself; reconciliation ONLY against the Pi onion; zero awareness of PC branch
+Nov 10 21:21:48 vmi3080415 follow_tip[2816136]: [2026-11-11T05:21:48Z] h2209493: no external checksum oracle for this block — adopting locally computed 254e361c
+Nov 10 20:54:05 ... empty tip-poll reply (streak trigger) while out:ra32xf5og…b32/onion claims h2209455 … requesting window-locator reconciliation
+grep dial|refus|timed out|unreachable|100.85 over last 60 min: EMPTY (no dial errors surfaced)
+
+--- [E6] Port probes FROM DNS2 to sami-pc 100.85.236.10 (2026-11-11 05:3xZ)
+DNS2 -> 100.85.236.10:24113 : OPEN  (TCP connect succeeded)
+DNS2 -> 100.85.236.10:24112 : Connection refused
+DNS2 -> tuu7h65jykj327um6jfcecqmgyq6mjn3psiay5mtald2olsswk4jcrad.onion:24113 via tor socks 127.0.0.1:9050 : curl 28 timed out after 12003 ms  (PC onion dead — separate follow-up, not fixed here)
+sami-pc getlocalinfo: {"i2p":"mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113","onion":"tuu7h65jykj327um6jfcecqmgyq6mjn3psiay5mtald2olsswk4jcrad.onion","listen":1}
+
+--- [E7] The conf line being fixed (conf-before.conf line 24, full addnode block in bundle)
+24:addnode=100.85.236.10:24112   <- sami-pc tailscale, WRONG port (refused live, E6)
+23:addnode=100.98.140.83:24112   <- Pi, UNTOUCHED by this change
+25:addnode=100.106.76.60:24113   <- DNS3, UNTOUCHED by this change
+
+--- [E8] Operator balances intact during split
+sami-pc getbalance: 5110.900381 (the standing number) — read 05:26Z
+PC wallet live view window line after boot: "wallet live view ready: window h2204894..h2209493 — 7 outputs (7 owned) balance 1450351067 sats" (windowed partial view; RPC getbalance aggregates rows+live view correctly per wallet-balance-authority rules)
+
+--- [E9] Process identity on the PC at probe time (chronic restart pattern, unrelated to this fix)
+follow_tip.exe PID 39324, one TCP connection: 127.0.0.1:52473 -> 127.0.0.1:9050 (tor socks outbound). PC restarts ~every 10 min drop its outbound dial; its tipstate persists (tip held at h2209493 across boots, observed 05:13/05:19/05:23).
+
+--- [E10] DNS2 journal, new process 05:38:00Z (verbatim):
+2026-11-11T05:38:00Z addnode=100.85.236.10:24112 ignored: only .onion / .b32.i2p addnode hosts are accepted - no cleartext P2P
+
+--- [E11] staking RPC persist target after round-1 restart:
+{"error":null,"id":null,"result":{"persisted_to":"/etc/tri7/triangles.conf","staking":true},"source":"tri7"}
+(/root/.triangles/triangles.conf reverted to conf-before byte-for-byte; daemon reads /etc/tri7/triangles.conf: port=24113, stake=1, rpcallowip=127.0.0.1)
+
+--- [E12] DNS2 -> PC i2p probe through DNS2 i2pd SOCKS 127.0.0.1:4447 (05:4xZ, verbatim):
+* SOCKS5 connect to mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113 (remotely resolved)
+* SOCKS5 request granted.
+(PC i2pd.exe pid 3172 running; PC getlocalinfo i2p = mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113; PC tor.exe running but onion still times out from DNS2)
+
+--- [E13] Branch drift since round-1 restart: DNS2 tip h2209506 (canonical 665cb7a4@2209493), PC tip h2209512 (solo branch, fork at <=2209488) — split growing
+
+--- [E14] POST-FIX VERIFICATION (05:47-05:53Z) — the promised artifacts
+DNS2 journal (verbatim):
+[05:46:23Z] addnode=mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113 accepted (i2p)
+[05:46:28Z] handshake ok: mb3ox52u...b32.i2p:24113 - peer version 70206 (/tri7:7.0.0/) start height 2209512 services 1
+[05:47:30Z] empty tip-poll reply (start-height trigger) while out:mb3ox52u...b32.i2p:24113 claims h2209512 (we are h2209507) - requesting window-locator reconciliation
+[05:47:33Z] FORK CHOICE (reconciliation): their branch h2209512 carries more work (4844724397924147271827456) than ours h2209507 (1113365033906812940713984) - rolling back to h2209505, adopting 7 block(s) via the validated body path
+[05:47:35-36Z] h2209506..h2209512: adopting (validated body path re-advances along PC-branch hashes)
+[05:48:10Z] h2209513, [05:48:25Z] h2209514 — DNS2 minting on the adopted chain
+getstakinginfo after restart: {enabled:true, attempts:63324, connections:3} (conf stake=1; RPC staking on also asserted)
+
+FOUR-WAY PARITY (05:53Z):
+  DNS2 tip 2209514; Pi 2209514; DNS3 2209514; PC 2209514
+  hash@2209513 = 3a5a4363bba36051c84a25833c5dd49d853a953a5ed35b706a220b82e7e1e688 on DNS2 + Pi + DNS3 + PC
+  hash@2209493 = 665cb7a4... on DNS2 AND PC (canonical blocks preserved by the adoption — rollback point was h2209505)
+  PC getbalance 5110.900381 (standing number intact through the whole incident)
+  DNS2 advanced to 679cd10e@2209514 immediately after (minting on merged chain)
+
+NOTE: the PC itself had adopted the canonical blocks up to h2209505 shortly before the bridge (its own judge: recon lines showing the rival segment equal/heavier), then minted 2209506..2209512 on top — which is why DNS2 rollback landed at h2209505 with zero abandoned canonical blocks in [2209486..2209505].

@@ -1,0 +1,54 @@
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index 0d38397..c33313f 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -2230,6 +2230,9 @@ mod tests {
+             while served_v1 < 3 && Instant::now() < serve_deadline {
+                 match listener.accept() {
+                     Ok((mut s, _)) => {
++                        // BSD/macOS: accepted sockets inherit the listener's
++                        // O_NONBLOCK — restore blocking (Linux no-op).
++                        let _ = s.set_nonblocking(false);
+                         served_v1 += 1;
+                         served.fetch_add(1, Ordering::SeqCst);
+                         let mut buf = [0u8; 8192];
+@@ -3134,6 +3137,9 @@ mod tests {
+                 let deadline = Instant::now() + Duration::from_secs(5);
+                 while Instant::now() < deadline && st.load(Ordering::SeqCst) == 0 {
+                     if let Ok((mut s, _)) = sp.accept() {
++                        // BSD/macOS: accepted sockets inherit the listener's
++                        // O_NONBLOCK — restore blocking (Linux no-op).
++                        let _ = s.set_nonblocking(false);
+                         let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                         let mut greeting = [0u8; 3];
+                         if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00]
+@@ -3207,6 +3213,9 @@ mod tests {
+             let deadline = Instant::now() + Duration::from_secs(5);
+             while Instant::now() < deadline && st.load(Ordering::SeqCst) == 0 {
+                 if let Ok((mut s, _)) = sp.accept() {
++                    // BSD/macOS: accepted sockets inherit the listener's
++                    // O_NONBLOCK — restore blocking (Linux no-op).
++                    let _ = s.set_nonblocking(false);
+                     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                     let mut greeting = [0u8; 3];
+                     if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+@@ -3624,6 +3633,9 @@ mod tests {
+             let deadline = Instant::now() + Duration::from_secs(8);
+             while Instant::now() < deadline && st_flag.load(Ordering::SeqCst) == 0 {
+                 if let Ok((mut s, _)) = sp.accept() {
++                    // BSD/macOS: accepted sockets inherit the listener's
++                    // O_NONBLOCK — restore blocking (Linux no-op).
++                    let _ = s.set_nonblocking(false);
+                     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                     let mut greeting = [0u8; 3];
+                     if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+@@ -3863,6 +3875,9 @@ mod tests {
+             let deadline = Instant::now() + Duration::from_secs(8);
+             while Instant::now() < deadline && st_flag.load(Ordering::SeqCst) == 0 {
+                 if let Ok((mut s, _)) = sp.accept() {
++                    // BSD/macOS: accepted sockets inherit the listener's
++                    // O_NONBLOCK — restore blocking (Linux no-op).
++                    let _ = s.set_nonblocking(false);
+                     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                     let mut greeting = [0u8; 3];
+                     if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {

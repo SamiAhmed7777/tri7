@@ -1,0 +1,17 @@
+23,26c23,28
+< addnode=100.98.140.83:24112
+< addnode=100.85.236.10:24112
+< addnode=100.106.76.60:24113
+< addnode=i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112
+---
+> # retired 2026-11-11 item22: cleartext addnodes are ignored by tri7d ("only .onion / .b32.i2p accepted - no cleartext P2P", live journal each boot)
+> #   (was: addnode=100.98.140.83:24112)
+> #   (was: addnode=100.85.236.10:24112)
+> #   (was: addnode=100.106.76.60:24113)
+> # retired 2026-11-11 item22: dead samihost rotation leftover - SOCKS reply 1 (descriptor not found) on every dial, zero connections ever
+> #   (was: addnode=i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112)
+29c31,32
+< addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112
+---
+> # retired 2026-11-11 item22: legacy-era i2p destination (retired fleet-wide in the PC conf 2026-11-07) - SOCKS reply 4 (host unreachable) on every dial, zero connections ever
+> #   (was: addnode=lfuojjpstasun27n77o2637pmsd3dpkrpgyeuiwijduxrfmoyb2a.b32.i2p:24112)

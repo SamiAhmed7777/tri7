@@ -1,0 +1,104 @@
+# DIAL TRANSCRIPTS (DNS2 -> PC onion tuu7h65j…:24113 via socks5h 127.0.0.1:9050)
+#
+# LABELING (honesty note): entries marked [RECONSTRUCTED] are faithful summaries of
+# in-session terminal output whose full raw text was not captured to disk at the time.
+# Entries under [RAW] are complete unedited command outputs captured directly to this
+# file. A successful SOCKS5 grant + backend accept proves reachability AT THAT
+# TIMESTAMP, not continuous endpoint availability.
+=== DIAL TRANSCRIPTS, reconstructed + raw (DNS2 -> PC onion tuu7h65j…:24113 via socks5h 127.0.0.1:9050) ===
+
+--- [RECONSTRUCTED] BEFORE tick, 08:47-08:52Z (control: unbounded hang, no SOCKS grant) ---
+$ timeout 35 curl -v --socks5-hostname 127.0.0.1:9050 telnet://tuu7h65j….onion:24113
+* Connected to 127.0.0.1 (127.0.0.1) port 9050
+* SOCKS5 connect to tuu7h65j….onion:24113 (remotely resolved)
+  <progress ticks 0-35s, no grant, killed by timeout> echo
+--- [RECONSTRUCTED] 09:41Z (after 09:18:37Z upload 200 OK): GRANTED in ~4s ---
+* SOCKS5 connect to tuu7h65j….onion:24113 (remotely resolved)
+* SOCKS5 request granted.
+* Connected to 127.0.0.1 (127.0.0.1) port 9050
+
+--- [RECONSTRUCTED] 09:47-09:48Z dial (verify daemon live): GRANTED; PC-side journal 09:48:41Z: ---
+[2026-11-11T09:48:41Z] inbound handshake 100.85.236.10:50070 failed: inbound handshake: no version from client
+  (100.85.236.10:50070 = tor backend dial; tri7 listener ACCEPTED the tor-delivered
+   connection; "failure" = the curl probe does not speak the tri7 handshake)
+
+--- [RECONSTRUCTED] 10:11Z dial: general failure (dirty-descriptor re-upload delay after 09:56 restart) ---
+* Can't complete SOCKS5 connection to tuu7h65j….onion. (1)
+
+--- [RECONSTRUCTED] PC tor info log 10:16:08Z (fresh-process descriptor live): ---
+Nov 11 02:16:08.000 [info] handle_introduce_ack_success: Received INTRODUCE_ACK ack! Informing rendezvous
+
+--- [RECONSTRUCTED] 10:19:11Z dial: GRANTED again ---
+* SOCKS5 request granted.
+
+=== [RAW] FRESH LIVE DIAL 10:37:52Z — raw, unedited ===
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 127.0.0.1:9050...
+* Connected to 127.0.0.1 (127.0.0.1) port 9050
+* SOCKS5 connect to tuu7h65jykj327um6jfcecqmgyq6mjn3psiay5mtald2olsswk4jcrad.onion:24113 (remotely resolved)
+
+  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:02 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:03 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:04 --:--:--     0* SOCKS5 request granted.
+* Connected to 127.0.0.1 (127.0.0.1) port 9050
+
+  0     0    0     0    0     0      0      0 --:--:--  0:00:04 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:05 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:06 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:07 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:08 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:09 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:10 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:11 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:12 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:13 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:14 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:15 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:16 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:17 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:18 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:19 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:20 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:21 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:22 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:23 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:24 --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:--  0:00:24 --:--:--     0
+* Closing connection
+curl rc=0
+--- PC state2.log raw lines from the same minute ---
+
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209646 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209646 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209646 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209646 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209647 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209649 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209650 (we are h2209651) �?" 
+requesting window-locator reconciliation
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209650 (we are h2209651) �?" 
+requesting window-locator reconciliation
+[2026-11-11T10:38:13Z] inbound handshake 100.85.236.10:64092 failed: inbound handshake: no version from client
+out:ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 claims h2209651 (we are h2209651) �?" 
+requesting window-locator reconciliation
+
+

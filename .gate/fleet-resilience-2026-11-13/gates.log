@@ -1,0 +1,50 @@
+(exactly ONE gate run for the final tree; history in gates-history.log)
+=== cargo test --lib ===
+test wallet::tests::bestblock_update_roundtrip_preserves_locator_ancestors ... ok
+test wallet::seed_tests::passphrase_wallet_restores_identically_across_files ... ok
+test wallet::tests::backup_created_once_per_session_before_first_write ... ok
+test wallet::tests::live_wallet_copy_roundtrip ... ignored, live-wallet evidence: run on a COPY of wallet.dat via TRI7_LIVE_WALLET_COPY
+test wallet::tests::name_rows_use_legacy_bytes_and_reader_accepts_both_layouts ... ok
+test wallet::seed_tests::tri7_wallet_is_readable_by_legacy_record_shapes ... ok
+test wallet::tests::open_readwrite_refuses_foreign_missing_and_bad_schema ... ok
+test wallet::tests::pool_row_bytes_decode_live_ground_truth ... ok
+test wallet::tests::open_readwrite_refuses_encrypted_wallets ... ok
+test wallet::tests::redeem_script_rows_roundtrip_and_are_idempotent ... ok
+test wallet::tests::pop_skips_pool_rows_without_key_rows ... ok
+test wallet::tests::keypool_refill_pop_and_census_lifecycle ... ok
+test wallet::tests::row_encoders_match_legacy_qt_byte_fixture ... ok
+test wallet::tests::refill_refuses_non_hd_wallet ... ok
+test smsg_net::tests::want_serves_only_bucket_tokens_and_caps_bunch ... ok
+test wallet::tests::set_label_roundtrip_and_overwrite ... ok
+test wallet::tests::setting_row_encoders_match_the_live_legacy_shape ... ok
+test wallet::tests::concurrent_writer_is_refused_at_open_and_at_write ... ok
+test wallet::tests::write_roundtrip_add_key_is_visible_via_reader ... ok
+test wallet::tests::wallet_write_session_survives_restart_like_legacy_rows ... ok
+test walletcrypto::tests::aes_matches_openssl_vector ... ok
+test walletcrypto::tests::kdf_matches_reference_vector ... ok
+test walletcrypto::tests::aes_roundtrip_and_checksum ... ok
+test wallet::seed_tests::restore_on_fresh_wallet_reproduces_identical_keys ... ok
+test wallet::tests::refill_recounts_when_register_replaces_an_imported_row ... ok
+test wallet_encrypt::tests::encrypted_wallet_roundtrip_and_strict_refusal ... ok
+test wallet_encrypt::uncompressed_tests::decrypt_wallet_supports_uncompressed_legacy_keys ... ok
+
+test result: ok. 795 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 129.68s
+
+EXIT_TEST=0
+=== GUI featureful check ===
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4277 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 150 warnings (run `cargo fix --lib -p tri7-core` to apply 109 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.41s
+EXIT_GUI=0
+=== windows-gnu release all bins ===
+warning: `tri7-core` (bin "stake_mint") generated 2 warnings
+warning: `tri7-core` (bin "historical_sig_corpus") generated 1 warning
+warning: `tri7-core` (bin "tri7") generated 2 warnings (run `cargo fix --bin "tri7" -p tri7-core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 3m 05s
+EXIT_WIN=0
+=== GATES DONE ===

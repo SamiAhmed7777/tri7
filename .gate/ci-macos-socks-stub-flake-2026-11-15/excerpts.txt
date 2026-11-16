@@ -1,0 +1,128 @@
+===== FILE: node_supervisor_excerpt_A_rpc_stub.txt (REAL file src/gui/node_supervisor.rs lines 2224-2252; reproduced verbatim) =====
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            listener
+                .set_nonblocking(true)
+                .expect("set_nonblocking");
+            let serve_deadline = Instant::now() + std::time::Duration::from_secs(2);
+            let mut served_v1 = 0;
+            while served_v1 < 3 && Instant::now() < serve_deadline {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        // BSD/macOS: accepted sockets inherit the listener's
+                        // O_NONBLOCK — restore blocking (Linux no-op).
+                        let _ = s.set_nonblocking(false);
+                        served_v1 += 1;
+                        served.fetch_add(1, Ordering::SeqCst);
+                        let mut buf = [0u8; 8192];
+                        let _ = std::io::Read::read(&mut s, &mut buf);
+                        let body = r#"{"result":7,"error":null,"id":"tri7-gui"}"#;
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = std::io::Write::write_all(&mut s, http.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    Err(_) => break,
+                }
+===== FILE: node_supervisor_excerpt_B_tor_probe.txt (REAL file src/gui/node_supervisor.rs lines 3131-3155; reproduced verbatim) =====
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let stop = Arc::new(AtomicUsize::new(0));
+            let (st, sp) = (Arc::clone(&stop), listener);
+            std::thread::spawn(move || {
+                sp.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && st.load(Ordering::SeqCst) == 0 {
+                    if let Ok((mut s, _)) = sp.accept() {
+                        // BSD/macOS: accepted sockets inherit the listener's
+                        // O_NONBLOCK — restore blocking (Linux no-op).
+                        let _ = s.set_nonblocking(false);
+                        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut greeting = [0u8; 3];
+                        if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00]
+                        {
+                            let _ = s.write_all(&reply);
+                        }
+                        drop(s);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            });
+            port
+===== FILE: node_supervisor_excerpt_C_tor_adopt.txt (REAL file src/gui/node_supervisor.rs lines 3211-3231; reproduced verbatim) =====
+        std::thread::spawn(move || {
+            sp.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && st.load(Ordering::SeqCst) == 0 {
+                if let Ok((mut s, _)) = sp.accept() {
+                    // BSD/macOS: accepted sockets inherit the listener's
+                    // O_NONBLOCK — restore blocking (Linux no-op).
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut greeting = [0u8; 3];
+                    if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+                        let _ = s.write_all(&[0x05, 0x00]);
+                    }
+                    drop(s);
+                } else {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("torprobe2{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+===== FILE: node_supervisor_excerpt_D_i2p_transitions.txt (REAL file src/gui/node_supervisor.rs lines 3631-3651; reproduced verbatim) =====
+        std::thread::spawn(move || {
+            sp.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline && st_flag.load(Ordering::SeqCst) == 0 {
+                if let Ok((mut s, _)) = sp.accept() {
+                    // BSD/macOS: accepted sockets inherit the listener's
+                    // O_NONBLOCK — restore blocking (Linux no-op).
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut greeting = [0u8; 3];
+                    if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+                        let _ = std::io::Write::write_all(&mut s, &[0x05, 0x00]);
+                    }
+                    drop(s);
+                } else {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        });
+        let mut sup5 = i2p_supervisor(&dir, port);
+        sup5.spawn_override = Some(Arc::new(
+===== FILE: node_supervisor_excerpt_E_i2p_stale_flaked.txt (REAL file src/gui/node_supervisor.rs lines 3873-3899; reproduced verbatim) =====
+        std::thread::spawn(move || {
+            sp.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline && st_flag.load(Ordering::SeqCst) == 0 {
+                if let Ok((mut s, _)) = sp.accept() {
+                    // BSD/macOS: accepted sockets inherit the listener's
+                    // O_NONBLOCK — restore blocking (Linux no-op).
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut greeting = [0u8; 3];
+                    if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+                        let _ = std::io::Write::write_all(&mut s, &[0x05, 0x00]);
+                    }
+                    drop(s);
+                } else {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        });
+        let mut sup = i2p_supervisor(&dir, port);
+        sup.spawn_override = Some(Arc::new(
+            |_req: I2pSpawnRequest| -> Result<Child, String> {
+                panic!("already-answer rule violated: spawned over a foreign system i2pd");
+            },
+        ));
+        let st = sup.ensure(&dir, true);
+        assert_eq!(st, I2pStatus::System(port), "foreign daemon adopted: {st:?}");

@@ -1,0 +1,417 @@
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 8587afa..a4671ed 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -511,3 +511,101 @@ probe scripts).
+   (h2209617..24, heavier by work) is being reconciled by the deployed judges
+   themselves (claim-divergence recons live in both journals) — the designed
+   reorg-world behavior, no manual surgery.
++
++## 2026-11-13 fleet-resilience code lane (fb6e875, grade B urn:ump:ilhtwodj2mhdgst3uink3yhyqkqe7mwebw4z2pk3ckwvx6fr5hma)
++Live session: laptop froze beside a stale peer entry (reconnect defect, OPEN DEV ITEM 1) + stallwatch force-kills tore a store hole at h2210955; PC had TWO i2pd instances with the trusted one's SOCKS 4447 dead; laptop tor orphan healthy on the old port while every newer session's spawn died on its DataDirectory lock (chip lied 'Tor unavailable'); DNS2 adoption-body starved at h2210963 ('no live peer can take' forever). CODE FIXES committed fb6e875: fresh_outbound_present rotation gate (240s window), adoption_escalation_due fresh-seed dial (60s grace/spacing), tor PINNED SOCKS 58033 + process-bound listener identity (pid+exe path, one PowerShell query, Windows fail-closed) for orphan adoption/child health/spawn attribution + ownership-safe recovery (taskkill /PID the wallet-owned listener only), i2p child health probes 4447 (process liveness lied). Judge chain r1 wedged / r2 F / r3 F / r4 C / r5 B-zero-blockers (verdict write lost to 4317 outage — ump-audit-writer restarted 06:44 local) / r6 B. 771/0/1 lib, GUI check, windows-gnu release green. CI run 43448551449 watching. DEPLOY PENDING: Windows boxes (PC + laptop) from CI artifacts; DNS2 restart onto the new binary after CI; laptop gapfix h2210955 (store_gapfix from a canonical peer) + PC i2pd duplicate cleanup are the ops follow-ups.
++
++## 2026-11-13 fleet recovery + no-clearnet enforcement (a07d6e3 lane)
++
++Laptop tor never came up because its OS `Get-NetTCPConnection` cannot see
++loopback LISTEN sockets; fail-closed identity (r4) was RIGHT to refuse
++attribution. Fix: netstat -ano fallback parsed in Rust (pure, tested),
++pid double-read turnover guard, 127.0.0.1-only. Judge chain r1 D -> r2/r3/r4 C
++-> r5 A-in-text (wrapper parser artifact, no JSON verdict) -> r6 A
++urn:ump:2id4s6fwbout2ptlqfsvhvg6elcjjfgxvmg7jalrchaj3laeghia. Commit a07d6e3.
++
++Fleet topology fixes found along the way:
++- DNS2 ran BOTH generations: old C++ `trianglesd` squatted 0.0.0.0:24113 +
++  [::1]:19112 and was DEAF to inbound handshakes (the fleet-wide "verack
++  timeout" cascade); new follow_tip ran dial-only (port race lost). Stopped
++  trianglesd, swapped follow_tip to the current build (df3ae146 netstat tree),
++  loopback-only bind restored.
++- Pi: old local ARM build + repeated headless boots ("no outbound target
++  reachable (11 configured)") — boot-window reachability requires ONE
++  successful handshake or the node starts HEADLESS (RPC-only, no listeners).
++  Native rebuild (ARM aarch64 — do NOT scp x86 binaries there, Exec format
++  error), then boot landed during DNS2 serving: non-headless, 443+onion+i2p.
++- Operator policy ENFORCED: "Triangles should not be on clearnet".
++  All P2P listeners loopback-only (DNS2 24113, Pi 443); nftables
++  tri7_p2p_policy drops 24113/443 from non-lo/non-tailscale0 on both boxes,
++  persisted via tri7-p2p-policy.service. NOTE: node code already rejects
++  cleartext-IP `addnode=` (node_embedded "only .onion / .b32.i2p addnode
++  hosts are accepted"); DEFAULT_PEER_SEEDS still contains two clearnet
++  seeds (46.62.249.20:443, 100.85.236.10:24113) — candidate for a judged
++  policy purge later.
++- Laptop peer set: peers.json IS the store; GUI node dials conf addnodes
++  (onion/i2p only) + compiled seeds + store peers. tailscale-IP addnodes are
++  ignored by the parser (policy). Laptop links resume via onion/i2p once the
++  a07d6e3 exe deploys (tor 58033 + i2p 4447 supervision with netstat
++  fallback).
++- TRI-pi repo (Pi's distribution bundle /root/tri-pi-v5.4.4-arm64): refreshed
++  with latest ARM daemon (08f47108) + store_gapfix + tri7d.service.example +
++  install-tri7.sh + README rewrite (legacy kept under README-v5.4.4-legacy.md).
++- PC: duplicate i2pd twins already dead; stray orphan tor 2840 killed.
++  Laptop tri7gui-stallwatch task retired (deleted).
++
++## 2026-11-13 laptop resolution (post-a07d6e3 deploy)
++
++The laptop's Windows OS TCP-pid attribution layer is BROKEN AT THE OS LEVEL:
++`Get-NetTCPConnection` returns nothing AND `netstat -ano` prints PID 0 on
++every row (verified). No pid-based listener attribution can ever succeed
++there — the bundled-tor spawn lane will always fail-closed. The design's
++answer worked out of the box: ATTACH LANES. Installed:
++- System tor service (`tor --service install`, torrc-sys: SocksPort 9050,
++  ClientOnly) from the existing C:\Coins\TRI-LAPTOP\tor\tor.exe — the
++  supervisor probes 9050 first and attaches (never spawns a second one).
++- Result: laptop follows the fleet via tor onion peers, tip tracks (h2211345),
++  staking true, ZERO clearnet. Link churn observed (peers drop at ~90s idle,
++  re-attach next rotation) — blocks flow continuously; tuning candidate, not
++  a blocker.
++- i2pd on the laptop PARKED: mingw build dies silently ~1-2min in (no logs),
++  Windows Defender flagged the zip (exclusions added but instability
++  persists). Retry later with the official setup.exe variant.
++- a07d6e3 (netstat fallback) CI green run 43513497572; deployed to the laptop.
++  Seed purge 23ec1a5 (overlay-only DEFAULT_PEER_SEEDS + DEFAULT_PEER/
++  FALLBACK_PEER aliased to FLEET_ONION_SEED/I2P_SEED, policy regression test)
++  graded B urn:ump:64wauya4uy7qh2r6b5f3zxg3hvxo5dgyguf3f3cfwpdlw7b6bbxa,
++  pushed, CI run 43524683399.
++- OS repair candidate (needs operator go): `netsh winsock reset` + reboot to
++  restore the TCP-pid mapping on the laptop.
++
++## 2026-11-14 UX pass + encrypted-wallet support (897024c, 2736c59)
++
++Operator directive: "make sure all of the user interface is actually usable
++to ordinary people" + "old encrypted Triangles wallets still work".
++
++- UX pass (897024c, grade B smswd7jgocajbjowuvyg7i4shbtu3di74ksh23jir3yxrk36f7mq):
++  three source audits (~100 findings) -> encrypt-brick disabled, broadcast
++  double-click fixed, real lock chip, passphrase dialog feedback, first-run
++  create-vs-restore guidance, RPC error humanization in rpc_client
++  (humanize_error), 20+ jargon strings rewritten, WCAG AA contrast fixes
++  (DISABLED_FG/TEXT_MUTED/BRAND_RED/BRAND_RED_PRESSED; palette anchor test
++  updated). Known follow-up: RPC calls still run on the UI thread (up to
++  ~16s pause on send) - threading is the structural fix.
++- Encrypted-wallet support (2736c59, grade B
++  qfgws6kxag2emsyu72ykvtuekklgd3gyagyaaubffc2uhba5szmq): the load screen
++  detects an mkey/ckey store, asks for the passphrase, decrypts via the
++  legacy crypter (wallet_encrypt::decrypt_wallet, now TESTED - roundtrip +
++  wrong-passphrase + uncompressed 65-byte keys), injects keys into the
++  in-memory WalletData only (NEVER the persistable keystore - judge r2
++  caught the plaintext-keystore.json leak), transactional on finish_load
++  failure (keyless skeleton restored for retry). The strict reader
++  contract (keytool/bdb) preserved.
++- Deployed: laptop runs 897024c (UX build); PC has it installed for next
++  start. 2736c59 deploys to both when its CI is green.
++- Fleet state 2026-11-14: DNS2 minting at tip; Pi v7.0.3 overlay-only
++  (onion+i2p, loopback listener, nft tri7_p2p_policy); DNS3 healed
++  (kernel-chain divergence fixed by bbd48cd, at the lead tip); laptop on
++  tor+i2p attach lanes (system tor 9050 + i2pd 4447 services); winsock
++  reset applied on the laptop (Get-NetTCPConnection remains broken on that
++  box - attach lanes are the workaround).
+diff --git a/TRI7-COORDINATION.md b/TRI7-COORDINATION.md
+index e42c253..4ff06a3 100644
+--- a/TRI7-COORDINATION.md
++++ b/TRI7-COORDINATION.md
+@@ -82,3 +82,6 @@ pinned hash in this file; `tri7-verify.sh` prints the HEAD it saw at capture.
+ - BALANCE-SOURCE SEMANTICS: getwalletinfo balance_source=snapshot-pair can be FROZEN at an old coverage height (the PC's pre-cutover snapshot said 1538 TRI anchored at h2208645/2026-11-08); balance_source=live-index (complete addrindex) serves the current truth — listunspent sum == getwalletinfo.balance_sats EXACTLY at one tip (2500176114 at h2210917; later 2551062373 at h2210927). listwalletaddresses.balance is the LEGACY wallet-table ledger (pre-tri7 imported coins; 5110900381) — NOT the chain balance; never quote it. UNIT: 1e6 sat/TRI.
+ - DEV ITEM (top priority, GUI lane/follow-loop): EMBEDDED NODE NEVER RE-DIALS AFTER THE LAST PEER'S CLEAN DISCONNECT. Caught live TWICE on the laptop: (1) 07:09:37Z tor 10053 clean disconnect after healthy 2s/block catchup -> 29 min of silence, stale peer entry (traffic_ms_ago 1,728,371), height frozen; (2) second run: peer ra32xf5og stale at 513,056 ms -> height frozen 2210335 across 4 samples/90s. Each GUI restart re-dials instantly and rotates fleet onion peers (gxvrhv -> ra32xf5). The reconnect/demotion logic does not cover this path — the wallet freezes until restarted whenever its single tor peer drops. Evidence: .gate/singleexe-merge-cutover-2026-11-12/laptop-*.txt.
+ - Rotation disclosure: both machines' conf rpcpassword values were exposed in r1/r2 judge evidence and were REGENERATED in place (loopback-only, no auth enforcement, GUI client sends no auth — zero functional impact). Disclosed to Sami per his no-rotation rule.
++
++## HEADER WORDMARK (2026-11-13, Sami: bigger words, icon unchanged)
++- The 1199x252 lockup split at its natural alpha gaps into brand_lockup_icon.png (186x162), brand_word_cryptographic.png (587x59), brand_word_triangles.png (378x59); the header composes them — icon 36px content height (exactly its pre-split size), each word 30px, header 64->88px + 8px top nudge (operator feedback: felt top-clipped). Commits 3033aff (B urn:ump:fdv2syq44srgsutxa36hen6knj3ubxpiqhqf4awlr37j7s3eyibq) + 0d26ac2 (A urn:ump:gm5w6luo5teji6hiehhxcndsr5mpzsc42izgpbj5rl24xf6ccwxq). Deployed sha256 ecf14b0a… on pc+laptop. Content test pins assets/ratios/sizes; if brand_header_white.png ever changes, re-derive the crops (extents documented in the test).
+diff --git a/src/bin/tri7_wallet_gui.rs b/src/bin/tri7_wallet_gui.rs
+index 586e7b3..d22ddb6 100644
+--- a/src/bin/tri7_wallet_gui.rs
++++ b/src/bin/tri7_wallet_gui.rs
+@@ -99,6 +99,9 @@ fn main() {
+     }
+     if let Some(v) = get("--wallet", &args) {
+         cfg.wallet_path = v;
++        // explicit launch target: the persisted last-wallet session must not
++        // override it (resolve_first_run_target enforces the precedence)
++        cfg.wallet_path_explicit = true;
+     }
+     if let Some(v) = get("--state-dir", &args) {
+         cfg.state_dir = v;
+diff --git a/src/gui/app.rs b/src/gui/app.rs
+index 86d14f9..41c92b9 100644
+--- a/src/gui/app.rs
++++ b/src/gui/app.rs
+@@ -2126,28 +2126,38 @@ impl eframe::App for Tri7App {
+             if self.st.wallet.is_none() && self.st.seed_flow.is_none() {
+                 let profile = self.st.cfg.profile_dir.clone();
+                 let remembered = crate::gui::app_state::remembered_wallet_path(&profile);
+-                let target_exists = Path::new(&self.st.cfg.wallet_path).exists();
+-                match remembered {
+-                    Some(p) if Path::new(&p).exists() => {
+-                        // reopen the remembered wallet silently
++                // precedence lives in resolve_first_run_target: an explicit
++                // --wallet launch target ALWAYS beats the persisted session
++                // (live incident 2026-11-16: the remembered Roaming wallet
++                // silently outranked --wallet E:\Coins\TRI\wallet.dat)
++                match crate::gui::app_state::resolve_first_run_target(
++                    self.st.cfg.wallet_path_explicit,
++                    &self.st.cfg.wallet_path,
++                    remembered,
++                ) {
++                    crate::gui::app_state::FirstRunTarget::Remembered(p) => {
++                        // reopen the remembered wallet silently (no --wallet
++                        // flag on this launch)
+                         self.st.cfg.wallet_path = p;
+                         if let Err(e) = self.st.load_wallet_action() {
+                             self.st.load_error = Some(e);
+                         }
+                     }
+-                    _ if target_exists => {
++                    crate::gui::app_state::FirstRunTarget::Target => {
+                         // the --wallet/default path exists: auto-open it
+                         if let Err(e) = self.st.load_wallet_action() {
+                             self.st.load_error = Some(e);
+                         }
+                     }
+-                    _ => {
++                    crate::gui::app_state::FirstRunTarget::Welcome => {
+                         // FIRST OPEN (UX pass 2): a brand-new user used to be
+                         // dropped straight into 24 freshly generated words —
+                         // someone who came to RESTORE had to guess that the way
+                         // out was Cancel. Nothing is generated now: the welcome
+                         // menu offers create / restore / open-a-file and the
+-                        // user chooses.
++                        // user chooses. (Also: an explicit --wallet whose file
++                        // is missing lands here rather than silently opening
++                        // some other wallet.)
+                         self.st.first_run_welcome = true;
+                     }
+                 }
+diff --git a/src/gui/app_state.rs b/src/gui/app_state.rs
+index 7e1b3fe..4f8c919 100644
+--- a/src/gui/app_state.rs
++++ b/src/gui/app_state.rs
+@@ -3764,6 +3764,56 @@ pub fn remember_last_wallet(profile_dir: &str, wallet_path: &str) {
+     let _ = std::fs::write(dir.join("last_wallet.txt"), wallet_path);
+ }
+ 
++/// What the first-run flow should open. Explicit CLI beats the persisted
++/// session — Sami 2026-11-16: "it should actually use the existing wallets
++/// in the locations I give you not the locations you want to move them to".
++/// Precedence:
++///   1. `--wallet` passed and that file exists        -> open the CLI target
++///   2. `--wallet` passed but the file does not exist -> welcome (NEVER
++///      silently open a different wallet than the one named on the command
++///      line — live incident 2026-11-16: `--wallet E:\Coins\TRI\wallet.dat`
++///      launched, the remembered Roaming wallet opened instead, and the
++///      fused node replayed the chain for the wrong key set for days)
++///   3. no flag, remembered wallet exists on disk     -> reopen the remembered
++///   4. no flag, default target exists               -> auto-open it
++///   5. otherwise                                    -> welcome
++#[derive(Debug)]
++pub enum FirstRunTarget {
++    /// open this path (persisted last-wallet session)
++    Remembered(String),
++    /// open cfg.wallet_path (explicit flag or platform default target)
++    Target,
++    /// nothing to auto-open: show the welcome menu (create / restore / open)
++    Welcome,
++}
++
++pub fn resolve_first_run_target(
++    wallet_path_explicit: bool,
++    wallet_path: &str,
++    remembered: Option<String>,
++) -> FirstRunTarget {
++    let target_exists = Path::new(wallet_path).exists();
++    if wallet_path_explicit {
++        // Sami's rule: the wallet he points the app at IS the wallet that
++        // opens — remembered sessions never outrank an explicit launch flag,
++        // and a missing explicit target is surfaced, not papered over.
++        return if target_exists {
++            FirstRunTarget::Target
++        } else {
++            FirstRunTarget::Welcome
++        };
++    }
++    if let Some(p) = remembered {
++        if Path::new(&p).exists() {
++            return FirstRunTarget::Remembered(p);
++        }
++    }
++    if target_exists {
++        return FirstRunTarget::Target;
++    }
++    FirstRunTarget::Welcome
++}
++
+ pub fn run_selfcheck(cfg: &UiConfig, report_path: Option<&str>) -> i32 {
+     let t0 = std::time::Instant::now();
+     let mut report = serde_json::Map::new();
+diff --git a/src/gui/state.rs b/src/gui/state.rs
+index dc0e558..4697c66 100644
+--- a/src/gui/state.rs
++++ b/src/gui/state.rs
+@@ -140,6 +140,13 @@ impl Screen {
+ #[derive(Debug, Clone)]
+ pub struct UiConfig {
+     pub wallet_path: String,
++    /// explicit --wallet was passed on this launch: the persisted
++    /// last-wallet session must NOT override it (CLI-flag only). Live
++    /// incident 2026-11-16: the app was launched `--wallet E:\Coins\TRI\wallet.dat`
++    /// and silently reopened the remembered Roaming wallet instead — the fused
++    /// node then replayed the chain for the WRONG key set. Sami's rule: the
++    /// wallet he points the app at IS the wallet that opens.
++    pub wallet_path_explicit: bool,
+     pub state_dir: String, // tipstate.json, wallet_utxos.json, blk0001.dat, index/
+     /// explicit --state-dir was passed: the one-folder auto-derivation (from
+     /// the wallet file's parent) must NOT override it (CLI-flag only)
+@@ -167,6 +174,7 @@ impl Default for UiConfig {
+                 .unwrap_or_else(|_| format!("{}\\AppData\\Local", std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into())));
+             UiConfig {
+                 wallet_path: format!("{appdata}\\Triangles\\wallet.dat"),
++                wallet_path_explicit: false,
+                 state_dir: format!("{local}\\Tri7Wallet\\state"),
+                 state_dir_explicit: false,
+                 stake_dryrun_path: format!("{local}\\Tri7Wallet\\stake_dryrun.json"),
+@@ -179,6 +187,7 @@ impl Default for UiConfig {
+         } else {
+             UiConfig {
+                 wallet_path: "/root/.triangles/wallet.dat".into(),
++                wallet_path_explicit: false,
+                 state_dir: "/var/lib/tri7".into(),
+                 state_dir_explicit: false,
+                 stake_dryrun_path: "/root/tri7/stake_dryrun.json".into(),
+diff --git a/src/gui/tests.rs b/src/gui/tests.rs
+index 9c2c481..c78aac7 100644
+--- a/src/gui/tests.rs
++++ b/src/gui/tests.rs
+@@ -1743,6 +1743,7 @@ fn derivation_falls_back_to_snapshot_without_index() {
+     .unwrap();
+     let cfg = UiConfig {
+         wallet_path: "/nonexistent/wallet.dat".into(),
++        wallet_path_explicit: false,
+         state_dir: dir.join("state").display().to_string(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -1777,6 +1778,7 @@ fn keystore_side_files_persist_new_addresses() {
+     let dir = std::env::temp_dir().join(format!("tri7gui_keystore_{}", std::process::id()));
+     let cfg = UiConfig {
+         wallet_path: "/nonexistent".into(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -1909,6 +1911,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
+     let wallet = synth_wallet_file(&dir, "wallet.dat");
+     let cfg = UiConfig {
+         wallet_path: wallet.display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -1949,6 +1952,7 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
+     // wallet.dat — no keystore involvement
+     let cfg2 = UiConfig {
+         wallet_path: wallet.display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -1974,6 +1978,7 @@ fn wallet_label_edit_writes_name_row_when_writable() {
+     let wallet = synth_wallet_file(&dir, "wallet.dat");
+     let cfg = UiConfig {
+         wallet_path: wallet.display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -2032,6 +2037,7 @@ fn locked_wallet_falls_back_to_keystore() {
+     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+     let cfg = UiConfig {
+         wallet_path: wallet.display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -2061,6 +2067,7 @@ fn locked_wallet_falls_back_to_keystore() {
+ fn upd_test_cfg(dir: &std::path::Path) -> UiConfig {
+     UiConfig {
+         wallet_path: dir.join("wallet.dat").display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -2254,6 +2261,7 @@ fn updater_options_line_reports_state() {
+ fn sweep_test_cfg(dir: &std::path::Path, rpc_addr: Option<String>) -> UiConfig {
+     UiConfig {
+         wallet_path: dir.join("wallet.dat").display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: "/nonexistent".into(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),
+@@ -3318,6 +3326,64 @@ fn remembered_wallet_roundtrip_and_first_open_logic() {
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
++/// Explicit --wallet beats the persisted last-wallet session (Sami
++/// 2026-11-16: "it should actually use the existing wallets in the locations
++/// I give you"). Live incident: `--wallet E:\Coins\TRI\wallet.dat` launched
++/// while last_wallet.txt still held the Roaming path — the app opened the
++/// Roaming wallet and the fused node replayed the chain for the wrong key
++/// set. The resolver must rank the explicit flag first, and a missing
++/// explicit target must land on the welcome screen, never on some other
++/// wallet.
++#[test]
++fn cli_wallet_flag_beats_remembered_wallet() {
++    use crate::gui::app_state::{resolve_first_run_target, FirstRunTarget};
++    let dir = std::env::temp_dir().join(format!("tri7gui_cliwallet_{}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).unwrap();
++    let remembered_path = dir.join("roaming\\wallet.dat");
++    std::fs::create_dir_all(remembered_path.parent().unwrap()).unwrap();
++    std::fs::write(&remembered_path, b"x").unwrap();
++    let cli_path = dir.join("ecoins\\wallet.dat");
++    std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
++    std::fs::write(&cli_path, b"x").unwrap();
++
++    // 1. explicit --wallet + target exists -> the CLI target, never the session
++    match resolve_first_run_target(
++        true,
++        cli_path.to_str().unwrap(),
++        Some(remembered_path.to_str().unwrap().to_string()),
++    ) {
++        FirstRunTarget::Target => {}
++        other => panic!("explicit --wallet must win, got {:?}", other),
++    }
++    // 2. explicit --wallet + target MISSING -> welcome, never another wallet
++    match resolve_first_run_target(
++        true,
++        dir.join("missing\\wallet.dat").to_str().unwrap(),
++        Some(remembered_path.to_str().unwrap().to_string()),
++    ) {
++        FirstRunTarget::Welcome => {}
++        other => panic!("missing explicit target must show welcome, got {:?}", other),
++    }
++    // 3. no flag -> the remembered session still reopens (unchanged behavior)
++    match resolve_first_run_target(
++        false,
++        cli_path.to_str().unwrap(),
++        Some(remembered_path.to_str().unwrap().to_string()),
++    ) {
++        FirstRunTarget::Remembered(p) => {
++            assert_eq!(std::path::Path::new(&p), remembered_path.as_path());
++        }
++        other => panic!("no-flag launch must reopen the remembered wallet, got {:?}", other),
++    }
++    // 4. no flag, nothing remembered, target exists -> auto-open the target
++    match resolve_first_run_target(false, cli_path.to_str().unwrap(), None) {
++        FirstRunTarget::Target => {}
++        other => panic!("default auto-open must survive, got {:?}", other),
++    }
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
+ /// The Transactions date order must flip newest<->oldest cleanly: the sort
+ /// key is (tx_time, height, txid, n) and the toggle only reverses it, so the
+ /// same set is shown in the exact reverse sequence both ways (Sami: "oldest
+@@ -3539,6 +3605,7 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
+     .unwrap();
+     let cfg = UiConfig {
+         wallet_path: wallet_path.display().to_string(),
++        wallet_path_explicit: false,
+         state_dir: dir.join("state").display().to_string(),
+         state_dir_explicit: true,
+         stake_dryrun_path: "/nonexistent".into(),

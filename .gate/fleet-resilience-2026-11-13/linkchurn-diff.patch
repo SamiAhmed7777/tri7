@@ -1,0 +1,181 @@
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index b928adc..0d38397 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -86,6 +86,26 @@ pub enum TorStatus {
+     Unavailable,
+ }
+ 
++/// Spawn a Windows helper process WITHOUT a console window.
++///
++/// The supervisor resolves the tor listener pid/path on a timer, and every one
++/// of those probes used to launch `powershell`/`cmd` in a fresh console — which
++/// flashed a window on the desktop roughly every 6-10 seconds (observed
++/// 2026-11-14: `tri7_wallet_gui.exe` spawning powershell repeatedly, each spawn
++/// pairing with a conhost window). CREATE_NO_WINDOW keeps the same diagnostics
++/// with no visible window.
++#[cfg(windows)]
++fn quiet_command(cmd: &mut std::process::Command) -> &mut std::process::Command {
++    use std::os::windows::process::CommandExt;
++    cmd.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
++}
++
++/// Non-Windows builds have no console-window concept; keep one call shape.
++#[cfg(not(windows))]
++fn quiet_command(cmd: &mut std::process::Command) -> &mut std::process::Command {
++    cmd
++}
++
+ impl TorStatus {
+     /// status-bar label (directive formats): 'Tor: bundled (running)' /
+     /// 'Tor: system (9050)' / 'Tor: unavailable' + the SOCKS port
+@@ -550,15 +570,15 @@ impl TorSupervisor {
+ 
+     /// primary Windows resolution: Get-NetTCPConnection + Get-Process Path,
+     /// ONE query (judge r4 — no pid/path turnover pairing).
+-    #[cfg(windows)]
++
++#[cfg(windows)]
+     fn listener_of_socks_port_os_cmdlet(port: u16) -> Option<(u32, String)> {
+         let q = format!(
+             "$c = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \"{{0}}|{{1}}\" -f $c.OwningProcess, $p.Path }}"
+         );
+-        let out = std::process::Command::new("powershell")
+-            .args(["-NoProfile", "-Command", &q])
+-            .output()
+-            .ok()?;
++        let mut c = std::process::Command::new("powershell");
++        c.args(["-NoProfile", "-Command", &q]);
++        let out = quiet_command(&mut c).output().ok()?;
+         let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+         let (pid, path) = line.split_once('|')?;
+         let pid = pid.trim().parse::<u32>().ok()?;
+@@ -583,10 +603,9 @@ impl TorSupervisor {
+     #[cfg(windows)]
+     fn listener_of_socks_port_os_netstat(port: u16) -> Option<(u32, String)> {
+         let read_pid = || -> Option<u32> {
+-            let out = std::process::Command::new("cmd")
+-                .args(["/C", "netstat -ano"])
+-                .output()
+-                .ok()?;
++            let mut c = std::process::Command::new("cmd");
++            c.args(["/C", "netstat -ano"]);
++            let out = quiet_command(&mut c).output().ok()?;
+             let rows: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                 .lines()
+                 .map(str::to_string)
+@@ -595,10 +614,9 @@ impl TorSupervisor {
+         };
+         let pid1 = read_pid()?;
+         let pq = format!("(Get-Process -Id {pid1} -ErrorAction SilentlyContinue).Path");
+-        let uout = std::process::Command::new("powershell")
+-            .args(["-NoProfile", "-Command", &pq])
+-            .output()
+-            .ok()?;
++        let mut uc = std::process::Command::new("powershell");
++        uc.args(["-NoProfile", "-Command", &pq]);
++        let uout = quiet_command(&mut uc).output().ok()?;
+         let path = String::from_utf8_lossy(&uout.stdout).trim().to_string();
+         if path.is_empty() {
+             return None;
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 2545db9..b6b3a9c 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -269,6 +269,13 @@ fn keypool_maintainer_loop(
+ }
+ 
+ const STALE_LINK_SECS: u64 = 90;
++/// (link-churn, 2026-11-13 operator request) Overlay transports (tor/i2p)
++/// get a longer silent-window than clearnet: circuit/tunnel rebuilds after
++/// an idle stretch routinely exceed 90s even for HEALTHY links (the laptop's
++/// tor lane churned drop→re-attach every ~2min while perfectly synced at the
++/// fleet tip). A truly dead overlay link still drops within this window and
++/// the dial rotation covers the gap; clearnet keeps the tight 90s cut.
++const STALE_LINK_SECS_OVERLAY: u64 = 300;
+ const MAX_OUTSTANDING_GETDATA: usize = 64;
+ const GETDATA_BATCH: usize = 32;
+ /// (2026-11-13 boot-body-stall) Body-phase deadline for boot backfill.
+@@ -13552,16 +13559,18 @@ pub fn main_args(argv: &[String]) -> i32 {
+             }
+         }
+ 
+-        // drop silent peers (90s without any inbound traffic). ALWAYS via
+-        // stale_link_reason → the reason line names transport, message
+-        // count and connected_utc: a getpeerinfo disappearance with no
+-        // matching drop line was the observability bug (i2p fleet defect),
++        // drop silent peers — 90s without inbound traffic on clearnet, 300s
++        // on overlay transports (tor/i2p links rebuild circuits/tunnels past
++        // the clearnet window even when healthy; operator link-churn fix).
++        // ALWAYS via stale_link_reason → the reason line names transport,
++        // message count and connected_utc: a getpeerinfo disappearance with
++        // no matching drop line was the observability bug (i2p fleet defect),
+         // and the keepalive pings above are what keep an ANSWERING idle
+         // session from ever crossing this gate.
+-        let stale_cut = Duration::from_secs(STALE_LINK_SECS);
+         let stale_now = Instant::now();
+         let mut dropped_stale = 0usize;
+         for p in peers.iter_mut() {
++            let stale_cut = stale_link_cut(p);
+             if let Some(reason) = stale_link_reason(p, stale_cut, stale_now) {
+                 log(&format!("stale link: {reason}"));
+                 p.dead = true;
+@@ -13700,11 +13709,21 @@ fn adoption_escalation_due(
+     }
+ }
+ 
+-/// The loud reason a session crosses the stale-link gate, or None while it
+-/// is KEPT. Pure over (last_traffic, now, cut) so the prune semantics are
+-/// unit-testable: an idle session may only leave the peers table THROUGH
+-/// this reason (the caller logs it verbatim with the transport), never
+-/// silently. Saturating on clock skew (last_traffic in the future → kept).
++/// Transport-aware stale cut (link-churn, 2026-11-13): clearnet keeps the
++/// tight 90s window; overlay links (tor/i2p) get 300s because circuit/tunnel
++/// rebuilds after an idle stretch exceed the clearnet window even for
++/// healthy links.
++fn stale_link_cut(p: &Peer) -> Duration {
++    match p.transport {
++        Transport::Clearnet => Duration::from_secs(STALE_LINK_SECS),
++        Transport::Tor | Transport::I2p => Duration::from_secs(STALE_LINK_SECS_OVERLAY),
++    }
++}
++
++/// The ONLY way an idle session may leave the peers table: unit-testable,
++/// the caller logs the reason verbatim with the transport — never a silent
++/// disappearance. Saturating on clock skew (last_traffic in the future →
++/// kept).
+ fn stale_link_reason(p: &Peer, cut: Duration, now: Instant) -> Option<String> {
+     let idle = now.checked_duration_since(p.last_traffic)?;
+     if idle < cut {
+@@ -19324,6 +19343,31 @@ addnode=host:notaport
+         let _ = listener;
+     }
+ 
++    /// (link-churn) the stale cut is TRANSPORT-AWARE: clearnet keeps 90s,
++    /// overlay (tor/i2p) gets 300s — healthy overlay links rebuild circuits
++    /// past the clearnet window and must not churn.
++    #[test]
++    fn stale_link_cut_is_transport_aware() {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let mut p = i2p_test_peer(stream);
++        let now = Instant::now();
++        // overlay (i2p fixture): idle 299s → KEPT, idle 301s → dropped
++        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS_OVERLAY - 1);
++        assert!(stale_link_reason(&p, stale_link_cut(&p), now).is_none());
++        p.last_traffic = now - Duration::from_secs(STALE_LINK_SECS_OVERLAY + 1);
++        assert!(stale_link_reason(&p, stale_link_cut(&p), now).is_some());
++        // clearnet peer: the OLD 90s cut still applies (91s idle → dropped)
++        let cl_stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let mut cl = i2p_test_peer(cl_stream);
++        cl.transport = Transport::Clearnet;
++        cl.last_traffic = now - Duration::from_secs(89);
++        assert!(stale_link_reason(&cl, stale_link_cut(&cl), now).is_none());
++        cl.last_traffic = now - Duration::from_secs(91);
++        assert!(stale_link_reason(&cl, stale_link_cut(&cl), now).is_some());
++        let _ = listener;
++    }
++
+     /// Test fixture for the rotation gate: a peer with controllable
+     /// (outbound, dead, last_traffic) and a real local-socket session.
+     fn gate_peer(outbound: bool, dead: bool, last_traffic: Instant) -> Peer {

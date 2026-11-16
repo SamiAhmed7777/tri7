@@ -1,0 +1,13 @@
+GRADE=B urn=urn:ump:ydngne6bub6lawocypmha7ti7vwsbda6e7xprk3mugo4avntlgjq
+{
+  "blocking": [],
+  "polish": [
+    "The two containment blocks in handle_message are near-duplicates (~25 lines each); extract a shared contained_kernel_failure helper to keep the validate and apply paths from drifting.",
+    "Kernel-state classification by error-string substring matching (is_kernel_state_failure) is brittle \u2014 a structured error enum (or at least a shared error-prefix constant) would prevent silent misclassification if upstream error strings change.",
+    "The interval threshold 17692, the 70-entry min-age offset, and tx_offset 181 are hardcoded in several places (scan, rebase, fixture, tests); hoist into named constants.",
+    "Item25Fixture's coin_input_for and the dense-pool builder assume n \u2265 ~120; add a debug_assert or doc the minimum fixture size.",
+    "scan_modifier_chain returns replay_floor=n (meaning 'nothing below floor') when the whole window is below the floor, which conflates 'window too small' with 'floor at end'; a comment or distinct sentinel would clarify.",
+    "In the integration test, pass 2 reuses the dead peer for handle_message; if handle_message ever gains an early dead-peer guard the test would silently change meaning \u2014 reset peer.dead or add a comment.",
+    "Log lines embed height/rel formatting inline; a small fmt helper would reduce the verbosity in detect_and_heal_modifier_chain."
+  ]
+}

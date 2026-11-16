@@ -1,0 +1,587 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 076be1f..15e4e13 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -323,6 +323,14 @@ const DEMOTION_COOLDOWN_SECS: u64 = 120;
+ // summary (fires at most once per this many seconds while the tip is frozen
+ // on a queued / outstanding-only adoption window).
+ const ADOPTION_STALL_LOG_SECS: u64 = 60;
++// (item 28, zombie adoption-queue) hard give-up cap for ONE adoption era: an
++// adoption whose bodies cannot be fetched within this window is CANCELLED —
++// queue, outstanding getdata and rotation memory drop, branch_source clears,
++// staking resumes, and the branch re-announces/re-judges normally. Live Pi
++// 2026-11-15: the adopt-fail-remint loop ran ~25 min (judge re-adopting every
++// ~4.5 min while the staker re-minted its own fork on top) because nothing
++// ever cancelled a stalled adoption or stopped the remint race.
++const ADOPTION_GIVE_UP_SECS: u64 = 600;
+ // (fz-rec fix 4) from-zero phase-B gap-fill: how many consecutive heights one
+ // recovery request covers. The old single-height form made a dead fetcher
+ // phase crawl at one block per 30 s (sami-pc 2026-11-11, h15096+).
+@@ -732,6 +740,14 @@ struct ReconAcc {
+     /// in-flight outstanding set empty), and cleared when the source peer
+     /// ITSELF is dropped (an unrelated peer's DropPeer never clears it).
+     branch_source: Option<String>,
++    /// (item 28) bumped on EVERY Switched judgment. The daemon loop watches
++    /// it: an epoch change while requests are in flight means the new
++    /// adoption SUPERSEDED the old one — the old era's outstanding getdata
++    /// and rotation memory are dead weight (the live loop saturated the
++    /// MAX_OUTSTANDING_GETDATA cap with unanswerable slots and froze
++    /// dispatch; each re-judge re-queued the same heights). Clearing the
++    /// slots frees the cap for the new branch immediately.
++    switch_epoch: u64,
+ }
+ 
+ /// (item 19) An empty headers reply just arrived: count it toward the
+@@ -848,60 +864,93 @@ fn claim_from_extending_batch(tip_height: u64, headers: &[Block]) -> (u64, Hash)
+ /// promises rotation to the REMAINING peers). An all-demoted set yields
+ /// None (the batch stays queued); window expiry restores every peer with a
+ /// fresh probe budget, so the wait is bounded, not a deadlock.
++/// (item 28) the give-up clock: ONE adoption era older than the cap is
++/// cancelled outright (see ADOPTION_GIVE_UP_SECS). Split out for the
++/// boundary test — the loop block stays thin.
++fn adoption_give_up_due(started: Instant, now: Instant, cap: Duration) -> bool {
++    now.duration_since(started) >= cap
++}
++
+ fn choose_body_source_label(
+     recon_source: Option<&str>,
+-    live: &[(bool, String)], // (outbound, label) of live peers
++    live: &[(bool, Option<u64>, String)], // (outbound, claimed tip height, label)
+     avoid: &[String],
+     demoted_at: &HashMap<String, Instant>,
++    min_tip_height: u64,
+ ) -> Option<String> {
+     let eligible =
+         |l: &str| !avoid.iter().any(|a| a == l) && !demoted_at.contains_key(l);
++    // (item 28) a session whose CLAIMED tip does not reach the requested
++    // heights cannot serve this batch — the live zombie loop rotated getdata
++    // across exactly such sessions. Claims are advisory (None = unknown);
++    // coverage only reorders the FALLBACK tiers below, it never outranks
++    // the advertiser (tier 0), which announced the branch it holds.
++    let covers = |ch: Option<u64>| ch.map_or(false, |h| h >= min_tip_height);
+     if let Some(src) = recon_source {
+         if eligible(src) {
+-            if let Some((_, l)) = live.iter().find(|(_, l)| l == src) {
++            if let Some((_, _, l)) = live.iter().find(|(_, _, l)| l == src) {
+                 return Some(l.clone());
+             }
+         }
+     }
+-    if let Some((_, l)) = live.iter().find(|(out, l)| *out && eligible(l)) {
++    if let Some((_, _, l)) = live
++        .iter()
++        .find(|(out, ch, l)| *out && covers(*ch) && eligible(l))
++    {
++        return Some(l.clone());
++    }
++    if let Some((_, _, l)) = live.iter().find(|(_, ch, l)| covers(*ch) && eligible(l)) {
+         return Some(l.clone());
+     }
+-    if let Some((_, l)) = live.iter().find(|(_, l)| eligible(l)) {
++    if let Some((_, _, l)) = live.iter().find(|(out, _, l)| *out && eligible(l)) {
++        return Some(l.clone());
++    }
++    if let Some((_, _, l)) = live.iter().find(|(_, _, l)| eligible(l)) {
+         return Some(l.clone());
+     }
+     // rotation exhausted: retry the advertiser, then the first live peer
+     if let Some(src) = recon_source {
+         if !demoted_at.contains_key(src) {
+-            if let Some((_, l)) = live.iter().find(|(_, l)| l == src) {
++            if let Some((_, _, l)) = live.iter().find(|(_, _, l)| l == src) {
+                 return Some(l.clone());
+             }
+         }
+     }
+     live.iter()
+-        .find(|(_, l)| !demoted_at.contains_key(l))
+-        .map(|(_, l)| l.clone())
++        .find(|(_, _, l)| !demoted_at.contains_key(l))
++        .map(|(_, _, l)| l.clone())
+ }
+ 
+ /// (item 21, r2) The exact selection the main loop performs for a pending
+-/// body batch: resolve the label (advertiser → outbound → any live, skipping
+-/// already-tried peers first) against the LIVE sessions and return that
+-/// peer. Shared with the socket-level regression so the test observes the
+-/// same control flow the loop runs.
++/// body batch: resolve the label (advertiser → covering outbound → covering
++/// live → outbound → any live, skipping already-tried peers first) against
++/// the LIVE sessions and return that peer. Shared with the socket-level
++/// regression so the test observes the same control flow the loop runs.
++/// (item 28) `min_tip_height` is the batch's tallest requested height: peers
++/// whose claimed tip reaches it are preferred in the fallback tiers.
+ fn resolve_body_send_target<'a>(
+     recon_source: Option<&str>,
+     peers: &'a mut [Peer],
+     avoid: &[String],
+     demoted_at: &HashMap<String, Instant>,
++    min_tip_height: u64,
+ ) -> Option<&'a mut Peer> {
+     if peers.is_empty() {
+         return None;
+     }
+-    let live: Vec<(bool, String)> = peers
++    let live: Vec<(bool, Option<u64>, String)> = peers
+         .iter()
+         .filter(|p| p.sess_ok())
+-        .map(|p| (p.outbound, p.label.clone()))
++        .map(|p| {
++            (
++                p.outbound,
++                p.claimed_tip.map(|(h, _)| h),
++                p.label.clone(),
++            )
++        })
+         .collect();
+-    let label = choose_body_source_label(recon_source, &live, avoid, demoted_at)?;
++    let label =
++        choose_body_source_label(recon_source, &live, avoid, demoted_at, min_tip_height)?;
+     peers.iter_mut().find(|p| p.label == label && p.sess_ok())
+ }
+ 
+@@ -1555,6 +1604,21 @@ fn recon_intake(
+             if rollback_failed {
+                 return ReconOutcome::Ignored;
+             }
++            // (item 28) cancel-on-supersede: a Switch while body requests
++            // from a PREVIOUS adoption are still queued REPLACES them.
++            // Keeping the old entries made the live adopt-fail-remint loop
++            // re-queue the same heights every re-judge cycle (queue growth,
++            // outstanding saturation, frozen dispatch). The new branch's
++            // headers are the only truth now; the epoch bump tells the main
++            // loop to drop the old era's outstanding getdata + tries.
++            if !pending_from_headers.is_empty() {
++                log(&format!(
++                    "adoption SUPERSEDED mid-flight: dropping {} queued body request(s) for the previous branch",
++                    pending_from_headers.len()
++                ));
++                pending_from_headers.clear();
++            }
++            recon.switch_epoch += 1;
+             for (i, hdr) in branch.iter().enumerate() {
+                 let hash = hdr.hash();
+                 st.pending_headers.insert(hash, hdr.clone());
+@@ -12789,6 +12853,12 @@ pub fn main_args(argv: &[String]) -> i32 {
+     // escalation dial fired. Both are loop-scope because the pending queue
+     // outlives any single pass.
+     let mut body_no_server_since: Option<Instant> = None;
++    // (item 28) adoption-lifecycle loop locals: the last Switch epoch this
++    // loop has consumed, when the CURRENT adoption era started (for the
++    // give-up cap), and how many stake ticks the staker has been held.
++    let mut adoption_epoch_seen: u64 = 0;
++    let mut adoption_started_at: Option<Instant> = None;
++    let mut stake_hold_ticks: u32 = 0;
+     let mut body_escalation_last_dial: Option<Instant> = None;
+     // (fz-rec fix 6) last body-getdata target + the tip-frozen tracker for
+     // the fail-loud ADOPTION STALLED summary
+@@ -13086,6 +13156,54 @@ pub fn main_args(argv: &[String]) -> i32 {
+             peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+         }
+ 
++        // (item 28) adoption lifecycle — two guards that together end the
++        // zombie adopt-fail-remint class (live on DNS2/Pi/DNS3 four times,
++        // healed each time only by the restart lever):
++        // (a) SUPERSEDE: a new Switch epoch cancels the previous era's
++        //     outstanding getdata + rotation memory — the dead slots
++        //     saturated the MAX_OUTSTANDING_GETDATA cap and froze dispatch
++        //     while each re-judge re-queued the same heights;
++        // (b) GIVE-UP: an adoption whose bodies never arrive inside
++        //     ADOPTION_GIVE_UP_SECS is cancelled outright — branch_source
++        //     clears (staking resumes) and the branch re-announces and
++        //     re-judges normally. The hold is bounded, never forever.
++        if recon_acc.switch_epoch != adoption_epoch_seen {
++            adoption_epoch_seen = recon_acc.switch_epoch;
++            if !outstanding.is_empty() || !body_tries.is_empty() {
++                log(&format!(
++                    "adoption epoch {} — clearing {} outstanding getdata + rotation memory from the superseded era",
++                    adoption_epoch_seen,
++                    outstanding.len()
++                ));
++            }
++            outstanding.clear();
++            body_tries.clear();
++            adoption_started_at = Some(Instant::now());
++        } else if adoption_started_at.is_none() && recon_acc.branch_source.is_some() {
++            // adoption already in flight with no clock (loop restart edge)
++            adoption_started_at = Some(Instant::now());
++        }
++        if recon_acc.branch_source.is_some() {
++            if let Some(started) = adoption_started_at {
++                if adoption_give_up_due(
++                    started,
++                    Instant::now(),
++                    Duration::from_secs(ADOPTION_GIVE_UP_SECS),
++                ) {
++                    log(&format!(
++                        "adoption CANCELLED after {}s (item 28 give-up): {} queued + {} outstanding body request(s) dropped, rotation memory reset — staking resumes and the branch will re-announce",
++                        started.elapsed().as_secs(),
++                        pending_from_headers.len(),
++                        outstanding.len()
++                    ));
++                    pending_from_headers.clear();
++                    outstanding.clear();
++                    body_tries.clear();
++                    recon_acc.branch_source = None;
++                    adoption_started_at = None;
++                }
++            }
++        }
+         // request queued block announcements. (item 21, r2) an adoption's
+         // body source is the peer whose branch was ADOPTED — the outbound
+         // set is exactly the peer group a heavier inbound branch beat, so
+@@ -13177,6 +13295,7 @@ pub fn main_args(argv: &[String]) -> i32 {
+             body_escalation_last_dial = None;
+             if recon_acc.branch_source.is_some() {
+                 recon_acc.branch_source = None; // adoption satisfied
++                adoption_started_at = None; // (item 28) era over
+             }
+         }
+         if !pending_from_headers.is_empty()
+@@ -13220,6 +13339,7 @@ pub fn main_args(argv: &[String]) -> i32 {
+                         &mut peers,
+                         avoid,
+                         &body_demoted_at,
++                        group.iter().map(|(_, _, ht)| *ht).max().unwrap_or(0),
+                     );
+                     match body_peer {
+                         Some(p) => {
+@@ -13654,7 +13774,29 @@ pub fn main_args(argv: &[String]) -> i32 {
+         {
+             last_stake_tick = Instant::now();
+             enforce_unlock_timeout(&wl_shared);
+-            let wl_ready = wl_shared.lock().unwrap().is_some();
++            // (item 28) staker hold: minting while an adoption is in flight
++            // re-creates exactly the fork the adoption is trying to leave —
++            // the live loop (Pi 2026-11-15) minted its own fork blocks on
++            // top of a half-adopted rollback every ~4.5 min, feeding the
++            // judge fresh fork "evidence" and re-triggering the
++            // rollback/adopt cycle. branch_source is bound to Switched and
++            // cleared on drain, so normal announces never hold the staker;
++            // the ADOPTION_GIVE_UP_SECS cap bounds the hold.
++            if recon_acc.branch_source.is_some() {
++                stake_hold_ticks += 1;
++                if stake_hold_ticks == 1 || stake_hold_ticks % 10 == 0 {
++                    log(&format!(
++                        "staking HELD — adoption in flight ({} stake tick(s)); no mint until the adopted branch settles",
++                        stake_hold_ticks
++                    ));
++                }
++            } else {
++                stake_hold_ticks = 0;
++            }
++            // holding the mint during an adoption: wl_ready stays false so
++            // stake_tick never runs while the node is between tips
++            let wl_ready = wl_shared.lock().unwrap().is_some()
++                && recon_acc.branch_source.is_none();
+             if wl_ready {
+                 let mut wl_guard = wl_shared.lock().unwrap();
+                 let wl = wl_guard.as_mut().unwrap();
+@@ -17555,41 +17697,41 @@ mod tests {
+     #[test]
+     fn body_source_choice_prefers_the_recon_advertiser_over_healthy_outbound() {
+         let live = vec![
+-            (true, "out:dns3.onion".to_string()),
+-            (false, "in:pc.i2p".to_string()),
++            (true, None, "out:dns3.onion".to_string()),
++            (false, None, "in:pc.i2p".to_string()),
+         ];
+         // THE blocker scenario: live advertiser beats the healthy outbound set
+         assert_eq!(
+-            choose_body_source_label(Some("in:pc.i2p"), &live, &[], &HashMap::new()).as_deref(),
++            choose_body_source_label(Some("in:pc.i2p"), &live, &[], &HashMap::new(), 0).as_deref(),
+             Some("in:pc.i2p")
+         );
+         // advertiser gone (disconnect) → outbound fallback
+         assert_eq!(
+-            choose_body_source_label(Some("in:gone"), &live, &[], &HashMap::new()).as_deref(),
++            choose_body_source_label(Some("in:gone"), &live, &[], &HashMap::new(), 0).as_deref(),
+             Some("out:dns3.onion")
+         );
+         // no recon source (normal tip-advance pendings) → outbound first
+         assert_eq!(
+-            choose_body_source_label(None, &live, &[], &HashMap::new()).as_deref(),
++            choose_body_source_label(None, &live, &[], &HashMap::new(), 0).as_deref(),
+             Some("out:dns3.onion")
+         );
+         // inbound-only peer set → the sole live peer
+-        let inbound_only = vec![(false, "in:pc.i2p".to_string())];
++        let inbound_only = vec![(false, None, "in:pc.i2p".to_string())];
+         assert_eq!(
+-            choose_body_source_label(None, &inbound_only, &[], &HashMap::new()).as_deref(),
++            choose_body_source_label(None, &inbound_only, &[], &HashMap::new(), 0).as_deref(),
+             Some("in:pc.i2p")
+         );
+         // nobody live → None (the dispatch no-ops)
+-        assert_eq!(choose_body_source_label(None, &[], &[], &HashMap::new()), None);
++        assert_eq!(choose_body_source_label(None, &[], &[], &HashMap::new(), 0), None);
+         // (item 23) rotation: a tried label is skipped in every tier first
+         assert_eq!(
+-            choose_body_source_label(Some("in:pc.i2p"), &live, &["in:pc.i2p".to_string()], &HashMap::new())
++            choose_body_source_label(Some("in:pc.i2p"), &live, &["in:pc.i2p".to_string()], &HashMap::new(), 0)
+                 .as_deref(),
+             Some("out:dns3.onion"),
+             "a tried advertiser is skipped for an untried outbound"
+         );
+         assert_eq!(
+-            choose_body_source_label(None, &live, &["out:dns3.onion".to_string()], &HashMap::new()).as_deref(),
++            choose_body_source_label(None, &live, &["out:dns3.onion".to_string()], &HashMap::new(), 0).as_deref(),
+             Some("in:pc.i2p"),
+             "a tried outbound is skipped for an untried live peer"
+         );
+@@ -17601,11 +17743,11 @@ mod tests {
+         // exactly the wedge this fixes; retrying a tried peer is the cure's
+         // last tier, and a recovered tunnel answers on retry)
+         assert_eq!(
+-            choose_body_source_label(None, &live, &all_tried, &HashMap::new()).as_deref(),
++            choose_body_source_label(None, &live, &all_tried, &HashMap::new(), 0).as_deref(),
+             Some("out:dns3.onion")
+         );
+         assert_eq!(
+-            choose_body_source_label(Some("in:pc.i2p"), &live, &all_tried, &HashMap::new()).as_deref(),
++            choose_body_source_label(Some("in:pc.i2p"), &live, &all_tried, &HashMap::new(), 0).as_deref(),
+             Some("in:pc.i2p"),
+             "exhausted rotation retries the advertiser"
+         );
+@@ -17762,7 +17904,7 @@ mod tests {
+         // and the body-fetch resolution still targets A
+         let mut peers = vec![b, a]; // A second in the list: choice, not order
+         let target =
+-            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[], &HashMap::new())
++            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[], &HashMap::new(), 0)
+             .unwrap();
+         assert_eq!(target.label, "in:pc.i2p");
+     }
+@@ -17819,7 +17961,7 @@ mod tests {
+         // ...and A is still the resolved getdata target
+         let mut peers = vec![b, a];
+         let target =
+-            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[], &HashMap::new())
++            resolve_body_send_target(recon.branch_source.as_deref(), &mut peers, &[], &HashMap::new(), 0)
+             .unwrap();
+         assert_eq!(target.label, "in:pc.i2p");
+ 
+@@ -17894,6 +18036,7 @@ mod tests {
+                 peers.as_mut_slice(),
+                 &[],
+                 &HashMap::new(),
++                0,
+             )
+             .expect("advertiser is live");
+         assert_eq!(target.label, "in:pc.i2p");
+@@ -17958,6 +18101,7 @@ mod tests {
+             peers.as_mut_slice(),
+             &avoid,
+             &HashMap::new(),
++            0,
+         )
+         .expect("rotation must still find a live target");
+         assert_eq!(
+@@ -18301,19 +18445,19 @@ mod tests {
+     #[test]
+     fn advertiser_yields_to_rotation_while_demotion_is_active() {
+         let live = vec![
+-            (false, "in:advertiser".to_string()),
+-            (true, "out:fallback".to_string()),
++            (false, None, "in:advertiser".to_string()),
++            (true, None, "out:fallback".to_string()),
+         ];
+         let no_demotion: HashMap<String, Instant> = HashMap::new();
+         assert_eq!(
+-            choose_body_source_label(Some("in:advertiser"), &live, &[], &no_demotion).as_deref(),
++            choose_body_source_label(Some("in:advertiser"), &live, &[], &no_demotion, 0).as_deref(),
+             Some("in:advertiser"),
+             "a clean advertiser keeps first pick"
+         );
+         let mut demoted: HashMap<String, Instant> = HashMap::new();
+         demoted.insert("in:advertiser".to_string(), Instant::now());
+         assert_eq!(
+-            choose_body_source_label(Some("in:advertiser"), &live, &[], &demoted).as_deref(),
++            choose_body_source_label(Some("in:advertiser"), &live, &[], &demoted, 0).as_deref(),
+             Some("out:fallback"),
+             "active demotion: the fallback receives the request"
+         );
+@@ -18324,7 +18468,8 @@ mod tests {
+                 Some("in:advertiser"),
+                 &live,
+                 &["in:advertiser".to_string()],
+-                &demoted
++                &demoted,
++                0,
+             )
+             .as_deref(),
+             Some("out:fallback"),
+@@ -18335,14 +18480,14 @@ mod tests {
+         let mut all_demoted = demoted.clone();
+         all_demoted.insert("out:fallback".to_string(), Instant::now());
+         assert_eq!(
+-            choose_body_source_label(None, &live, &[], &all_demoted),
++            choose_body_source_label(None, &live, &[], &all_demoted, 0),
+             None,
+             "all-demoted set must yield None"
+         );
+         // cooldown expiry: the sweep drops the window — first pick restored
+         demoted.remove("in:advertiser");
+         assert_eq!(
+-            choose_body_source_label(Some("in:advertiser"), &live, &[], &demoted).as_deref(),
++            choose_body_source_label(Some("in:advertiser"), &live, &[], &demoted, 0).as_deref(),
+             Some("in:advertiser"),
+             "expired demotion restores the advertiser"
+         );
+@@ -18444,6 +18589,148 @@ mod tests {
+         assert!(!demoted_at.contains_key("in:advertiser"), "arrival restores");
+     }
+ 
++    // ---- (item 28) zombie adoption-queue guards ----
++
++    /// (item 28) claimant pinning: with no advertiser, the fallback tiers
++    /// prefer peers whose CLAIMED tip reaches the requested heights — a
++    /// session claiming a shorter tip cannot serve the batch (the live
++    /// zombie loop rotated getdata across exactly such sessions).
++    #[test]
++    fn body_source_prefers_peers_whose_claimed_tip_covers_the_batch() {
++        let l_short = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let l_tall = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let mut short = i2p_test_peer(
++            std::net::TcpStream::connect(l_short.local_addr().unwrap()).unwrap(),
++        );
++        let mut tall = i2p_test_peer(
++            std::net::TcpStream::connect(l_tall.local_addr().unwrap()).unwrap(),
++        );
++        short.label = "out:short".into();
++        short.outbound = true;
++        short.claimed_tip = Some((105u64, [0xAAu8; 32]));
++        tall.label = "out:tall".into();
++        tall.outbound = true;
++        tall.claimed_tip = Some((109u64, [0xBBu8; 32]));
++        let mut peers = vec![short, tall];
++        let target = resolve_body_send_target(None, &mut peers, &[], &HashMap::new(), 108)
++            .expect("a covering peer is selected");
++        assert_eq!(
++            target.label, "out:tall",
++            "the covering claim outranks the short one"
++        );
++    }
++
++    /// (item 28) the advertiser outranks everything, even a shorter claim:
++    /// it ANNOUNCED the branch, so it holds the bodies regardless of its
++    /// (possibly stale) claimed tip.
++    #[test]
++    fn the_advertiser_still_outranks_a_covering_fallback() {
++        let l_adv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let l_tall = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let mut adv = i2p_test_peer(
++            std::net::TcpStream::connect(l_adv.local_addr().unwrap()).unwrap(),
++        );
++        let mut tall = i2p_test_peer(
++            std::net::TcpStream::connect(l_tall.local_addr().unwrap()).unwrap(),
++        );
++        adv.label = "in:adv".into();
++        adv.outbound = false;
++        adv.claimed_tip = Some((100u64, [0x11u8; 32]));
++        tall.label = "out:tall".into();
++        tall.outbound = true;
++        tall.claimed_tip = Some((109u64, [0x22u8; 32]));
++        let mut peers = vec![tall, adv];
++        let target = resolve_body_send_target(
++            Some("in:adv"),
++            &mut peers,
++            &[],
++            &HashMap::new(),
++            108,
++        )
++        .expect("the advertiser resolves");
++        assert_eq!(target.label, "in:adv", "tier 0 stays the advertiser");
++    }
++
++    /// (item 28) the give-up cap boundary: an era at exactly the cap is
++    /// cancelled; one second younger is not.
++    #[test]
++    fn adoption_give_up_fires_only_at_the_cap() {
++        let now = Instant::now();
++        let cap = Duration::from_secs(600);
++        assert!(!adoption_give_up_due(
++            now - Duration::from_secs(599),
++            now,
++            cap
++        ));
++        assert!(adoption_give_up_due(
++            now - Duration::from_secs(600),
++            now,
++            cap
++        ));
++    }
++
++    /// (item 28) cancel-on-supersede: a SECOND, heavier adoption while the
++    /// first adoption's bodies are still queued DROPS the old queue (only
++    /// the new branch remains) and bumps the switch epoch — the live
++    /// adopt-fail-remint loop re-queued the same heights every re-judge
++    /// cycle until the outstanding cap froze dispatch.
++    #[test]
++    fn a_second_adoption_supersedes_the_first_era() {
++        let _live_store_serial = lock_live_store_tests();
++        let l_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let l_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let mut a = i2p_test_peer(std::net::TcpStream::connect(l_a.local_addr().unwrap()).unwrap());
++        let mut b = i2p_test_peer(std::net::TcpStream::connect(l_b.local_addr().unwrap()).unwrap());
++        a.label = "in:pc.i2p".into();
++        b.label = "out:other.onion".into();
++        let mut stg = synthetic_chain(100, 105);
++        let mut recon = ReconAcc::default();
++        let mut pend = VecDeque::new();
++        let mut stats = Stats::default();
++
++        // era 1: A's heavier branch — 4 blocks forking at h102 → ADOPTED
++        let fork_hash = stg.entry_abs(102).unwrap().hash;
++        let mut prev = fork_hash;
++        let mut branch_a: Vec<Block> = Vec::new();
++        for i in 0..4u8 {
++            let hdr = mk_header(prev, 0x80 + i, 0x2000_ffff);
++            prev = hdr.hash();
++            branch_a.push(hdr);
++        }
++        recon_dispatch(&mut stg, &mut a, &branch_a, &mut recon, &mut pend, &mut stats)
++            .expect("era-1 adoption dispatch ok");
++        assert_eq!(pend.len(), 4, "era-1 bodies are pending");
++        assert_eq!(recon.switch_epoch, 1);
++        let era1_first = pend.front().unwrap().0;
++
++        // era 2: B's heavier branch — 5 blocks forking at h101 (BELOW the
++        // post-rollback tip: a branch that chains onto the tip is a normal
++        // extension, not a competing branch), distinct seeds → Switch again;
++        // era-1's queued bodies must DROP
++        let fork2_hash = stg.entry_abs(101).unwrap().hash;
++        let mut prev2 = fork2_hash;
++        let mut branch_b: Vec<Block> = Vec::new();
++        for i in 0..5u8 {
++            let hdr = mk_header(prev2, 0x90 + i, 0x2000_ffff);
++            prev2 = hdr.hash();
++            branch_b.push(hdr);
++        }
++        recon_dispatch(&mut stg, &mut b, &branch_b, &mut recon, &mut pend, &mut stats)
++            .expect("era-2 adoption dispatch ok");
++        assert_eq!(recon.switch_epoch, 2, "the switch epoch advanced");
++        assert_eq!(pend.len(), 5, "era-1's queue was replaced, not appended to");
++        assert_ne!(
++            pend.front().unwrap().0,
++            era1_first,
++            "the front is era-2's first body, not a stale era-1 hash"
++        );
++        assert_eq!(
++            recon.branch_source.as_deref(),
++            Some("out:other.onion"),
++            "the new adoption owns the body source"
++        );
++    }
++
+ 
+ 
+     /// (item-23 never-pin rule, socket-level) a FAILED send never happened:
+@@ -18483,6 +18770,7 @@ mod tests {
+             peers.as_mut_slice(),
+             &[],
+             &HashMap::new(),
++            0,
+         )
+         .expect("the (dead) session still resolves as the target");
+         let inv: Vec<(u32, Hash)> = group.iter().map(|(t, h, _)| (*t, *h)).collect();
