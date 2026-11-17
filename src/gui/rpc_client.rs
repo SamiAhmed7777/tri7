@@ -98,6 +98,30 @@ pub fn is_allowed(method: &str) -> bool {
     ALLOWED_METHODS.contains(&method)
 }
 
+/// TRI7-RPC-05 (partial): the GUI's RPC surface is LOOPBACK-ONLY. A configured
+/// `rpc_addr` naming any other host would put the wallet's verbs — including
+/// the passphrase and broadcast verbs — on the wire toward a machine we do not
+/// own, so it is refused before a byte is written. Accepts exactly the
+/// operator-written loopback spellings: 127.0.0.1, localhost, [::1], ::1
+/// (port optional, brackets optional).
+pub fn is_loopback_addr(addr: &str) -> bool {
+    let host = if let Some(rest) = addr.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((h, _)) => format!("[{h}]"),
+            None => return false, // malformed bracket form
+        }
+    } else {
+        match addr.rsplit_once(':') {
+            Some((h, _)) => h.to_string(),
+            None => addr.to_string(),
+        }
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "[::1]" | "::1"
+    )
+}
+
 /// Ordinary-person error wording (UX audit 2026-11-14): every error leaving
 /// this client leads with a human sentence; the raw technical detail stays
 /// appended after an em-dash so support/debugging keeps the specifics.
@@ -128,12 +152,36 @@ fn humanize_error(raw: String) -> String {
     }
 }
 
+// (TRI7-RPC-01) the embedded node publishes a per-boot capability token in
+// the state dir; the supervisor hands it to us and every rpc_call presents
+// it as Bearer auth alongside the node's Basic auth for human callers.
+static RPC_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_rpc_token(token: &str) {
+    if let Ok(mut g) = RPC_TOKEN.lock() {
+        *g = if token.is_empty() { None } else { Some(token.to_string()) };
+    }
+}
+
+fn rpc_token() -> Option<String> {
+    RPC_TOKEN.lock().ok().and_then(|g| g.clone())
+}
+
 pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, String> {
     if !is_allowed(method) {
         return Err(format!(
             "method \"{}\" is not on the GUI read-only allow list",
             method
         ));
+    }
+    // loopback-only (TRI7-RPC-05): never send wallet verbs to a remote host
+    if !is_loopback_addr(addr) {
+        let msg = format!(
+            "refused rpc_addr {addr:?}: the wallet only talks to its own node on \
+             127.0.0.1, localhost or [::1]"
+        );
+        crate::node_embedded::embedded_log(&format!("rpc_client: {}", msg));
+        return Err(msg);
     }
     let addrs: Vec<_> = addr
         .to_socket_addrs()
@@ -162,9 +210,13 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
         .map_err(|e| e.to_string())?;
 
     let body = json!({"jsonrpc":"1.0","id":"tri7-gui","method":method,"params":params}).to_string();
+    let auth_hdr = rpc_token()
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "POST / HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST / HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         addr,
+        auth_hdr,
         body.len(),
         body
     );
@@ -232,6 +284,36 @@ mod tests {
     fn rpc_call_unreachable_is_clean_error() {
         let err = rpc_call("127.0.0.1:9", "getblockcount", &[]).unwrap_err();
         assert!(err.contains("connect"), "unexpected error: {}", err);
+    }
+
+    /// TRI7-RPC-05: only loopback spellings are accepted, and a non-loopback
+    /// rpc_addr is refused BEFORE any connection attempt (no DNS, no wire).
+    #[test]
+    fn non_loopback_rpc_addr_is_refused_before_io() {
+        for ok in [
+            "127.0.0.1:19114",
+            "localhost:19114",
+            "[::1]:19114",
+            "::1:19114",
+            "127.0.0.1",
+        ] {
+            assert!(is_loopback_addr(ok), "{ok} must be accepted");
+        }
+        for bad in [
+            "10.0.0.5:19114",
+            "192.168.1.20:19112",
+            "node.example.com:19114",
+            "[2001:db8::1]:19114",
+            "0.0.0.0:19114",
+            "",
+        ] {
+            assert!(!is_loopback_addr(bad), "{bad} must be refused");
+        }
+        let e = rpc_call("10.0.0.5:19114", "getblockcount", &[]).unwrap_err();
+        assert!(
+            e.contains("refused rpc_addr"),
+            "refusal must be explicit, not a connect error: {e}"
+        );
     }
 
     /// UX audit: every error class leaving the client leads with a human

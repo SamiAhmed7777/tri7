@@ -26,7 +26,7 @@
 
 use crate::p2p::{AddrEntry, WireAddr, MAX_ADDR_ENTRIES};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Store cap — matches the legacy addr vector cap.
 pub const PEER_STORE_CAP: usize = MAX_ADDR_ENTRIES;
@@ -105,7 +105,22 @@ pub struct PeerStore {
     /// identities we must never store as peers: our own onion hostname and
     /// the hex of our own tor_v3 key
     self_idents: Vec<String>,
+    /// TRI7 (gossip amplification): a mutation landed that is not on disk yet.
+    /// Callers that merge `addr`/`version` gossip on every message use
+    /// `save_throttled`, which coalesces the full-file rewrite to at most one
+    /// per `PEER_PERSIST_INTERVAL` and flushes whatever is still pending on
+    /// drop.
+    dirty: bool,
+    /// when the last coalesced write landed (None = never)
+    last_persist: Option<std::time::Instant>,
+    /// where coalesced writes go (set by the first throttled save)
+    persist_path: Option<PathBuf>,
 }
+
+/// Gossip amplification: every `addr`/`version` message used to trigger a
+/// FULL peers.json rewrite (load → merge → pretty-print → tmp+rename). One
+/// write per 30s is ample for facts that only feed the next dial rotation.
+pub const PEER_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl PeerStore {
     /// Load `<state-dir>/peers.json`. Missing file → empty store. Corrupt
@@ -134,6 +149,9 @@ impl PeerStore {
                     PeerStore {
                         peers,
                         self_idents: Vec::new(),
+                        dirty: false,
+                        last_persist: None,
+                        persist_path: None,
                     }
                 }
                 Err(e) => {
@@ -152,7 +170,24 @@ impl PeerStore {
     /// Atomic save: write `peers.json.tmp`, then rename over the target
     /// (with the Windows access-denied retry loop used by every state-file
     /// writer in this crate). Applies the 1000-entry cap.
+    ///
+    /// A save whose bytes already equal what is on disk is a NO-OP: the
+    /// gossip paths call this after every `addr`/`version` message, and most
+    /// of those messages change nothing — rewriting the identical file was
+    /// pure amplification. (Permissions are re-checked on unix so a legacy
+    /// world-readable file is still tightened.)
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        let text = self.serialize()?;
+        if let Ok(on_disk) = std::fs::read(path) {
+            if on_disk == text.as_bytes() && Self::perms_ok(path) {
+                return Ok(());
+            }
+        }
+        self.write_text(path, &text)
+    }
+
+    /// Serialize the store (the exact bytes `save` writes).
+    fn serialize(&self) -> Result<String, String> {
         let file = PeerFile {
             peers: self
                 .peers
@@ -170,7 +205,27 @@ impl PeerStore {
                 })
                 .collect(),
         };
-        let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&file).map_err(|e| e.to_string())
+    }
+
+    /// unix: the file must already be 0600 for the no-op path to apply
+    fn perms_ok(path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            match std::fs::metadata(path) {
+                Ok(m) => m.permissions().mode() & 0o777 == 0o600,
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            true
+        }
+    }
+
+    fn write_text(&self, path: &Path, text: &str) -> Result<(), String> {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, text).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
         #[cfg(unix)]
@@ -198,6 +253,45 @@ impl PeerStore {
         ))
     }
 
+    /// Coalesced save for the gossip hot paths (TRI7 amplification fix): mark
+    /// dirty and write at most once per `PEER_PERSIST_INTERVAL`; whatever is
+    /// still pending is flushed by `flush()` / on Drop. Returns Ok(true) when
+    /// this call actually wrote.
+    ///
+    /// NOTE: callers that ACKNOWLEDGE a mutation to a user (addnode) must keep
+    /// using `save` — an ack that is still in the coalescing window would lie.
+    pub fn save_throttled(&mut self, path: &Path) -> Result<bool, String> {
+        self.persist_path = Some(path.to_path_buf());
+        if !self.dirty {
+            return Ok(false);
+        }
+        let due = match self.last_persist {
+            None => true,
+            Some(t) => t.elapsed() >= PEER_PERSIST_INTERVAL,
+        };
+        if !due {
+            return Ok(false);
+        }
+        self.save(path)?;
+        self.dirty = false;
+        self.last_persist = Some(std::time::Instant::now());
+        Ok(true)
+    }
+
+    /// Persist anything still pending (shutdown path). No-op when clean.
+    pub fn flush(&mut self) -> Result<(), String> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let Some(path) = self.persist_path.clone() else {
+            return Ok(());
+        };
+        self.save(&path)?;
+        self.dirty = false;
+        self.last_persist = Some(std::time::Instant::now());
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.peers.len()
     }
@@ -220,7 +314,6 @@ impl PeerStore {
             }
         }
     }
-
     fn is_self(&self, host: &str) -> bool {
         self.self_idents.iter().any(|s| s == host)
     }
@@ -251,6 +344,7 @@ impl PeerStore {
             if e.source.is_empty() {
                 e.source = source.to_string();
             }
+            self.dirty = true;
             return true;
         }
         self.peers.push(PeerEntry {
@@ -270,6 +364,7 @@ impl PeerStore {
                 .unwrap_or(0);
             self.peers.remove(worst);
         }
+        self.dirty = true;
         true
     }
 
@@ -283,6 +378,7 @@ impl PeerStore {
             e.last_ok = now;
             e.ok_count += 1;
             e.fail_count = 0;
+            self.dirty = true;
         }
     }
 
@@ -295,6 +391,7 @@ impl PeerStore {
         {
             e.last_fail = now;
             e.fail_count += 1;
+            self.dirty = true;
         }
     }
 
@@ -306,7 +403,11 @@ impl PeerStore {
         let before = self.peers.len();
         self.peers
             .retain(|e| !(e.host == host && e.port == port));
-        self.peers.len() != before
+        let removed = self.peers.len() != before;
+        if removed {
+            self.dirty = true;
+        }
+        removed
     }
 
     /// Whether a (host, port) entry exists — the `addnode <node> add`
@@ -402,6 +503,16 @@ impl PeerStore {
     }
 }
 
+/// Shutdown-drop: anything the coalesced path still has pending goes to disk
+/// when the store is dropped (a session's last gossip merges are not lost).
+impl Drop for PeerStore {
+    fn drop(&mut self) {
+        if self.dirty {
+            let _ = self.flush();
+        }
+    }
+}
+
 /// Sort key: answered-and-recent first, then fewer failures. Higher is
 /// better for `addr_entries` (used reversed), lower is evicted first.
 fn score_key(e: &PeerEntry, _now: u64) -> (u64, u64, u64) {
@@ -488,6 +599,37 @@ mod tests {
         // a missing file is just an empty store with no drama
         let _ = std::fs::remove_file(&path);
         assert!(PeerStore::load(&path).is_empty());
+    }
+
+    /// Gossip amplification (peers.rs): the coalesced save writes at most
+    /// once per `PEER_PERSIST_INTERVAL` and a shutdown flush persists whatever
+    /// is still pending — so a burst of addr/version merges costs ONE rewrite
+    /// per window instead of one per message.
+    #[test]
+    fn coalesced_save_writes_once_per_window_and_flushes_pending() {
+        let path = tmp_path("coalesce");
+        let mut store = PeerStore::default();
+        store.upsert(KEY_A, 24113, 1, "addr", 1000);
+        assert!(
+            store.save_throttled(&path).unwrap(),
+            "the first dirty save must write"
+        );
+        let first = std::fs::read(&path).unwrap();
+        store.upsert(KEY_B, 24113, 1, "addr", 1001);
+        assert!(
+            !store.save_throttled(&path).unwrap(),
+            "a second save inside the 30s window is deferred, not written"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "the file must be untouched inside the coalescing window"
+        );
+        // shutdown-drop path: flush persists the pending merge
+        store.flush().unwrap();
+        let reloaded = PeerStore::load(&path);
+        assert!(reloaded.contains(KEY_B, 24113), "flushed merge reaches disk");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Dial ordering: best-seen first, then fresh, then seeds; failing

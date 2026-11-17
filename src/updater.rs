@@ -389,16 +389,46 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Verify downloaded bytes against the pinned digest (release notes).
-/// Missing pin → Ok (documented digest pinning: enforced WHEN present; the
-/// size floor + header sanity always apply).
+///
+/// TRI7-UPD-01: FAIL CLOSED. A release body that carries no digest line for
+/// the asset is a VERIFICATION FAILURE, not a pass — "enforced when present"
+/// made a stripped/edited release body a silent downgrade to size-floor-only
+/// checking, exactly the hole an attacker with write access to the release
+/// notes would use. The caller must supply the pinned digest (it is scraped
+/// from the release body before the download).
+///
+/// NOTE (deferred): this checks INTEGRITY, not AUTHENTICITY — a digest that
+/// travels with the payload's own release notes only proves the bytes match
+/// the notes. Signature verification (detached sig over the notes or the
+/// payload with a pinned public key) is a separate project and is NOT
+/// implemented here.
 pub fn verify_digest(bytes: &[u8], pinned_hex: Option<&str>) -> Result<(), String> {
     let Some(pin) = pinned_hex else {
-        return Ok(());
+        eprintln!(
+            "[updater] REFUSED: the release carries no SHA256 digest for this asset — \
+             update verification fails closed (no digest, no install)"
+        );
+        crate::node_embedded::embedded_log(
+            "updater: SECURITY — no pinned SHA256 in the release for this asset; \
+             refusing the update (fail closed)",
+        );
+        return Err(
+            "update rejected: the release carries no SHA256 digest for this asset \
+             (verification fails closed)"
+                .into(),
+        );
     };
+    if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+        eprintln!("[updater] REFUSED: malformed pinned digest {pin:?}");
+        return Err(format!(
+            "update rejected: malformed pinned SHA256 {pin:?} (verification fails closed)"
+        ));
+    }
     let actual = sha256_hex(bytes);
     if actual == pin.to_lowercase() {
         Ok(())
     } else {
+        eprintln!("[updater] REFUSED: SHA256 mismatch (expected {pin}, got {actual})");
         Err(format!(
             "SHA256 mismatch: expected {pin}, got {actual} — update rejected"
         ))
@@ -1196,6 +1226,16 @@ pub mod runtime {
     use super::*;
     use std::sync::mpsc::Sender;
 
+    /// TRI7-UPD-02: is this path inside the C:\Users\Public fallback tree?
+    /// A world-writable directory must never stage a script the wallet runs.
+    /// Pure string test (lowercased, separator-normalized) so it is testable
+    /// on every host and independent of drive mapping quirks.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn path_is_public_staging(path: &Path) -> bool {
+        let s = path.to_string_lossy().replace('/', "\\").to_lowercase();
+        s.starts_with("c:\\users\\public\\") || s.contains("\\users\\public\\")
+    }
+
     fn agent() -> Result<ureq::Agent, String> {
         Ok(ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(15))
@@ -1334,8 +1374,36 @@ pub mod runtime {
         if let Some((script_path, script)) = &plan.windows_script {
             #[cfg(target_os = "windows")]
             {
+                // TRI7-UPD-02: the wrapper is EXECUTED BY cmd from a
+                // user-writable staging directory, so two barriers are the
+                // minimum:
+                //  1. the C:\Users\Public fallback is refused outright — a
+                //     world-writable directory must never host an install
+                //     batch the wallet is about to run;
+                //  2. after writing, the file is RE-READ and must be
+                //     byte-identical immediately before the spawn (write →
+                //     swap → spawn is the race the audit named).
+                if path_is_public_staging(script_path) {
+                    return Err(format!(
+                        "update refused: the install script would run from the public \
+                         staging dir ({}); the wallet profile must live under the user's \
+                         own profile",
+                        script_path.display()
+                    ));
+                }
                 std::fs::write(script_path, script)
                     .map_err(|e| format!("write update script: {e}"))?;
+                let written = std::fs::read(script_path)
+                    .map_err(|e| format!("re-read update script: {e}"))?;
+                if written != script.as_bytes() {
+                    let _ = std::fs::remove_file(script_path);
+                    return Err(format!(
+                        "update refused: {} changed between write and spawn ({} vs {} bytes)",
+                        script_path.display(),
+                        written.len(),
+                        script.len()
+                    ));
+                }
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 std::process::Command::new("cmd")
@@ -1625,8 +1693,12 @@ mod tests {
         assert_eq!(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(verify_digest(bytes, Some(&h)), Ok(()));
         assert!(verify_digest(b"abd", Some(&h)).is_err());
-        // unpinned → pass (documented: enforced when present)
-        assert_eq!(verify_digest(bytes, None), Ok(()));
+        // TRI7-UPD-01: NO pin → FAIL CLOSED (a digest-less release must never
+        // install silently)
+        let e = verify_digest(bytes, None).unwrap_err();
+        assert!(e.contains("no SHA256"), "clear refusal wording: {e}");
+        // malformed pin → fail closed too
+        assert!(verify_digest(bytes, Some("nothex")).is_err());
     }
 
     // ---- payload sanity ----
@@ -2117,6 +2189,29 @@ mod tests {
 
 // Live end-to-end probe (network). Run explicitly:
 //   cargo test --features gui --lib updater::live -- --ignored --nocapture
+#[cfg(all(test, feature = "gui"))]
+mod gui_runtime_tests {
+    use super::runtime::*;
+
+    /// TRI7-UPD-02: the public staging tree is refused regardless of drive
+    /// letter case or separator style; the user's own profile is allowed.
+    #[test]
+    fn public_staging_paths_are_refused() {
+        assert!(path_is_public_staging(std::path::Path::new(
+            r"C:\Users\Public\AppData\Local\Tri7Wallet\profile\update\tri7-update.bat"
+        )));
+        assert!(path_is_public_staging(std::path::Path::new(
+            "c:/users/public/x/tri7-update.bat"
+        )));
+        assert!(!path_is_public_staging(std::path::Path::new(
+            r"C:\Users\sami\AppData\Local\Tri7Wallet\profile\update\tri7-update.bat"
+        )));
+        assert!(!path_is_public_staging(std::path::Path::new(
+            "/root/.tri7_gui/update/tri7-update.sh"
+        )));
+    }
+}
+
 #[cfg(all(test, feature = "gui"))]
 mod live {
     use super::*;

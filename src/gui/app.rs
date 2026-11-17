@@ -411,6 +411,23 @@ impl Tri7App {
         });
     }
 
+    /// The ONE ordered exit path for every "quit now" affordance — File ▸ Exit
+    /// and the updater's pending_exit (TRI7-GUI-04). `std::process::exit` on
+    /// its own skipped every Drop impl, so a bundled tor.exe/i2pd.exe outlived
+    /// the wallet and kept holding its SOCKS port: here the node is asked to
+    /// stop (bounded 3s wait), the supervisors are dropped — their Drop impls
+    /// kill the children — and only then does the process end.
+    fn ordered_exit(&mut self) -> ! {
+        if let Some(mut node) = self.node.take() {
+            node.shutdown(std::time::Duration::from_secs(3));
+            drop(node);
+        }
+        crate::node_embedded::embedded_log(
+            "gui: ordered exit — node stopped, tor/i2p children reaped",
+        );
+        std::process::exit(0)
+    }
+
     fn scoped_menu_button<R>(
         ui: &mut egui::Ui,
         label: &str,
@@ -471,7 +488,7 @@ impl Tri7App {
             }
             ui.separator();
             if ui.button("Exit Triangles wallet").clicked() {
-                std::process::exit(0);
+                self.ordered_exit();
             }
         });
     }
@@ -1931,7 +1948,9 @@ impl eframe::App for Tri7App {
         // missing entirely, so "Install now & restart" never restarted
         // (operator report, laptop).
         if self.st.pending_exit {
-            std::process::exit(0);
+            // ordered: the node is stopped and the tor/i2p children reaped
+            // before the process disappears (the wrapper polls for THIS exit)
+            self.ordered_exit();
         }
         // Close button behaviour (Options -> Window):
         //   minimize        -> the window minimizes, the process AND the node

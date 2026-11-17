@@ -1198,6 +1198,12 @@ pub struct I2pSupervisor {
         Option<Arc<dyn Fn(I2pSpawnRequest) -> Result<Child, String> + Send + Sync>>,
     /// system probe port (4447 in production; tests point it at a bound port)
     system_probe_port: u16,
+    /// test hook: overrides the PROCESS-BOUND listener resolution for the
+    /// pinned SOCKS port (production resolves the listener pid + image path on
+    /// Windows). None in production → the real resolver runs; unresolvable
+    /// ports yield None and the adoption path fails safe.
+    listener_resolver:
+        Option<Arc<dyn Fn(u16) -> Option<(u32, String)> + Send + Sync>>,
     /// test hook ONLY: override the binary lookup (bundle/system resolution).
     /// Some(existing) = use exactly this binary; Some(missing) = the lookup
     /// CONCLUDED with no binary anywhere (pins the latched unavailable path
@@ -1220,6 +1226,7 @@ impl I2pSupervisor {
             spawn_gave_up: false,
             spawn_override: None,
             system_probe_port: SYSTEM_I2P_PORT,
+            listener_resolver: None,
             exe_override: None,
             kills: Arc::new(AtomicUsize::new(0)),
         }
@@ -1287,15 +1294,34 @@ impl I2pSupervisor {
         //    listener for hours while the chip kept trusting it). Probe the
         //    pinned port: a live child whose SOCKS stopped answering is
         //    killed and respawned below, never reported.
-        let child_usable = match &mut self.child {
-            Some(c) => match c.try_wait() {
-                Ok(None) => self
-                    .socks_port
-                    .map(|p| socks_endpoint_answers("127.0.0.1", p))
-                    .unwrap_or(false),
-                _ => false,
-            },
-            None => false,
+        let child_pid = self.child.as_ref().map(|c| c.id());
+        let child_alive = matches!(
+            self.child.as_mut().map(|c| c.try_wait()),
+            Some(Ok(None))
+        );
+        let child_usable = if child_alive {
+            match self.socks_port {
+                Some(p) => {
+                    if !socks_endpoint_answers("127.0.0.1", p) {
+                        false
+                    } else {
+                        // PROCESS-BOUND attribution (TRI7-I2P-01, the tor
+                        // lane's rule): the answer is OUR child's only when
+                        // the pinned port's LISTENER is that child. Where the
+                        // listener cannot be resolved the handshake remains
+                        // the gate (no bundled-payload attribution exists on
+                        // those hosts).
+                        let resolved = TorSupervisor::resolve_listener(
+                            self.listener_resolver.as_deref(),
+                            p,
+                        );
+                        TorSupervisor::listener_pid_is(&resolved, child_pid) || resolved.is_none()
+                    }
+                }
+                None => false,
+            }
+        } else {
+            false
         };
         if child_usable {
             if let Some(p) = self.socks_port {
@@ -1305,17 +1331,66 @@ impl I2pSupervisor {
             }
         }
         self.kill_child(); // exited — or alive with a dead SOCKS port; respawn
-        // 2. already-answer rule: a FOREIGN system i2pd wins when we have
-        //    no live child of our own — use it and never spawn. Its tunnels
-        //    are NOT ours: the wallet-owned keys dat from a previous
-        //    session does NOT make an address live in this daemon, so no
-        //    destination refresh happens here and any previously-known (or
-        //    stale on-disk) destination is dropped and its state file
-        //    removed — advertising an address nothing serves would be a
-        //    lie peers would dial forever (judge r2 blocker).
+        // 2. already-answer rule: a daemon on the pinned port wins when we
+        //    have no live child of our own — but WHO owns that listener must
+        //    be established first (TRI7-I2P-01): taking any SOCKS5 speaker as
+        //    "system i2pd" let a wallet-owned orphan of a previous session be
+        //    misclassified as foreign, which then DELETED
+        //    state/i2p_destination.txt and stopped advertising a tunnel that
+        //    was live all along (the tor lane's listener-attribution lesson,
+        //    applied here).
+        //    - listener image path inside OUR wallet tree (+ our generated
+        //      tunnels.conf present) → wallet-owned orphan: adopt as OURS and
+        //      refresh the destination from the keys dat (its server tunnel IS
+        //      registered — it reads the same datadir).
+        //    - listener provably elsewhere → foreign system i2pd: use it and
+        //      never spawn; its tunnels are NOT ours, so any previously-known
+        //      (or stale on-disk) destination is dropped and its state file
+        //      removed — advertising an address nothing serves would be a lie
+        //      peers would dial forever (judge r2 blocker).
+        //    - listener UNRESOLVABLE (no attribution available on this host):
+        //      fail safe on the ADVERTISING side — we cannot prove a tunnel we
+        //      own is registered there, so the destination is not advertised.
         if socks_endpoint_answers("127.0.0.1", self.system_probe_port) {
             let port = self.system_probe_port;
             self.kill_child();
+            let resolved = TorSupervisor::resolve_listener(self.listener_resolver.as_deref(), port);
+            let tunnels_witness = node_dir
+                .join("state")
+                .join("i2p")
+                .join("data")
+                .join("tunnels.conf")
+                .exists();
+            let ours = Self::listener_is_wallet_i2pd(
+                &resolved,
+                node_dir,
+                self.exe_override.as_deref(),
+                tunnels_witness,
+            );
+            self.ilog(&format!(
+                "i2p: pinned port {port} answered; listener attribution: {} → {}",
+                match &resolved {
+                    Some((lpid, lpath)) => format!("pid={lpid} path={lpath}"),
+                    None => "UNRESOLVED (no listener lookup available)".to_string(),
+                },
+                if ours {
+                    "wallet-owned"
+                } else if resolved.is_some() {
+                    "foreign"
+                } else {
+                    "unattributable (treated as not ours)"
+                }
+            ));
+            self.socks_port = Some(port);
+            if ours {
+                self.status = I2pStatus::Bundled(port);
+                self.ilog(
+                    "i2p: adopted wallet-owned orphan — our server tunnel is \
+                     registered in it, destination kept",
+                );
+                self.refresh_destination(node_dir);
+                return self.status.clone();
+            }
             if self.destination.take().is_some() {
                 self.ilog(
                     "i2p: adopted foreign system i2pd — our server tunnel is not \
@@ -1326,7 +1401,6 @@ impl I2pSupervisor {
             if stale.exists() {
                 let _ = std::fs::remove_file(&stale);
             }
-            self.socks_port = Some(port);
             self.status = I2pStatus::System(port);
             return self.status.clone();
         }
@@ -1464,6 +1538,51 @@ impl I2pSupervisor {
             self.status = I2pStatus::Unavailable;
         }
         self.status.clone()
+    }
+
+    /// (TRI7-I2P-01) PROCESS-BOUND identity for the i2p SOCKS listener: the
+    /// pinned port's LISTENER image path must live inside OUR wallet tree (the
+    /// wallet folder holding the node dir, or the node dir itself — that is
+    /// where the bundled payload beside the GUI exe and the installer's
+    /// i2pd\ directory sit), AND our generated tunnels.conf must exist as the
+    /// second witness. A user's own i2pd (Program Files / /usr/bin /
+    /// /usr/sbin) is never inside the wallet tree; an EMPTY or unresolvable
+    /// listener is never claimed as ours. Pure over the resolved (pid, path) —
+    /// testable on every host; the resolution is OS work.
+    fn listener_is_wallet_i2pd(
+        resolved: &Option<(u32, String)>,
+        node_dir: &Path,
+        exe_override: Option<&Path>,
+        tunnels_witness: bool,
+    ) -> bool {
+        if !tunnels_witness {
+            return false;
+        }
+        let Some((_, path)) = resolved else {
+            return false;
+        };
+        let norm = |p: &Path| -> String {
+            p.to_string_lossy().replace('/', "\\").to_lowercase()
+        };
+        let listener = norm(Path::new(path));
+        if listener.is_empty() {
+            return false;
+        }
+        if let Some(exe) = exe_override {
+            if listener == norm(exe) {
+                return true;
+            }
+        }
+        // strip any \\?\ prefix so the comparison is prefix-clean
+        let listener_trim = listener.trim_start_matches("\\\\?\\").to_string();
+        [Some(node_dir), node_dir.parent()]
+            .into_iter()
+            .flatten()
+            .any(|base| {
+                let b = norm(base);
+                let b = b.trim_start_matches("\\\\?\\").trim_end_matches('\\');
+                !b.is_empty() && listener_trim.starts_with(&format!("{b}\\"))
+            })
     }
 
     /// Read the .b32 destination back from the tunnel's keys dat (created by
@@ -1658,6 +1777,20 @@ fn free_port() -> u16 {
 /// spawn failed (cold index builds are slow — retry window is generous)
 const RPC_WAIT: Duration = Duration::from_secs(25);
 const MAX_RESTARTS: u32 = 5;
+/// base delay for the exponential restart backoff (5s, 10s, 20s, 40s, 80s,
+/// capped at 120s) — a crashing node must not relaunch in a tight loop
+const RESTART_BACKOFF_BASE: Duration = Duration::from_secs(5);
+/// a run that stays up (RPC answering) this long proves the failure was
+/// transient: the restart counter is reset so the cap never latches forever
+const HEALTHY_RESET_WINDOW: Duration = Duration::from_secs(600);
+const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(120);
+
+/// 5s * 2^(n-1), capped at 120s (n = the restart number, 1-based)
+fn restart_backoff_delay(base: Duration, restarts: u32) -> Duration {
+    let exp = restarts.saturating_sub(1).min(16);
+    let secs = base.as_secs().saturating_mul(1u64 << exp);
+    Duration::from_secs(secs).min(RESTART_BACKOFF_CAP)
+}
 
 /// The supervisor's fresh-machine decision, extracted for tests: a state dir
 /// whose blk file is missing OR holds no body beyond genesis (the 208-byte
@@ -1679,6 +1812,18 @@ pub struct EmbeddedNode {
     snapshot_done: bool,
     started_at: Option<Instant>,
     restarts: u32,
+    /// exponential restart backoff: set when a run is reaped, honoured before
+    /// the next spawn. Without it a fast-crashing node spun at full speed
+    /// (five spawns in milliseconds, then a silent permanent latch).
+    restart_backoff_until: Option<Instant>,
+    /// base delay for the restart backoff (production 5s; tests shrink it to
+    /// zero so the crash-loop bound stays fast to reach)
+    restart_backoff_base: Duration,
+    /// when the CURRENT run was first observed answering RPC — a run that
+    /// stays up HEALTHY_RESET_WINDOW (10 min) proves the failure was
+    /// transient, so the restart counter is reset and the cap does not latch
+    /// for the rest of the session
+    healthy_since: Option<Instant>,
     log_path: PathBuf,
     /// the in-process node thread (run_embedded)
     node_thread: Option<JoinHandle<()>>,
@@ -1708,6 +1853,9 @@ impl EmbeddedNode {
             snapshot_done: false,
             started_at: None,
             restarts: 0,
+            restart_backoff_until: None,
+            restart_backoff_base: RESTART_BACKOFF_BASE,
+            healthy_since: None,
             log_path: log_path.clone(),
             node_thread: None,
             node_finished: Arc::new(AtomicBool::new(false)),
@@ -1760,7 +1908,24 @@ impl EmbeddedNode {
     /// the embedded node exit-loop and the wallet fail standalone). Staking
     /// defaults off; the user flips it in the UI (persisted by the staking RPC).
     fn ensure_conf(conf: &Path, rpc_port: u16) {
-        if let Ok(text) = std::fs::read_to_string(conf) {
+        let existing = match std::fs::read_to_string(conf) {
+            Ok(text) => Some(text),
+            // a MISSING conf is the legitimate first-run path (write a fresh
+            // one below); any OTHER read failure (sharing violation on
+            // Windows, EACCES) must never be mistaken for "no conf" — a
+            // fresh write would clobber the operator's rpcuser/rpcpassword
+            // and any hand-set lines with a brand-new identity.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: refusing to rewrite {} — read failed ({}); leaving the conf untouched",
+                    conf.display(),
+                    e
+                ));
+                return;
+            }
+        };
+        if let Some(text) = existing {
             // MIGRATE, never blindly trust the file's existence: a conf
             // written by an early build (fleet-follower era: just
             // "daemon=0\nrpc=1") lacks the rpcuser/rpcpassword the node now
@@ -1838,7 +2003,7 @@ impl EmbeddedNode {
             }
             let mut migrated = migrated_lines.join("\n");
             migrated.push('\n');
-            let _ = std::fs::write(conf, migrated);
+            Self::write_conf_atomic(conf, &migrated);
             return;
         }
         if let Some(dir) = conf.parent() {
@@ -1849,9 +2014,47 @@ impl EmbeddedNode {
             .expect("CSPRNG entropy for the node conf password must never fail silently");
         let password: String = pw.iter().map(|b| format!("{b:02x}")).collect();
         let text = format!(
-            "server=1\nrpcport={rpc_port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcuser=tri7\nrpcpassword={password}\nstaking=0\n"
+            "server=1\nrpcport={rpc_port}\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcuser=tri7\nrpcpassword={password}\nstake=0\n"
         );
-        let _ = std::fs::write(conf, text);
+        Self::write_conf_atomic(conf, &text);
+    }
+
+    /// Write the node conf via temp-file + rename IN THE SAME DIRECTORY, so a
+    /// torn/partial write can never leave a half conf behind (the rename is
+    /// the commit point). Errors are LOGGED, never swallowed: a silently
+    /// failed conf write used to resurface only as an unexplained node
+    /// exit-loop. The rename carries the Windows access-denied retry loop the
+    /// crate's other state writers use (an AV scanner holding the target for
+    /// a few ms must not cost the wallet its conf).
+    fn write_conf_atomic(conf: &Path, text: &str) {
+        let mut tmp_os = conf.as_os_str().to_os_string();
+        tmp_os.push(".tmp");
+        let tmp = PathBuf::from(tmp_os);
+        if let Err(e) = std::fs::write(&tmp, text) {
+            crate::node_embedded::embedded_log(&format!(
+                "supervisor: conf write FAILED at {} ({}); the previous conf is untouched",
+                tmp.display(),
+                e
+            ));
+            return;
+        }
+        let mut last: Option<std::io::Error> = None;
+        for attempt in 0..12 {
+            match std::fs::rename(&tmp, conf) {
+                Ok(()) => return,
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(Duration::from_millis(25 * (attempt + 1) as u64));
+                }
+            }
+        }
+        crate::node_embedded::embedded_log(&format!(
+            "supervisor: conf rename FAILED {} -> {} ({}); the previous conf is untouched",
+            tmp.display(),
+            conf.display(),
+            last.map(|e| e.to_string()).unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&tmp);
     }
 
     /// When tor is live the conf gains, idempotently, the tor SOCKS setting
@@ -1864,7 +2067,21 @@ impl EmbeddedNode {
     /// one. tor unavailable → conf untouched (no dead lines, no phantom onion
     /// route pointing at a tor that is not running).
     fn ensure_tor_conf_lines(conf: &Path, socks_port: u16) {
-        let text = std::fs::read_to_string(conf).unwrap_or_default();
+        // A read failure must NEVER be treated as "empty conf": this writer
+        // APPENDS, so writing the empty default back would erase
+        // rpcuser/rpcpassword and drop the node into an authless exit loop.
+        // Log and leave the file alone — the next ensure retries.
+        let text = match std::fs::read_to_string(conf) {
+            Ok(t) => t,
+            Err(e) => {
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: tor conf lines NOT applied — read {} failed ({}); conf untouched",
+                    conf.display(),
+                    e
+                ));
+                return;
+            }
+        };
         let socks_line = format!("socks=127.0.0.1:{socks_port}");
         let seed_line = format!("addnode={FLEET_ONION_SEED}");
         let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
@@ -1893,7 +2110,7 @@ impl EmbeddedNode {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        let _ = std::fs::write(conf, out);
+        Self::write_conf_atomic(conf, &out);
     }
 
     /// When i2p is live the conf gains, idempotently, the fleet i2p seed
@@ -1904,7 +2121,19 @@ impl EmbeddedNode {
     /// is not running — the node's own DEFAULT_PEER_SEEDS floor still covers
     /// a later i2pd appearing).
     fn ensure_i2p_conf_lines(conf: &Path) {
-        let text = std::fs::read_to_string(conf).unwrap_or_default();
+        // Same rule as the tor lane: a transient read failure must not be
+        // rewritten as an empty conf (that would erase the RPC credentials).
+        let text = match std::fs::read_to_string(conf) {
+            Ok(t) => t,
+            Err(e) => {
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: i2p conf lines NOT applied — read {} failed ({}); conf untouched",
+                    conf.display(),
+                    e
+                ));
+                return;
+            }
+        };
         let seed_line = format!("addnode={FLEET_I2P_SEED}");
         let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
         if lines.iter().any(|l| l.trim() == seed_line) {
@@ -1915,7 +2144,7 @@ impl EmbeddedNode {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        let _ = std::fs::write(conf, out);
+        Self::write_conf_atomic(conf, &out);
     }
 
     /// Ensure the embedded node is running for this wallet. Returns Ok(true)
@@ -1954,6 +2183,12 @@ impl EmbeddedNode {
         )
         .is_ok()
         {
+            // health witness: start the "has this run stayed up?" clock the
+            // first time OUR thread answers RPC (a run that survives
+            // HEALTHY_RESET_WINDOW resets the restart counter when it ends)
+            if self.node_thread.is_some() && self.healthy_since.is_none() {
+                self.healthy_since = Some(Instant::now());
+            }
             return Ok(true);
         }
         // 2. attach-to-EXTERNAL mode (rpc_addr configured — fleet/advanced):
@@ -1977,6 +2212,19 @@ impl EmbeddedNode {
                 self.restarts + 1
             ));
             self.node_thread = None; // reap
+            // HEALTH RESET: a run that stayed up HEALTHY_RESET_WINDOW proves
+            // the earlier exits were transient — clear the counter so the cap
+            // is a crash-loop bound, not a permanent session latch.
+            if let Some(hs) = self.healthy_since.take() {
+                if hs.elapsed() >= HEALTHY_RESET_WINDOW {
+                    crate::node_embedded::embedded_log(&format!(
+                        "supervisor: previous run stayed healthy {}s — restart counter reset (was {})",
+                        hs.elapsed().as_secs(),
+                        self.restarts
+                    ));
+                    self.restarts = 0;
+                }
+            }
             // r2 judge: count EVERY finished run — a node meant to run
             // continuously exiting with code 0 is still an unexpected exit
             // (a crash-loop that exits 0 would otherwise respawn forever).
@@ -1991,6 +2239,28 @@ impl EmbeddedNode {
                     self.log_path.display()
                 ));
             }
+            // exponential backoff before the next spawn (never a tight
+            // relaunch loop): 5s, 10s, 20s … capped at 120s. ensure_running
+            // returning Ok(false) while the delay runs out is honest — the
+            // node is down and the UI keeps showing progress.
+            let delay = restart_backoff_delay(self.restart_backoff_base, self.restarts);
+            if !delay.is_zero() {
+                self.restart_backoff_until = Some(Instant::now() + delay);
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: restart #{} backoff — next spawn in {}s",
+                    self.restarts,
+                    delay.as_secs()
+                ));
+            }
+        }
+        // 3b. the backoff gate: refuse to spawn before the delay elapses.
+        //     Checked AFTER the reap above so a dead thread is always counted
+        //     exactly once.
+        if let Some(at) = self.restart_backoff_until {
+            if Instant::now() < at {
+                return Ok(false);
+            }
+            self.restart_backoff_until = None;
         }
         // 4. spawn IN-PROCESS (single exe): the node runs on a dedicated
         //    thread with the IDENTICAL argv the old Command::new(follow_tip)
@@ -2110,11 +2380,23 @@ impl EmbeddedNode {
         finished.store(false, Ordering::SeqCst);
         exit_code.store(-1, Ordering::SeqCst);
         self.started_at = Some(Instant::now());
+        self.healthy_since = None;
         self.node_thread = Some(
             std::thread::Builder::new()
                 .name("tri7-node-embedded".into())
                 .spawn(move || {
-                    let code = runner(&argv).unwrap_or(-1);
+                    // (TRI7-GUI-03) the runner's Err must be named, not
+                    // discarded: `unwrap_or(-1)` turned a PANIC into an opaque
+                    // exit code with no reason anywhere in the log.
+                    let code = match runner(&argv) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            crate::node_embedded::embedded_log(&format!(
+                                "node panicked: {e}"
+                            ));
+                            -1
+                        }
+                    };
                     // (exit-attribution) every run's end must be attributable:
                     // the thread has no console, and EMBEDDED is already
                     // cleared by EmbeddedGuard when this line runs
@@ -2138,6 +2420,26 @@ impl EmbeddedNode {
             )
             .is_ok()
             {
+                if self.healthy_since.is_none() {
+                    self.healthy_since = Some(Instant::now());
+                }
+                // (TRI7-RPC-01) hand the node's per-boot capability token to
+                // the GUI client so its calls pass the node's RPC auth; the
+                // node writes the file before binding the listener, but the
+                // write can trail the first successful probe on a cold start
+                let token_path = state_dir.join("node_rpc.token");
+                for _ in 0..5 {
+                    match std::fs::read_to_string(&token_path) {
+                        Ok(t) => {
+                            let t = t.trim().to_string();
+                            if !t.is_empty() {
+                                crate::gui::rpc_client::set_rpc_token(&t);
+                                break;
+                            }
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(200)),
+                    }
+                }
                 return Ok(true);
             }
             if self.node_finished.load(Ordering::SeqCst) {
@@ -2223,6 +2525,36 @@ impl EmbeddedNode {
         Ok(())
     }
 
+    /// Ordered in-process shutdown for GUI exit (TRI7-GUI-04): signal the
+    /// node's OWN cooperative stop flag (the same flag RPC `stop`/SIGTERM
+    /// set — the follow loop persists state and returns at a safe point),
+    /// wait a BOUNDED time for the thread to finish, then let the caller drop
+    /// this supervisor so tor/i2pd children are killed by their Drop impls.
+    /// Never blocks the exit longer than `timeout`.
+    pub fn shutdown(&mut self, timeout: Duration) {
+        let Some(handle) = self.node_thread.take() else {
+            return;
+        };
+        if !self.node_finished.load(Ordering::SeqCst) {
+            crate::shutdown::request();
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline && !self.node_finished.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if self.node_finished.load(Ordering::SeqCst) {
+                crate::node_embedded::embedded_log(
+                    "supervisor: node stopped cleanly on wallet exit (state persisted)",
+                );
+                let _ = handle.join();
+                return;
+            }
+            crate::node_embedded::embedded_log(&format!(
+                "supervisor: node still running {}s after the stop request — exiting anyway (state on disk is resumable)",
+                timeout.as_secs()
+            ));
+        }
+    }
+
     pub fn running(&mut self) -> bool {
         // in-process mode: the node thread is alive until it finishes
         if self.node_thread.is_some() {
@@ -2283,6 +2615,55 @@ mod tests {
             std::fs::read_to_string(&conf).unwrap(),
             "custom=1\nrpcuser=me\nrpcpassword=pw\nserver=1\nrpcport=19199\nrpcbind=10.0.0.5\nrpcallowip=10.0.0.0/24\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TRI7-CONF-03: the node parses `stake=` (NOT `staking=`), so the fresh
+    /// conf must carry `stake=0` or the default-off intent never reaches it.
+    #[test]
+    fn fresh_conf_writes_the_key_the_node_actually_parses() {
+        let dir = std::env::temp_dir().join(format!("nsstake{}", std::process::id()));
+        let conf = dir.join("triangles.conf");
+        let _ = std::fs::remove_dir_all(&dir);
+        EmbeddedNode::ensure_conf(&conf, 19199);
+        let text = std::fs::read_to_string(&conf).unwrap();
+        assert!(text.contains("\nstake=0\n"), "stake key written: {text}");
+        assert!(
+            !text.contains("staking="),
+            "the node never parses `staking=`: {text}"
+        );
+        // no temp file left behind (tmp+rename commit)
+        assert!(
+            !dir.join("triangles.conf.tmp").exists(),
+            "the atomic writer must not leave a tmp file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TRI7-CONF-01: the APPEND writers must never treat a read failure as
+    /// "empty conf" — doing so rewrote the file with only the appended lines
+    /// and silently destroyed rpcuser/rpcpassword. A conf path that exists but
+    /// cannot be read (a directory stands in for that class on every OS) is
+    /// left EXACTLY as it was.
+    #[test]
+    fn conf_append_writers_leave_an_unreadable_conf_untouched() {
+        let dir = std::env::temp_dir().join(format!("nsconfread{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // a DIRECTORY at the conf path: read_to_string fails, yet the path is
+        // NOT "missing" (NotFound) — the transient-failure shape that used to
+        // wipe the credentials
+        let conf = dir.join("triangles.conf");
+        std::fs::create_dir_all(&conf).unwrap();
+        EmbeddedNode::ensure_tor_conf_lines(&conf, 31551);
+        EmbeddedNode::ensure_i2p_conf_lines(&conf);
+        assert!(conf.is_dir(), "the read failure must not replace the path");
+        assert!(
+            !dir.join("triangles.conf.tmp").exists(),
+            "nothing may be written on a failed read"
+        );
+        // ensure_conf must ALSO refuse (not write a fresh identity over it)
+        EmbeddedNode::ensure_conf(&conf, 19199);
+        assert!(conf.is_dir(), "ensure_conf must not clobber an unreadable conf");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2370,6 +2751,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nsinproc{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        // (TRI7-GUI-02) the finished-run restarts here are immediate by
+        // design; the production backoff window must not gate the test
+        n.restart_backoff_base = Duration::ZERO;
         let runner_calls = Arc::new(AtomicUsize::new(0));
         let rpc_served = Arc::new(AtomicUsize::new(0));
         // capture run 1's argv: the empty state dir is FRESH, so the
@@ -2530,6 +2914,9 @@ mod tests {
         std::fs::write(&wallet, b"").unwrap();
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
         n.runner_override = Some(Arc::new(move |_argv: &[String]| Ok(0)));
+        // the production backoff (5s, 10s, 20s …) would make this test take
+        // minutes; the BOUND is what is under test here, not the delay
+        n.restart_backoff_base = Duration::ZERO;
         let mut bounded = true;
         for _ in 0..=MAX_RESTARTS as usize * 3 + 2 {
             match n.ensure_running(&wallet, &dir, &[]) {
@@ -2547,6 +2934,60 @@ mod tests {
         assert!(
             !bounded,
             "exit-0 crash-loop must be bounded by MAX_RESTARTS"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TRI7-GUI-02: the restart delay is 5s * 2^(n-1), capped at 120s.
+    #[test]
+    fn restart_backoff_is_exponential_and_capped() {
+        let base = Duration::from_secs(5);
+        assert_eq!(restart_backoff_delay(base, 1), Duration::from_secs(5));
+        assert_eq!(restart_backoff_delay(base, 2), Duration::from_secs(10));
+        assert_eq!(restart_backoff_delay(base, 3), Duration::from_secs(20));
+        assert_eq!(restart_backoff_delay(base, 4), Duration::from_secs(40));
+        assert_eq!(restart_backoff_delay(base, 5), Duration::from_secs(80));
+        assert_eq!(restart_backoff_delay(base, 9), RESTART_BACKOFF_CAP);
+    }
+
+    /// TRI7-GUI-02: after a run is reaped, the supervisor must WAIT out the
+    /// backoff instead of relaunching immediately (a crash-loop used to spin
+    /// at full speed until the silent latch).
+    #[test]
+    fn restart_backoff_blocks_the_respawn_until_it_elapses() {
+        let port = free_dead_port();
+        let dir = std::env::temp_dir().join(format!("nsbackoff{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let sc = Arc::clone(&spawns);
+        n.runner_override = Some(Arc::new(move |_argv: &[String]| {
+            sc.fetch_add(1, Ordering::SeqCst);
+            Ok(0) // exit immediately
+        }));
+        // production base (5s) — the delay under test
+        let _ = n.ensure_running(&wallet, &dir, &[]); // spawn #1, exits at once
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        let _ = n.ensure_running(&wallet, &dir, &[]); // reap + arm the backoff
+        assert!(
+            n.restart_backoff_until.is_some(),
+            "the reap must arm a restart delay"
+        );
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            1,
+            "no respawn inside the backoff window"
+        );
+        // let the window elapse: the next ensure spawns again
+        n.restart_backoff_until = Some(Instant::now() - Duration::from_millis(1));
+        let _ = n.ensure_running(&wallet, &dir, &[]);
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            2,
+            "after the backoff elapses the node is spawned again"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4072,6 +4513,79 @@ mod tests {
         assert!(
             !dir.join("state").join("i2p_destination.txt").exists(),
             "the stale state file must be removed on foreign adoption"
+        );
+        stop.store(1, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (TRI7-I2P-01) a WALLET-OWNED orphan must be adopted as OURS, not
+    /// misclassified as a foreign system daemon: when the pinned port's
+    /// LISTENER image path is inside our wallet tree AND our generated
+    /// tunnels.conf exists as the second witness, the destination is KEPT
+    /// (refreshed from the keys dat) and the state file is NOT deleted — that
+    /// deletion used to stop advertising a tunnel that was live all along.
+    #[test]
+    fn i2p_wallet_owned_orphan_is_adopted_not_foreign() {
+        let dir = std::env::temp_dir().join(format!("i2pown{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state").join("i2p").join("data")).unwrap();
+        // OUR generated tunnel config (ownership witness #2) + our identity
+        write_i2pd_tunnels_conf(&dir, I2P_TUNNEL_TARGET_PORT).unwrap();
+        std::fs::write(
+            dir.join("state").join("i2p").join("data").join(I2P_DEST_KEYS_FILE),
+            fixture_keys_dat(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("state").join("i2p_destination.txt"),
+            "vbomgzub5x4mm3zgzcr5v5h2n3lg5cw7zji2ps7324s2ciyojgha.b32.i2p:24113\n",
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicUsize::new(0));
+        let (st_flag, sp) = (Arc::clone(&stop), listener);
+        std::thread::spawn(move || {
+            sp.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline && st_flag.load(Ordering::SeqCst) == 0 {
+                if let Ok((mut s, _)) = sp.accept() {
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut greeting = [0u8; 3];
+                    if s.read_exact(&mut greeting).is_ok() && greeting == [0x05, 0x01, 0x00] {
+                        let _ = std::io::Write::write_all(&mut s, &[0x05, 0x00]);
+                    }
+                    drop(s);
+                } else {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        });
+        let mut sup = i2p_supervisor(&dir, port);
+        // the listener's image path IS our bundled payload inside the wallet tree
+        let own_exe = dir.join("i2pd").join("i2pd");
+        sup.listener_resolver = Some(Arc::new(move |_p: u16| {
+            Some((4242, own_exe.to_string_lossy().to_string()))
+        }));
+        sup.spawn_override = Some(Arc::new(
+            |_req: I2pSpawnRequest| -> Result<Child, String> {
+                panic!("a wallet-owned orphan must be ADOPTED, never spawned over");
+            },
+        ));
+        let st = sup.ensure(&dir, true);
+        assert_eq!(
+            st,
+            I2pStatus::Bundled(port),
+            "wallet-owned orphan must be reported as OURS: {st:?}"
+        );
+        assert!(
+            sup.destination().is_some(),
+            "our own orphan serves our tunnel — the destination must survive"
+        );
+        assert!(
+            dir.join("state").join("i2p_destination.txt").exists(),
+            "the destination state file must NOT be deleted for a wallet-owned orphan"
         );
         stop.store(1, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(&dir);
