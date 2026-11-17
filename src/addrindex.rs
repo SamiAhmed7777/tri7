@@ -194,6 +194,23 @@ pub fn finish(c: &Connection, height: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Record the hash of the last applied block. The daemon's per-block append
+/// (LiveIndex::apply) writes this on every accepted block; the catch-up
+/// builder writes it too, for the last block of each committed slice. THE
+/// LAG-AWARE MONEY-PATH VERDICT (authority_with_lag, 2026-11-17) proves
+/// same-chain from THIS fact: a builder-maintained index without it carries
+/// no proof and is refused (fail closed) — exactly what the fleet ran into
+/// when only the 10-minute builder advanced DNS2's index.
+pub fn set_tip_hash(c: &Connection, hash: &[u8; 32]) -> Result<(), String> {
+    c.execute(
+        "INSERT INTO meta(k,v) VALUES('tip_hash',?1) \
+         ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        [hex32(hash)],
+    )
+    .map_err(|e| format!("tip_hash: {e}"))?;
+    Ok(())
+}
+
 /// getaddressbalance: {balance, received} in sats.
 pub fn balance(c: &Connection, addrs: &[String]) -> Result<(i64, i64), String> {
     let mut bal = 0i64;

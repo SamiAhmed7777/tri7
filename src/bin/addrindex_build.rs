@@ -260,6 +260,13 @@ fn main() {
     let mut spends = 0u64;
     let mut in_txn = false;
     let mut last_slice_off = pos;
+    // the hash of the last block whose slice COMMITTED (meta tip_hash tracks
+    // the committed coverage — a torn tail that gets re-walked on resume must
+    // not claim a hash its height doesn't cover)
+    let mut last_committed_hash: Option<[u8; 32]> = None;
+    // the hash of the last block ACCEPTED this run (committed by the final
+    // tail COMMIT at eof — the honest proof for the eof height)
+    let mut last_accepted_hash: Option<[u8; 32]> = None;
     // The height the index actually covers. Stamping `tip` after an abort (a
     // corrupt frame, a parse error) would advertise a complete index that is
     // not complete, so this only advances on a committed slice and only
@@ -378,6 +385,7 @@ fn main() {
             Ok((o, s)) => {
                 outputs += o;
                 spends += s;
+                last_accepted_hash = Some(hash);
             }
             Err(e) => {
                 eprintln!("h{real_height}: {e}");
@@ -397,6 +405,10 @@ fn main() {
             last_height = real_height;
             addrindex::finish(&conn, last_height).ok();
             addrindex::set_offset(&conn, pos).ok();
+            // the proof the lag-aware money-path verdict reads: the hash of
+            // the block AT the committed height (this slice's last block)
+            last_committed_hash = Some(hash);
+            addrindex::set_tip_hash(&conn, &hash).ok();
         }
         if blocks % 20_000 == 0 {
             let bps = blocks as f64 / started.elapsed().as_secs_f64().max(0.001);
@@ -445,10 +457,25 @@ fn main() {
     }
     if reached_eof {
         addrindex::finish(&conn, chain_tip.max(last_height)).ok();
+        // eof: every block through the tip is committed — the LAST accepted
+        // block's hash is the honest proof for the advertised height. When
+        // the walk accepted nothing this run (resume with nothing new), keep
+        // the last COMMITTED slice's hash.
+        let proof = if blocks > 0 {
+            last_accepted_hash
+        } else {
+            last_committed_hash
+        };
+        if let Some(h) = proof {
+            addrindex::set_tip_hash(&conn, &h).ok();
+        }
         addrindex::set_complete(&conn, true).ok();
     } else {
         // partial: keep the covered height and say so explicitly
         addrindex::finish(&conn, last_height).ok();
+        if let Some(h) = last_committed_hash {
+            addrindex::set_tip_hash(&conn, &h).ok();
+        }
         addrindex::set_complete(&conn, false).ok();
         eprintln!(
             "addrindex: INCOMPLETE — stopped before the end of the store; index covers h{last_height} of h{chain_tip}"
