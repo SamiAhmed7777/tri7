@@ -1066,32 +1066,125 @@ impl WalletHandle {
     /// Automatic pre-first-write backup: wallet.dat.tri7bak next to the
     /// wallet, one per session (overwritten on the first write of each new
     /// session so it always snapshots THIS session's starting state).
-    /// `fs::copy` streams via file descriptors (no 48 MB buffer) and
-    /// preserves the file mode on unix; the size check proves the copy.
+    ///
+    /// The copy is taken under a READ transaction, never with `fs::copy` on a
+    /// live file. The wallet runs rollback-journal mode (`journal_mode=DELETE`,
+    /// see `open_readwrite`), where a SHARED lock pins every page in the file:
+    /// a concurrent writer may fill its journal and its private cache, but it
+    /// cannot put new page images into the file until every reader releases.
+    /// So the byte stream we copy IS one committed transaction state.
+    /// `fs::copy` on a live SQLite file is not that: it can capture a mix of
+    /// pages from two generations — a file that opens, passes the header
+    /// checks and holds torn rows.
+    ///
+    /// The copy lands in `wallet.dat.tri7bak.tmp`, is fsynced, and only then
+    /// renamed over the previous backup: a crash at any point leaves either the
+    /// old backup or the new one, never a half-written file.
     fn ensure_backup(&mut self) -> Result<std::path::PathBuf, String> {
         if self.backup_done {
             return Ok(self.backup_path());
         }
         let bak = self.backup_path();
-        std::fs::copy(&self.path, &bak)
-            .map_err(|e| format!("copy {} -> {}: {}", self.path.display(), bak.display(), e))?;
-        let src = std::fs::metadata(&self.path)
-            .map_err(|e| format!("stat {}: {}", self.path.display(), e))?
-            .len();
-        let copied = std::fs::metadata(&bak)
-            .map_err(|e| format!("stat backup {}: {}", bak.display(), e))?
-            .len();
-        if copied != src {
-            return Err(format!("backup verify: {} != {} bytes", copied, src));
-        }
+        let mut tmp_os = bak.clone().into_os_string();
+        tmp_os.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp_os);
+
+        // Hold the read snapshot for the whole copy.
+        self.conn
+            .execute_batch("BEGIN")
+            .map_err(|e| format!("backup: BEGIN read transaction: {}", e))?;
+        let copied = self.copy_snapshot(&tmp);
+        let _ = self.conn.execute_batch("ROLLBACK");
+        let copied = copied?;
+
+        // Swap in atomically; the previous backup survives any failure above.
+        std::fs::rename(&tmp, &bak).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("backup: rename {} -> {}: {}", tmp.display(), bak.display(), e)
+        })?;
+
         self.backup_done = true;
         self.log(format!(
             "backup: {} -> {} ({} bytes) before first write of session",
             self.path.display(),
             bak.display(),
-            src
+            copied
         ));
         Ok(bak)
+    }
+
+    /// Stream the live DB file into `tmp` (already inside a read transaction)
+    /// and prove the result is a structurally valid wallet before it can
+    /// replace the backup.
+    fn copy_snapshot(&self, tmp: &Path) -> Result<u64, String> {
+        use std::io::{Read, Write};
+        // A deferred BEGIN takes no lock until the first read: touch a row so
+        // the SHARED lock is really held while we stream the file.
+        match self
+            .conn
+            .query_row("SELECT key FROM main LIMIT 1", [], |r| r.get::<_, Vec<u8>>(0))
+        {
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(format!("backup: read lock: {}", e)),
+        }
+        let mut src = std::fs::File::open(&self.path)
+            .map_err(|e| format!("backup: open {}: {}", self.path.display(), e))?;
+        let mut dst = std::fs::File::create(tmp)
+            .map_err(|e| format!("backup: create {}: {}", tmp.display(), e))?;
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total = 0u64;
+        loop {
+            let n = src
+                .read(&mut buf)
+                .map_err(|e| format!("backup: read {}: {}", self.path.display(), e))?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n])
+                .map_err(|e| format!("backup: write {}: {}", tmp.display(), e))?;
+            total += n as u64;
+        }
+        dst.sync_all()
+            .map_err(|e| format!("backup: fsync {}: {}", tmp.display(), e))?;
+        drop(dst);
+
+        let src_len = std::fs::metadata(&self.path)
+            .map_err(|e| format!("backup: stat {}: {}", self.path.display(), e))?
+            .len();
+        if total != src_len {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!(
+                "backup: copied {} of {} bytes — the source changed under the read lock",
+                total, src_len
+            ));
+        }
+        // Structural proof from the copy itself: header page + schema version
+        // must read back as THIS wallet. (Not a full integrity_check — this runs
+        // before every first write of a session and must stay cheap.)
+        let c = rusqlite::Connection::open_with_flags(tmp, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("backup: reopen {}: {}", tmp.display(), e))?;
+        let app: i32 = c
+            .query_row("PRAGMA application_id", [], |r| r.get(0))
+            .map_err(|e| format!("backup: application_id of copy: {}", e))?;
+        let ver: i32 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| format!("backup: user_version of copy: {}", e))?;
+        let schema: i32 = c
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .map_err(|e| format!("backup: schema_version of copy: {}", e))?;
+        drop(c);
+        if app != WALLET_APP_ID || ver != WALLET_USER_VERSION {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!(
+                "backup: copy is not this wallet (application_id {:#x}, user_version {})",
+                app, ver
+            ));
+        }
+        if schema <= 0 {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!("backup: copy has no schema (schema_version {})", schema));
+        }
+        Ok(total)
     }
 
     /// wallet.dat.tri7bak — the session backup path.
@@ -1871,10 +1964,143 @@ impl WalletHandle {
     /// skipped loudly (a legacy import artifact must never produce an
     /// address the wallet cannot spend from). Returns None when the pool is
     /// empty or every remaining entry is unusable.
+    ///
+    /// TOCTOU: the candidate list used to be read BEFORE `BEGIN IMMEDIATE`,
+    /// so two poppers (the RPC thread and the GUI thread, or two processes)
+    /// could both pick the same index; the loser's DELETE removed 0 rows and
+    /// its INSERT still relabelled the address — or worse, both callers
+    /// received the SAME key as "fresh". Selection now happens INSIDE the
+    /// write transaction and the DELETE must prove exactly one row. A 0-row
+    /// DELETE means the snapshot lied (the row went away under us): re-select
+    /// and retry, up to 3 times, then fail instead of handing out a key the
+    /// wallet has already given away.
     pub fn pop_keypool(&mut self, label: &str) -> Result<Option<KeyPoolEntry>, String> {
+        const MAX_ATTEMPTS: usize = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            self.conn
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| write_error("BEGIN IMMEDIATE", "pop_keypool", e))?;
+            // indices already proven gone inside THIS transaction — without
+            // this a 0-row DELETE would re-select the same stale row forever
+            let mut gone: Vec<i64> = Vec::new();
+            loop {
+                let entry = match self.pool_candidate(&gone) {
+                    Ok(Some(e)) => e,
+                    Ok(None) => {
+                        // nothing usable left: no write, release the lock
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(e);
+                    }
+                };
+                let pool_kb = encode_pool_keyblob(entry.index);
+                let name_kb = encode_legacy_name_keyblob(&entry.address);
+                let name_row = (name_kb.clone(), encode_name_value(label));
+                let deleted = match self.conn.execute(
+                    "DELETE FROM main WHERE key = ?1",
+                    rusqlite::params![&pool_kb],
+                ) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(write_error("DELETE pool row", "pop_keypool", e));
+                    }
+                };
+                if deleted != 1 {
+                    // The candidate no longer exists (or was rewritten). Do
+                    // not relabel an address whose pool row we did not take:
+                    // drop the stale candidate and look again.
+                    gone.push(entry.index);
+                    self.log(format!(
+                        "pop_keypool: pool index {} DELETE removed {deleted} rows — re-selecting \
+                         (attempt {}/{MAX_ATTEMPTS})",
+                        entry.index, attempt
+                    ));
+                    if gone.len() >= MAX_ATTEMPTS {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        break;
+                    }
+                    continue;
+                }
+                if let Err(e) = self.conn.execute(
+                    "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![&name_row.0, &name_row.1],
+                ) {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(write_error("INSERT name row", "pop_keypool", e));
+                }
+                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(write_error("COMMIT", "pop_keypool", e));
+                }
+                // Post-commit proof: pool row gone, name row byte-exact.
+                let gone_check: Option<Vec<u8>> = self
+                    .conn
+                    .query_row(
+                        "SELECT value FROM main WHERE key = ?1",
+                        rusqlite::params![&pool_kb],
+                        |r| r.get(0),
+                    )
+                    .map(Some)
+                    .or_else(|err| match err {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })
+                    .map_err(|e| format!("pop_keypool verify: {}", e))?;
+                if gone_check.is_some() {
+                    return Err(
+                        "pop_keypool verify: pool row still present after COMMIT".into()
+                    );
+                }
+                let back: Option<Vec<u8>> = self
+                    .conn
+                    .query_row(
+                        "SELECT value FROM main WHERE key = ?1",
+                        rusqlite::params![&name_row.0],
+                        |r| r.get(0),
+                    )
+                    .map(Some)
+                    .or_else(|err| match err {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })
+                    .map_err(|e| format!("pop_keypool verify: {}", e))?;
+                if back.as_deref() != Some(name_row.1.as_slice()) {
+                    return Err(
+                        "pop_keypool verify: name row not byte-exact after COMMIT".into()
+                    );
+                }
+                self.log(format!(
+                    "pop_keypool: {} (index={}) handed out with label=\"{}\" — key row kept, \
+                     pool row erased wallet={}",
+                    entry.address,
+                    entry.index,
+                    label,
+                    self.path.display()
+                ));
+                return Ok(Some(entry));
+            }
+            if attempt == MAX_ATTEMPTS {
+                return Err(format!(
+                    "pop_keypool: the pool row kept disappearing under the write lock \
+                     ({MAX_ATTEMPTS} attempts)"
+                ));
+            }
+        }
+        Err("pop_keypool: unreachable".into())
+    }
+
+    /// Lowest-index usable pool entry, read INSIDE the caller's transaction
+    /// (`taken` = indices whose pool row is already proven gone).
+    fn pool_candidate(&mut self, taken: &[i64]) -> Result<Option<KeyPoolEntry>, String> {
         let entries = self.pool_entries()?;
-        let mut usable: Vec<KeyPoolEntry> = Vec::new();
         for e in entries {
+            if taken.contains(&e.index) {
+                continue;
+            }
             let kb = encode_key_keyblob(&e.pubkey);
             let present: Option<Vec<u8>> = self
                 .conn
@@ -1890,83 +2116,15 @@ impl WalletHandle {
                 })
                 .map_err(|e| format!("pop_keypool key scan: {}", e))?;
             if present.is_some() {
-                usable.push(e);
-            } else {
-                self.log(format!(
-                    "pop_keypool: pool index {} ({}) has NO key row — skipping \
-                     (legacy import artifact)",
-                    e.index, e.address
-                ));
+                return Ok(Some(e));
             }
+            self.log(format!(
+                "pop_keypool: pool index {} ({}) has NO key row — skipping \
+                 (legacy import artifact)",
+                e.index, e.address
+            ));
         }
-        let Some(entry) = usable.into_iter().next() else {
-            return Ok(None);
-        };
-        let pool_kb = encode_pool_keyblob(entry.index);
-        let name_kb = encode_legacy_name_keyblob(&entry.address);
-        let name_row = (name_kb.clone(), encode_name_value(label));
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| write_error("BEGIN IMMEDIATE", "pop_keypool", e))?;
-        if let Err(e) = self.conn.execute(
-            "DELETE FROM main WHERE key = ?1",
-            rusqlite::params![&pool_kb],
-        ) {
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(write_error("DELETE pool row", "pop_keypool", e));
-        }
-        if let Err(e) = self.conn.execute(
-            "INSERT OR REPLACE INTO main (key, value) VALUES (?1, ?2)",
-            rusqlite::params![&name_row.0, &name_row.1],
-        ) {
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(write_error("INSERT name row", "pop_keypool", e));
-        }
-        if let Err(e) = self.conn.execute_batch("COMMIT") {
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(write_error("COMMIT", "pop_keypool", e));
-        }
-        // Post-commit proof: pool row gone, name row byte-exact.
-        let gone: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT value FROM main WHERE key = ?1",
-                rusqlite::params![&pool_kb],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-            .map_err(|e| format!("pop_keypool verify: {}", e))?;
-        if gone.is_some() {
-            return Err("pop_keypool verify: pool row still present after COMMIT".into());
-        }
-        let back: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT value FROM main WHERE key = ?1",
-                rusqlite::params![&name_row.0],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-            .map_err(|e| format!("pop_keypool verify: {}", e))?;
-        if back.as_deref() != Some(name_row.1.as_slice()) {
-            return Err("pop_keypool verify: name row not byte-exact after COMMIT".into());
-        }
-        self.log(format!(
-            "pop_keypool: {} (index={}) handed out with label=\"{}\" — key row kept, pool row erased wallet={}",
-            entry.address,
-            entry.index,
-            label,
-            self.path.display()
-        ));
-        Ok(Some(entry))
+        Ok(None)
     }
 
     /// Write the seed-migration completion marker: setting "seedmigrated" =

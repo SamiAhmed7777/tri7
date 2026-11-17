@@ -268,6 +268,13 @@ pub struct IndexBuild {
     /// at the window tip hash — heights are authoritative only then
     pub heights_ok: bool,
     pub skipped_frames: usize,
+    /// Offset of the file's torn tail: the scan stopped on a SHORT final frame
+    /// (a power cut between the amortized fsyncs) and every frame before this
+    /// offset is indexed. None = the file ends on a frame boundary. The store
+    /// keeps it so `append_block` can cut the partial frame before writing —
+    /// appending after those bytes would leave a valid frame behind garbage,
+    /// which every later scan reads as MID-FILE corruption (a hard error).
+    pub torn_tail: Option<u64>,
 }
 
 /// Scan the blocks file sequentially, building all three indexes.
@@ -291,16 +298,32 @@ pub fn build_index(
     let mut last_accepted: Option<Hash> = None;
     let mut skipped = 0usize;
     let mut tx_count = 0usize;
+    // Torn tail: a short final frame is a LOST TAIL, not corruption.
+    // append_block fsyncs every 256 frames, so a power cut leaves exactly this
+    // shape, and the old code failed the WHOLE index build on it — the node
+    // then served no blocks at all until someone deleted the file by hand.
+    // The scan stops at the last whole frame and reports the cut point.
+    let mut torn_tail: Option<u64> = None;
     // hash -> height for the authoritative window, built ONCE. Scanning the
     // window per frame is O(frames x window) on a cold 2.2M-frame build.
     let oracle_map: Option<std::collections::HashMap<Hash, u64>> =
         oracle.map(|o| o.hashes.iter().enumerate().map(|(i, h)| (*h, o.base + i as u64)).collect());
 
     loop {
-        match read_exact_or_eof(&mut r, &mut hdr) {
-            Ok(false) => break,
-            Ok(true) => {}
+        let frame_off = off;
+        let got = match read_up_to(&mut r, &mut hdr) {
+            Ok(n) => n,
             Err(e) => return Err(e),
+        };
+        if got == 0 {
+            break; // clean EOF on a frame boundary
+        }
+        if got < hdr.len() {
+            if hdr[..got].iter().all(|&b| b == 0) {
+                break; // NUL padding tail, not a frame
+            }
+            torn_tail = Some(frame_off); // header cut mid-write
+            break;
         }
         let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
         let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
@@ -321,8 +344,16 @@ pub fn build_index(
         }
         body.clear();
         body.resize(len, 0);
-        r.read_exact(&mut body)
-            .map_err(|e| format!("frame body at offset {}: {}", off, e))?;
+        match read_full_or_eof(&mut r, &mut body) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Body cut by EOF: the header of the final frame landed but
+                // the body did not. Same lost-tail shape as a short header.
+                torn_tail = Some(frame_off);
+                break;
+            }
+            Err(e) => return Err(format!("frame body at offset {}: {}", off, e)),
+        }
 
         let hash = header_hash(&body).map_err(|e| format!("offset {}: {}", off, e))?;
 
@@ -454,8 +485,9 @@ pub fn build_index(
     // walk (DNS3, 2026-11-03: tip h17524 fully validated, zero bytes on
     // disk). A 0-frame index is immediately replaced by real frames through
     // the append path; heights_ok=false until real frames thread.
-    if blocks.is_empty() && skipped == 0 && seq == 0 && off == 0 {
-        // completely empty file: fall through with a 0-frame build
+    if blocks.is_empty() && skipped == 0 && seq == 0 && (off == 0 || torn_tail.is_some()) {
+        // completely empty file (or one whose only frame was cut mid-write
+        // and never fsynced): fall through with a 0-frame build
     } else if blocks.is_empty() {
         return Err("no frames found".into());
     }
@@ -498,25 +530,30 @@ pub fn build_index(
         txs_indexed: tx_count,
         heights_ok,
         skipped_frames: skipped,
+        torn_tail,
     })
 }
 
-fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, String> {
+/// Read up to `buf.len()` bytes, stopping at EOF. Returns the bytes read
+/// (0 = clean EOF at the first byte). A short count is NOT an error — the
+/// caller decides whether it is a torn tail (final frame) or corruption.
+fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize, String> {
     let mut got = 0;
     while got < buf.len() {
         match r.read(&mut buf[got..]) {
-            Ok(0) => {
-                return if got == 0 || buf[..got].iter().all(|&b| b == 0) {
-                    Ok(false)
-                } else {
-                    Err("EOF mid-frame-header".into())
-                }
-            }
+            Ok(0) => break,
             Ok(n) => got += n,
-            Err(e) => return Err(format!("frame header read: {}", e)),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("frame read: {}", e)),
         }
     }
-    Ok(true)
+    Ok(got)
+}
+
+/// Fill `buf` completely; Ok(false) when EOF cut it short (the torn-tail
+/// shape). Ok(true) = full frame body.
+fn read_full_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, String> {
+    Ok(read_up_to(r, buf)? == buf.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -533,8 +570,12 @@ const CACHE_MAGIC_TX: u32 = 0x5452_4954; // TRIT
 /// v3: height_off became height-indexed (gap-padded). A v2 cache holds the
 /// compact list, where every skipped frame shifted later heights onto the
 /// wrong offsets — serving neighbour bodies and reporting false gaps.
-const CACHE_VERSION: u32 = 3;
-const BLOCKS_HEAD_LEN: usize = 49;
+/// v4: the blocks head carries the torn-tail offset. A cache written over a
+/// file that ends mid-frame must TELL the store where the tear is; without it
+/// the next append wrote a valid frame behind a half-written one and every
+/// later scan saw mid-file corruption.
+const CACHE_VERSION: u32 = 4;
+const BLOCKS_HEAD_LEN: usize = 57;
 const TX_HEAD_LEN: usize = 32;
 
 fn sha256d(data: &[u8]) -> [u8; 32] {
@@ -566,6 +607,7 @@ fn write_blocks_cache(
     blk_len: u64,
     heights_ok: bool,
     oracle: Option<&BuildOracle>,
+    torn_tail: Option<u64>,
 ) -> Result<(), String> {
     let mut head = Vec::with_capacity(BLOCKS_HEAD_LEN);
     head.extend_from_slice(&CACHE_MAGIC_BLOCKS.to_le_bytes());
@@ -584,6 +626,7 @@ fn write_blocks_cache(
         }
     }
     head.push(if heights_ok { 1 } else { 0 });
+    head.extend_from_slice(&torn_tail.unwrap_or(u64::MAX).to_le_bytes());
     debug_assert_eq!(head.len(), BLOCKS_HEAD_LEN);
 
     let mut payload = Vec::with_capacity(
@@ -662,6 +705,7 @@ pub fn load_caches(
     let cbase = u64::from_le_bytes(bhead[32..40].try_into().unwrap());
     let ctip = u64::from_le_bytes(bhead[40..48].try_into().unwrap());
     let c_heights_ok = bhead[48] == 1;
+    let c_torn = u64::from_le_bytes(bhead[49..57].try_into().unwrap());
     if file_len != blk_len || cbase != base_sentinel || ctip != tip_sentinel {
         return Ok(None);
     }
@@ -730,6 +774,7 @@ pub fn load_caches(
         txs_indexed: n_tx,
         heights_ok: c_heights_ok,
         skipped_frames: 0,
+        torn_tail: if c_torn == u64::MAX { None } else { Some(c_torn) },
     }))
 }
 
@@ -749,6 +794,7 @@ pub fn save_caches(
         blk_len,
         build.heights_ok,
         oracle,
+        build.torn_tail,
     )?;
     write_tx_cache(&dir.join("txidx.bin"), &build.txs, blk_len, tip)?;
     Ok(())
@@ -840,6 +886,16 @@ pub struct StoreInner {
     /// false when the blocks file could not be opened writable (perm/ro fs) —
     /// append_block errors cleanly instead of writing
     writable: std::sync::atomic::AtomicBool,
+    /// Offset of a torn final frame found by the scan (or restored from the
+    /// cache). `append_block` cuts the partial frame off before writing:
+    /// appending behind those bytes would leave a valid frame after garbage,
+    /// which every later scan reads as MID-FILE corruption (a hard error that
+    /// fails the whole index build). Cleared once the cut is made.
+    torn_tail: std::sync::Mutex<Option<u64>>,
+    /// Serializes the truncate-then-append sequence between concurrent
+    /// appenders (the chain lock upstream usually does, but the store must not
+    /// depend on that for its own file integrity).
+    append_lock: std::sync::Mutex<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -990,6 +1046,9 @@ impl BlockStore {
             appendix_by_key: std::sync::RwLock::new(std::collections::HashMap::new()),
             unsynced: std::sync::atomic::AtomicU64::new(0),
             writable: std::sync::atomic::AtomicBool::new(false),
+            // read-only consumer: it never appends, so it never heals
+            torn_tail: std::sync::Mutex::new(b.torn_tail),
+            append_lock: std::sync::Mutex::new(()),
         };
         if let Ok(mut g) = self.state.write() {
             *g = Some(Arc::new(inner));
@@ -1027,6 +1086,15 @@ impl BlockStore {
             let build = build_index(&path, oracle.as_ref(), &|n| {
                 progress.store(n as u64, Ordering::Relaxed);
             })?;
+            if let Some(cut) = build.torn_tail {
+                eprintln!(
+                    "[blockidx] torn tail at offset {} in {}: indexing the {} complete frame(s) \
+                     before it; the partial frame is cut before the next append",
+                    cut,
+                    path.display(),
+                    build.frames
+                );
+            }
             if let Some(dir) = &self.cache_dir {
                 // cache failure is non-fatal — the in-memory index still serves
                 if let Err(e) = save_caches(dir, &build, blk_len, oracle.as_ref()) {
@@ -1072,6 +1140,8 @@ impl BlockStore {
                             ),
                             unsynced: std::sync::atomic::AtomicU64::new(0),
                             writable: std::sync::atomic::AtomicBool::new(writable),
+                            torn_tail: std::sync::Mutex::new(b.torn_tail),
+                            append_lock: std::sync::Mutex::new(()),
                         };
                         *self.state.write().unwrap() = Some(Arc::new(inner));
                     }
@@ -1658,10 +1728,6 @@ impl BlockStore {
             );
         }
         let f = &inner.file;
-        let off = f
-            .metadata()
-            .map_err(|e| format!("append: stat: {}", e))?
-            .len();
         let mut frame = Vec::with_capacity(8 + body.len());
         frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
         frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -1670,6 +1736,39 @@ impl BlockStore {
         let mut fh = f
             .try_clone()
             .map_err(|e| format!("append: clone handle: {}", e))?;
+        // TRUNCATE-THEN-APPEND under one lock: a scan that found a torn final
+        // frame (a power cut between the amortized fsyncs) leaves the file
+        // ending mid-frame. Writing the new frame BEHIND those bytes would put
+        // a valid frame after garbage, and every later scan then fails the
+        // whole index build on mid-file corruption. Cut the partial frame
+        // first: the frames before it are already indexed, so nothing is lost.
+        let _append_guard = inner
+            .append_lock
+            .lock()
+            .map_err(|_| "append: append lock poisoned".to_string())?;
+        let torn_cut = inner.torn_tail.lock().map(|c| *c).unwrap_or(None);
+        if let Some(cut) = torn_cut {
+                let cur = fh
+                    .metadata()
+                    .map_err(|e| format!("append: stat: {}", e))?
+                    .len();
+                if cur > cut {
+                    eprintln!(
+                        "[blockidx] cutting {} byte(s) of torn tail at offset {} before append",
+                        cur - cut,
+                        cut
+                    );
+                    fh.set_len(cut)
+                        .map_err(|e| format!("append: truncate torn tail: {}", e))?;
+                }
+                if let Ok(mut t) = inner.torn_tail.lock() {
+                    *t = None;
+                }
+        }
+        let off = fh
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
         fh.seek(std::io::SeekFrom::End(0))
             .map_err(|e| format!("append: seek: {}", e))?;
         fh.write_all(&frame)
@@ -1751,10 +1850,6 @@ impl BlockStore {
             );
         }
         let f = &inner.file;
-        let off = f
-            .metadata()
-            .map_err(|e| format!("append: stat: {}", e))?
-            .len();
         let mut frame = Vec::with_capacity(8 + body.len());
         frame.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
         frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -1763,6 +1858,39 @@ impl BlockStore {
         let mut fh = f
             .try_clone()
             .map_err(|e| format!("append: clone handle: {}", e))?;
+        // TRUNCATE-THEN-APPEND under one lock: a scan that found a torn final
+        // frame (a power cut between the amortized fsyncs) leaves the file
+        // ending mid-frame. Writing the new frame BEHIND those bytes would put
+        // a valid frame after garbage, and every later scan then fails the
+        // whole index build on mid-file corruption. Cut the partial frame
+        // first: the frames before it are already indexed, so nothing is lost.
+        let _append_guard = inner
+            .append_lock
+            .lock()
+            .map_err(|_| "append: append lock poisoned".to_string())?;
+        let torn_cut = inner.torn_tail.lock().map(|c| *c).unwrap_or(None);
+        if let Some(cut) = torn_cut {
+                let cur = fh
+                    .metadata()
+                    .map_err(|e| format!("append: stat: {}", e))?
+                    .len();
+                if cur > cut {
+                    eprintln!(
+                        "[blockidx] cutting {} byte(s) of torn tail at offset {} before append",
+                        cur - cut,
+                        cut
+                    );
+                    fh.set_len(cut)
+                        .map_err(|e| format!("append: truncate torn tail: {}", e))?;
+                }
+                if let Ok(mut t) = inner.torn_tail.lock() {
+                    *t = None;
+                }
+        }
+        let off = fh
+            .metadata()
+            .map_err(|e| format!("append: stat: {}", e))?
+            .len();
         fh.seek(std::io::SeekFrom::End(0))
             .map_err(|e| format!("append: seek: {}", e))?;
         fh.write_all(&frame)
@@ -2619,6 +2747,72 @@ mod tests {
             frame_bytes(&b2)[8..]
         );
         assert_eq!(store.stale_slot_hits(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F4: a power cut between the amortized fsyncs leaves the file ending
+    /// MID-FRAME. That is a lost tail, not corruption: the build must index
+    /// every complete frame and come up Ready, the cache must carry the cut
+    /// point across a restart, and the first append must CUT the partial frame
+    /// instead of writing behind it (which would make every later scan fail on
+    /// mid-file corruption).
+    #[test]
+    fn torn_tail_builds_ready_and_the_next_append_heals_it() {
+        let (frames, hashes, _, _) = synthetic_chain();
+        let dir = tmpdir("torntail");
+        let path = dir.join("blk.dat");
+        let b3 = block(hashes[2], vec![coin_tx(vec![0xcc], 7_777_777, vec![])]);
+        let b3_frame = frame_bytes(&b3);
+        assert!(frames.ends_with(&b3_frame));
+        let complete = frames.len() - b3_frame.len();
+        // 8-byte frame header landed, body cut 20 bytes in
+        std::fs::write(&path, &frames[..complete + 8 + 20]).unwrap();
+
+        // scan path: Ready, and every complete frame is served
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(None);
+        wait_ready(&store);
+        assert!(
+            store.block_by_hash(&hashes[2]).unwrap().is_some(),
+            "frames before the tear must serve"
+        );
+        assert!(
+            store.block_by_hash(&hashes[3]).unwrap().is_none(),
+            "the torn frame must NOT be indexed"
+        );
+
+        // cache path: a fresh store restores the torn offset from the cache
+        let store2 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store2.spawn_build(None);
+        wait_ready(&store2);
+        assert!(store2.block_by_hash(&hashes[2]).unwrap().is_some());
+
+        // the append cuts the 20 torn bytes, then writes a clean frame
+        let appended = store2
+            .append_block(&b3_frame[8..], Some(3))
+            .expect("append over a torn tail");
+        assert_eq!(appended, hashes[3]);
+        let expect_len = (complete + b3_frame.len()) as u64;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            expect_len,
+            "the partial frame must be gone, not buried under a new frame"
+        );
+
+        // restart proof: a full re-scan of the healed file succeeds (it would
+        // FAIL on mid-file corruption) and serves the appended block. The
+        // oracle is what gives the stale branch's twin its height, exactly as
+        // the live node's tipstate does.
+        let store3 = BlockStore::new(Some(path.clone()), Some(dir.join("idx3")));
+        store3.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 3,
+        }));
+        wait_ready(&store3);
+        let hit = store3.block_by_height(3).unwrap().expect("h3 after heal");
+        assert_eq!(hit.hash, hashes[3]);
+        assert_eq!(store3.threaded_tip(), Some(3));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

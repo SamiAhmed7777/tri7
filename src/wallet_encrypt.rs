@@ -26,7 +26,18 @@ use sha2::{Digest, Sha256};
 
 use crate::walletcrypto::{decrypt, derive_key_iv, encrypt, KEY_SIZE};
 
-pub const DEFAULT_ITERATIONS: u32 = 25_000;
+/// Iterations used for NEW encryptions. The legacy client tuned to ~2.5 s of
+/// work with a 25 000 floor; 60 000 is the modern replacement for that floor.
+///
+/// COMPATIBILITY: every mkey stores its own `nDeriveIterations` (see
+/// `encode_master_key`), and both `decrypt_wallet` and the rekey path derive
+/// from the STORED value — so raising the constant only changes what new
+/// wallets are written with. Existing wallets keep decrypting with their own
+/// 25 000 (or whatever the qt wrote).
+pub const DEFAULT_ITERATIONS: u32 = 60_000;
+
+/// Domain label for the HD-mnemonic IV (see `iv_for_mnemonic`).
+pub const MNEMONIC_IV_LABEL: &[u8] = b"hdcmnemonic";
 
 pub struct EncryptReport {
     pub keys: usize,
@@ -65,6 +76,37 @@ pub fn iv_for_pubkey(pubkey: &[u8]) -> [u8; 16] {
     let mut iv = [0u8; 16];
     iv.copy_from_slice(&h[..16]);
     iv
+}
+
+/// Derive the AES IV for the HD mnemonic: SHA256d(salt || "hdcmnemonic")[0..16].
+///
+/// The legacy scheme has no equivalent for this row (it is tri7's own), and the
+/// first implementation encrypted it under an ALL-ZERO IV. That is a real
+/// weakness, not a style point: AES-CBC with a fixed IV under a fixed key makes
+/// the first block's ciphertext a pure function of the plaintext, so two
+/// wallets (or a re-encrypt after a rekey that kept the same salt) would show
+/// equal leading ciphertext for equal mnemonic prefixes — and any scheme that
+/// re-encrypts different mnemonics under one master key leaks block equality.
+/// Deriving the IV from the wallet's per-wallet salt keeps it unique per
+/// encryption while staying reproducible from the mkey row.
+pub fn iv_for_mnemonic(salt: &[u8]) -> [u8; 16] {
+    let mut buf = Vec::with_capacity(salt.len() + MNEMONIC_IV_LABEL.len());
+    buf.extend_from_slice(salt);
+    buf.extend_from_slice(MNEMONIC_IV_LABEL);
+    let h = sha256d(&buf);
+    let mut iv = [0u8; 16];
+    iv.copy_from_slice(&h[..16]);
+    iv
+}
+
+/// Decrypt an `hdcmnemonic` row written by `encrypt_wallet`. Symmetric with the
+/// write path: the IV comes from the mkey's salt, the key from the passphrase-
+/// unwrapped master key. Returns the mnemonic text.
+pub fn decrypt_mnemonic(crypted: &[u8], master_key: &[u8; KEY_SIZE], salt: &[u8]) -> Result<String, String> {
+    let iv = iv_for_mnemonic(salt);
+    let pt = decrypt(master_key, &iv, crypted)
+        .map_err(|_| "hdcmnemonic: ciphertext did not decrypt".to_string())?;
+    String::from_utf8(pt).map_err(|_| "hdcmnemonic: plaintext is not UTF-8".to_string())
 }
 
 /// Serialize a CMasterKey value (order matters — see the module comment).
@@ -265,7 +307,9 @@ pub fn encrypt_wallet(path: &std::path::Path, passphrase: &str) -> Result<Encryp
             let n = v[0] as usize;
             if v.len() >= 1 + n {
                 let text = v[1..1 + n].to_vec();
-                let iv = [0u8; 16];
+                // Domain-separated IV (never the all-zero IV the first version
+                // used): derived from this wallet's random salt.
+                let iv = iv_for_mnemonic(&salt);
                 let ct = encrypt(&secret, &iv, &text);
                 let mut val = Vec::new();
                 push_cs(&mut val, ct.len());
@@ -630,6 +674,93 @@ mod tests {
         let err = decrypt_wallet(&path, "wrong passphrase").unwrap_err();
         assert!(err.contains("wrong passphrase"), "{err}");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The HD mnemonic must be encrypted under a DOMAIN-SEPARATED IV derived
+    /// from the wallet salt — never the all-zero IV the first version used —
+    /// and must decrypt back from the mkey row alone.
+    #[test]
+    fn mnemonic_uses_a_derived_iv_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("tri7-enc-mnem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = synth_wallet(&dir, "mnem");
+        let mnemonic = "abandon abandon abandon about";
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut k = Vec::new();
+            push_cs(&mut k, 10);
+            k.extend_from_slice(b"hdmnemonic");
+            let mut v = Vec::new();
+            push_cs(&mut v, mnemonic.len());
+            v.extend_from_slice(mnemonic.as_bytes());
+            conn.execute("INSERT INTO main (key, value) VALUES (?1, ?2)", [k, v])
+                .unwrap();
+        }
+
+        let report = encrypt_wallet(&path, "pass phrase").unwrap();
+        assert!(report.mnemonic, "the mnemonic row must be encrypted");
+        assert_eq!(
+            report.iterations, DEFAULT_ITERATIONS,
+            "new encryptions use the raised floor"
+        );
+
+        // recover the master key exactly the way decrypt_wallet does
+        let conn = Connection::open(&path).unwrap();
+        let mut mk_prefix = Vec::new();
+        push_cs(&mut mk_prefix, 4);
+        mk_prefix.extend_from_slice(b"mkey");
+        let mv: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM main WHERE substr(key,1,5) = ?1",
+                params![mk_prefix.clone()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (crypted_master, salt, _method, iterations) = decode_master_key(&mv).unwrap();
+        assert_eq!(iterations, DEFAULT_ITERATIONS);
+        let (dk, div) = derive_key_iv("pass phrase", &salt, iterations);
+        let master = decrypt(&dk, &div, &crypted_master).unwrap();
+        let mut master_key = [0u8; KEY_SIZE];
+        master_key.copy_from_slice(&master);
+
+        // the stored row decrypts back to the very same mnemonic
+        let mut hk = Vec::new();
+        push_cs(&mut hk, 12);
+        hk.extend_from_slice(b"hdcmnemonic");
+        let row: Vec<u8> = conn
+            .query_row("SELECT value FROM main WHERE key = ?1", params![hk], |r| r.get(0))
+            .unwrap();
+        let n = row[0] as usize;
+        let ct = &row[1..1 + n];
+        assert_eq!(
+            decrypt_mnemonic(ct, &master_key, &salt).unwrap(),
+            mnemonic,
+            "the derived IV must be reproducible from the mkey salt"
+        );
+
+        // ...and it is NOT the zero-IV ciphertext the old code wrote
+        let zero_iv_ciphertext = encrypt(&master_key, &[0u8; 16], mnemonic.as_bytes());
+        assert_ne!(
+            ct, &zero_iv_ciphertext[..],
+            "the mnemonic must not be encrypted under a fixed zero IV"
+        );
+        assert_ne!(iv_for_mnemonic(&salt), [0u8; 16]);
+
+        // the plaintext row is gone (exactly one of plain/crypted exists)
+        let mut pk = Vec::new();
+        push_cs(&mut pk, 10);
+        pk.extend_from_slice(b"hdmnemonic");
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM main WHERE key = ?1",
+                params![pk],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+
+        drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

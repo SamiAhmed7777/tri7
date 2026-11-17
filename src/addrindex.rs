@@ -27,6 +27,14 @@ pub fn db_path(state_dir: &Path) -> std::path::PathBuf {
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let c = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    // EVERY connection gets a busy timeout. The builder holds one write
+    // transaction per block batch, and the daemon's apply path and RPC readers
+    // hit the same file: with no timeout they failed instantly with
+    // SQLITE_BUSY ("database is locked"), and the accept loop treats an apply
+    // failure as "skip this block" — the index then froze at that height for
+    // good because next_height never advanced past it.
+    c.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| format!("busy_timeout {}: {e}", path.display()))?;
     Ok(c)
 }
 
@@ -301,6 +309,19 @@ impl LiveIndex {
             return None;
         }
         let conn = open(&db_path(state_dir)).ok()?;
+        // LIVE connection pragmas: WAL + synchronous=NORMAL. The daemon reads
+        // this DB from RPC threads while the accept path writes, and the
+        // builder's delete-journal/OFF settings made every reader block behind
+        // a writer (and vice versa). WAL is persistent in the DB file; the
+        // builder already creates the DB in WAL (create_schema), so this only
+        // re-asserts it and sets the per-connection sync level.
+        if let Err(e) = conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+        ) {
+            // not fatal: the index still serves reads; WAL is the concurrency
+            // optimization, not a correctness requirement
+            eprintln!("[addrindex] live pragmas not applied (wal/normal): {e}");
+        }
         let next = index_height(&conn) + 1;
         Some(LiveIndex {
             conn,
@@ -372,6 +393,50 @@ impl LiveIndex {
                 .collect();
             txs.push((txid, outs, ins));
         }
+        // Record the hash of the block this index has applied: the height
+        // alone does not prove the index is on the SAME chain the node is
+        // serving. The hash does.
+        let block_hash = crate::legacy::hash9(&block_header_bytes(block));
+
+        // A busy database must NOT be a permanent skip: the caller logs the
+        // failure and moves on, so next_height never advances and the index
+        // freezes at that height for the rest of the process. With the busy
+        // timeout in place a lock is rare; these retries cover the window
+        // between the timeout expiring and the builder's batch committing.
+        const ATTEMPTS: usize = 3;
+        let mut last = String::new();
+        for attempt in 1..=ATTEMPTS {
+            match self.apply_once(height, &txs, &block_hash) {
+                Ok(()) => {
+                    self.next_height = height + 1;
+                    return Ok(());
+                }
+                Err(e) => {
+                    let retryable = is_busy(&e);
+                    last = e;
+                    if !retryable || attempt == ATTEMPTS {
+                        break;
+                    }
+                    eprintln!(
+                        "[addrindex] h{height} apply hit a lock (attempt {attempt}/{ATTEMPTS}): \
+                         {last} — retrying in 250ms"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        }
+        Err(last)
+    }
+
+    /// One all-or-nothing write of a block: every output, spend marking, meta
+    /// row and height update in ONE transaction, so a failure leaves the index
+    /// exactly as it was (retryable).
+    fn apply_once(
+        &mut self,
+        height: u64,
+        txs: &[(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)],
+        block_hash: &[u8; 32],
+    ) -> Result<(), String> {
         // One transaction, held by rusqlite's RAII guard: ANY error after
         // this point - a failed output insert, a failed meta write, a failed
         // height update - rolls the whole block back. The index never keeps
@@ -380,22 +445,23 @@ impl LiveIndex {
             .conn
             .transaction()
             .map_err(|e| format!("begin: {e}"))?;
-        insert_block(&tx, height, &txs)?;
-        // Record the hash of the block this index has applied: the height
-        // alone does not prove the index is on the SAME chain the node is
-        // serving. The hash does.
-        let block_hash = crate::legacy::hash9(&block_header_bytes(block));
+        insert_block(&tx, height, txs)?;
         tx.execute(
             "INSERT INTO meta(k,v) VALUES('tip_hash',?1) \
              ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-            [hex32(&block_hash)],
+            [hex32(block_hash)],
         )
         .map_err(|e| format!("tip_hash: {e}"))?;
         finish(&tx, height)?;
         tx.commit().map_err(|e| format!("commit: {e}"))?;
-        self.next_height = height + 1;
         Ok(())
     }
+}
+
+/// SQLITE_BUSY / "database is locked" in any of the shapes rusqlite reports.
+fn is_busy(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.contains("database is locked") || l.contains("busy") || l.contains("locked")
 }
 
 /// Legacy failure text when the index is absent.
