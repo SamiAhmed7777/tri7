@@ -106,6 +106,21 @@ pub fn set_embedded_log_path(path: &Path) {
     let _ = LOG_PATH.set(path.to_path_buf());
 }
 
+/// Supervisor-side logging that does NOT depend on the EMBEDDED flag: by the
+/// time the supervisor reaps the node thread, run_embedded's EmbeddedGuard
+/// has already cleared EMBEDDED, so log()'s TEE would silently skip the line
+/// (2026-11-17: eight overnight restarts left NO exit line in node.log —
+/// die()/finish() print to a console nobody can see in a GUI session).
+/// This writes the supervisor's own bookkeeping into the same node.log.
+pub fn embedded_log(msg: &str) {
+    println!("[{}] {}", now_iso(), msg);
+    if let Some(path) = LOG_PATH.get() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "[{}] {}", now_iso(), msg);
+        }
+    }
+}
+
 /// single exit funnel: process::exit externally, panic-payload internally
 fn node_exit(code: i32) -> ! {
     if EMBEDDED.load(Ordering::SeqCst) {
@@ -392,7 +407,11 @@ fn log(msg: &str) {
 }
 
 fn die(code: i32, msg: &str) -> ! {
-    eprintln!("FAIL({}): {}", code, msg);
+    // (exit-attribution) eprintln alone is invisible in a GUI session — the
+    // FAIL line must also reach node.log or restarts look like silent exits
+    let line = format!("FAIL({}): {}", code, msg);
+    log(&line);
+    eprintln!("{}", line);
     node_exit(code);
 }
 
@@ -15290,6 +15309,17 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
     if let Some(p) = &cfg.summary_out {
         let _ = std::fs::write(p, text);
     }
+    // (exit-attribution) the finish path was println-only — invisible in the
+    // GUI session; a normal-looking exit left no trace in node.log
+    log(&format!(
+        "node finish: exit {} (summary {})",
+        code,
+        if cfg.summary_out.is_some() {
+            "written to file"
+        } else {
+            "not persisted"
+        }
+    ));
     node_exit(code);
 }
 

@@ -1969,6 +1969,13 @@ impl EmbeddedNode {
                 return Ok(true); // still starting
             }
             let code = self.node_exit_code.load(Ordering::SeqCst);
+            // (exit-attribution) the reaper must name what it reaped — eight
+            // overnight restarts (2026-11-17, sami-pc) left no trace here
+            crate::node_embedded::embedded_log(&format!(
+                "supervisor: reaping node run (exit code {}), restart #{}",
+                code,
+                self.restarts + 1
+            ));
             self.node_thread = None; // reap
             // r2 judge: count EVERY finished run — a node meant to run
             // continuously exiting with code 0 is still an unexpected exit
@@ -1976,7 +1983,6 @@ impl EmbeddedNode {
             // There is no user-facing intentional-stop path (RPC `stop` is
             // not on the GUI allow list; Windows has no SIGINT), so any
             // exit lands here honestly.
-            let _ = code;
             self.restarts += 1;
             if self.restarts > MAX_RESTARTS {
                 return Err(format!(
@@ -2070,9 +2076,20 @@ impl EmbeddedNode {
         argv.push(state_dir.join("balances.json").display().to_string());
         argv.push("--backfill".into());
         argv.push("6000".into());
-        if fresh {
-            argv.push("--sync-from-zero".into());
-        }
+        // (crash-loop fix, 2026-11-17) The flag was previously gated on
+        // is_fresh_store — which flips false once ANY bodies exist — so after
+        // a mid-sync crash the respawn silently switched to live-follow from
+        // the persisted tip, stranding the wallet at its last checkpoint while
+        // millions of headers remained unfetched (live: sami-pc, walk reset
+        // 2.21M → 34k eight times in one night). sync_from_zero is RESUMABLE —
+        // it enters at st.tip_height+1 — so requesting it unconditionally is
+        // cheap for a fully-synced store (empty walk) and correct for a
+        // partial one.
+        crate::node_embedded::embedded_log(&format!(
+            "supervisor: spawning node (fresh_store={}, --sync-from-zero=always)",
+            fresh
+        ));
+        argv.push("--sync-from-zero".into());
         argv.push("--wallet".into());
         argv.push(wallet_path.display().to_string());
         argv.push("--forever".into());
@@ -2098,6 +2115,13 @@ impl EmbeddedNode {
                 .name("tri7-node-embedded".into())
                 .spawn(move || {
                     let code = runner(&argv).unwrap_or(-1);
+                    // (exit-attribution) every run's end must be attributable:
+                    // the thread has no console, and EMBEDDED is already
+                    // cleared by EmbeddedGuard when this line runs
+                    crate::node_embedded::embedded_log(&format!(
+                        "supervisor: node run ended, exit code {}",
+                        code
+                    ));
                     exit_code.store(code, Ordering::SeqCst);
                     finished.store(true, Ordering::SeqCst);
                 })
