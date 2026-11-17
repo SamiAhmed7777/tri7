@@ -460,6 +460,49 @@ pub fn authority(facts: IndexFacts, chain_height: u64, chain_hash: Option<[u8; 3
     }
 }
 
+/// How far behind the chain tip an index may trail while still serving as
+/// the wallet's whole spendable set. The index's SPENTNESS for every height
+/// it has applied is canonical (per-height append, spend-marked in the same
+/// transaction), so an index a few blocks behind the tip answers honestly
+/// AS OF its coverage height — the tier machinery already labels that
+/// coverage on every money-path response. Requiring exact-equality made the
+/// verdict practically unreachable: DNS2's index trails the tip 0..~30
+/// blocks (the 10-minute catch-up builder plus continuous minting), so the
+/// designed tier-1 cure never engaged and the stale tier-2 pair served
+/// forever (the 2026-11-17 wallet-ledger defect: 1713 TRI listed, 5329 TRI
+/// canonically live). 64 blocks ≈ 16 minutes at the observed mint cadence —
+/// comfortably above the builder's cadence, tiny next to the wallet's
+/// maturity windows.
+pub const MAX_INDEX_LAG: u64 = 64;
+
+/// The money-path rule: same-chain proof AT the index's applied height plus
+/// a bounded lag. `chain_hash_at_index_height` is the CHAIN's hash at
+/// `facts.coverage_height` (the caller resolves it from its own chain
+/// state); when it matches the hash the index recorded for that same
+/// height, the index provably applied the chain this node serves, and its
+/// unspent set is the wallet's truth as of that height. An index AHEAD of
+/// the chain tip, unfinished, on another chain, or with an unresolvable
+/// chain hash refuses exactly as before (fail closed).
+pub fn authority_with_lag(
+    facts: IndexFacts,
+    chain_tip_height: u64,
+    chain_hash_at_index_height: Option<[u8; 32]>,
+    max_lag: u64,
+) -> Authority {
+    let same_chain = match (facts.index_tip_hash, chain_hash_at_index_height) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    let not_ahead = facts.coverage_height <= chain_tip_height;
+    let within_lag = chain_tip_height.saturating_sub(facts.coverage_height) <= max_lag;
+    Authority {
+        authoritative: facts.complete && same_chain && not_ahead && within_lag,
+        coverage_height: facts.coverage_height,
+        index_tip_hash: facts.index_tip_hash,
+        complete: facts.complete,
+    }
+}
+
 /// The wallet's spendable set and the index's facts, read under ONE
 /// transaction: a block applied while we read must not tear the answer
 /// (the utxos from one height and the height/hash of another).
@@ -590,5 +633,45 @@ mod tests {
         assert_eq!(ids.len(), 2, "payment + spend");
         assert_eq!(ids[0], txid_a);
         assert_eq!(ids[1], txid_b);
+    }
+
+    #[test]
+    fn authority_with_lag_serves_a_bounded_lag_on_the_same_chain() {
+        let tip_h = [0xAAu8; 32];
+        let mut facts = IndexFacts {
+            coverage_height: 0,
+            index_tip_hash: Some(tip_h),
+            complete: true,
+        };
+        // exact coverage: the old exact rule and the lag rule agree
+        facts.coverage_height = 100;
+        assert!(authority(facts, 100, Some(tip_h)).authoritative);
+        assert!(authority_with_lag(facts, 100, Some(tip_h), MAX_INDEX_LAG).authoritative);
+        // lag 6 (DNS2's steady state under the 10-minute catch-up builder):
+        // the exact rule refuses, the lag rule serves — same-chain proven AT
+        // the index height
+        assert!(!authority(facts, 106, Some(tip_h)).authoritative);
+        assert!(authority_with_lag(facts, 106, Some(tip_h), MAX_INDEX_LAG).authoritative);
+        // lag at the bound passes, one past it refuses
+        assert!(authority_with_lag(facts, 100 + MAX_INDEX_LAG, Some(tip_h), MAX_INDEX_LAG)
+            .authoritative);
+        assert!(
+            !authority_with_lag(facts, 100 + MAX_INDEX_LAG + 1, Some(tip_h), MAX_INDEX_LAG)
+                .authoritative
+        );
+        // a DIFFERENT chain hash at the index height refuses at ANY lag (the
+        // index applied a fork — its spentness is not this chain's truth)
+        assert!(
+            !authority_with_lag(facts, 106, Some([0xBBu8; 32]), MAX_INDEX_LAG).authoritative,
+            "same-chain proof is mandatory"
+        );
+        // an unresolvable chain hash refuses (fail closed)
+        assert!(!authority_with_lag(facts, 106, None, MAX_INDEX_LAG).authoritative);
+        // an index AHEAD of the chain tip refuses (nonsense state)
+        assert!(!authority_with_lag(facts, 99, Some(tip_h), MAX_INDEX_LAG).authoritative);
+        // an UNFINISHED index refuses even at zero lag
+        facts.coverage_height = 100;
+        facts.complete = false;
+        assert!(!authority_with_lag(facts, 100, Some(tip_h), MAX_INDEX_LAG).authoritative);
     }
 }

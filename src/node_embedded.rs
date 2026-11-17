@@ -7158,7 +7158,13 @@ type SharedWalletLive = Arc<Mutex<Option<WalletLive>>>;
 /// live view cannot cover (per-address receipts, membership, coverage-gated
 /// listunspent).
 struct LiveWalletProvider {
-    snap: Arc<SnapshotWallet>,
+    /// The parsed snapshot pair, swapped ATOMICALLY when the files on disk
+    /// change (see reload_snap_if_changed). RwLock guards only the swap; every
+    /// call clones the Arc out (cheap) so no lock is held while serving.
+    snap: std::sync::RwLock<Arc<SnapshotWallet>>,
+    /// (mtime, len) of balances.json + wallet_utxos.json at the last parse.
+    /// None = the next call re-parses (a mixed-generation refusal resets it).
+    snap_sig: std::sync::Mutex<Option<((u64, u64), (u64, u64))>>,
     wl: SharedWalletLive,
     st: SharedState,
     /// state dir holding history.json (full wallet history, txhistory bin)
@@ -7168,7 +7174,99 @@ struct LiveWalletProvider {
     /// rebuild is picked up on the next call WITHOUT a restart, and an
     /// unchanged multi-MB snapshot is never re-parsed per call.
     balances_path: std::path::PathBuf,
+    /// wallet_utxos.json path — the other half of the reloadable pair.
+    utxos_path: std::path::PathBuf,
     rich_cache: Arc<Mutex<tri7_core::rpc::RichListCache>>,
+}
+
+impl LiveWalletProvider {
+    /// THE 2026-11-17 DNS2 WALLET-LEDGER DEFECT (item 31): the snapshot pair
+    /// was parsed ONCE at startup while the balances-build thread REWROTE both
+    /// files minutes into the same run (boot 08:18:30Z, rewrite 08:25:25Z) —
+    /// the RPC then served the boot-time pair forever: 201 rows / 1713.76 TRI
+    /// listing 188 storm-era ghosts, while 392 rows / 5329.14 TRI were
+    /// canonically live. THE CURE: stat both files on every wallet-path call
+    /// (two metadata reads) and re-parse only when either changed. Files are
+    /// written atomically (tmp+rename), but the TWO writes are a beat apart,
+    /// so a NEW pair is adopted only when BOTH sides parse AND agree on
+    /// coverage height AND tip hash (the same strict gate coverage() applies)
+    /// — a mixed generation is never served, and the signature resets so the
+    /// next call retries. extras/pubkeys/labels are the SHARED Arcs inside
+    /// SnapshotWallet, re-cloned into the new instance, so runtime
+    /// wallet-file bookkeeping survives every swap.
+    fn reload_snap_if_changed(&self) {
+        let sig = (file_sig(&self.balances_path), file_sig(&self.utxos_path));
+        {
+            let cur = self
+                .snap_sig
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if *cur == Some(sig) {
+                return;
+            }
+        }
+        let bal = tri7_core::rpc::load_balances_snap(&self.balances_path);
+        let utx = tri7_core::rpc::load_utxos_snap(&self.utxos_path);
+        let adoptable = bal.loaded
+            && utx.loaded
+            && !bal.coverage_hash.is_empty()
+            && !utx.coverage_hash.is_empty()
+            && bal.height == utx.height
+            && bal.coverage_hash == utx.coverage_hash;
+        if !adoptable {
+            // mixed generation (one write landed, the other not yet): reset
+            // the signature so the NEXT call retries, keep serving the old pair
+            *self
+                .snap_sig
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
+            return;
+        }
+        let old = self
+            .snap
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner().clone());
+        let fresh = Arc::new(SnapshotWallet {
+            balances: bal,
+            utxos: utx,
+            extra: Arc::clone(&old.extra),
+            pubkeys: Arc::clone(&old.pubkeys),
+            labels: Arc::clone(&old.labels),
+        });
+        *self
+            .snap
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = fresh;
+        *self
+            .snap_sig
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(sig);
+    }
+
+    /// The current pair, reloaded if the files changed since the last call.
+    fn snap_view(&self) -> Arc<SnapshotWallet> {
+        self.reload_snap_if_changed();
+        self.snap
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner().clone())
+    }
+}
+
+/// (mtime secs, len) of a file; (0, 0) when it cannot be stat'd (missing).
+fn file_sig(p: &std::path::Path) -> (u64, u64) {
+    match std::fs::metadata(p) {
+        Ok(m) => (
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            m.len(),
+        ),
+        Err(_) => (0, 0),
+    }
 }
 
 
@@ -7428,11 +7526,11 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     // every native handler reads them through this, so a `settxfee` that lands
     // anywhere else would be invisible to `estimatefee`/`getwalletinfo`.
     fn extras(&self) -> tri7_core::rpc::WalletExtras {
-        tri7_core::rpc::WalletProvider::extras(self.snap.as_ref())
+        tri7_core::rpc::WalletProvider::extras(self.snap_view().as_ref())
     }
 
     fn set_paytxfee(&self, sats: i64) -> std::result::Result<(), String> {
-        tri7_core::rpc::WalletProvider::set_paytxfee(self.snap.as_ref(), sats)
+        tri7_core::rpc::WalletProvider::set_paytxfee(self.snap_view().as_ref(), sats)
     }
 
     fn live_wallet_total(
@@ -7457,7 +7555,7 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
             // follow loop holds the state mutex (validation batch) — fall
             // back to the snapshot's coverage (same fallback balance() uses)
             Err(_) => self
-                .snap
+                .snap_view()
                 .balance()
                 .map(|bv| bv.coverage_height)
                 .unwrap_or(0),
@@ -7470,15 +7568,15 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn default_key(&self) -> Option<Vec<u8>> {
-        tri7_core::rpc::WalletProvider::default_key(self.snap.as_ref())
+        tri7_core::rpc::WalletProvider::default_key(self.snap_view().as_ref())
     }
 
     fn pubkey_for_address(&self, addr: &str) -> Option<Vec<u8>> {
-        tri7_core::rpc::WalletProvider::pubkey_for_address(self.snap.as_ref(), addr)
+        tri7_core::rpc::WalletProvider::pubkey_for_address(self.snap_view().as_ref(), addr)
     }
 
     fn labels(&self) -> std::collections::HashMap<String, String> {
-        tri7_core::rpc::WalletProvider::labels(self.snap.as_ref())
+        tri7_core::rpc::WalletProvider::labels(self.snap_view().as_ref())
     }
 
     fn balance(&self) -> Option<BalanceView> {
@@ -7497,13 +7595,13 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
             // covers the chain from genesis - is the whole-wallet figure
             // and is served instead.
             if let Some(w) = g.as_ref().filter(|w| w.base == 0) {
-                let b = &self.snap.balances;
+                let b = &self.snap_view().balances;
                 let (tip, tip_hash) = match self.st.try_lock() {
                     Ok(s) => (
                         s.tip_height,
                         tri7_core::p2p::internal_to_display(&s.tip_hash),
                     ),
-                    Err(_) => match self.snap.balance() {
+                    Err(_) => match self.snap_view().balance() {
                         // follow loop holds the state mutex (validation
                         // batch) — fall back to snapshot coverage info
                         Some(bv) => (bv.coverage_height, bv.coverage_hash.clone()),
@@ -7541,7 +7639,7 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                 });
             }
         }
-        self.snap.balance()
+        self.snap_view().balance()
     }
 
     fn coverage(&self) -> Option<(u64, String)> {
@@ -7557,7 +7655,7 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
                 }
             }
         }
-        self.snap.coverage()
+        self.snap_view().coverage()
     }
 
     fn address_entries(&self) -> Vec<AddressEntry> {
@@ -7565,7 +7663,7 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
         // a node started without --balances never writes one). Serve the live
         // wallet view instead of failing the whole call: the UI needs the
         // address list, and the live view already knows every owned output.
-        let from_snap = self.snap.address_entries();
+        let from_snap = self.snap_view().address_entries();
         if !from_snap.is_empty() {
             return from_snap;
         }
@@ -7603,11 +7701,11 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
     }
 
     fn received_regular(&self, addr: &str) -> Option<i64> {
-        self.snap.received_regular(addr)
+        self.snap_view().received_regular(addr)
     }
 
     fn is_mine(&self, addr: &str) -> bool {
-        self.snap.is_mine(addr)
+        self.snap_view().is_mine(addr)
     }
 
     fn utxos(&self) -> Vec<UtxoRow> {
@@ -7631,10 +7729,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
         // than the snapshot's coverage. The two ranges do not overlap (the
         // live rows kept are strictly above the coverage height, and the
         // snapshot ends at it), so nothing is counted twice.
-        let snap_coverage = self.snap.coverage();
+        let snap_coverage = self.snap_view().coverage();
         let has_snapshot = snap_coverage.is_some();
         let coverage = snap_coverage.map(|(h, _)| h).unwrap_or(0);
-        let snapshot_rows = self.snap.utxos();
+        let snapshot_rows = self.snap_view().utxos();
         let (live_rows, spends, live_base) = live_rows_for(&self.wl);
         merge_whole_wallet_utxos(
             snapshot_rows,
@@ -9087,6 +9185,21 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let chain_hash: Option<[u8; 32]> = tip_entry
                     .as_ref()
                     .map(|e| <[u8; 32]>::from(e.hash));
+                // The CHAIN's hash at the index's applied height — the fact
+                // the lag-aware money-path verdict needs: an index whose
+                // recorded hash matches THIS is provably this chain even
+                // while it trails the tip (10-minute catch-up cadence).
+                // Resolved from the live block index's main-chain height
+                // slot (never a fork body); None = unresolvable, and the
+                // verdict refuses (fail closed).
+                let chain_hash_at_index: Option<String> = match self.store.as_ref() {
+                    Some(store) if facts.coverage_height > 0 => store
+                        .block_by_height(facts.coverage_height)
+                        .ok()
+                        .flatten()
+                        .map(|hit| tri7_core::addrindex::txid_hex(&hit.hash)),
+                    _ => None,
+                };
                 Ok(serde_json::json!({
                     "balance_sats": balance,
                     "utxos": utxos,
@@ -9094,6 +9207,7 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "index_tip_hash": facts.index_tip_hash.map(|h| tri7_core::addrindex::txid_hex(&h)),
                     "chain_tip": tip_h,
                     "chain_tip_hash": chain_hash.map(|h| tri7_core::addrindex::txid_hex(&h)),
+                    "chain_hash_at_index": chain_hash_at_index,
                     "complete": facts.complete,
                 }))
             }
@@ -12817,17 +12931,19 @@ pub fn main_args(argv: &[String]) -> i32 {
                 mirror: Arc::clone(&tip_mirror),
             }),
             wallet: Arc::new(LiveWalletProvider {
-                snap: Arc::new(SnapshotWallet {
+                snap: std::sync::RwLock::new(Arc::new(SnapshotWallet {
                     balances: balances_snap,
                     utxos: utxos_snap,
                     extra: Arc::clone(&wallet_extras),
                     pubkeys: Arc::clone(&wallet_pubkeys),
                     labels: Arc::clone(&wallet_labels),
-                }),
+                })),
+                snap_sig: std::sync::Mutex::new(None),
                 wl: Arc::clone(&wl_shared),
                 st: Arc::clone(&st_shared),
                 state_dir: cfg.state_dir.clone(),
                 balances_path: cfg.balances_path.clone(),
+                utxos_path: cfg.wallet_utxos_path.clone(),
                 rich_cache: Arc::new(Mutex::new(tri7_core::rpc::RichListCache::new())),
             }),
             blocks: Arc::new(StoreAdapter {
@@ -22938,5 +23054,83 @@ addnode=host:notaport
             "the funnel must classify this non-fatal (peer drop, never exit): {}",
             e
         );
+    }
+
+    /// ITEM-31 (2026-11-17 DNS2-WALLET-LEDGER-STALE) — the pair was parsed
+    /// ONCE at startup while the balances-build thread REWROTE both files
+    /// minutes into the same run; the RPC served the boot-time pair forever
+    /// (188 storm-era ghosts listed, 5329 TRI of live coins hidden). The
+    /// provider now stats both files on every wallet-path call and swaps in
+    /// a freshly parsed pair ONLY when both sides parse and agree on
+    /// coverage height and tip hash.
+    #[test]
+    fn snapshot_pair_follows_the_files_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-item31-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h1 = "11".repeat(32);
+        let h2 = "22".repeat(32);
+        let write_pair = |bh: u64, bhash: &str, uh: u64, uhash: &str, row: &str| {
+            let bal = format!(
+                "{{\"height\":{},\"covered_tip_hash\":\"{}\",\"totals\":{{\"wallet_balance_sats\":1,\"total_balance_sats\":2}},\"wallet\":[{{\"address\":\"Told\",\"balance_sats\":1,\"utxos\":1,\"received_regular_sats\":1,\"received_all_sats\":1}}],\"received_regular\":{{}}}}",
+                bh, bhash
+            );
+            let utx = format!(
+                "{{\"height\":{},\"covered_tip_hash\":\"{}\",\"count\":1,\"total_value_sats\":12345,\"utxos\":[{row}]}}",
+                uh, uhash
+            );
+            std::fs::write(dir.join("balances.json"), bal).unwrap();
+            std::fs::write(dir.join("wallet_utxos.json"), utx).unwrap();
+        };
+        let row1 = "{\"txid\":\"aa\",\"n\":0,\"value_sats\":12345,\"script_hex\":\"51\",\"address\":\"Told\",\"height\":99,\"tx_time\":0,\"prev_kind\":\"regular\"}";
+        let row2 = "{\"txid\":\"bb\",\"n\":1,\"value_sats\":999,\"script_hex\":\"51\",\"address\":\"Tnew\",\"height\":150,\"tx_time\":0,\"prev_kind\":\"regular\"}";
+        write_pair(100, &h1, 100, &h1, row1);
+
+        let provider = LiveWalletProvider {
+            snap: std::sync::RwLock::new(Arc::new(SnapshotWallet {
+                balances: crate::rpc::load_balances_snap(&dir.join("balances.json")),
+                utxos: crate::rpc::load_utxos_snap(&dir.join("wallet_utxos.json")),
+                extra: Arc::new(std::sync::RwLock::new(crate::rpc::WalletExtras::default())),
+                pubkeys: Arc::new(std::sync::RwLock::new(HashMap::new())),
+                labels: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            })),
+            snap_sig: std::sync::Mutex::new(None),
+            wl: Arc::new(Mutex::new(None)),
+            st: Arc::new(Mutex::new(synthetic_chain(0, 10))),
+            state_dir: dir.clone(),
+            balances_path: dir.join("balances.json"),
+            utxos_path: dir.join("wallet_utxos.json"),
+            rich_cache: Arc::new(Mutex::new(crate::rpc::RichListCache::new())),
+        };
+        // gen1 served as-is
+        let cov = provider.snap_view().coverage().unwrap();
+        assert_eq!(cov, (100, h1.clone()));
+
+        // THE DEFECT SHAPE: both files rewritten under the running daemon —
+        // the pair must follow WITHOUT a restart
+        write_pair(200, &h2, 200, &h2, row2);
+        let s = provider.snap_view();
+        assert_eq!(s.coverage().unwrap(), (200, h2.clone()), "reload on change");
+        assert_eq!(s.utxos().len(), 1);
+        assert_eq!(s.utxos()[0].txid, "bb", "the NEW rows are served, not the boot-time ones");
+
+        // mixed generation (balances ahead of wallet_utxos): refused, the
+        // old pair keeps serving, and the signature resets for a retry
+        write_pair(300, &h1, 200, &h2, row2);
+        let s = provider.snap_view();
+        assert_eq!(s.coverage().unwrap(), (200, h2.clone()), "refuse mixed pair");
+
+        // once the files agree again, the retry adopts them
+        write_pair(300, &h1, 300, &h1, row1);
+        let s = provider.snap_view();
+        assert_eq!(s.coverage().unwrap(), (300, h1.clone()), "retry adopts");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

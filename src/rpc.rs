@@ -1089,7 +1089,39 @@ fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
                 None
             }
         });
-    let verdict = crate::addrindex::authority(facts, chain_height, chain_hash);
+    // THE LAG-AWARE MONEY-PATH RULE (2026-11-17, item-31 DNS2-WALLET-LEDGER):
+    // the exact-equality verdict made tier 1 practically unreachable (the
+    // index trails the tip under the 10-minute catch-up cadence), so the
+    // STALE tier-2 pair served forever — the wallet listed 1713 TRI while
+    // 5329 TRI were canonically live. The chain now also publishes the hash
+    // AT the index's applied height; a FINISHED index that recorded that
+    // same hash is provably this chain, lag-bounded, and serves honestly AS
+    // OF its coverage height. Missing/unmatched hash → refuse (fail closed).
+    // BYTE-EXACTNESS PIN: addrindex::txid_hex (payload side) and
+    // p2p::hex_decode (here) are exact byte inverses, so the decode below
+    // reproduces the very bytes the daemon hashed — the verdict compares
+    // this decoded chain_hash_at_index against the index's own
+    // facts.index_tip_hash bytes.
+    let chain_hash_at_index = v
+        .get("chain_hash_at_index")
+        .and_then(|x| x.as_str())
+        .and_then(|s| crate::p2p::hex_decode(s).ok())
+        .and_then(|b| {
+            if b.len() == 32 {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            } else {
+                None
+            }
+        });
+    let _ = chain_hash; // tip hash stays on the payload for the label fields
+    let verdict = crate::addrindex::authority_with_lag(
+        facts,
+        chain_height,
+        chain_hash_at_index,
+        crate::addrindex::MAX_INDEX_LAG,
+    );
     if !verdict.authoritative {
         return None;
     }
@@ -5103,6 +5135,7 @@ mod tests {
             index: idx,
             chain_tip: 2_206_001,
             chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
             addresses: vec!["Tlive000000000000000000000000000000".to_string()],
         };
         let d = Deps {
@@ -5125,20 +5158,24 @@ mod tests {
         assert_eq!(info["balance_height"], 2_206_001u64);
     }
 
-    /// The index must have applied EXACTLY the chain the node serves: an
-    /// index a block behind the tip has not seen the newest coin, and an
-    /// index on a DIFFERENT chain at the same height has seen other coins.
-    /// Neither may be served as the whole wallet: the replay snapshot is
-    /// served instead, flagged partial, with the replay coverage.
+    /// THE 2026-11-17 RE-RULED TEST (item-31: the exact-match verdict made
+    /// tier 1 practically unreachable — the index trails the tip under the
+    /// 10-minute catch-up cadence, so the STALE tier-2 pair served forever).
+    /// The lag-aware rule: a FINISHED index whose recorded hash matches the
+    /// CHAIN's hash AT ITS OWN COVERAGE HEIGHT serves honestly AS OF that
+    /// height within MAX_INDEX_LAG of the tip; a different-chain hash never
+    /// serves; lag past the bound falls back to the pair.
     #[test]
-    fn live_index_must_match_the_served_chain_exactly() {
+    fn live_index_serves_within_the_lag_bound_on_the_same_chain_only() {
         let t = StubTip;
         let w = StubWallet::default();
         let b = StubBlocks { ready: true, chain_hash: None };
         let hash = [7u8; 32];
         let addrs = vec!["Tlive000000000000000000000000000000".to_string()];
 
-        // (1) one block behind the tip -> not authoritative
+        // (1) one block behind the tip, hash proven AT the index height ->
+        // authoritative: the index's unspent set IS the wallet's truth as of
+        // its coverage height (labelled by the tier machinery)
         let mut idx = TempIndex::new("lag");
         idx.seed(2_206_000, hash, true);
         idx.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
@@ -5146,25 +5183,19 @@ mod tests {
             index: idx,
             chain_tip: 2_206_001,
             chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
             addresses: addrs.clone(),
         };
         let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
-        // not authoritative → the pair's rows answer (the stale aggregate is
-        // last resort and stays out of the way), partial stays flagged
-        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(0.0001));
+        assert_eq!(call(&d, "getbalance", json!([]))["result"], json!(3236.439612));
         let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
-        assert_eq!(info["balance_partial"], json!(true));
-        assert_eq!(info["balance"], json!(0.0001));
-        assert_eq!(info["balance_source"], "snapshot-pair");
-        assert_eq!(info["balance_height"], 2_201_090u64);
-        assert_eq!(info["coverage_height"], 2_201_090u64);
-        assert_eq!(
-            info["coverage_hash"],
-            json!("f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307")
-        );
+        assert_eq!(info["balance_source"], "live-index");
+        assert_eq!(info["balance_partial"], json!(false));
+        assert_eq!(info["balance_height"], 2_206_000u64, "coverage = the index's height");
+        assert_eq!(info["index_behind"], 1u64);
 
-        // (2) same height but a DIFFERENT chain (the hash does not match) ->
-        // not authoritative
+        // (2) same height but a DIFFERENT chain (the hash the index recorded
+        // does not match the chain's hash at that height) -> never served
         let mut idx2 = TempIndex::new("fork");
         idx2.seed(2_206_001, [0x11; 32], true);
         idx2.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
@@ -5172,6 +5203,7 @@ mod tests {
             index: idx2,
             chain_tip: 2_206_001,
             chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
             addresses: addrs.clone(),
         };
         let d2 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops2) };
@@ -5180,6 +5212,24 @@ mod tests {
             call(&d2, "getwalletinfo", json!([]))["result"]["balance_partial"],
             json!(true)
         );
+
+        // (3) lag past the bound: the chain's tip has run away from the
+        // index -> the pair answers (flagged partial), never the index
+        let mut idx3 = TempIndex::new("farbehind");
+        idx3.seed(2_206_001 - crate::addrindex::MAX_INDEX_LAG - 1, hash, true);
+        idx3.add_utxo("Tlive000000000000000000000000000000", [0xaa; 32], 0, 3_236_439_612, 2_206_000);
+        let ops3 = LiveIndexOps {
+            index: idx3,
+            chain_tip: 2_206_001,
+            chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
+            addresses: addrs,
+        };
+        let d3 = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops3) };
+        assert_eq!(call(&d3, "getbalance", json!([]))["result"], json!(0.0001));
+        let info3 = call(&d3, "getwalletinfo", json!([]))["result"].clone();
+        assert_eq!(info3["balance_source"], "snapshot-pair");
+        assert_eq!(info3["balance_partial"], json!(true));
     }
 
     /// An index that is still BUILDING is not a whole-wallet view: the node
@@ -5197,6 +5247,7 @@ mod tests {
             index: idx,
             chain_tip: 2_206_001,
             chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
             addresses: vec!["Tlive000000000000000000000000000000".to_string()],
         };
         let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
@@ -5436,6 +5487,9 @@ mod tests {
         complete: bool,
         chain_tip: u64,
         chain_tip_hash: String,
+        /// the CHAIN's hash at the index's applied height (empty = unknown —
+        /// the lag-aware verdict then refuses, fail closed)
+        chain_hash_at_index: String,
         balance_sats: i64,
         /// (txid display, n, value_sats, height)
         utxos: Vec<(String, u32, i64, u64)>,
@@ -5454,6 +5508,7 @@ mod tests {
                 complete: true,
                 chain_tip,
                 chain_tip_hash: tip_hash_at(chain_tip),
+                chain_hash_at_index: tip_hash_at(chain_tip),
                 balance_sats,
                 utxos,
                 raw_utxos: None,
@@ -5468,6 +5523,7 @@ mod tests {
                 complete: true,
                 chain_tip,
                 chain_tip_hash: tip_hash_at(chain_tip),
+                chain_hash_at_index: tip_hash_at(chain_tip),
                 balance_sats,
                 utxos: vec![],
                 raw_utxos: Some(raw),
@@ -5500,6 +5556,7 @@ mod tests {
                         "index_tip_hash": self.index_tip_hash,
                         "chain_tip": self.chain_tip,
                         "chain_tip_hash": self.chain_tip_hash,
+                        "chain_hash_at_index": self.chain_hash_at_index,
                         "complete": self.complete,
                     }))
                 }
@@ -5835,6 +5892,7 @@ mod tests {
             complete: false,
             chain_tip: TIP_H,
             chain_tip_hash: tip_hash_at(TIP_H),
+            chain_hash_at_index: String::new(), // incomplete: refused anyway
             balance_sats: 0, // not authoritative anyway
             utxos: vec![],
             raw_utxos: None,
@@ -6045,6 +6103,7 @@ mod tests {
             index: idx,
             chain_tip: 2_206_001,
             chain_tip_hash: Some(hash),
+            chain_hash_at_index: Some(hash),
             addresses: vec!["Tlive000000000000000000000000000000".to_string()],
         };
         let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: Some(&ops) };
@@ -7379,6 +7438,9 @@ struct LiveIndexOps {
     index: TempIndex,
     chain_tip: u64,
     chain_tip_hash: Option<[u8; 32]>,
+    /// the CHAIN's hash at the index's applied height — the fact the
+    /// lag-aware money-path verdict proves same-chain from
+    chain_hash_at_index: Option<[u8; 32]>,
     addresses: Vec<String>,
 }
 
@@ -7411,6 +7473,9 @@ impl NodeOps for LiveIndexOps {
                     "index_tip_hash": f.index_tip_hash.map(|h| crate::addrindex::txid_hex(&h)),
                     "chain_tip": self.chain_tip,
                     "chain_tip_hash": self.chain_tip_hash.map(|h| crate::addrindex::txid_hex(&h)),
+                    "chain_hash_at_index": self
+                        .chain_hash_at_index
+                        .map(|h| crate::addrindex::txid_hex(&h)),
                     "complete": f.complete,
                 }))
             }

@@ -147,8 +147,9 @@ pub fn build_balances_snapshot(
     let mut untracked_spends = 0usize;
     let mut duplicate_txids = 0usize;
     let mut tip_hash = [0u8; 32];
-    // wallet-owned live UTXOs for the --utxos-out dump (same lifecycle rules
-    // as UtxoSet: per-tx all-or-nothing spend removal, IsEmpty never tracked)
+    // wallet-owned live UTXOs for the --utxos-out dump. Spend removal is
+    // PER-VIN (see the pass below for why it must NOT mirror the global
+    // set's per-tx all-or-nothing rule), IsEmpty never tracked.
     let mut wallet_utxo_set: HashMap<(crate::legacy::Hash, u32), WalletUtxo> = HashMap::new();
     let wallet_payload_set: std::collections::HashSet<[u8; 21]> =
         wallet_payloads.iter().map(|(p, _)| *p).collect();
@@ -192,21 +193,27 @@ pub fn build_balances_snapshot(
             }
         }
 
-        // wallet-owned UTXO lifecycle, mirroring UtxoSet::apply_block_reported
-        // (per-tx all-or-nothing spend removal; runs BEFORE apply_block so the
-        // "all vins resolve" check reads the pre-application set)
+        // wallet-owned UTXO lifecycle. Spend removal is PER-VIN, applied
+        // whenever the vin names the coin — NOT gated on every vin of the
+        // tx resolving in the global set. The historical all-or-nothing
+        // gate (mirroring UtxoSet::apply_block_reported) STRANDED coins:
+        // any tx carrying one unresolvable vin (the chain's re-spend
+        // history — e.g. DNS2 block h2206958's 8812990e spends b14a219d:1
+        // alongside 88aa59ec:1, which the chain had ALREADY spent at
+        // h2206940) skipped removal for its WHOLE vin list, so every
+        // wallet-owned coin that tx also spent stayed in the dump forever
+        // as a ghost the merge could never see. The global set keeps its
+        // own all-or-nothing semantics (balances.json/moneysupply parity);
+        // the dump's contract is different — SPENDABLE coins — and a
+        // re-spent coin fails at accept time, so canonical spentness is
+        // the truth here, exactly like the addrindex's insert-vs-spend and
+        // WalletLive::apply_block's per-vin bookkeeping.
         for tx in &block.vtx {
             let is_coinbase = consensus::tx_is_coin_base(tx);
             let is_coinstake = consensus::tx_is_coin_stake(tx);
             if !is_coinbase {
-                let all_resolve = tx
-                    .vin
-                    .iter()
-                    .all(|vin| utxos.get(&(vin.prev_hash, vin.prev_n)).is_some());
-                if all_resolve {
-                    for vin in &tx.vin {
-                        wallet_utxo_set.remove(&(vin.prev_hash, vin.prev_n));
-                    }
+                for vin in &tx.vin {
+                    wallet_utxo_set.remove(&(vin.prev_hash, vin.prev_n));
                 }
             }
             for (n, vout) in tx.vout.iter().enumerate() {
@@ -743,6 +750,193 @@ mod tests {
             leftovers.is_empty(),
             "tmp file must be renamed away, found: {leftovers:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal-but-valid TRI wallet container with ONE key (the fixture the
+    /// item-31 regression below spends from). Mirrors the daemon's own
+    /// bootstrap_wallet_file rows: pragmas, main kv table, version row,
+    /// genesis bestblock locator, then the key row via the same encoders
+    /// wallet.rs's writer uses.
+    fn wallet_fixture(dir: &Path, secret: [u8; 32]) -> std::path::PathBuf {
+        use tri7_core::wallet::{CLIENT_VERSION, WALLET_APP_ID, WALLET_USER_VERSION};
+        let wpath = dir.join("wallet.dat");
+        let conn = rusqlite::Connection::open(&wpath).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {};\nPRAGMA user_version = {};",
+            WALLET_APP_ID, WALLET_USER_VERSION
+        ))
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);",
+        )
+        .unwrap();
+        let mut k: Vec<u8> = Vec::new();
+        k.push(7u8);
+        k.extend_from_slice(b"version");
+        let kv = CLIENT_VERSION.to_le_bytes().to_vec();
+        conn.execute(
+            "INSERT INTO main (key, value) VALUES (?1, ?2)",
+            [&k, &kv],
+        )
+        .unwrap();
+        let mut bk: Vec<u8> = Vec::new();
+        bk.push(9u8);
+        bk.extend_from_slice(b"bestblock");
+        let mut bv: Vec<u8> = Vec::new();
+        bv.extend_from_slice(&CLIENT_VERSION.to_le_bytes());
+        bv.push(1u8);
+        bv.extend_from_slice(&[0u8; 32]);
+        conn.execute(
+            "INSERT INTO main (key, value) VALUES (?1, ?2)",
+            [&bk, &bv],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let pk33 = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+        let der = tri7_core::wallet::encode_der_privkey(&secret, &pk33).unwrap();
+        let kb = tri7_core::wallet::encode_key_keyblob(&pk33);
+        let kvv = tri7_core::wallet::encode_key_value(&der);
+        conn.execute(
+            "INSERT INTO main (key, value) VALUES (?1, ?2)",
+            [&kb, &kvv],
+        )
+        .unwrap();
+        wpath
+    }
+
+    fn pay_tx(vins: Vec<(crate::legacy::Hash, u32)>, outs: Vec<([u8; 20], i64)>) -> Tx {
+        Tx {
+            version: 1,
+            time: 1_400_000_700,
+            vin: vins
+                .into_iter()
+                .map(|(prev_hash, prev_n)| Vin {
+                    prev_hash,
+                    prev_n,
+                    script_sig: vec![0x00],
+                    sequence: u32::MAX,
+                })
+                .collect(),
+            vout: outs
+                .into_iter()
+                .map(|(pay, value)| Vout {
+                    value,
+                    script_pubkey: p2pkh(pay),
+                })
+                .collect(),
+            locktime: 0,
+        }
+    }
+
+    fn block(prev: crate::legacy::Hash, vtx: Vec<Tx>, t: u32) -> Block {
+        let mut b = Block {
+            version: 1,
+            prev_hash: prev,
+            merkle_root: [0xCCu8; 32],
+            time: 1_400_000_000u32.checked_add(t).unwrap(),
+            bits: 0x1e0fffff,
+            nonce: 0,
+            vtx,
+            block_sig: Vec::new(),
+        };
+        b.merkle_root = sha256d_for_merkle(&b.vtx);
+        b
+    }
+
+    /// ITEM-31 REGRESSION (live-caught on DNS2 h2206940/h2206958): a tx that
+    /// spends [a fresh wallet coin + an output the chain ALREADY spent] must
+    /// still remove the fresh wallet coin from the wallet_utxos.json dump.
+    /// The historical all-or-nothing gate ("remove only when every vin
+    /// resolves in the global set") let the unresolvable sibling vin veto the
+    /// whole tx, so every wallet coin that tx also spent stayed listed as a
+    /// ghost forever. Per-vin removal (addrindex/WalletLive semantics) is the
+    /// cure; the global set keeps its own all-or-nothing reporting semantics.
+    #[test]
+    fn respent_sibling_vin_cannot_strand_wallet_utxos_in_the_dump() {
+        let dir = tmp_dir("item31-ghost");
+        let secret = [7u8; 32];
+        let wpath = wallet_fixture(&dir, secret);
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let pk33 = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+        let w_payload = pubkey_payload(&pk33);
+        let w20: [u8; 20] = w_payload[1..].try_into().unwrap();
+        let c20 = [0x44u8; 20]; // non-wallet destination
+
+        // genesis: 100 to the wallet (coin A)
+        let mut genesis = Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0xAAu8; 32],
+            time: 1_400_000_000,
+            bits: 0x1e0fffff,
+            nonce: 0,
+            vtx: vec![coinbase(w20, 100)],
+            block_sig: Vec::new(),
+        };
+        genesis.merkle_root = sha256d_for_merkle(&genesis.vtx);
+        let a_hash = genesis.vtx[0].hash();
+
+        // h1: T1 spends A -> 40 to non-wallet C (coin Y) + 60 back to the
+        // wallet (coin Z). (A itself is spent cleanly — control removal.)
+        let t1 = pay_tx(
+            vec![(a_hash, 0)],
+            vec![(c20, 40), (w20, 60)],
+        );
+        let b1 = block(genesis.hash(), vec![coinbase(c20, 1), t1], 600);
+        let y_hash = b1.vtx[1].hash(); // coin Y = (T1, 0) — spent below twice
+        let z_key = (b1.vtx[1].hash(), 1u32);
+
+        // h2: T2a spends Y (legitimately) — Y leaves the global UTXO set.
+        let t2a = pay_tx(vec![(y_hash, 0)], vec![(c20, 40)]);
+        let b2 = block(b1.hash(), vec![coinbase(c20, 2), t2a], 900);
+
+        // h3: T2b spends [wallet coin Z + Y AGAIN — the RE-SPEND sibling].
+        // At h3 the global set no longer holds Y (removed at h2), so the
+        // historical gate saw a missing vin and vetoed the WHOLE tx: Z
+        // stayed in the dump as a ghost. Z's canonical truth is SPENT.
+        let t2b = pay_tx(
+            vec![(z_key.0, z_key.1), (y_hash, 0)],
+            vec![(c20, 100)],
+        );
+        let b3 = block(b2.hash(), vec![coinbase(c20, 3), t2b], 1200);
+
+        let blk = dir.join("blk0001.dat");
+        write_blk_file(&blk, &[genesis, b1, b2, b3]);
+        let out = dir.join("balances.json");
+        let dump = dir.join("wallet_utxos.json");
+        let opts = BalancesBuildOpts {
+            blk: &blk,
+            out: &out,
+            wallet: Some(&wpath),
+            utxos_out: Some(&dump),
+            end_height: 3,
+            replay_target: Some(3),
+            allow_stale: false,
+        };
+        let mut progress = |_: usize, _: usize| {};
+        let rep = build_balances_snapshot(&opts, &mut progress).expect("build ok");
+        // the re-spend sibling vin is the global set's counted anomaly —
+        // reported, never fatal, and never a veto on the wallet dump
+        assert_eq!(rep.untracked_spends, 1, "the Y re-spend is counted once");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dump).unwrap()).unwrap();
+        let rows = v["utxos"].as_array().unwrap();
+        let z_listed = rows.iter().any(|r| {
+            r["txid"].as_str() == Some(&crate::legacy::hash_to_display(&z_key.0))
+                && r["n"].as_u64() == Some(z_key.1 as u64)
+        });
+        assert!(
+            !z_listed,
+            "GHOST: the wallet coin spent by a tx with a re-spent sibling vin \
+             must be removed from the dump (per-vin spend application)"
+        );
+        // the dump carries exactly the still-live wallet coin: A's spend left
+        // 60 change (Z) at h1, which T2b then spent at h3 — zero rows remain
+        assert_eq!(rows.len(), 0, "every wallet coin is canonically spent");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
