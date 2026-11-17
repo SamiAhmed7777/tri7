@@ -17,6 +17,15 @@ tray-icon = { version = "0.26.1", optional = true }
 # Start-on-login (src/gui/autostart.rs): the HKCU ...\Run registration
 # (the v5 GUIUtil startup-shortcut mechanism, user scope, sans COM).
 winreg = "0.55"
+# tor-supervisor listener attribution (2026-11-16): the scheduled-task
+# environment broke every spawned helper (powershell/cmd/netstat) while the
+# bundled tor's SOCKS port was answering — the API table is in-process and
+# immune to the environment.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Threading",
+] }
 
 [[bin]]
 name = "tri7"

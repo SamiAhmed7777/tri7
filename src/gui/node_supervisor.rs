@@ -588,12 +588,96 @@ impl TorSupervisor {
     /// forever.
     #[cfg(windows)]
     fn listener_of_socks_port_os(port: u16) -> Option<(u32, String)> {
-        // primary: the cmdlet; when it yields nothing usable (missing
-        // cmdlet, no rows, empty path) fall back to the netstat row parse.
+        // PRIMARY: the in-process API table — immune to the stripped
+        // scheduled-task environment that broke every spawned helper
+        // (2026-11-16: powershell/cmd/netstat all returned nothing while
+        // the bundled tor's SOCKS port was answering).
+        if let Some(r) = Self::listener_of_socks_port_native(port) {
+            return Some(r);
+        }
+        // fallbacks: the spawned-helper paths (kept for belt and braces)
         if let Some(r) = Self::listener_of_socks_port_os_cmdlet(port) {
             return Some(r);
         }
         Self::listener_of_socks_port_os_netstat(port)
+    }
+
+    /// Rust-NATIVE listener resolution: the owning pid of the LISTEN socket
+    /// on 127.0.0.1:port via GetExtendedTcpTable, the pid's exe path via
+    /// OpenProcess + QueryFullProcessImageNameW. In-process — no child
+    /// processes, no environment sensitivity. The path is best-effort:
+    /// attribution (the pid match) is the security gate; the path only
+    /// feeds the stale-image identity gate, which keeps its helper path.
+    #[cfg(windows)]
+    fn listener_of_socks_port_native(port: u16) -> Option<(u32, String)> {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetExtendedTcpTable, MIB_TCPTABLE_OWNER_MODULE, TCP_TABLE_OWNER_MODULE_ALL,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const AF_INET: u32 = 2;
+        const TCP_STATE_LISTEN: u32 = 2;
+        unsafe {
+            let mut size: u32 = 0;
+            let rc = GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_MODULE_ALL,
+                0,
+            );
+            if rc != ERROR_INSUFFICIENT_BUFFER {
+                return None;
+            }
+            let mut buf = vec![0u8; size as usize];
+            let rc = GetExtendedTcpTable(
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_MODULE_ALL,
+                0,
+            );
+            if rc != NO_ERROR {
+                return None;
+            }
+            let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_MODULE);
+            let mut found: Option<u32> = None;
+            for i in 0..table.dwNumEntries as usize {
+                let row = &table.table[i];
+                // dwLocalAddr is the wire-order address stored little-endian
+                // in the DWORD — to_le_bytes recovers 127.0.0.1 byte order
+                if row.dwLocalAddr.to_le_bytes() != [127, 0, 0, 1]
+                    || row.dwState != TCP_STATE_LISTEN
+                {
+                    continue;
+                }
+                // dwLocalPort: the low WORD is the port in network byte
+                // order — byteswap the halves to recover the host port
+                let p = ((row.dwLocalPort >> 8) & 0xff) as u16
+                    | (((row.dwLocalPort & 0xff) << 8) as u16);
+                if p == port {
+                    found = Some(row.dwOwningPid);
+                    break;
+                }
+            }
+            let pid = found?;
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return Some((pid, String::new()));
+            }
+            let mut path_buf = [0u16; 1024];
+            let mut len = path_buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, path_buf.as_mut_ptr(), &mut len);
+            CloseHandle(handle);
+            if ok == 0 {
+                return Some((pid, String::new()));
+            }
+            Some((pid, String::from_utf16_lossy(&path_buf[..len as usize])))
+        }
     }
 
     /// primary Windows resolution: Get-NetTCPConnection + Get-Process Path,

@@ -4116,6 +4116,7 @@ dependencies = [
  "tauri-winrt-notification",
  "tray-icon",
  "ureq",
+ "windows-sys 0.59.0",
  "winreg",
  "winresource",
  "zeroize",
