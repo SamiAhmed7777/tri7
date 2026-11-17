@@ -658,6 +658,48 @@ pub fn txid_blob(display_hex: &str) -> Option<[u8; 32]> {
     display_to_internal(display_hex)
 }
 
+/// The (coverage height, proof hash) pair the catch-up builder stamps at
+/// end-of-walk. THE PAIR MUST DESCRIBE THE SAME BLOCK: the lag-aware
+/// money-path verdict ([`authority_with_lag`]) resolves the CHAIN's hash at
+/// `height` and compares it with the index's recorded tip_hash — pairing the
+/// start-of-walk chain tip with a frame accepted beyond it (blocks landed
+/// mid-walk), or advancing the height when nothing was accepted, mismatches
+/// the proof and tier-1 refuses forever (DNS2 2026-11-17: meta.height
+/// 2213928 stamped with h2213929's hash — the wallet's own mint landed
+/// mid-walk — so the stale wallet-live window served 1823 TRI while 5368
+/// TRI were canonically live).
+///
+/// When the walk accepted anything, the honest coverage is the LAST
+/// accepted block (its height proves its hash, and the content includes
+/// everything up to it). When it accepted nothing, the previous
+/// (height, hash) pair still stands — return the previous height and no
+/// new hash so the caller keeps the previous stamp intact.
+pub struct EofStamp {
+    /// meta.height: the coverage the content actually proves.
+    pub height: u64,
+    /// meta.tip_hash: the hash recorded FOR `height` (None: keep whatever
+    /// is already stamped — the previous pair is still self-consistent).
+    pub tip_hash: Option<[u8; 32]>,
+}
+
+pub fn eof_stamp(
+    blocks_accepted: u64,
+    last_accepted: Option<(u64, [u8; 32])>,
+    last_committed: Option<(u64, [u8; 32])>,
+    prev_height: u64,
+) -> EofStamp {
+    match last_accepted {
+        Some((h, hash)) if blocks_accepted > 0 => EofStamp {
+            height: h,
+            tip_hash: Some(hash),
+        },
+        _ => EofStamp {
+            height: last_committed.map(|(h, _)| h).unwrap_or(prev_height),
+            tip_hash: last_committed.map(|(_, hash)| hash),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +717,90 @@ mod tests {
         s.extend(std::iter::repeat(h).take(20));
         s.extend_from_slice(&[0x88, 0xac]);
         s
+    }
+
+    /// THE mid-walk-mint regression (DNS2 2026-11-17): the walk started at
+    /// coverage h2213922 with the oracle tip at h2213928; h2213929 (the
+    /// wallet's own mint) landed MID-WALK and was accepted via the store
+    /// resolution; fewer than 500 blocks meant no slice commit. The old EOF
+    /// stamp paired `finish(chain_tip.max(last_height))` (h2213928) with
+    /// `set_tip_hash(last_accepted)` (h2213929's hash) — a pair no chain can
+    /// prove, so tier-1 refused forever and the stale wallet-live window
+    /// (1823 TRI) served while 5368 TRI were canonically live. The stamp
+    /// must name the pair the CONTENT proves: (h2213929, its own hash).
+    #[test]
+    fn eof_stamp_pairs_the_last_accepted_block_with_its_own_height() {
+        let h28 = [0x28u8; 32];
+        let h29 = [0x29u8; 32];
+        let h22 = [0x22u8; 32];
+        // accepted h2213929, no slice commit this run, previous coverage
+        // h2213922 (start-of-walk chain tip h2213928 is IRRELEVANT to the
+        // honest pair — that is the bug)
+        let s = eof_stamp(466, Some((2_213_929, h29)), None, 2_213_922);
+        assert_eq!(s.height, 2_213_929, "coverage must be the last accepted block's height, not the start-of-walk chain tip");
+        assert_eq!(s.tip_hash, Some(h29), "the proof hash must be the hash OF the coverage height");
+        // the OLD formula's output, pinned as the thing that must never
+        // come back: max(start tip, prev coverage) next to a newer hash
+        let old_height = 2_213_928u64.max(2_213_922);
+        assert_ne!((old_height, Some(h29)), (s.height, s.tip_hash));
+        // and the old pair genuinely fails the verdict while the new one
+        // passes (chain hash AT height vs recorded hash)
+        let facts_old = IndexFacts { coverage_height: old_height, index_tip_hash: Some(h29), complete: true };
+        let facts_new = IndexFacts { coverage_height: s.height, index_tip_hash: s.tip_hash, complete: true };
+        let chain_hash_at = |h: u64| -> Option<[u8; 32]> {
+            match h { 2_213_928 => Some(h28), 2_213_929 => Some(h29), _ => None }
+        };
+        assert!(!authority_with_lag(facts_old, 2_213_930, chain_hash_at(old_height), MAX_INDEX_LAG).authoritative,
+            "the old mis-paired stamp must refuse");
+        assert!(authority_with_lag(facts_new, 2_213_930, chain_hash_at(s.height), MAX_INDEX_LAG).authoritative,
+            "the corrected stamp must serve within the lag bound");
+    }
+
+    /// A slice commit followed by a tail beyond it: the pair still comes
+    /// from the last accepted block, not the last committed slice.
+    #[test]
+    fn eof_stamp_prefers_the_accepted_tail_over_the_last_slice() {
+        let h1 = [0xA1u8; 32];
+        let h29 = [0x29u8; 32];
+        let s = eof_stamp(700, Some((2_213_929, h29)), Some((2_213_900, h1)), 2_213_899);
+        assert_eq!(s.height, 2_213_929);
+        assert_eq!(s.tip_hash, Some(h29));
+    }
+
+    /// Nothing accepted (resume with nothing new): keep the previous pair
+    /// INTACT — never advance the height past the hash it is paired with.
+    #[test]
+    fn eof_stamp_keeps_the_previous_pair_when_nothing_was_accepted() {
+        let s = eof_stamp(0, None, None, 2_213_922);
+        assert_eq!(s.height, 2_213_922, "the height must not chase a tip the content does not cover");
+        assert_eq!(s.tip_hash, None, "no new hash — the caller keeps the stamped one");
+        // the fallback when only the slice-committed pair exists
+        let h1 = [0xA1u8; 32];
+        let s2 = eof_stamp(0, None, Some((2_213_900, h1)), 2_213_899);
+        assert_eq!(s2.height, 2_213_900);
+        assert_eq!(s2.tip_hash, Some(h1));
+    }
+
+    /// DB-level: the stamped pair reads back through facts()/index_tip_hash
+    /// and passes the verdict the daemon runs — the full loop the wallet's
+    /// money path takes.
+    #[test]
+    fn eof_stamp_written_to_the_db_passes_the_lag_aware_verdict() {
+        let dir = tmpdir("eofpair");
+        let (c, _) = begin(&dir).unwrap();
+        let h29 = [0x29u8; 32];
+        let s = eof_stamp(466, Some((2_213_929, h29)), None, 2_213_922);
+        finish(&c, s.height).unwrap();
+        if let Some(h) = s.tip_hash {
+            set_tip_hash(&c, &h).unwrap();
+        }
+        set_complete(&c, true).unwrap();
+        let f = facts(&c);
+        assert_eq!(f.coverage_height, 2_213_929);
+        assert_eq!(f.index_tip_hash, Some(h29));
+        assert!(f.complete);
+        let verdict = authority_with_lag(f, 2_213_930, Some(h29), MAX_INDEX_LAG);
+        assert!(verdict.authoritative);
     }
 
     #[test]

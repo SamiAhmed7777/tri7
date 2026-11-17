@@ -267,6 +267,9 @@ fn main() {
     // the hash of the last block ACCEPTED this run (committed by the final
     // tail COMMIT at eof — the honest proof for the eof height)
     let mut last_accepted_hash: Option<[u8; 32]> = None;
+    // the height of that same block — the OTHER half of the eof stamp pair
+    // (meta.height and meta.tip_hash must describe the SAME block)
+    let mut last_accepted_height: Option<u64> = None;
     // The height the index actually covers. Stamping `tip` after an abort (a
     // corrupt frame, a parse error) would advertise a complete index that is
     // not complete, so this only advances on a committed slice and only
@@ -386,6 +389,7 @@ fn main() {
                 outputs += o;
                 spends += s;
                 last_accepted_hash = Some(hash);
+                last_accepted_height = Some(real_height);
             }
             Err(e) => {
                 eprintln!("h{real_height}: {e}");
@@ -456,17 +460,25 @@ fn main() {
         std::process::exit(3);
     }
     if reached_eof {
-        addrindex::finish(&conn, chain_tip.max(last_height)).ok();
-        // eof: every block through the tip is committed — the LAST accepted
-        // block's hash is the honest proof for the advertised height. When
-        // the walk accepted nothing this run (resume with nothing new), keep
-        // the last COMMITTED slice's hash.
-        let proof = if blocks > 0 {
-            last_accepted_hash
-        } else {
-            last_committed_hash
-        };
-        if let Some(h) = proof {
+        // eof: stamp THE PAIR, not two independent facts — meta.height and
+        // meta.tip_hash must describe the SAME block, because the lag-aware
+        // money-path verdict reads the chain's hash AT meta.height and
+        // compares it with meta.tip_hash. The old stamp here paired
+        // finish(chain_tip.max(last_height)) — the START-of-walk chain tip
+        // — with set_tip_hash(last_accepted), a frame accepted BEYOND that
+        // tip whenever blocks landed mid-walk (DNS2 2026-11-17: h2213928
+        // stamped with the wallet's own h2213929 mint hash; the verdict
+        // refused and the stale wallet-live window — 1823 TRI of the real
+        // 5368 — served forever). eof_stamp keeps the pair self-consistent
+        // and never advances the height past the content on an empty walk.
+        let stamp = addrindex::eof_stamp(
+            blocks,
+            last_accepted_height.zip(last_accepted_hash),
+            last_committed_hash.map(|h| (last_height, h)),
+            last_height,
+        );
+        addrindex::finish(&conn, stamp.height).ok();
+        if let Some(h) = stamp.tip_hash {
             addrindex::set_tip_hash(&conn, &h).ok();
         }
         addrindex::set_complete(&conn, true).ok();
