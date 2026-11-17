@@ -358,7 +358,29 @@ struct BodyTries {
     sent_at: Instant,
     attempts: u32,
     tried: Vec<String>,
+    /// clock refreshes granted to this hash (BODY-CLOCK-REFRESH-PIN fix):
+    /// a peer re-serving one NON-EXTENDING block could otherwise bump
+    /// `sent_at` forever and pin a getdata slot. Capped at
+    /// `BODY_REFRESH_CAP`; past it the request ages out and re-dispatches.
+    refreshes: u32,
 }
+
+/// I2P-NEVER-DEMOTED: i2p body sources get a longer leash, not immunity —
+/// 4 unserved rounds and a 300s cooldown (tunnels build slowly), while ANY
+/// transport is demoted at the hard cap so a never-serving peer can never own
+/// body dispatch indefinitely.
+const BODY_I2P_FAIL_LIMIT: u32 = 4;
+const BODY_I2P_COOLDOWN: Duration = Duration::from_secs(300);
+const BODY_HARD_UNSERVED_ROUNDS: u32 = 8;
+
+/// How many non-extending re-serves of one hash may refresh its age-out
+/// clock before the request is allowed to time out and rotate.
+const BODY_REFRESH_CAP: u32 = 2;
+
+/// PENDING-QUEUE-NO-DEDUPE: hard cap on the announced-header queue. The
+/// queue is drained by body arrivals; when bodies stall it must not grow
+/// without bound (the pre-fix queue re-appended the whole window every 30s).
+const PENDING_HEADERS_CAP: usize = 20_000;
 const EXIT_USAGE: i32 = 2;
 const EXIT_VALIDATE: i32 = 3;
 const EXIT_PROTOCOL: i32 = 4;
@@ -679,6 +701,11 @@ struct GapState {
 
 /// daemon getheaders serving cap (collect_headers: 2000 per response)
 const RECON_HEADERS_CAP: usize = 2000;
+/// RECON-ONE-PAGE-ONLY: how many headers one reconciliation may ACCUMULATE
+/// across pages before it judges. The serving page stays RECON_HEADERS_CAP;
+/// the accumulator used to be capped at the same 2000, so a branch taller
+/// than one page was silently abandoned after page one.
+const RECON_ACCUM_CAP: usize = 20_000;
 /// give up reconciling after this many responses whose fork point lies
 /// outside our window — drop the peer (the supervisor reconnects) instead
 /// of looping forever (the DNS3 wedge shape)
@@ -712,6 +739,19 @@ struct ReconAcc {
     seen: std::collections::HashSet<Hash>,
     /// consecutive reconciliations with no in-window fork point
     unresolved: u32,
+    /// RECON-ONE-PAGE-ONLY: KNOWN headers walked on this branch since the
+    /// serve anchor (our own prefix re-served page by page). Heights of a
+    /// continuation start at fork_height + 1 + prefix_walked.
+    prefix_walked: u64,
+    /// the height the peer CLAIMED for its branch (start_height at branch
+    /// open) — an empty reply is only a branch end once we reached it
+    claim_depth: Option<u64>,
+    /// consecutive EMPTY pages seen for this branch (guard against a peer
+    /// that keeps answering "nothing" while claiming a taller branch)
+    empty_pages: u32,
+    /// the previous page was a FULL serving-cap page — only then can an empty
+    /// reply be a mid-branch boundary rather than the branch end
+    last_page_full: bool,
     /// the prev-hash the next batch header must present to keep chaining
     /// onto our window at the running height (anchor entry hash, advanced
     /// per header). A header whose prev breaks the chain ends the batch —
@@ -1024,6 +1064,14 @@ fn refresh_body_request_clock(
 ) -> bool {
     match body_tries.get_mut(hash) {
         Some(t) => {
+            // BODY-CLOCK-REFRESH-PIN: a peer re-serving one non-extending
+            // block may not pin the slot forever. After BODY_REFRESH_CAP
+            // refreshes the clock is left alone so the age-out scan
+            // re-dispatches the request (and rotates away from the peer).
+            if t.refreshes >= BODY_REFRESH_CAP {
+                return false;
+            }
+            t.refreshes += 1;
             t.sent_at = Instant::now();
             true
         }
@@ -1171,24 +1219,35 @@ fn credit_body_miss_round(
         .collect();
     let mut reports = Vec::new();
     for label in round_labels {
-        // MED-3b: an i2p source that accepted getdata but served nothing is
-        // usually a tunnel still building, not a dead peer — never DEMOTE it
-        // (the 45s age-out/requeue above still rotates the request, so bulk
-        // sync keeps moving; a healthy i2p source serves on its next round).
-        // Clearnet/tor labels keep the exact pre-lane demotion behavior.
-        if label_is_i2p(&label) {
-            continue;
-        }
+        // I2P-NEVER-DEMOTED: an i2p source that accepted getdata but served
+        // nothing used to be exempt FOREVER — a peer that handshakes and never
+        // serves stayed the selected source ("100% to the never-serving peer").
+        // i2p gets a LONGER leash (tunnels really do take a while to build),
+        // not an infinite one; and ANY transport is demoted at the hard cap.
+        let i2p = label_is_i2p(&label);
+        let limit = if i2p {
+            adv_fail_limit.max(BODY_I2P_FAIL_LIMIT)
+        } else {
+            adv_fail_limit
+        };
+        let cd = if i2p {
+            cooldown.max(BODY_I2P_COOLDOWN)
+        } else {
+            cooldown
+        };
         let n = peer_misses.entry(label.clone()).or_insert(0);
         *n += 1;
-        if *n >= adv_fail_limit && !demoted_at.contains_key(&label) {
+        let hard_capped = *n >= BODY_HARD_UNSERVED_ROUNDS;
+        if (*n >= limit || hard_capped) && !demoted_at.contains_key(&label) {
             demoted_at.insert(label.clone(), now);
             reports.push(format!(
-                "BODY SOURCE DEMOTED for {}s: {} accepted getdata but served nothing for {} round(s) ({}s each) — it re-enters selection after the cooldown with a fresh probe budget",
-                cooldown.as_secs(),
+                "BODY SOURCE DEMOTED for {}s ({}): {} accepted getdata but served nothing for {} round(s) ({}s each){} — body dispatch skips it until the cooldown expires with a fresh probe budget",
+                cd.as_secs(),
+                if i2p { "i2p" } else { "clearnet/tor" },
                 label,
                 n,
-                timeout.as_secs()
+                timeout.as_secs(),
+                if hard_capped { ", HARD CAP" } else { "" }
             ));
         }
     }
@@ -1208,7 +1267,12 @@ fn expire_body_demotions(
     cooldown: Duration,
 ) {
     demoted_at.retain(|label, at| {
-        if now.duration_since(*at) >= cooldown {
+        let cd = if label_is_i2p(label) {
+            cooldown.max(BODY_I2P_COOLDOWN)
+        } else {
+            cooldown
+        };
+        if now.duration_since(*at) >= cd {
             peer_misses.remove(label); // fresh probe budget
             return false;
         }
@@ -1447,9 +1511,31 @@ fn intake_header_batch(
         if st.entry_by_hash(&hash).is_some() {
             continue; // already have
         }
+        // PENDING-QUEUE-NO-DEDUPE: the 30s tip poll re-serves the same header
+        // window while bodies stall; without this check every poll appended
+        // another copy (~240k entries/hr). A hash still held as a pending
+        // header is already queued for its body — never append it again.
+        // (pending_headers is exactly the queued set: entries leave it when
+        // their body lands, at which point they are chain entries instead.)
         if hdr.prev_hash == prev_expected {
+            if st.pending_headers.contains_key(&hash) {
+                prev_expected = hash;
+                next_h += 1;
+                continue;
+            }
             stats.headers_new += 1;
             st.pending_headers.insert(hash, hdr.clone());
+            if pending_from_headers.len() >= PENDING_HEADERS_CAP {
+                if pending_from_headers.len() == PENDING_HEADERS_CAP {
+                    log(&format!(
+                        "pending-body queue at cap ({} entries) — dropping newly announced headers until bodies drain",
+                        PENDING_HEADERS_CAP
+                    ));
+                }
+                prev_expected = hash;
+                next_h += 1;
+                continue;
+            }
             pending_from_headers.push_back((hash, next_h));
             prev_expected = hash;
             next_h += 1;
@@ -1503,6 +1589,8 @@ fn recon_intake(
                 recon.headers.clear();
                 recon.seen.clear();
                 recon.unresolved = 0;
+                recon.prefix_walked = 0;
+                recon.empty_pages = 0;
                 // the chain check starts at the ANCHOR ENTRY's own hash: the
                 // first served header must present it as prev
                 recon.expected_prev = Some(st.entries[anchor_h as usize - st.base as usize].hash);
@@ -1538,7 +1626,10 @@ fn recon_intake(
     // known prefix in every reply)
     let mut running_h = match recon.branch_base {
         Some(base) => base + recon.their_blocks, // continuation: next expected
-        None => recon.fork_height.unwrap_or(st.tip_height) + 1,
+        // RECON-ONE-PAGE-ONLY: a continuation of a KNOWN-prefix page must
+        // carry the prefix already walked — restarting at fork_height+1
+        // re-labelled the same heights on every page.
+        None => recon.fork_height.unwrap_or(st.tip_height) + 1 + recon.prefix_walked,
     };
     for hdr in headers {
         let hash = hdr.hash();
@@ -1565,11 +1656,17 @@ fn recon_intake(
             // our own prefix being re-served: advance the linkage AND the
             // height (the served header IS our entry)
             recon.expected_prev = Some(hash);
+            if recon.branch_base.is_none() {
+                recon.prefix_walked += 1;
+            }
             running_h += 1;
             continue;
         }
         if recon.seen.contains(&hash) {
             recon.expected_prev = Some(hash);
+            if recon.branch_base.is_none() {
+                recon.prefix_walked += 1;
+            }
             continue; // already accumulated in an earlier batch
         }
         if recon.branch_base.is_none() {
@@ -1587,6 +1684,27 @@ fn recon_intake(
     }
 
     let Some(branch_base) = recon.branch_base else {
+        // RECON-ONE-PAGE-ONLY: a FULL page that was entirely our own prefix
+        // is a page to CONTINUE from, not a dead end. Advance the
+        // continuation anchor to the last served header and ask for the next
+        // page — the pre-fix reset threw the accumulator away and the peer's
+        // branch beyond our prefix was never seen.
+        if headers.len() >= RECON_HEADERS_CAP && recon.fork_height.is_some() {
+            if let Some(last) = headers.last() {
+                // only a page that ends BELOW our own tip can have a branch
+                // beyond it; a page that reaches our tip is us seeing
+                // ourselves (the re-fire case) and closes normally.
+                let below_tip = st
+                    .index_of_hash(&last.hash())
+                    .map(|i| st.base + (i as u64) < st.tip_height)
+                    .unwrap_or(false);
+                if below_tip {
+                    recon.last_hash = Some(last.hash());
+                    recon.expected_prev = Some(last.hash());
+                    return ReconOutcome::Extended;
+                }
+            }
+        }
         // the batch held nothing new (pure re-serve of our own prefix):
         // nothing to judge, nothing to hold
         recon.fork_height = None;
@@ -1606,11 +1724,28 @@ fn recon_intake(
     // (stats note: branch headers are counted by intake_header_batch when a
     // batch turns out to extend the tip; this path never double-counts)
 
+    recon.last_page_full = headers.len() >= RECON_HEADERS_CAP;
     // a batch under the serving cap is COMPLETE (the peer served to its own
     // branch tip; an empty reply after a cap-sized branch means the same);
     // a cap-sized batch may continue. Judge early when their accumulated
     // work already beats ours — branch work only grows.
-    let complete = headers.len() < RECON_HEADERS_CAP;
+    // RECON-ONE-PAGE-ONLY: a FULL page is a page boundary, not a branch end —
+    // continue accumulating until the accumulator cap, an EMPTY reply that
+    // reached the peer's claimed depth, or work that already beats ours.
+    let page_full = headers.len() >= RECON_HEADERS_CAP;
+    let accum_full = recon.their_blocks as usize >= RECON_ACCUM_CAP;
+    let reached_claim = match recon.claim_depth {
+        Some(d) => recon.branch_base.unwrap_or(0) + recon.their_blocks >= d,
+        None => true,
+    };
+    let empty_at_end = headers.is_empty()
+        && recon.last_page_full
+        && (!reached_claim && recon.empty_pages < 2);
+    if empty_at_end {
+        recon.empty_pages += 1;
+        return ReconOutcome::Extended;
+    }
+    let complete = !page_full || accum_full;
     if !(complete || recon.their_work > our_work) {
         return ReconOutcome::Extended;
     }
@@ -1642,6 +1777,10 @@ fn recon_intake(
     recon.branch_base = None;
     recon.expected_prev = None;
     recon.unresolved = 0; // any close resets the escalation counter
+    recon.prefix_walked = 0;
+    recon.empty_pages = 0;
+    recon.last_page_full = false;
+    recon.claim_depth = None;
     let fork = recon.fork_height.take();
     match decision {
         tri7_core::forkchoice::ForkChoice::KeepOurs => {
@@ -1717,6 +1856,11 @@ fn recon_dispatch(
     pending_from_headers: &mut VecDeque<(Hash, u64)>,
     stats: &mut Stats,
 ) -> Result<(), String> {
+    // RECON-ONE-PAGE-ONLY: remember the depth the peer CLAIMed when this
+    // branch opened, so an EMPTY reply is only a branch end once we got there.
+    if recon.claim_depth.is_none() && peer.start_height > 0 {
+        recon.claim_depth = Some(peer.start_height as u64);
+    }
     match recon_intake(st, headers, recon, pending_from_headers, stats) {
         ReconOutcome::Ignored => {
             // (item 21) the judge recorded the branch tip the peer claims —
@@ -1752,6 +1896,23 @@ fn recon_dispatch(
                 let tip_h = base + recon.their_blocks.saturating_sub(1);
                 let tip_hash = recon.last_hash.unwrap_or([0u8; 32]);
                 peer.claimed_tip = Some((tip_h, tip_hash));
+            }
+            // RECON-ONE-PAGE-ONLY: immediately pull the NEXT page from the
+            // continuation anchor into the SAME accumulator. The pre-fix code
+            // simply returned and waited for the next 30s tip poll — one page
+            // per poll, and the branch beyond it was never assembled.
+            if let Some(last) = recon.last_hash {
+                let stop = [0u8; 32];
+                if let Err(e) = peer.sess.send(
+                    "getheaders",
+                    &tri7_core::p2p::build_getheaders(&[last], &stop),
+                    stats,
+                ) {
+                    log(&format!(
+                        "recon: continuation getheaders to {} failed: {}",
+                        peer.label, e
+                    ));
+                }
             }
             // (item 21, r3) accumulation alone names no body source — the
             // judge has not adopted anything yet
@@ -1798,7 +1959,9 @@ fn recon_dispatch(
 /// hash/height, with the peer that served (or the rollback height).
 fn write_gap_marker(cfg: &Config, payload: Value) {
     let path = cfg.state_dir.join("gap_recovery.json");
-    let tmp = cfg.state_dir.join("gap_recovery.json.tmp");
+    let tmp = cfg
+        .state_dir
+        .join(format!("gap_recovery.json.tmp.{}", std::process::id()));
     let body = format!("{}\n", serde_json::to_string_pretty(&payload).unwrap_or_default());
     if std::fs::write(&tmp, body)
         .and_then(|_| std::fs::rename(&tmp, &path))
@@ -3104,25 +3267,206 @@ fn state_path(cfg: &Config) -> PathBuf {
 
 fn write_state_atomic(cfg: &Config, st: &TipStateFile) -> Result<(), String> {
     let path = state_path(cfg);
-    let tmp = path.with_extension("json.tmp");
+    write_tipstate_atomic(&path, st)
+}
+
+// ---------------------------------------------------------------------------
+// STATE-LOCK (F1): one owner per state dir
+// ---------------------------------------------------------------------------
+
+/// An exclusive, process-lifetime lock on the state directory.
+///
+/// Two nodes sharing one state dir interleave their atomic writers: each
+/// loads a window, writes it back, and the later write resurrects a stale
+/// tip while the other keeps appending — the classic double-owner wedge.
+/// The lock is advisory-by-file: `<state>/node.lock` on unix via
+/// `flock(LOCK_EX|LOCK_NB)`; on Windows `CreateFileW` WITHOUT any
+/// `FILE_SHARE_*` so a second opener gets a sharing violation.
+pub struct StateDirLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+    #[cfg(windows)]
+    handle: *mut core::ffi::c_void,
+}
+
+#[cfg(unix)]
+impl Drop for StateDirLock {
+    fn drop(&mut self) {
+        // closing the fd releases the flock; nothing else to do
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StateDirLock {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandleLock(self.handle);
+        }
+    }
+}
+
+#[cfg(unix)]
+unsafe impl Send for StateDirLock {}
+
+#[cfg(windows)]
+unsafe impl Send for StateDirLock {}
+
+#[cfg(windows)]
+extern "system" {
+    #[link_name = "CreateFileW"]
+    fn CreateFileWLock(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *mut core::ffi::c_void,
+        disposition: u32,
+        flags: u32,
+        template: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void;
+    #[link_name = "CloseHandle"]
+    fn CloseHandleLock(h: *mut core::ffi::c_void) -> i32;
+    #[link_name = "GetLastError"]
+    fn GetLastErrorLock() -> u32;
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+/// Take the exclusive state-dir lock. Err carries the operator-facing
+/// "another instance owns this state dir" message (never a panic).
+fn acquire_state_lock(state_dir: &Path) -> Result<StateDirLock, String> {
+    std::fs::create_dir_all(state_dir)
+        .map_err(|e| format!("create state dir {}: {}", state_dir.display(), e))?;
+    let path = state_dir.join("node.lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+        const LOCK_EX: i32 = 2;
+        const LOCK_NB: i32 = 4;
+        let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+        if rc != 0 {
+            return Err(format!(
+                "another instance owns this state dir ({}): {} is locked — stop it first, or use a different --datadir",
+                state_dir.display(),
+                path.display()
+            ));
+        }
+        Ok(StateDirLock { _file: file })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const OPEN_ALWAYS: u32 = 4;
+        const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+        // share mode 0 = nobody else may open it while we hold it
+        let handle = unsafe {
+            CreateFileWLock(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                std::ptr::null_mut(),
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle as isize == -1 {
+            let err = unsafe { GetLastErrorLock() };
+            return Err(format!(
+                "another instance owns this state dir ({}): cannot exclusively open {} (win32 error {}) — stop it first, or use a different --datadir",
+                state_dir.display(),
+                path.display(),
+                err
+            ));
+        }
+        Ok(StateDirLock { handle })
+    }
+}
+
+/// Monotonic suffix for state tmp files: a pid-unique path is not enough
+/// when two THREADS of the same process write the same file (gap recovery +
+/// the follow loop) — they would clobber each other's half-written tmp, and
+/// whichever renamed second published a torn body.
+static STATE_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `.json.tmp.<pid>.<n>` — never a shared fixed tmp name (STATE-LOCK fix).
+fn state_tmp_path(path: &Path) -> PathBuf {
+    let seq = STATE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("json.tmp.{}.{}", std::process::id(), seq))
+}
+
+/// Atomic, DURABLE tipstate write (TIPSTATE-DURABILITY fix):
+///   1. write the tmp with the pid-unique name,
+///   2. `sync_all` it BEFORE the rename (a crash after rename must not lose
+///      the bytes: rename is atomic, the data behind it is not),
+///   3. keep the previous good file as `tipstate.json.bak` (load_state falls
+///      back to it when the primary parse fails),
+///   4. rename over the target,
+///   5. fsync the directory so the rename itself is durable (unix).
+fn write_tipstate_atomic(path: &Path, st: &TipStateFile) -> Result<(), String> {
+    let tmp = state_tmp_path(path);
     let text = serde_json::to_string_pretty(st).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create {}: {}", tmp.display(), e))?;
+        use std::io::Write as _;
+        f.write_all(text.as_bytes())
+            .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync {}: {}", tmp.display(), e))?;
+    }
     // the state file holds no secrets but is nobody's business but the
     // service's: pin 0600 on the tmp BEFORE the rename, or the default
-    // 0644 from fs::write clobbers the mode on every atomic swap
+    // 0644 from File::create clobbers the mode on every atomic swap
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod {}: {}", tmp.display(), e))?;
     }
+    // retain the previous good state as the load fallback
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        if let Err(e) = std::fs::copy(path, &bak) {
+            log(&format!(
+                "tipstate backup {} failed (continuing): {}",
+                bak.display(),
+                e
+            ));
+        } else if let Ok(f) = std::fs::File::open(&bak) {
+            let _ = f.sync_all();
+        }
+    }
     // Windows: MoveFileEx fails with ERROR_ACCESS_DENIED (os error 5) when a
     // reader has the destination open or an AV filter holds it briefly. Retry
     // with backoff instead of failing the write.
     let mut last: Option<std::io::Error> = None;
     for attempt in 0..12 {
-        match std::fs::rename(&tmp, &path) {
-            Ok(()) => return Ok(()),
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => {
+                // fsync the directory so the rename survives a power cut
+                #[cfg(unix)]
+                if let Some(dir) = path.parent() {
+                    if let Ok(d) = std::fs::File::open(dir) {
+                        let _ = d.sync_all();
+                    }
+                }
+                return Ok(());
+            }
             Err(e) => {
                 last = Some(e);
                 std::thread::sleep(std::time::Duration::from_millis(
@@ -3131,6 +3475,7 @@ fn write_state_atomic(cfg: &Config, st: &TipStateFile) -> Result<(), String> {
             }
         }
     }
+    let _ = std::fs::remove_file(&tmp);
     Err(format!(
         "rename state: {}",
         last.map(|e| e.to_string()).unwrap_or_default()
@@ -3449,14 +3794,15 @@ fn socks5_connect(
     socks_read_timeout: Duration,
 ) -> Result<TcpStream, String> {
     use std::net::ToSocketAddrs;
-    let mut s = TcpStream::connect(
-        (socks_host, socks_port)
-            .to_socket_addrs()
-            .map_err(|e| format!("resolve socks {}: {}", socks_host, e))?
-            .next()
-            .ok_or_else(|| format!("resolve socks {}: no address", socks_host))?,
-    )
-    .map_err(|e| format!("connect socks {}: {}", socks_host, e))?;
+    // OUTBOUND-DIAL-BLOCKS-LOOP: an unbounded TCP connect to a wedged local
+    // SOCKS listener blocked the whole rotation for minutes. Bound it.
+    let addr = (socks_host, socks_port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve socks {}: {}", socks_host, e))?
+        .next()
+        .ok_or_else(|| format!("resolve socks {}: no address", socks_host))?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("connect socks {}: {}", socks_host, e))?;
     s.set_read_timeout(Some(socks_read_timeout)).ok();
     s.set_write_timeout(Some(Duration::from_secs(10))).ok();
     s.write_all(&socks5_greeting())
@@ -3515,7 +3861,7 @@ fn handshake(
     let q = quad.unwrap_or([127, 0, 0, 1]);
     let (a, b, c, d) = (q[0], q[1], q[2], q[3]);
     let addr_you = tri7_core::p2p::WireAddr::ipv4(a, b, c, d, target.port, tri7_core::p2p::NODE_NETWORK);
-    let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
+    let nonce = our_version_nonce();
     let vp = tri7_core::p2p::VersionPayload {
         version: tri7_core::p2p::PROTOCOL_VERSION,
         services: tri7_core::p2p::NODE_NETWORK,
@@ -3539,6 +3885,9 @@ fn handshake(
                     let v = tri7_core::p2p::parse_version(&msg.payload)?;
                     if v.version < tri7_core::p2p::MIN_PROTO_VERSION {
                         return Err(format!("peer version {} obsolete", v.version));
+                    }
+                    if v.nonce == our_version_nonce() {
+                        return Err("self-connection: peer presents our own version nonce".into());
                     }
                     peer = Some(PeerInfo {
                         version: v.version,
@@ -3582,6 +3931,16 @@ fn handshake(
         services: 0,
         advertised: None,
     }))
+}
+
+/// Process-wide version NONCE (SELF-DIAL). Both handshake sides used to mint
+/// `now_secs() ^ pid<<32` per call, so a loopback connection could not be
+/// recognised. One constant per process means a peer presenting OUR nonce is
+/// provably this node talking to itself — the handshake rejects it instead of
+/// maintaining a session with ourselves forever.
+fn our_version_nonce() -> u64 {
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| (now_secs() ^ ((std::process::id() as u64) << 32)) | 1)
 }
 
 /// MED-4d — the node's SELF-ADVERTISED listening address for `version`
@@ -3683,6 +4042,22 @@ fn self_identities_at(state_dir: &std::path::Path) -> Vec<String> {
             ids.push(key);
         }
     }
+    // SELF-DIAL: the i2p identity is the OTHER half of "ourselves". The
+    // onion state says nothing about it, so a node that learns its own b32
+    // through gossip dialed itself (handshake loop). Both the bare b32
+    // hostname and the `b32.i2p:port` file form are registered.
+    for name in ["i2p_destination.txt", "i2p/hostname"] {
+        if let Ok(text) = std::fs::read_to_string(state_dir.join(name)) {
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let host = text.rsplit_once(':').map(|(h, _)| h).unwrap_or(text);
+            if host.ends_with(".b32.i2p") {
+                ids.push(host.to_string());
+            }
+        }
+    }
     ids
 }
 
@@ -3776,6 +4151,156 @@ fn record_peer_fail(cfg: &Config, endpoint: &str) {
             store.record_fail(&host, port, now);
         }
     });
+}
+
+/// PEER-HEALTH: served-block tallies accumulate in memory and flush to
+/// peers.json at most once per window — a per-block load→save would rewrite
+/// the whole store per block (the very amplification class we just fixed).
+static SERVED_TALLY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(String, u16), (u64, u64)>>,
+> = std::sync::OnceLock::new();
+static SERVED_FLUSH_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn served_tally() -> &'static std::sync::Mutex<std::collections::HashMap<(String, u16), (u64, u64)>> {
+    SERVED_TALLY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Note that `label` SERVED us `bytes` of block data (one block).
+fn note_peer_served(label: &str, bytes: u64) {
+    let Some((host, port)) = tri7_core::peers::PeerStore::endpoint_of_label(label) else {
+        return;
+    };
+    if let Ok(mut t) = served_tally().lock() {
+        let e = t.entry((host, port)).or_insert((0, 0));
+        e.0 += 1;
+        e.1 = e.1.saturating_add(bytes);
+    }
+}
+
+/// Flush accumulated served tallies (rate-limited to once per 5s). The
+/// served counters — not the handshake — are what `dial_order` now ranks by.
+fn flush_peer_served(cfg: &Config) {
+    let now = tri7_core::peers::unix_now();
+    let last = SERVED_FLUSH_AT.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < 5 {
+        return;
+    }
+    if SERVED_FLUSH_AT
+        .compare_exchange(
+            last,
+            now,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let drained: Vec<((String, u16), (u64, u64))> = match served_tally().lock() {
+        Ok(mut t) => t.drain().collect(),
+        Err(_) => return,
+    };
+    if drained.is_empty() {
+        return;
+    }
+    with_peer_store(cfg, |store| {
+        for ((host, port), (blocks, bytes)) in drained {
+            store.record_served(&host, port, now, blocks, bytes);
+        }
+    });
+}
+
+/// PEER-HEALTH: a peer that dropped data we asked for (stale-only reply,
+/// protocol violation, non-extending body) is counted UNHEALTHY so the dial
+/// order and backoff see it — the pre-fix code only ever recorded dial
+/// successes, so a handshaking non-server looked perfect forever.
+fn record_peer_unserved(cfg: &Config, label: &str) {
+    let Some((host, port)) = tri7_core::peers::PeerStore::endpoint_of_label(label) else {
+        return;
+    };
+    let now = tri7_core::peers::unix_now();
+    with_peer_store(cfg, |store| store.record_unserved(&host, port, now));
+}
+
+/// SERVE-SILENT-NOT-READY + GETDATA-SERVE-AMPLIFICATION state, per peer
+/// label: how much has been served in the current window, how many requests
+/// MISSED (store not ready / block absent), and whether the one-shot
+/// "serving degraded" line has been said.
+#[derive(Default)]
+struct ServeState {
+    served: u64,
+    misses: u64,
+    getheaders_misses: u64,
+    window_start: Option<Instant>,
+    degraded_logged: bool,
+}
+
+const SERVE_WINDOW: Duration = Duration::from_secs(5);
+/// GETDATA-SERVE-AMPLIFICATION: at most this many entries answered per
+/// getdata message, and at most this many block/tx payloads per peer per
+/// SERVE_WINDOW — an inbound peer cannot make us stream its whole wishlist.
+const GETDATA_SERVE_CAP: usize = 500;
+const SERVE_BUDGET_PER_WINDOW: u64 = 2_000;
+
+fn serve_state() -> &'static std::sync::Mutex<std::collections::HashMap<String, ServeState>> {
+    static ST: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ServeState>>,
+    > = std::sync::OnceLock::new();
+    ST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How many of `want` entries this peer may still be served in this window.
+fn serve_budget_allows(label: &str, want: usize) -> usize {
+    let want = want.min(GETDATA_SERVE_CAP) as u64;
+    let Ok(mut st) = serve_state().lock() else {
+        return want as usize;
+    };
+    let e = st.entry(label.to_string()).or_default();
+    let now = Instant::now();
+    match e.window_start {
+        Some(t) if now.duration_since(t) < SERVE_WINDOW => {}
+        _ => {
+            e.window_start = Some(now);
+            e.served = 0;
+        }
+    }
+    let left = SERVE_BUDGET_PER_WINDOW.saturating_sub(e.served);
+    let allow = want.min(left);
+    e.served += allow;
+    allow as usize
+}
+
+/// SERVE-SILENT-NOT-READY: count a getdata miss and say ONCE, per peer, that
+/// serving is degraded because the store index is not Ready — silence looked
+/// exactly like a dead node to the asker before this.
+fn note_getdata_miss(label: &str, store_ready: bool, status: &str) {
+    let Ok(mut st) = serve_state().lock() else {
+        return;
+    };
+    let e = st.entry(label.to_string()).or_default();
+    e.misses += 1;
+    if !store_ready && !e.degraded_logged {
+        e.degraded_logged = true;
+        log(&format!(
+            "serving degraded (store {}) — getdata from {} cannot be answered from the index yet; recent-cache payloads still serve",
+            status, label
+        ));
+    }
+}
+
+fn note_getheaders_miss(label: &str, store_ready: bool, status: &str) {
+    let Ok(mut st) = serve_state().lock() else {
+        return;
+    };
+    let e = st.entry(label.to_string()).or_default();
+    e.getheaders_misses += 1;
+    if !store_ready && !e.degraded_logged {
+        e.degraded_logged = true;
+        log(&format!(
+            "serving degraded (store {}) — getheaders from {} cannot be answered from the index yet",
+            status, label
+        ));
+    }
 }
 
 fn split_endpoint(endpoint: &str) -> Option<(String, u16)> {
@@ -4632,25 +5157,49 @@ fn headers_round(
     // the walk keeps requesting from the last header until the peer sends a
     // partial (tip-ending) batch or goes idle
     let mut expect_prev = walk.next_hash;
-    let mut outstanding = true;
+    // HDRWALK AMPLIFICATION fix: ONE request epoch per CURSOR. The old bool
+    // `outstanding` re-sent the SAME locator after every 2s partial exit and
+    // 30s silence; the peer answered every copy, duplicates piled up, and once
+    // >8 anchors were in flight an evicted duplicate took the Fatal arm and
+    // killed the whole walk. Now: never re-send while an epoch for this cursor
+    // is in flight (wait for it up to the round deadline), and classify
+    // duplicates against ALL live epochs of this round — a reply for a
+    // superseded epoch is a duplicate, never Fatal.
+    let mut epoch_seq: u64 = 0;
+    let mut inflight: Vec<(u64, Hash)> = Vec::new(); // (epoch, requested anchor)
     let mut last_msg = Instant::now();
+    let mut last_stale_log = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
-        if outstanding {
+        if !inflight.iter().any(|(_, anchor)| *anchor == expect_prev) {
+            epoch_seq += 1;
             sess.send(
                 "getheaders",
                 &tri7_core::p2p::build_getheaders(&[expect_prev], &[0u8; 32]),
                 stats,
             )?;
+            inflight.push((epoch_seq, expect_prev));
+            let excess = inflight.len().saturating_sub(8);
+            if excess > 0 {
+                inflight.drain(..excess);
+            }
             walk.anchors.push(expect_prev);
             let excess = walk.anchors.len().saturating_sub(8);
             if excess > 0 {
                 walk.anchors.drain(..excess);
             }
-            outstanding = false;
         }
         let msgs = sess.pump()?;
         if msgs.is_empty() {
+            if !inflight.is_empty() {
+                // an epoch for the current cursor is IN FLIGHT: wait for it
+                // (up to the round deadline) instead of re-asking — a re-ask
+                // here is exactly the amplification this fix removes.
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             // 2s idle after traffic = segment ended (peer only serves the
             // next segment on a fresh locator anyway — return INCOMPLETE with
             // the cursor advanced; the caller immediately re-requests from
@@ -4682,16 +5231,26 @@ fn headers_round(
                         return Ok((out, true));
                     }
                     if batch[0].prev_hash != expect_prev {
-                        // stale duplicate of an already-consumed segment:
-                        // drop it and keep waiting for the real response
-                        if classify_segment(&batch[0].prev_hash, &expect_prev, &walk.anchors)
-                            == SegAction::DropStale
+                        // A reply for ANY live epoch anchor of this round (the
+                        // current cursor's own epoch was consumed on a match,
+                        // so this is a SUPERSEDED epoch) is a late duplicate:
+                        // drop it and keep waiting — never Fatal.
+                        let superseded = inflight
+                            .iter()
+                            .any(|(_, anchor)| *anchor == batch[0].prev_hash);
+                        if superseded
+                            || classify_segment(&batch[0].prev_hash, &expect_prev, &walk.anchors)
+                                == SegAction::DropStale
                         {
-                            log(&format!(
-                                "from-zero: dropped stale duplicate headers segment ({} headers, parent h{})",
-                                batch.len(),
-                                walk.next_height.saturating_sub(1)
-                            ));
+                            // rate-limit the stale-drop log to once per second
+                            if last_stale_log.elapsed() >= Duration::from_secs(1) {
+                                last_stale_log = Instant::now();
+                                log(&format!(
+                                    "from-zero: dropped stale duplicate headers segment ({} headers, parent h{})",
+                                    batch.len(),
+                                    walk.next_height.saturating_sub(1)
+                                ));
+                            }
                             continue;
                         }
                         return Err(format!(
@@ -4701,6 +5260,8 @@ fn headers_round(
                             tri7_core::p2p::internal_to_display(&expect_prev)
                         ));
                     }
+                    // the live epoch for this cursor is answered
+                    inflight.retain(|(_, anchor)| *anchor != expect_prev);
                     for hdr in batch {
                         if hdr.prev_hash != expect_prev {
                             return Err(format!(
@@ -4728,7 +5289,8 @@ fn headers_round(
                             walk.next_height + out.len() as u64 - 1
                         ));
                     }
-                    outstanding = true; // full batch — request the next segment now
+                    // full batch — the next iteration issues the NEXT epoch
+                    // (for the new cursor) and never re-sends this one
                 }
                 "ping" => {
                     let n = tri7_core::p2p::parse_ping(&msg.payload)?;
@@ -5378,7 +5940,36 @@ fn sync_from_zero(
 // ---------------------------------------------------------------------------
 fn load_state(cfg: &Config) -> Result<ChainState, String> {
     let path = state_path(cfg);
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    match load_state_from(&path) {
+        Ok(st) => Ok(st),
+        Err(e) => {
+            // TIPSTATE-DURABILITY (F3): a torn/partial primary must not brick
+            // the node — the previous good file is kept as `.bak` precisely
+            // for this. Only when BOTH fail does the error escape (and the
+            // caller then takes the seed path instead of dying).
+            let bak = path.with_extension("json.bak");
+            match load_state_from(&bak) {
+                Ok(st) => {
+                    log(&format!(
+                        "tipstate.json unusable ({}): recovered from {} (previous good state)",
+                        e,
+                        bak.display()
+                    ));
+                    Ok(st)
+                }
+                Err(e2) => Err(format!(
+                    "{} (backup {} also unusable: {})",
+                    e,
+                    bak.display(),
+                    e2
+                )),
+            }
+        }
+    }
+}
+
+fn load_state_from(path: &Path) -> Result<ChainState, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let f: TipStateFile = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     if f.entries.is_empty() {
         return Err("empty entries in state".into());
@@ -5849,27 +6440,35 @@ fn scan_modifier_chain(st: &ChainState) -> ModifierScan {
     let mut compared = 0usize;
     let mut first_bad: Option<usize> = None;
     for i in rewrite_start..n {
-        if !st.entries[i].generated_stake_modifier {
-            continue;
-        }
+        // MODIFIER AUDIT (T7-07): the stored `generated` flag is NOT trusted —
+        // replaying only entries that CLAIM to be generated made a wrong flag
+        // invisible (a real generated entry marked false, or vice versa, was
+        // skipped by the audit forever). Recompute the (modifier, generated)
+        // PAIR for every sampled entry and flag a mismatch on either field.
         let interval: u32 = if st.base + (i as u64) < 17692 { 1200 } else { 300 };
         // The replay input (nearest generated modifier ≤ i-1) is stored
         // canonical below the divergence; above it the recomputed value
         // tracks the poison exactly like the stored chain, so the compare
         // stays clean there — first_bad is the divergence point itself.
-        let computed = match tri7_core::kernel::compute_next_stake_modifier_era(
+        let (computed, computed_generated) = match tri7_core::kernel::compute_next_stake_modifier_era(
             &idx,
             Some(i - 1),
             interval,
         ) {
-            Ok((m, _g)) => m,
+            Ok(pair) => pair,
             Err(_) => continue, // not replayable here — skip, never a false mismatch
         };
         compared += 1;
-        if computed != st.entries[i].stake_modifier && first_bad.is_none() {
+        if (computed != st.entries[i].stake_modifier
+            || computed_generated != st.entries[i].generated_stake_modifier)
+            && first_bad.is_none()
+        {
             first_bad = Some(i);
         }
     }
+    // a stored flag that lies also lies about where healing must start: never
+    // start the rewrite ABOVE the first divergence the audit found
+    let rewrite_start = first_bad.map(|b| b.min(rewrite_start)).unwrap_or(rewrite_start);
     ModifierScan {
         compared,
         first_bad,
@@ -10879,7 +11478,9 @@ fn handle_message(
     pool: &mut tri7_core::txpool::TxPool,
     wl: &SharedWalletLive,
     announce: &TxAnnounce,
-    pending_tx_getdata: &mut std::collections::HashSet<Hash>,
+    // TX-GETDATA-NO-EXPIRY: hash → (sent_at, requesting peer label). A
+    // HashSet had no age-out, so 64 bogus txids disabled tx relay FOREVER.
+    pending_tx_getdata: &mut HashMap<Hash, (Instant, String)>,
     recon: &mut ReconAcc,
 ) -> Result<(), String> {
     match msg.command.as_str() {
@@ -11029,8 +11630,16 @@ fn handle_message(
             for (t, hash) in inv {
                 if t == tri7_core::p2p::MSG_TX {
                     let known = pool.get(&hash).is_some();
+                    // TX-GETDATA-NO-EXPIRY: age out first — a txid whose
+                    // getdata went unanswered for GETDATA_TIMEOUT_SECS no
+                    // longer holds a slot (and a disconnected peer's entries
+                    // are dropped entirely below).
+                    pending_tx_getdata.retain(|_, (at, _)| {
+                        at.elapsed() < Duration::from_secs(GETDATA_TIMEOUT_SECS)
+                    });
                     if !known && pending_tx_getdata.len() < 64 {
-                        pending_tx_getdata.insert(hash);
+                        pending_tx_getdata
+                            .insert(hash, (Instant::now(), peer.label.clone()));
                         tx_want.push((tri7_core::p2p::MSG_TX, hash));
                     }
                     continue;
@@ -11367,6 +11976,10 @@ fn handle_message(
                                 });
                             }
                         }
+                        // PEER-HEALTH: a body that fails consensus is a
+                        // protocol violation — record it as UNSERVED so the
+                        // dial order stops preferring this peer.
+                        record_peer_unserved(cfg, &peer.label);
                         peer.dead = true;
                         peer.sess.shutdown();
                         return Ok(());
@@ -11420,6 +12033,11 @@ fn handle_message(
                 }
                 addrindex_apply(&b, height_abs);
                 stats.blocks_validated_live += 1;
+                // PEER-HEALTH: only a body that actually advanced the tip is
+                // proof this peer SERVES — tallied and flushed periodically.
+                if !is_reinject {
+                    note_peer_served(&peer.label, msg.payload.len() as u64);
+                }
                 outstanding.remove(&hash);
                 body_tries.remove(&hash); // (item 23) rotation memory done
                 // DURABILITY: append the accepted block to the store so the
@@ -11501,7 +12119,19 @@ fn handle_message(
         // serving: peers may pull stored blocks and header ranges from us
         "getdata" => {
             let inv = tri7_core::p2p::parse_inv(&msg.payload)?;
-            for (t, hash) in inv {
+            // GETDATA-SERVE-AMPLIFICATION: answer at most GETDATA_SERVE_CAP
+            // entries of one request and at most a per-window budget per peer.
+            let (store_ready, status_txt) = match store.status() {
+                StoreStatus::Ready { .. } => (true, "ready".to_string()),
+                StoreStatus::Building { frames_done } => {
+                    (false, format!("building, {} frames", frames_done))
+                }
+                StoreStatus::Failed(e) => (false, format!("failed: {}", e)),
+                StoreStatus::Unconfigured => (false, "unconfigured".to_string()),
+            };
+            let allowed = serve_budget_allows(&peer.label, inv.len());
+            let mut missed = 0usize;
+            for (t, hash) in inv.into_iter().take(allowed) {
                 if t == tri7_core::p2p::MSG_TX {
                     if let Some((raw, _)) = pool.get(&hash) {
                         stats.getdata_tx_served += 1;
@@ -11520,16 +12150,36 @@ fn handle_message(
                         _ => None,
                     },
                 };
-                if let Some(raw) = payload {
-                    stats.getdata_served += 1;
-                    peer.sess.send("block", &raw, stats)?;
+                match payload {
+                    Some(raw) => {
+                        stats.getdata_served += 1;
+                        peer.sess.send("block", &raw, stats)?;
+                    }
+                    None => missed += 1,
                 }
+            }
+            if missed > 0 {
+                note_getdata_miss(&peer.label, store_ready, &status_txt);
             }
             Ok(())
         }
         "getheaders" => {
             let (locator, stop) = parse_getheaders(&msg.payload)?;
+            let (store_ready, status_txt) = match store.status() {
+                StoreStatus::Ready { .. } => (true, "ready".to_string()),
+                StoreStatus::Building { frames_done } => {
+                    (false, format!("building, {} frames", frames_done))
+                }
+                StoreStatus::Failed(e) => (false, format!("failed: {}", e)),
+                StoreStatus::Unconfigured => (false, "unconfigured".to_string()),
+            };
             let headers = collect_headers(store, recent, &locator, &stop);
+            // SERVE-SILENT-NOT-READY: an EMPTY reply while the index is not
+            // ready is not "we have nothing after your locator" — count it
+            // and say so once per peer instead of silently looking at tip.
+            if headers.is_empty() && !store_ready {
+                note_getheaders_miss(&peer.label, store_ready, &status_txt);
+            }
             stats.getheaders_served += 1;
             peer.sess
                 .send("headers", &tri7_core::p2p::encode_headers(&headers), stats)?;
@@ -12282,6 +12932,12 @@ pub fn main_args(argv: &[String]) -> i32 {
         std::env::set_var("TRI7_WALLET_PATH", wp.display().to_string());
     }
     std::env::set_var("TRI7_STATE_DIR", cfg.state_dir.display().to_string());
+    // STATE-LOCK (F1): refuse to start when another process owns this state
+    // dir — two writers silently promote each other's stale windows.
+    let _state_lock = match acquire_state_lock(&cfg.state_dir) {
+        Ok(l) => l,
+        Err(e) => die(EXIT_USAGE, &e),
+    };
     // --new-wallet: brand-new wallet with BRAND-NEW keys (never copied) —
     // bootstrap the SQLite TRIw container (the wallet writer opens rw but
     // never creates), then insert freshly generated secrets via add_key.
@@ -12382,8 +13038,21 @@ pub fn main_args(argv: &[String]) -> i32 {
     // 2. load or seed chain state
     let mut st: ChainState = if have_state {
         log("loading tipstate.json …");
-        let mut loaded =
-            load_state(&cfg).unwrap_or_else(|e| die(EXIT_SEED, &format!("load state: {}", e)));
+        let mut loaded = match load_state(&cfg) {
+            Ok(l) => l,
+            Err(e) => {
+                // TIPSTATE-DURABILITY (F3): BOTH the primary and its .bak are
+                // unusable. Dying here bricked the node on a disk-level tear;
+                // the honest move is a loud line + the normal seed path, which
+                // re-derives the window from peers.
+                log(&format!(
+                    "tipstate.json AND its .bak are unusable ({}): {} — falling back to the network seed path instead of exiting",
+                    state_path(&cfg).display(),
+                    e
+                ));
+                seed_chain_from_network(&cfg, &rpc, &mut peers, &mut stats)
+            }
+        };
         // Item 24: fold the [base..first_record) bodies so the kernel map
         // spans the whole staking window — a records-only boot used to leave
         // every coin older than ~1700 conf permanently unstakable
@@ -12445,30 +13114,7 @@ pub fn main_args(argv: &[String]) -> i32 {
         ));
         st
     } else {
-        log("no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …");
-        let seeded = match peers.first_mut() {
-            Some(p) => seed_from_network(&cfg, &rpc, &mut p.sess, &mut stats),
-            None => die(
-                EXIT_SEED,
-                "seeding needs a live peer but all outbound targets are unreachable",
-            ),
-        };
-        if let Err(e) = &seeded {
-            if let Some(p) = peers.first_mut() {
-                p.sess.shutdown();
-            }
-            die(EXIT_SEED, &e);
-        }
-        let (chain, file) = seeded.unwrap();
-        write_state_atomic(&cfg, &file)
-            .unwrap_or_else(|e| die(EXIT_SEED, &format!("write state: {}", e)));
-        log(&format!(
-            "seeded: tip h{} {} (window base {})",
-            chain.tip_height,
-            tri7_core::p2p::internal_to_display(&chain.tip_hash),
-            chain.base
-        ));
-        chain
+        seed_chain_from_network(&cfg, &rpc, &mut peers, &mut stats)
     };
 
     // report our real height to the peer: reconnect with the correct
@@ -12693,6 +13339,12 @@ pub fn main_args(argv: &[String]) -> i32 {
                 let mut blk_missing_logged = false;
                 let mut sched = RebuildSchedule::new();
                 let mut last_attempt: Option<std::time::Instant> = None;
+                // BALANCES PACING (F8): consecutive ERROR attempts and the
+                // stop threshold. The pre-fix loop slept a flat 600s forever
+                // on errors and a flat 6h after a short walk, ignoring the
+                // backoff the scheduler already computes.
+                let mut err_streak: u32 = 0;
+                const MAX_BUILD_ERRORS: u32 = 20;
                 // logged-once guard for the startup seeding
                 let mut short_seeded = false;
                 loop {
@@ -12814,6 +13466,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                             // and loop: the scheduler paces the retry, so the
                             // snapshot converges to the whole chain.
                             last_attempt = Some(std::time::Instant::now());
+                            err_streak = 0;
                             sched.record((rep.covered_to as u64) >= tip);
                             if sched.streak > 0 {
                                 log(&format!(
@@ -12826,17 +13479,38 @@ pub fn main_args(argv: &[String]) -> i32 {
                             // NO sleep here: the loop top owns the pacing
                         }
                         Err(e) => {
-                            // transient failure (torn read, disk full): retry
-                            // on the SHORT cycle, not the 6h one
+                            // BALANCES PACING (F8): a deterministic failure
+                            // (bad input, disk full) used to retry every 600s
+                            // forever. Back off 30..1800s via the scheduler's
+                            // ladder and stop after MAX_BUILD_ERRORS with ONE
+                            // final line instead of spinning silently.
+                            err_streak = err_streak.saturating_add(1);
+                            if err_streak >= MAX_BUILD_ERRORS {
+                                log(&format!(
+                                    "balances-build: FAILED after {} consecutive attempts ({}): giving up — the snapshot stays at its last good coverage",
+                                    err_streak, e
+                                ));
+                                break;
+                            }
+                            sched.record(false);
+                            let wait = sched.backoff_secs().max(30);
                             log(&format!(
-                                "balances-build: FAILED: {} — retrying in {}s",
-                                e, NO_BLK_RETRY_SECS
+                                "balances-build: FAILED (attempt {}/{}): {} — retrying in {}s",
+                                err_streak, MAX_BUILD_ERRORS, e, wait
                             ));
-                            std::thread::sleep(Duration::from_secs(NO_BLK_RETRY_SECS));
+                            std::thread::sleep(Duration::from_secs(wait));
                             continue;
                         }
                     }
-                    std::thread::sleep(Duration::from_secs(REFRESH_CHECK_SECS));
+                    // BALANCES PACING (F8): a SHORT walk waits the scheduler's
+                    // backoff (30..1800s), not the flat 6h refresh — the whole
+                    // point of the ladder is to converge quickly, then slowly.
+                    let wait = if sched.streak > 0 {
+                        sched.backoff_secs().max(30)
+                    } else {
+                        REFRESH_CHECK_SECS
+                    };
+                    std::thread::sleep(Duration::from_secs(wait));
                 }
             })
             .map(|_| ())
@@ -13365,6 +14039,11 @@ pub fn main_args(argv: &[String]) -> i32 {
     };
     let mut last_poll = Instant::now() - Duration::from_secs(POLL_SECS);
     let mut poll_parity = false;
+    // background connection machinery (the loop must never sit inside a
+    // handshake or a SOCKS dial: see INBOUND-HS-BLOCKS-LOOP /
+    // OUTBOUND-DIAL-BLOCKS-LOOP)
+    let mut dialer = Dialer::new(cfg.clone());
+    let mut inbound_hs = InboundHs::new();
     let mut outstanding: HashMap<Hash, u64> = HashMap::new();
     // (item 23) rotation memory for the body-request pipeline (age-out +
     // peer rotation); keyed by the same hashes as `outstanding`
@@ -13407,7 +14086,7 @@ pub fn main_args(argv: &[String]) -> i32 {
     let mut relayed_tip: Option<Hash> = None;
     let gap_shared: Arc<Mutex<GapState>> = Arc::new(Mutex::new(GapState::default()));
     // phase 7 milestone 2 loop state
-    let mut pending_tx_getdata: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+    let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
     let mut last_stake_tick = Instant::now() - Duration::from_secs(cfg.stake_tick_secs);
     let mut last_smsg_tick = Instant::now() - Duration::from_secs(2);
     let mut last_peer_table_sync = Instant::now() - Duration::from_secs(30);
@@ -13458,13 +14137,9 @@ pub fn main_args(argv: &[String]) -> i32 {
             let have_outbound =
                 fresh_outbound_present(&peers, Instant::now(), OUTBOUND_FRESH_WINDOW);
             if !have_outbound {
-                // headless/peerless: retry the outbound rotation each tick
-                if let Some((p, idx)) = try_connect(&cfg, &mut stats, height_for_attach, outbound_start) {
-                    log(&format!("outbound re-attached: {}", p.label));
-                    outbound_start = (idx + 1) % cfg.peers.len();
-                    peers.push(p);
-                    st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
-                }
+                // headless/peerless: retry the outbound rotation each tick —
+                // QUEUED to the connector thread, never dialled inline
+                dialer.request(height_for_attach, outbound_start);
             }
             if !peers.is_empty() {
                 {
@@ -13654,35 +14329,42 @@ pub fn main_args(argv: &[String]) -> i32 {
             last_poll = Instant::now();
         }
 
-        // accept inbound peers (nonblocking; handshake is bounded)
+        // INBOUND-HS-BLOCKS-LOOP: handshakes complete on bounded worker
+        // threads (max MAX_INBOUND_HS); the loop only accepts new sockets and
+        // drains finished peers from the control queue — one silent
+        // connection can no longer freeze the node for 40s.
         if let Some(l) = listener.as_ref() {
-            loop {
-                match l.accept() {
-                    Ok((stream, sa)) => {
-                        let height = st_shared.lock().unwrap().tip_height;
-                        let port = cfg.listen_port.unwrap_or(0);
-                        match accept_handshake(stream, sa, &mut stats, height, port, &cfg.state_dir) {
-                            Ok(p) => {
-                                stats.inbound_accepted += 1;
-                                log(&format!("inbound peer connected: {}", p.label));
-                                peers.push(p);
-                                st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
-                                peers_shared.store(peers.len() as u32, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                log(&format!("inbound handshake {} failed: {}", sa, e));
-                            }
-                        }
+            inbound_hs.pump(l, &cfg, st_shared.lock().unwrap().tip_height);
+            for (sa, res) in inbound_hs.drain() {
+                match res {
+                    Ok(p) => {
+                        inbound_hs.note_result(true);
+                        stats.inbound_accepted += 1;
+                        log(&format!("inbound peer connected: {}", p.label));
+                        peers.push(p);
+                        st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-                // bound the accepts per tick so a flood cannot starve the loop
-                if peers.len() > 32 {
-                    break;
+                    Err(e) => {
+                        inbound_hs.note_result(false);
+                        log(&format!("inbound handshake {} failed: {}", sa, e));
+                    }
                 }
             }
             peers_shared.store(peers.len() as u32, Ordering::Relaxed);
+        }
+
+        // OUTBOUND-DIAL-BLOCKS-LOOP: consume a finished background dial. The
+        // tick never waits for it — `poll` is a try_recv.
+        if let Some(res) = dialer.poll() {
+            match res {
+                Ok((p, idx)) => {
+                    log(&format!("outbound re-attached: {}", p.label));
+                    outbound_start = (idx + 1) % cfg.peers.len().max(1);
+                    peers.push(p);
+                    st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
+                }
+                Err(e) => log(&format!("outbound dial failed: {}", e)),
+            }
         }
 
         // (item 28) adoption lifecycle — two guards that together end the
@@ -13886,6 +14568,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                                                 sent_at: now,
                                                 attempts: 0,
                                                 tried: Vec::new(),
+                                                refreshes: 0,
                                             });
                                         t.sent_at = now;
                                         t.attempts += 1;
@@ -13948,14 +14631,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                             "adoption body ESCALATION: no connected peer could serve the adopted branch — dialling a fresh transport seed",
                         );
                         let tip_now = st_shared.lock().unwrap().tip_height;
-                        if let Some((p, idx)) =
-                            try_connect(&cfg, &mut stats, tip_now, outbound_start)
-                        {
-                            log(&format!("outbound re-attached: {}", p.label));
-                            outbound_start = (idx + 1) % cfg.peers.len();
-                            peers.push(p);
-                            st_shared.lock().unwrap().last_peer_utc = Some(now_iso());
-                        }
+                        dialer.request(tip_now, outbound_start);
                     }
                 } else {
                     body_no_server_since = None;
@@ -14136,6 +14812,17 @@ pub fn main_args(argv: &[String]) -> i32 {
             }
         }
         peers.retain(|p| p.sess_ok());
+        // TX-GETDATA-NO-EXPIRY: a disconnected peer's pending tx requests go
+        // with it — nobody else will answer a getdata we sent to that peer,
+        // and keeping them would hold relay slots until the age-out.
+        {
+            let live: std::collections::HashSet<String> =
+                peers.iter().map(|p| p.label.clone()).collect();
+            pending_tx_getdata.retain(|_, (_, label)| live.contains(label));
+        }
+        // PEER-HEALTH: flush the served-block tallies into peers.json (the
+        // dial order's primary ranking input), at most once per 5s.
+        flush_peer_served(&cfg);
         peers_shared.store(peers.len() as u32, Ordering::Relaxed);
         // (fz-rec fix 5) arrived bodies = served bodies: every tried label on
         // a hash the pump removed from `outstanding` proved itself — its
@@ -15392,6 +16079,180 @@ fn getrawchangeaddress_verb(
     Ok(serde_json::json!(address))
 }
 
+// ---------------------------------------------------------------------------
+// Background connection machinery
+// (INBOUND-HS-BLOCKS-LOOP + OUTBOUND-DIAL-BLOCKS-LOOP)
+// ---------------------------------------------------------------------------
+
+/// Max concurrent inbound handshake workers. Each may wait 20s for version
+/// plus 20s for verack; running them ON the follow loop froze the node for
+/// 40s per silent connection. Four workers absorb bursts without letting a
+/// flood spawn unbounded threads.
+const MAX_INBOUND_HS: usize = 4;
+/// Consecutive failed accepts before inbound accepting pauses (a scanner
+/// that opens and drops sockets must not burn the CPU in handshakes).
+const MAX_INBOUND_FAIL_STREAK: u32 = 20;
+const INBOUND_PAUSE: Duration = Duration::from_secs(60);
+
+/// Inbound handshake workers: accepted sockets complete version/verack on
+/// their own threads; completed `Peer`s (or errors) come back through a
+/// channel that the follow loop drains without ever blocking.
+struct InboundHs {
+    tx: std::sync::mpsc::Sender<(std::net::SocketAddr, Result<Peer, String>)>,
+    rx: std::sync::mpsc::Receiver<(std::net::SocketAddr, Result<Peer, String>)>,
+    inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail_streak: u32,
+    paused_until: Option<Instant>,
+    pause_logged: bool,
+}
+
+impl InboundHs {
+    fn new() -> InboundHs {
+        let (tx, rx) = std::sync::mpsc::channel();
+        InboundHs {
+            tx,
+            rx,
+            inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fail_streak: 0,
+            paused_until: None,
+            pause_logged: false,
+        }
+    }
+
+    /// Accept at most the free worker slots. Never blocks: the listener is
+    /// nonblocking and every accepted socket is handed to a worker thread.
+    fn pump(&mut self, l: &TcpListener, cfg: &Config, our_height: u64) {
+        if let Some(until) = self.paused_until {
+            if Instant::now() < until {
+                return;
+            }
+            self.paused_until = None;
+        }
+        if self.fail_streak >= MAX_INBOUND_FAIL_STREAK {
+            if !self.pause_logged {
+                log(&format!(
+                    "inbound: {} consecutive handshake failures — pausing accepts for {}s",
+                    self.fail_streak,
+                    INBOUND_PAUSE.as_secs()
+                ));
+                self.pause_logged = true;
+            }
+            self.paused_until = Some(Instant::now() + INBOUND_PAUSE);
+            self.fail_streak = 0;
+            return;
+        }
+        loop {
+            if self.inflight.load(Ordering::Relaxed) >= MAX_INBOUND_HS {
+                return;
+            }
+            match l.accept() {
+                Ok((stream, sa)) => {
+                    let tx = self.tx.clone();
+                    let inflight = self.inflight.clone();
+                    let port = cfg.listen_port.unwrap_or(0);
+                    let state_dir = cfg.state_dir.clone();
+                    inflight.fetch_add(1, Ordering::Relaxed);
+                    let spawned = std::thread::Builder::new()
+                        .name("inbound-hs".into())
+                        .spawn(move || {
+                            let mut st = Stats::default();
+                            let res =
+                                accept_handshake(stream, sa, &mut st, our_height, port, &state_dir);
+                            let _ = tx.send((sa, res));
+                            inflight.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    if let Err(e) = spawned {
+                        self.inflight.fetch_sub(1, Ordering::Relaxed);
+                        log(&format!("inbound: cannot spawn handshake worker: {}", e));
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Collect every finished handshake (nonblocking).
+    fn drain(&mut self) -> Vec<(std::net::SocketAddr, Result<Peer, String>)> {
+        let mut out = Vec::new();
+        while let Ok(item) = self.rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+
+    fn note_result(&mut self, ok: bool) {
+        if ok {
+            self.fail_streak = 0;
+            self.pause_logged = false;
+        } else {
+            self.fail_streak = self.fail_streak.saturating_add(1);
+        }
+    }
+}
+
+/// OUTBOUND-DIAL-BLOCKS-LOOP: one connector thread. `try_connect` dials EVERY
+/// rotation target inline (90s SOCKS + 60s handshake each on i2p), freezing
+/// the follow loop for minutes. Here the loop only queues a job and consumes
+/// whatever finished; it never waits more than a `try_recv`.
+struct Dialer {
+    job_tx: std::sync::mpsc::Sender<(u64, usize)>,
+    res_rx: std::sync::mpsc::Receiver<(Result<(Peer, usize), String>, usize)>,
+    inflight: bool,
+}
+
+impl Dialer {
+    fn new(cfg: Config) -> Dialer {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<(u64, usize)>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("dialer".into())
+            .spawn(move || {
+                let mut stats = Stats::default();
+                while let Ok((height, start)) = job_rx.recv() {
+                    let res = connect_and_handshake(&cfg, &mut stats, height, start);
+                    if res_tx.send((res, start)).is_err() {
+                        break; // loop gone
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            log(&format!(
+                "dialer: cannot spawn connector thread ({}): outbound dials stay inline",
+                e
+            ));
+        }
+        Dialer {
+            job_tx,
+            res_rx,
+            inflight: false,
+        }
+    }
+
+    /// Queue a dial unless one is already running (one at a time: the
+    /// rotation walks targets in order anyway).
+    fn request(&mut self, height: u64, start: usize) {
+        if self.inflight {
+            return;
+        }
+        if self.job_tx.send((height, start)).is_ok() {
+            self.inflight = true;
+        }
+    }
+
+    /// Nonblocking: the finished dial, if any.
+    fn poll(&mut self) -> Option<Result<(Peer, usize), String>> {
+        match self.res_rx.try_recv() {
+            Ok((res, _start)) => {
+                self.inflight = false;
+                Some(res)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 /// Server-side handshake for an accepted inbound connection: the client
 /// speaks first (legacy daemon behavior — it waits for our version on its
 /// outbound connects), we answer version+verack together, then sendheaders
@@ -15427,6 +16288,9 @@ fn accept_handshake(
                 let v = tri7_core::p2p::parse_version(&msg.payload)?;
                 if v.version < tri7_core::p2p::MIN_PROTO_VERSION {
                     return Err(format!("peer version {} obsolete", v.version));
+                }
+                if v.nonce == our_version_nonce() {
+                    return Err("self-connection: peer presents our own version nonce".into());
                 }
                 peer = Some(PeerInfo {
                     version: v.version,
@@ -15473,7 +16337,7 @@ fn accept_handshake(
         yport,
         tri7_core::p2p::NODE_NETWORK,
     );
-    let nonce = (now_secs() ^ ((std::process::id() as u64) << 32)) | 1;
+    let nonce = our_version_nonce();
     let vp = tri7_core::p2p::VersionPayload {
         version: tri7_core::p2p::PROTOCOL_VERSION,
         services: tri7_core::p2p::NODE_NETWORK,
@@ -15698,6 +16562,42 @@ fn try_connect(
         Ok((peer, idx)) => Some((peer, idx)),
         Err(_) => None,
     }
+}
+
+/// The SEED path, shared by "no usable state" and "tipstate unreadable"
+/// (TIPSTATE-DURABILITY F3). Kept as one function so the corruption fallback
+/// cannot drift from the first-boot path. Still dies when there is nothing to
+/// seed from (a genuinely empty node) — that is a real operator error.
+fn seed_chain_from_network(
+    cfg: &Config,
+    rpc: &Rpc,
+    peers: &mut Vec<Peer>,
+    stats: &mut Stats,
+) -> ChainState {
+    log("no usable state — seeding: raw blocks over P2P getdata, Hash9+link+merkle verified locally …");
+    let seeded = match peers.first_mut() {
+        Some(p) => seed_from_network(cfg, rpc, &mut p.sess, stats),
+        None => die(
+            EXIT_SEED,
+            "seeding needs a live peer but all outbound targets are unreachable",
+        ),
+    };
+    if let Err(e) = &seeded {
+        if let Some(p) = peers.first_mut() {
+            p.sess.shutdown();
+        }
+        die(EXIT_SEED, e);
+    }
+    let (chain, file) = seeded.unwrap();
+    write_state_atomic(cfg, &file)
+        .unwrap_or_else(|e| die(EXIT_SEED, &format!("write state: {}", e)));
+    log(&format!(
+        "seeded: tip h{} {} (window base {})",
+        chain.tip_height,
+        tri7_core::p2p::internal_to_display(&chain.tip_hash),
+        chain.base
+    ));
+    chain
 }
 
 fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, note: &str) -> ! {
@@ -18339,6 +19239,7 @@ mod tests {
                     sent_at: now - Duration::from_secs(age),
                     attempts: att,
                     tried: vec!["out:stale.onion".to_string()],
+                    refreshes: 0,
                 },
             );
         }
@@ -18718,6 +19619,7 @@ mod tests {
                 sent_at: Instant::now(),
                 attempts: 1,
                 tried: vec!["out:p".to_string()],
+                refreshes: 0,
             },
         );
         body_tries.insert(
@@ -18726,6 +19628,7 @@ mod tests {
                 sent_at: Instant::now(),
                 attempts: 2,
                 tried: vec!["out:q".to_string(), "out:p".to_string()],
+                refreshes: 0,
             },
         );
         let batch = vec![
@@ -18776,6 +19679,7 @@ mod tests {
                 sent_at: Instant::now() - Duration::from_secs(GETDATA_TIMEOUT_SECS * 2),
                 attempts: 1,
                 tried: vec!["out:slow.onion".to_string()],
+                refreshes: 0,
             },
         );
         assert!(refresh_body_request_clock(&mut body_tries, &h));
@@ -18893,6 +19797,7 @@ mod tests {
                 sent_at: Instant::now(),
                 attempts: 1,
                 tried: vec!["out:cached-src.onion".to_string()],
+                refreshes: 0,
             },
         );
         // the failure handler: refresh the clock, keep the request
@@ -19085,6 +19990,7 @@ mod tests {
                 sent_at: stale,
                 attempts: 1,
                 tried: vec!["in:advertiser".to_string()],
+                refreshes: 0,
             },
         );
         let mut outstanding: HashMap<Hash, u64> = HashMap::from([(h1, 65)]);
@@ -20253,6 +21159,76 @@ mod tests {
         let c = mk_header(alien, 0x03, 0x2000_ffff);
         assert!(intake_header_batch(&mut stg, &[c], &mut pend, &mut stats));
         assert_eq!(stats.headers_new, 2, "the unlinked header is not queued");
+    }
+
+    /// PENDING-QUEUE-NO-DEDUPE: the 30s tip poll re-serves the same headers
+    /// while bodies stall — the queue must not grow a second copy of them.
+    #[test]
+    fn intake_header_batch_dedupes_a_reserved_window() {
+        let mut stg = synthetic_chain(100, 105);
+        let mut pend = VecDeque::new();
+        let mut stats = Stats::default();
+        let a = mk_header(stg.tip_hash, 0x11, 0x2000_ffff);
+        let b = mk_header(a.hash(), 0x12, 0x2000_ffff);
+        assert!(!intake_header_batch(&mut stg, &[a.clone(), b.clone()], &mut pend, &mut stats));
+        let queued = pend.len();
+        assert_eq!(queued, 2);
+        // the SAME window arrives again on the next poll
+        assert!(!intake_header_batch(&mut stg, &[a.clone(), b.clone()], &mut pend, &mut stats));
+        assert_eq!(pend.len(), queued, "a re-served window must not be appended twice");
+        assert_eq!(stats.headers_new, 2, "no header counted twice");
+        // and the queue cap holds
+        let mut stg2 = synthetic_chain(100, 105);
+        let mut pend2: VecDeque<(Hash, u64)> = VecDeque::new();
+        for i in 0..(PENDING_HEADERS_CAP as u64) {
+            let h = mk_header([0xABu8; 32], i as u8, 0x2000_ffff);
+            stg2.pending_headers.insert(h.hash(), h.clone());
+            pend2.push_back((h.hash(), 106 + i));
+        }
+        let c = mk_header(stg2.tip_hash, 0x21, 0x2000_ffff);
+        intake_header_batch(&mut stg2, &[c], &mut pend2, &mut stats);
+        assert_eq!(pend2.len(), PENDING_HEADERS_CAP, "queue stays capped");
+    }
+
+    /// BODY-CLOCK-REFRESH-PIN: a peer re-serving one non-extending block may
+    /// refresh the age-out clock at most BODY_REFRESH_CAP times, then the
+    /// request must be allowed to age out and re-dispatch elsewhere.
+    #[test]
+    fn body_clock_refresh_is_capped() {
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let h = [0x5Au8; 32];
+        body_tries.insert(
+            h,
+            BodyTries {
+                sent_at: Instant::now() - Duration::from_secs(GETDATA_TIMEOUT_SECS * 2),
+                attempts: 1,
+                tried: vec!["out:non-extending.onion".to_string()],
+                refreshes: 0,
+            },
+        );
+        for i in 0..BODY_REFRESH_CAP {
+            assert!(
+                refresh_body_request_clock(&mut body_tries, &h),
+                "refresh {} inside the cap must be granted",
+                i + 1
+            );
+        }
+        assert!(
+            !refresh_body_request_clock(&mut body_tries, &h),
+            "the capped refresh is refused so the request can age out"
+        );
+    }
+
+    /// STATE-LOCK (F1): every atomic writer's tmp path is pid-unique — two
+    /// writers of the same process must never share a half-written tmp.
+    #[test]
+    fn state_tmp_paths_are_unique_per_call() {
+        let p = std::path::Path::new("/tmp/tipstate.json");
+        let a = state_tmp_path(p);
+        let b = state_tmp_path(p);
+        assert_ne!(a, b, "two calls must not share a tmp path");
+        assert!(a.to_string_lossy().contains(&std::process::id().to_string()));
+        assert!(a.to_string_lossy().ends_with(".tmp.") == false);
     }
 
     #[test]
@@ -22273,7 +23249,12 @@ addnode=host:notaport
         let mut store = tri7_core::peers::PeerStore::default();
         store.upsert(host, 24113, 1, "addnode", 1);
         store.save(&state.join("peers.json")).unwrap();
-        std::fs::create_dir_all(state.join("peers.json.tmp")).unwrap();
+        // STATE-LOCK (F1): the tmp sidecar is pid-unique now, so block THAT
+        // path — the intent (a failing tmp write must not ack) is unchanged.
+        std::fs::create_dir_all(
+            state.join(format!("peers.json.tmp.{}", std::process::id())),
+        )
+        .unwrap();
         let adapter = ops_adapter_for_tests(&state, Vec::new(), None);
         let err = tri7_core::rpc::NodeOps::call(&adapter, "addnode", &serde_json::json!([node, "remove"]))
             .unwrap_err();
@@ -22612,6 +23593,7 @@ addnode=host:notaport
                     sent_at: Instant::now(),
                     attempts: 1,
                     tried: vec![b32_label.clone(), clearnet_label.clone()],
+                    refreshes: 0,
                 },
             ),
             (
@@ -22620,6 +23602,7 @@ addnode=host:notaport
                     sent_at: Instant::now(),
                     attempts: 1,
                     tried: vec![dns_label.clone()],
+                    refreshes: 0,
                 },
             ),
         ]);
@@ -22643,12 +23626,19 @@ addnode=host:notaport
             "clearnet demotion unchanged: {demoted:?}"
         );
         assert!(reports.iter().any(|r| r.contains("100.85.236.10")));
-        assert!(
-            !misses.contains_key(&b32_label),
-            "i2p source must not be credited: {misses:?}"
+        // I2P-NEVER-DEMOTED: i2p IS credited now — a longer leash, not
+        // immunity. One unserved round is credited but does NOT demote it.
+        assert_eq!(
+            misses.get(&b32_label).copied(),
+            Some(1),
+            "i2p round is credited: {misses:?}"
         );
-        assert!(!demoted.iter().any(|(k, _)| k.contains(".b32.i2p")));
-        // round 2: the plain-`.i2p` inbound label is i2p too — exempt
+        assert!(
+            !demoted.iter().any(|(k, _)| k.contains(".b32.i2p")),
+            "one unserved round must not demote i2p"
+        );
+        // round 2: the plain-`.i2p` inbound label is i2p too — credited, and
+        // still not demoted before the i2p threshold (4 rounds)
         let reports2 = credit_body_miss_round(
             &[(hash_b, 0, 1)],
             &tries,
@@ -22661,9 +23651,28 @@ addnode=host:notaport
         );
         assert!(
             reports2.is_empty(),
-            "the .i2p label must be exempt too: {reports2:?}"
+            "one round of a fresh .i2p label must not demote: {reports2:?}"
         );
-        assert!(!misses.contains_key(&dns_label));
+        assert!(misses.contains_key(&dns_label), "the .i2p label is credited");
+        // rounds 3 and 4: the i2p leash runs out and it IS demoted — the
+        // never-serving peer can no longer own dispatch forever
+        for _ in 0..3 {
+            let r = credit_body_miss_round(
+                &[(hash_b, 0, 1)],
+                &tries,
+                &mut misses,
+                &mut demoted,
+                1,
+                Duration::from_secs(120),
+                Duration::from_secs(45),
+                Instant::now(),
+            );
+            let _ = r;
+        }
+        assert!(
+            demoted.iter().any(|(k, _)| k.contains(".i2p")),
+            "after the i2p leash the never-serving source IS demoted: {demoted:?}"
+        );
     }
 
     /// LOW-2b: inbound peers classify by their OWN advertised address shape
@@ -23190,8 +24199,7 @@ addnode=host:notaport
         let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
         let announce: TxAnnounce =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let mut pending_tx_getdata: std::collections::HashSet<Hash> =
-            std::collections::HashSet::new();
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
         let mut recon = ReconAcc::default();
         let mut stats = Stats::default();
 
@@ -23373,8 +24381,7 @@ addnode=host:notaport
         let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
         let announce: TxAnnounce =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let mut pending_tx_getdata: std::collections::HashSet<Hash> =
-            std::collections::HashSet::new();
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
         let mut recon = ReconAcc::default();
         let mut stats = Stats::default();
         let cfg = gate_test_cfg();

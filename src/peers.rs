@@ -62,6 +62,14 @@ pub struct PeerEntryJson {
     pub ok_count: u64,
     #[serde(default)]
     pub fail_count: u64,
+    // PEER-HEALTH: what the peer actually SERVED us (blocks / bytes) and when
+    // — a handshake alone is not health. Older files omit these (default 0).
+    #[serde(default)]
+    pub served_blocks: u64,
+    #[serde(default)]
+    pub served_bytes: u64,
+    #[serde(default)]
+    pub last_served: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +82,11 @@ pub struct PeerEntry {
     pub last_fail: u64,
     pub ok_count: u64,
     pub fail_count: u64,
+    /// blocks/bytes this peer actually SERVED us (PEER-HEALTH)
+    pub served_blocks: u64,
+    pub served_bytes: u64,
+    /// last time it served a block (0 = never)
+    pub last_served: u64,
 }
 
 impl PeerEntry {
@@ -87,6 +100,9 @@ impl PeerEntry {
             last_fail: 0,
             ok_count: 0,
             fail_count: 0,
+            served_blocks: 0,
+            served_bytes: 0,
+            last_served: 0,
         }
     }
 }
@@ -142,6 +158,9 @@ impl PeerStore {
                             last_fail: j.last_fail,
                             ok_count: j.ok_count,
                             fail_count: j.fail_count,
+                            served_blocks: j.served_blocks,
+                            served_bytes: j.served_bytes,
+                            last_served: j.last_served,
                         })
                         .filter(|e| !e.host.is_empty())
                         .take(PEER_STORE_CAP)
@@ -202,6 +221,9 @@ impl PeerStore {
                     last_fail: e.last_fail,
                     ok_count: e.ok_count,
                     fail_count: e.fail_count,
+                    served_blocks: e.served_blocks,
+                    served_bytes: e.served_bytes,
+                    last_served: e.last_served,
                 })
                 .collect(),
         };
@@ -226,7 +248,10 @@ impl PeerStore {
     }
 
     fn write_text(&self, path: &Path, text: &str) -> Result<(), String> {
-        let tmp = path.with_extension("json.tmp");
+        // STATE-LOCK (F1): a pid-unique tmp. A fixed `peers.json.tmp` let two
+        // writers of the same process (loop + RPC) interleave halves of
+        // different snapshots before the rename.
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
         std::fs::write(&tmp, text).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
         #[cfg(unix)]
         {
@@ -356,6 +381,9 @@ impl PeerStore {
             last_fail: 0,
             ok_count: 0,
             fail_count: 0,
+            served_blocks: 0,
+            served_bytes: 0,
+            last_served: 0,
         });
         if self.peers.len() > PEER_STORE_CAP {
             // evict the worst: never-answered with most failures first
@@ -393,6 +421,50 @@ impl PeerStore {
             e.fail_count += 1;
             self.dirty = true;
         }
+    }
+
+    /// The peer actually SERVED us data (PEER-HEALTH): blocks and bytes.
+    /// This — not the handshake — is what "healthy" means; a peer that
+    /// handshakes perfectly and never serves must sink in the dial order.
+    pub fn record_served(&mut self, host: &str, port: u16, now: u64, blocks: u64, bytes: u64) {
+        if let Some(e) = self
+            .peers
+            .iter_mut()
+            .find(|e| e.host == host && e.port == port)
+        {
+            e.served_blocks = e.served_blocks.saturating_add(blocks);
+            e.served_bytes = e.served_bytes.saturating_add(bytes);
+            e.last_served = now;
+            self.dirty = true;
+        }
+    }
+
+    /// The peer VIOLATED expectations (stale/duplicate-only reply, protocol
+    /// violation, or a served block that did not extend): count it as a
+    /// failure so the backoff and the dial order see it. Distinct from a dial
+    /// failure only in intent — both mean "this peer is not useful now".
+    pub fn record_unserved(&mut self, host: &str, port: u16, now: u64) {
+        if let Some(e) = self
+            .peers
+            .iter_mut()
+            .find(|e| e.host == host && e.port == port)
+        {
+            e.last_fail = now;
+            e.fail_count = e.fail_count.saturating_add(1);
+            self.dirty = true;
+        }
+    }
+
+    /// The (host, port) a peer label refers to, if the label IS an endpoint
+    /// (`out:<host>:<port>` / `in:<host>:<port>`). Used by the loop to map a
+    /// served-block event back onto the store without threading the store
+    /// through every call site.
+    pub fn endpoint_of_label(label: &str) -> Option<(String, u16)> {
+        let rest = label
+            .strip_prefix("out:")
+            .or_else(|| label.strip_prefix("in:"))?;
+        let (h, p) = rest.rsplit_once(':')?;
+        Some((h.to_string(), p.parse().ok()?))
     }
 
     /// Drop the (host, port) entry — the `addnode <node> remove` verb (the
@@ -482,7 +554,18 @@ impl PeerStore {
                 fresh.push(e);
             }
         }
-        answered.sort_by_key(|e| std::cmp::Reverse(e.last_ok));
+        // PEER-HEALTH: rank primarily by RECENT SERVE activity. A peer that
+        // handshook but never served (served_blocks == 0) sorts BELOW every
+        // peer that has produced blocks recently, no matter how fresh its
+        // handshake was — that is exactly the "100% to the never-serving
+        // peer" shape this fixes.
+        answered.sort_by_key(|e| {
+            std::cmp::Reverse((
+                e.served_blocks > 0,
+                e.last_served,
+                e.last_ok.saturating_add(e.served_blocks.min(1_000_000)),
+            ))
+        });
         fresh.sort_by_key(|e| {
             let is_seed = seeds.iter().any(|(h, p)| h == &e.host && *p == e.port);
             (!is_seed, e.fail_count, e.host.clone())
@@ -516,7 +599,13 @@ impl Drop for PeerStore {
 /// Sort key: answered-and-recent first, then fewer failures. Higher is
 /// better for `addr_entries` (used reversed), lower is evicted first.
 fn score_key(e: &PeerEntry, _now: u64) -> (u64, u64, u64) {
-    (e.ok_count, e.last_ok, u64::MAX - e.fail_count)
+    // served blocks dominate: an addr entry worth re-serving is one that has
+    // actually produced data (PEER-HEALTH)
+    (
+        e.served_blocks,
+        e.last_served.max(e.last_ok),
+        u64::MAX - e.fail_count,
+    )
 }
 
 /// Exponential backoff by fail_count: 2^n seconds since the last failure,
@@ -793,6 +882,41 @@ mod tests {
             "B's onion:24113 survives the reload"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// PEER-HEALTH: the dial order ranks by RECENT SERVE activity — a peer
+    /// that handshook a second ago but never served blocks must sort BELOW a
+    /// peer that served a while back (the "100% to the never-serving peer"
+    /// shape). Served counters also round-trip the store.
+    #[test]
+    fn dial_order_prefers_serving_peers_over_handshake_only() {
+        let mut store = PeerStore::default();
+        let server = "serveronlyserveronlyserveronlyserveronlyserver5555.onion";
+        let talker = "talkertalkertalkertalkertalkertalkertalker7777.onion";
+        store.upsert(server, 24113, 1, "addr", 100);
+        store.upsert(talker, 24113, 1, "addr", 100);
+        // both handshook; the talker far more recently
+        store.record_ok(server, 24113, 1_000);
+        store.record_ok(talker, 24113, 9_000);
+        // only the server actually produced blocks
+        store.record_served(server, 24113, 2_000, 64, 64 * 1024);
+        let order = store.dial_order(9_100, &[]);
+        assert_eq!(
+            order[0].0, server,
+            "the peer that SERVES must lead: {order:?}"
+        );
+        // served counters persist
+        let path = tmp_path("peer-health");
+        store.save(&path).unwrap();
+        let loaded = PeerStore::load(&path);
+        let e = loaded.peers().iter().find(|e| e.host == server).unwrap();
+        assert_eq!(e.served_blocks, 64);
+        assert_eq!(e.served_bytes, 64 * 1024);
+        assert_eq!(e.last_served, 2_000);
+        let _ = std::fs::remove_file(&path);
+        // record_unserved feeds the same backoff the dial order honours
+        store.record_unserved(talker, 24113, 9_100);
+        assert!(store.peers().iter().any(|e| e.host == talker && e.fail_count == 1));
     }
 
     /// The 1000-entry cap holds on save and on upsert.
