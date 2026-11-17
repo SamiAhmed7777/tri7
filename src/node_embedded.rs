@@ -363,6 +363,11 @@ struct BodyTries {
     /// `sent_at` forever and pin a getdata slot. Capped at
     /// `BODY_REFRESH_CAP`; past it the request ages out and re-dispatches.
     refreshes: u32,
+    /// (rollback-unwind) kernel-state validation failures seen for this body.
+    /// Bounded at KERNEL_FAILURE_RETRY_LIMIT so the failure path re-fetches a
+    /// failing tip+1 body ONCE from a different peer before anyone is dropped
+    /// — a kernel-state failure may be OUR state, not the peer's body.
+    kernel_fails: u32,
 }
 
 /// I2P-NEVER-DEMOTED: i2p body sources get a longer leash, not immunity —
@@ -587,8 +592,8 @@ struct BlockRec {
 }
 
 /// One wallet live-view coin the CHAIN contradicts: a phantom from a fork
-/// adoption (`rollback_tip` rolls the entries back but never the wallet live
-/// view nor `WindowOutputs`) or a raced store body served to the wallet
+/// adoption (`rollback_tip` rolls the entries AND the kernel map back, but
+/// never the wallet live view) or a raced store body served to the wallet
 /// seed (the seed-copy class). Such a coin is not chain evidence and cannot
 /// legally stake. The stake loop EXCLUDES it, logs the named defect, and
 /// persists this record so `--status` / `getstakinginfo` surface it until
@@ -2000,8 +2005,10 @@ fn gap_find_missing(
 
 /// Roll tipstate back one height (branch b): the phantom tip's body exists on
 /// no reachable peer, so the EFFECTIVE network tip is tip-1 (whose window
-/// entries are all present). Truncates entries/checksums/records, clears
-/// pending header announcements, refreshes daemon_tip. Returns the new tip.
+/// entries are all present). Truncates entries/checksums/records, UNWINDS the
+/// kernel map (coins created above the surviving tip — see the inline note),
+/// clears pending header announcements, refreshes daemon_tip. Returns the new
+/// tip.
 fn rollback_tip(st: &mut ChainState) -> Result<(u64, Hash), String> {
     let tip = st.tip_height;
     if tip == 0 || tip <= st.base {
@@ -2018,6 +2025,35 @@ fn rollback_tip(st: &mut ChainState) -> Result<(u64, Hash), String> {
     st.entries.truncate(keep);
     st.checksums.truncate(keep);
     st.records.retain(|r| r.height <= new_tip);
+    // UNWIND THE KERNEL MAP. The forward path is INSERT-ONLY (WindowOutputs
+    // never removes on spend, mirroring the txdb the kernel reads), so the
+    // only residue a rollback leaves is the coins CREATED at the abandoned
+    // heights. Keeping them is the defect that froze the fleet: a surviving
+    // meta whose height is entries.len() (or higher) makes
+    // get_kernel_stake_modifier return the guarded Err ("outside the index")
+    // → "kernel guard" → is_kernel_state_failure → peer dropped after every
+    // inbound block, and a meta that still RESOLVES (stale height now owned
+    // by another block) silently yields a WRONG modifier/target window.
+    //
+    // The abandoned heights' relative heights are exactly `> new_tip_rel`,
+    // because apply_block stamps st.rel(h) and base does not move on a
+    // rollback. Nothing needs re-ADDING for spends: the abandoned branch's
+    // spends never removed their inputs from the map (insert-only), so a
+    // pre-rollback coin stays spendable. Idempotent: when the map is already
+    // consistent the retain drops nothing.
+    let new_tip_rel = keep - 1;
+    let before = st.utxo.map.len();
+    st.utxo.map.retain(|_, m| m.height <= new_tip_rel);
+    let unwound = before - st.utxo.map.len();
+    if unwound > 0 {
+        log(&format!(
+            "rollback: unwound {} utxo entr{} created above h{} (kernel map now covers rel 0..={})",
+            unwound,
+            if unwound == 1 { "y" } else { "ies" },
+            new_tip,
+            new_tip_rel
+        ));
+    }
     st.pending_headers.clear();
     st.daemon_tip = Some(new_tip as i64);
     // the abandoned branch's heights must serve NOTHING until the adopted
@@ -6292,9 +6328,11 @@ fn boot_backfill_kernel_window(
 /// the first hole directly.) One-shot per pass; the follow-loop retry
 /// re-runs the whole pass (fold is idempotent) every 60s while floor > 0.
 ///
-/// ORDER SAFETY: the kernel map is INSERT-ONLY — apply_block,
-/// rebuild_from_records and this fold never remove an entry, spent or not
-/// ("NEVER removed on spend", the kernel.cpp txdb-resolution design). The
+/// ORDER SAFETY: the kernel map is INSERT-ONLY on every forward path —
+/// apply_block, rebuild_from_records and this fold never remove an entry,
+/// spent or not ("NEVER removed on spend", the kernel.cpp txdb-resolution
+/// design); the ONLY removal is `rollback_tip`'s unwind, which drops exactly
+/// the entries created above the surviving tip (never a spend). The
 /// boot order (records first, backfill second) therefore yields a map
 /// BYTE-IDENTICAL to the pure in-session build (apply every window body in
 /// order) — `backfill_boot_order_equals_the_in_session_map` proves it,
@@ -6387,6 +6425,134 @@ fn is_kernel_state_failure(e: &str) -> bool {
         || e.contains("bad modifierchecksum")
         || e.contains("modifier computation")
         || e.contains("empty checksum chain")
+}
+
+// ---------------------------------------------------------------------------
+// (rollback-unwind, part 2) PRE-DROP DISCRIMINATOR
+//
+// A kernel-state failure is ambiguous: the body may be foreign, OR our own
+// window/kernel map may be stale (a rolled-back branch's coins used to leave
+// metas pointing outside the index — see rollback_tip). Dropping the peer is
+// irreversible and, during the fleet stall, dropped EVERY inbound peer over a
+// purely local defect. So: read the failing coin out of the store into the
+// log, and grant ONE cross-peer re-fetch of the exact same tip+1 hash before
+// anyone is dropped. A second failure of that hash is the peer's problem
+// (or a genuinely invalid block) and takes the old drop path.
+// ---------------------------------------------------------------------------
+
+/// Cross-peer re-fetch budget per body hash for the kernel-state class.
+const KERNEL_FAILURE_RETRY_LIMIT: u32 = 1;
+
+#[derive(Debug, PartialEq, Eq)]
+enum KernelFailureAction {
+    /// Keep the peer, keep the hash in flight, re-dispatch from another peer.
+    RetryElsewhere,
+    /// Budget spent: the caller drops the peer (consensus violation).
+    DropPeer,
+}
+
+/// Re-resolve the failing block's coinstake input against the store and render
+/// the fields that separate the two kernel-state causes:
+///   * `in_index=false` → the meta height is at/above entries.len(): a coin we
+///     appended then rolled back (the defect), or a foreign meta;
+///   * `in_index=true` but the txid is absent from that height's records →
+///     the meta resolves to a WINDOW-RELATIVE height now owned by a DIFFERENT
+///     block (wrong modifier / wrong target window).
+fn kernel_failure_coin_readout(st: &ChainState, b: &Block) -> String {
+    let Some(tx) = b.vtx.get(1) else {
+        return format!("no coinstake (vtx {})", b.vtx.len());
+    };
+    let Some(txin) = tx.vin.first() else {
+        return "coinstake has no input".to_string();
+    };
+    let key = (txin.prev_hash, txin.prev_n);
+    let txid = tri7_core::p2p::internal_to_display(&key.0);
+    let Some(meta) = st.utxo.kernel_meta(&key) else {
+        return format!(
+            "coinstake input {}:{} → NOT in the kernel map (pre-window / unknown coin); entries={}",
+            txid,
+            key.1,
+            st.entries.len()
+        );
+    };
+    let in_index = meta.height < st.entries.len();
+    let abs = st.base + meta.height as u64;
+    let conf_secs = tx.time.saturating_sub(meta.tx_time);
+    let weight =
+        crate::consensus::stake_weight_era(meta.tx_time, tx.time, (st.tip_height + 1) as usize);
+    let coin_day_weight = (meta.value as i128 * weight as i128)
+        / crate::consensus::COIN as i128
+        / 86_400i128;
+    // Is the coin actually committed by the block at its own height? NOTE:
+    // `records` is the bounded WINDOW_BLOCKS serving tail, so "unknown" here
+    // only means the coin's height sits outside the records horizon — the
+    // scan is O(records) and records never exceed WINDOW_BLOCKS.
+    let rec_covers = st.records.iter().any(|r| r.height == abs);
+    let rec_has = st
+        .records
+        .iter()
+        .find(|r| r.height == abs)
+        .map(|r| r.outs.iter().any(|(t, n, ..)| *t == txid && *n == key.1));
+    format!(
+        "coinstake input {}:{} → meta.height={} (abs h{}) tx_offset={} tx_time={} value={} \
+         coinDays(conf)={} coinDayWeight={} in_index={} entries={} tip=h{} base=h{} \
+         records_cover_own_height={} txid_committed_at_own_height={}",
+        txid,
+        key.1,
+        meta.height,
+        abs,
+        meta.tx_offset,
+        meta.tx_time,
+        meta.value,
+        conf_secs / 86_400,
+        coin_day_weight,
+        in_index,
+        st.entries.len(),
+        st.tip_height,
+        st.base,
+        rec_covers,
+        rec_has.map(|x| x.to_string()).unwrap_or_else(|| "unknown".into()),
+    )
+}
+
+/// Arm (or spend) the one-shot cross-peer retry for a hash whose body failed
+/// the kernel-state class. Guarantees the hash is never left in `outstanding`
+/// with no retry counter: the entry carries `kernel_fails` and a back-dated
+/// clock, so the next pump tick's age-out scan re-dispatches it immediately
+/// with the failing peer pushed into `tried` (rotation avoids it) instead of
+/// sitting silent until the 45 s timeout.
+fn kernel_failure_retry(
+    body_tries: &mut HashMap<Hash, BodyTries>,
+    outstanding: &mut HashMap<Hash, u64>,
+    hash: &Hash,
+    height_abs: u64,
+    peer_label: &str,
+    now: Instant,
+) -> KernelFailureAction {
+    let t = body_tries.entry(*hash).or_insert(BodyTries {
+        sent_at: now,
+        attempts: 0,
+        tried: Vec::new(),
+        refreshes: 0,
+        kernel_fails: 0,
+    });
+    if t.kernel_fails >= KERNEL_FAILURE_RETRY_LIMIT {
+        return KernelFailureAction::DropPeer;
+    }
+    // kernel_fails is a SEPARATE counter from `attempts` (which counts real
+    // getdata dispatches, solicited or unsolicited): a hash already fetched
+    // normally still gets its one cross-peer re-fetch, and the budget is not
+    // consumed by ordinary transport attempts.
+    t.kernel_fails += 1;
+    if !t.tried.iter().any(|l| l == peer_label) {
+        t.tried.push(peer_label.to_string());
+    }
+    // back-date so the age-out re-dispatch fires on the next pump pass
+    t.sent_at = now
+        .checked_sub(Duration::from_secs(GETDATA_TIMEOUT_SECS))
+        .unwrap_or(now);
+    outstanding.insert(*hash, height_abs);
+    KernelFailureAction::RetryElsewhere
 }
 
 /// Forward replay of the stake-modifier chain over the loaded window — the
@@ -12057,6 +12223,53 @@ fn handle_message(
                                 });
                             }
                         }
+                        // (rollback-unwind, part 2) PRE-DROP DISCRIMINATOR: a
+                        // kernel-state rejection of our OWN tip+1 body is at
+                        // least as likely to be our state as the peer's body
+                        // (the rolled-back-branch coin class). Read the coin
+                        // out loud, then re-fetch the SAME hash once from a
+                        // different peer before dropping anyone.
+                        if is_kernel_state_failure(&e) && height_abs == st.tip_height + 1 {
+                            let readout = kernel_failure_coin_readout(st, &b);
+                            match kernel_failure_retry(
+                                body_tries,
+                                outstanding,
+                                &hash,
+                                height_abs,
+                                &peer.label,
+                                Instant::now(),
+                            ) {
+                                KernelFailureAction::RetryElsewhere => {
+                                    log(&format!(
+                                        "KERNEL-FAIL DISCRIMINATOR h{} from {} (outbound {}, transport {}): {} | {} | one cross-peer re-fetch armed — request stays in flight, peer KEPT",
+                                        height_abs,
+                                        peer.label,
+                                        peer.outbound,
+                                        peer.transport.as_str(),
+                                        e,
+                                        readout
+                                    ));
+                                    // KEEP the peer (our state may be the
+                                    // wrong side) but still record the
+                                    // unserved body: a peer streaming
+                                    // DISTINCT failing tip+1 hashes must lose
+                                    // dial preference, or the per-hash budget
+                                    // would be an unbounded free pass.
+                                    record_peer_unserved(cfg, &peer.label);
+                                    return Ok(());
+                                }
+                                KernelFailureAction::DropPeer => {
+                                    log(&format!(
+                                        "KERNEL-FAIL DISCRIMINATOR h{} from {}: {} | {} | retry budget exhausted ({} prior cross-peer re-fetch) — peer dropped",
+                                        height_abs,
+                                        peer.label,
+                                        e,
+                                        readout,
+                                        KERNEL_FAILURE_RETRY_LIMIT
+                                    ));
+                                }
+                            }
+                        }
                         // PEER-HEALTH: a body that fails consensus is a
                         // protocol violation — record it as UNSERVED so the
                         // dial order stops preferring this peer.
@@ -12106,6 +12319,42 @@ fn handle_message(
                                 command: "block-reinject".to_string(),
                                 payload: raw.clone(),
                             });
+                        }
+                    }
+                    // (rollback-unwind, part 2) same pre-drop discriminator on
+                    // the apply phase: a kernel-state apply rejection of our
+                    // own tip+1 body gets one cross-peer re-fetch first.
+                    if is_kernel_state_failure(&e) && height_abs == st.tip_height + 1 {
+                        let readout = kernel_failure_coin_readout(st, &b);
+                        match kernel_failure_retry(
+                            body_tries,
+                            outstanding,
+                            &hash,
+                            height_abs,
+                            &peer.label,
+                            Instant::now(),
+                        ) {
+                            KernelFailureAction::RetryElsewhere => {
+                                log(&format!(
+                                    "KERNEL-FAIL DISCRIMINATOR (apply) h{} from {} (outbound {}, transport {}): {} | {} | one cross-peer re-fetch armed — request stays in flight, peer KEPT",
+                                    height_abs,
+                                    peer.label,
+                                    peer.outbound,
+                                    peer.transport.as_str(),
+                                    e,
+                                    readout
+                                ));
+                                // soft health signal, hard drop withheld (see
+                                // the validate arm's note)
+                                record_peer_unserved(cfg, &peer.label);
+                                return Ok(());
+                            }
+                            KernelFailureAction::DropPeer => {
+                                log(&format!(
+                                    "KERNEL-FAIL DISCRIMINATOR (apply) h{} from {}: {} | {} | retry budget exhausted — peer dropped",
+                                    height_abs, peer.label, e, readout
+                                ));
+                            }
                         }
                     }
                     peer.dead = true;
@@ -14662,6 +14911,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                                                 attempts: 0,
                                                 tried: Vec::new(),
                                                 refreshes: 0,
+                                                kernel_fails: 0,
                                             });
                                         t.sent_at = now;
                                         t.attempts += 1;
@@ -18124,10 +18374,11 @@ mod tests {
     }
 
     /// ITEM 24 ORDER SAFETY (the r3 judge blocker, answered with bytes):
-    /// the kernel map is INSERT-ONLY — no path ever removes an entry, spent
-    /// or not (kernel.cpp reads txPrev from the txid-keyed txdb without
+    /// the kernel map is INSERT-ONLY — no forward path ever removes an entry,
+    /// spent or not (kernel.cpp reads txPrev from the txid-keyed txdb without
     /// consulting spentness; the wallet's spentness lives in wl.live, a
-    /// different structure). Therefore the boot order (records rebuild
+    /// different structure; only `rollback_tip`'s unwind removes, and only
+    /// the coins created above the surviving tip). Therefore the boot order (records rebuild
     /// FIRST, backfill fold SECOND) produces a map IDENTICAL to the pure
     /// in-session build (apply every window body in order) — including an
     /// output created deep (backfill range) and SPENT inside the records
@@ -18716,6 +18967,389 @@ mod tests {
         let file = stg.to_file();
         assert_eq!(file.height, 104);
         assert_eq!(file.entries.len(), stg.entries.len());
+    }
+
+    /// (rollback-unwind) THE DEFECT: a rollback truncated entries/checksums/
+    /// records but left `st.utxo` holding the abandoned branch's coins. Their
+    /// metas point at entries.len() (out of bounds → the guarded "outside the
+    /// index" Err → "kernel guard" → peer dropped) or, if the height is still
+    /// in bounds, at a window-relative height now owned by ANOTHER block
+    /// (wrong modifier / wrong target). The unwind drops exactly the coins
+    /// created above the new tip; the map is insert-only, so nothing needs
+    /// re-adding for the abandoned branch's spends.
+    #[test]
+    fn rollback_tip_unwinds_coins_created_on_the_abandoned_branch() {
+        let _live_store_serial = lock_live_store_tests();
+        let mut stg = synthetic_chain(100, 105);
+        let survivor = ([0x51u8; 32], 0u32); // minted in h103 (rel 3)
+        let abandoned = ([0x52u8; 32], 1u32); // minted in the tip block h105 (rel 5)
+        let mint = |h: u64| 1_700_000_000u32 + (h * 600) as u32;
+        stg.utxo.map.insert(
+            survivor,
+            crate::kernel::UtxoMeta {
+                height: 3,
+                tx_offset: 240,
+                tx_time: mint(103),
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        stg.utxo.map.insert(
+            abandoned,
+            crate::kernel::UtxoMeta {
+                height: 5,
+                tx_offset: 480,
+                tx_time: mint(105),
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        // the abandoned branch SPENT the survivor: the map never removed it on
+        // spend, so the rollback must leave it resolvable (nothing to re-add)
+        stg.records.push(BlockRec {
+            height: 105,
+            spends: vec![(
+                tri7_core::p2p::internal_to_display(&survivor.0),
+                survivor.1,
+            )],
+            outs: vec![(
+                tri7_core::p2p::internal_to_display(&abandoned.0),
+                abandoned.1,
+                50 * tri7_core::consensus::COIN,
+                mint(105),
+                480,
+            )],
+        });
+
+        let (new_tip, _) = rollback_tip(&mut stg).expect("rollback");
+        assert_eq!(new_tip, 104);
+        assert!(
+            stg.utxo.kernel_meta(&abandoned).is_none(),
+            "a rolled-back coin must be unspendable: absent from st.utxo"
+        );
+        let m = stg
+            .utxo
+            .kernel_meta(&survivor)
+            .expect("a pre-rollback coin stays resolvable after the unwind");
+        assert_eq!(m.height, 3);
+        assert!(
+            m.height < stg.entries.len(),
+            "every surviving meta indexes the truncated window"
+        );
+        assert!(
+            stg.utxo.map.values().all(|m| m.height < stg.entries.len()),
+            "no meta may resolve outside the index after a rollback"
+        );
+    }
+
+    /// (rollback-unwind) The regression guard for the fleet stall: after a
+    /// rollback, a block spending a PRE-rollback coin must validate through
+    /// the same kernel a healthy chain computes — and the pre-fix shape (a
+    /// surviving abandoned coin) must produce exactly the "outside the index"
+    /// class the discriminator now names instead of silently dropping peers.
+    #[test]
+    fn rollback_tip_keeps_a_pre_rollback_coin_validating_like_a_healthy_chain() {
+        use tri7_core::kernel::check_proof_of_stake;
+        use tri7_core::stake::{
+            assemble_pos_block, create_coinstake, sign_block, MAX_STAKE_SEARCH_INTERVAL,
+        };
+
+        let _live_store_serial = lock_live_store_tests();
+        let mut stg = synthetic_chain(100, 110);
+        let mut healthy = synthetic_chain(100, 109); // exactly the rolled-back state
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("rollback-unwind");
+        let pubkey = pubkey.to_vec();
+        let coin = ([0x61u8; 32], 0u32); // minted in h106 (rel 6): survives
+        let phantom = ([0x62u8; 32], 1u32); // minted in the abandoned tip h110
+        let value = 50 * tri7_core::consensus::COIN;
+        let mint_time = 1_700_000_000u32 + 106 * 600;
+        let phantom_time = 1_700_000_000u32 + 110 * 600;
+        for st in [&mut stg, &mut healthy] {
+            st.utxo.map.insert(
+                coin,
+                crate::kernel::UtxoMeta {
+                    height: 6,
+                    tx_offset: 181,
+                    tx_time: mint_time,
+                    value,
+                },
+            );
+        }
+        stg.utxo.map.insert(
+            phantom,
+            crate::kernel::UtxoMeta {
+                height: 10,
+                tx_offset: 999,
+                tx_time: phantom_time,
+                value,
+            },
+        );
+        let (new_tip, _) = rollback_tip(&mut stg).expect("rollback");
+        assert_eq!(new_tip, 109);
+
+        let mk = || tri7_core::stake::StakeCandidate {
+            txid: coin.0,
+            n: coin.1,
+            value,
+            script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey).unwrap(),
+            block_height: 106, // ABSOLUTE, wallet-shaped
+            block_time: mint_time,
+            tx_time: mint_time,
+            tx_offset: 181,
+            secret,
+            pubkey: pubkey.clone(),
+        };
+        let bits = 0x207f_ffff;
+        let probe = mint_time + 7_200;
+        let solve = |st: &ChainState| {
+            let (cand, stale, unres) = resolve_stake_evidence(st, vec![mk()]);
+            assert_eq!(
+                (cand.len(), stale.len(), unres),
+                (1, 0, 0),
+                "the pre-rollback coin resolves through the rolled-back state"
+            );
+            let (plan, _) = create_coinstake(
+                &st.rel_index(),
+                &cand,
+                bits,
+                0,
+                probe,
+                MAX_STAKE_SEARCH_INTERVAL,
+                60 * tri7_core::consensus::COIN,
+                (st.tip_height + 1) as usize,
+            )
+            .expect("search");
+            let plan = plan.expect("a mature coin must solve on an easy target");
+            let prev = st.entries.last().unwrap().clone();
+            let mut block =
+                assemble_pos_block(&prev, prev.time, &plan.tx, &[], bits).expect("assemble");
+            sign_block(&mut block, &secret).expect("sign");
+            block
+        };
+
+        let block_after = solve(&stg);
+        let block_healthy = solve(&healthy);
+        let k_after = check_proof_of_stake(
+            &stg.rel_index(),
+            &block_after,
+            &stg.utxo,
+            bits,
+            stg.tip_height as usize,
+        )
+        .expect("validator kernel after the rollback: the coin resolves, no 'outside the index'");
+        let k_healthy = check_proof_of_stake(
+            &healthy.rel_index(),
+            &block_healthy,
+            &healthy.utxo,
+            bits,
+            healthy.tip_height as usize,
+        )
+        .expect("healthy-chain kernel");
+        assert!(k_after.meets_target);
+        assert_eq!(k_after.block_from_height, 6, "window-relative coin height");
+        assert_eq!(
+            k_after.hash_proof_of_stake, k_healthy.hash_proof_of_stake,
+            "same block, same kernel: a rollback may not drift the modifier"
+        );
+
+        // THE PRE-FIX SHAPE, reproduced: a meta that survived the rollback
+        // points at entries.len(). The guard fires (this is what killed every
+        // inbound block in the fleet) and the readout names the coin.
+        stg.utxo.map.insert(
+            phantom,
+            crate::kernel::UtxoMeta {
+                height: 10,
+                tx_offset: 999,
+                tx_time: phantom_time,
+                value,
+            },
+        );
+        assert_eq!(
+            stg.utxo.kernel_meta(&phantom).unwrap().height,
+            stg.entries.len(),
+            "the stale meta is exactly the out-of-bounds shape"
+        );
+        let mut defect = block_after;
+        defect.vtx[1].vin[0].prev_hash = phantom.0;
+        defect.vtx[1].vin[0].prev_n = phantom.1;
+        let err = match check_proof_of_stake(
+            &stg.rel_index(),
+            &defect,
+            &stg.utxo,
+            bits,
+            stg.tip_height as usize,
+        ) {
+            Ok(_) => panic!("a coin outside the index must never resolve"),
+            Err(e) => e,
+        };
+        assert!(err.contains("outside the index"), "pre-fix blocker: {}", err);
+        assert!(
+            is_kernel_state_failure(&format!("h110: kernel guard: {}", err)),
+            "the wrapped form is the class that dropped the fleet's peers"
+        );
+        let readout = kernel_failure_coin_readout(&stg, &defect);
+        assert!(readout.contains("in_index=false"), "readout: {}", readout);
+        assert!(readout.contains("meta.height=10"), "readout: {}", readout);
+        assert!(
+            readout.contains("coinDays(conf)=") && readout.contains("tx_offset=999"),
+            "the readout carries the diagnostic fields: {}",
+            readout
+        );
+    }
+
+    /// (rollback-unwind) Idempotence: a rollback over an ALREADY consistent
+    /// kernel map (nothing created above the new tip) changes nothing — the
+    /// unwind is a no-op, never a rebuild.
+    #[test]
+    fn rollback_tip_on_a_consistent_utxo_changes_nothing() {
+        let _live_store_serial = lock_live_store_tests();
+        let mut stg = synthetic_chain(100, 105);
+        for rel in 0..5usize {
+            stg.utxo.map.insert(
+                ([0x70u8 + rel as u8; 32], 0u32),
+                crate::kernel::UtxoMeta {
+                    height: rel,
+                    tx_offset: (rel * 100) as u32,
+                    tx_time: 1_700_000_000u32,
+                    value: 10 * tri7_core::consensus::COIN,
+                },
+            );
+        }
+        let snapshot: Vec<((Hash, u32), (usize, u32, u32, i64))> = {
+            let mut v: Vec<_> = stg
+                .utxo
+                .map
+                .iter()
+                .map(|(k, m)| (*k, (m.height, m.tx_offset, m.tx_time, m.value)))
+                .collect();
+            v.sort_by_key(|(k, _)| *k);
+            v
+        };
+        let (new_tip, _) = rollback_tip(&mut stg).expect("rollback");
+        assert_eq!(new_tip, 104);
+        let after: Vec<((Hash, u32), (usize, u32, u32, i64))> = {
+            let mut v: Vec<_> = stg
+                .utxo
+                .map
+                .iter()
+                .map(|(k, m)| (*k, (m.height, m.tx_offset, m.tx_time, m.value)))
+                .collect();
+            v.sort_by_key(|(k, _)| *k);
+            v
+        };
+        assert_eq!(snapshot, after, "consistent map untouched: the unwind is free");
+    }
+
+    /// (rollback-unwind, part 2) ONE cross-peer re-fetch per body hash, then
+    /// the peer is dropped. The hash is never left in `outstanding` without a
+    /// retry counter armed, and the retry clock is back-dated so the next
+    /// pump pass re-dispatches it from a DIFFERENT peer (the failing label is
+    /// pushed into `tried`).
+    #[test]
+    fn kernel_failure_retry_arms_one_cross_peer_refetch_then_drops() {
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let hash = [0x81u8; 32];
+        let now = Instant::now();
+
+        assert_eq!(
+            kernel_failure_retry(
+                &mut body_tries,
+                &mut outstanding,
+                &hash,
+                111,
+                "out:a.onion",
+                now
+            ),
+            KernelFailureAction::RetryElsewhere
+        );
+        assert_eq!(
+            outstanding.get(&hash),
+            Some(&111),
+            "the failed hash stays in flight — never silently dropped"
+        );
+        let t = &body_tries[&hash];
+        assert_eq!(t.kernel_fails, 1);
+        assert_eq!(t.tried, vec!["out:a.onion".to_string()]);
+        assert!(
+            now.duration_since(t.sent_at) >= Duration::from_secs(GETDATA_TIMEOUT_SECS),
+            "the clock is back-dated so the age-out re-dispatches immediately"
+        );
+        // the age-out scan actually hands it back for a rotated re-fetch
+        // (attempts 0: this hash arrived unsolicited and no getdata was ever
+        // dispatched for it before the failure)
+        let aged = age_out_unanswered_bodies(
+            &mut outstanding,
+            &mut body_tries,
+            Duration::from_secs(GETDATA_TIMEOUT_SECS),
+        );
+        assert_eq!(aged, vec![(hash, 111, 0)]);
+
+        // the re-fetched copy fails too → the budget is spent → drop
+        outstanding.insert(hash, 111);
+        assert_eq!(
+            kernel_failure_retry(
+                &mut body_tries,
+                &mut outstanding,
+                &hash,
+                111,
+                "out:b.onion",
+                Instant::now()
+            ),
+            KernelFailureAction::DropPeer
+        );
+        assert_eq!(body_tries[&hash].kernel_fails, 1, "no third chance");
+    }
+
+    /// (rollback-unwind, part 2) The readout must name a coin the map does not
+    /// hold at all (the pre-window / unknown class) instead of panicking.
+    #[test]
+    fn kernel_failure_readout_handles_an_unresolved_coinstake_input() {
+        let stg = synthetic_chain(100, 105);
+        let mut block = mk_header([0u8; 32], 0x01, 0x2000_ffff);
+        block.vtx = vec![
+            Tx {
+                version: 1,
+                time: 1_700_000_000,
+                vin: vec![tri7_core::Vin {
+                    prev_hash: [0u8; 32],
+                    prev_n: u32::MAX,
+                    script_sig: vec![],
+                    sequence: u32::MAX,
+                }],
+                vout: vec![tri7_core::Vout {
+                    value: 50,
+                    script_pubkey: vec![0x51],
+                }],
+                locktime: 0,
+            },
+            Tx {
+                version: 1,
+                time: 1_700_000_000,
+                vin: vec![tri7_core::Vin {
+                    prev_hash: [0x99u8; 32],
+                    prev_n: 3,
+                    script_sig: vec![],
+                    sequence: u32::MAX,
+                }],
+                vout: vec![
+                    tri7_core::Vout {
+                        value: 0,
+                        script_pubkey: vec![],
+                    },
+                    tri7_core::Vout {
+                        value: 1,
+                        script_pubkey: vec![0x51],
+                    },
+                ],
+                locktime: 0,
+            },
+        ];
+        let readout = kernel_failure_coin_readout(&stg, &block);
+        assert!(
+            readout.contains("NOT in the kernel map"),
+            "readout: {}",
+            readout
+        );
+        assert!(readout.contains("entries=6"), "readout: {}", readout);
     }
 
     /// Fork choice must refuse a lighter competing block and adopt a heavier
@@ -19333,6 +19967,7 @@ mod tests {
                     attempts: att,
                     tried: vec!["out:stale.onion".to_string()],
                     refreshes: 0,
+                    kernel_fails: 0,
                 },
             );
         }
@@ -19713,6 +20348,7 @@ mod tests {
                 attempts: 1,
                 tried: vec!["out:p".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         body_tries.insert(
@@ -19722,6 +20358,7 @@ mod tests {
                 attempts: 2,
                 tried: vec!["out:q".to_string(), "out:p".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         let batch = vec![
@@ -19773,6 +20410,7 @@ mod tests {
                 attempts: 1,
                 tried: vec!["out:slow.onion".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         assert!(refresh_body_request_clock(&mut body_tries, &h));
@@ -19891,6 +20529,7 @@ mod tests {
                 attempts: 1,
                 tried: vec!["out:cached-src.onion".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         // the failure handler: refresh the clock, keep the request
@@ -20084,6 +20723,7 @@ mod tests {
                 attempts: 1,
                 tried: vec!["in:advertiser".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         let mut outstanding: HashMap<Hash, u64> = HashMap::from([(h1, 65)]);
@@ -21341,6 +21981,7 @@ mod tests {
                 attempts: 1,
                 tried: vec!["out:non-extending.onion".to_string()],
                 refreshes: 0,
+                kernel_fails: 0,
             },
         );
         for i in 0..BODY_REFRESH_CAP {
@@ -23731,6 +24372,7 @@ addnode=host:notaport
                     attempts: 1,
                     tried: vec![b32_label.clone(), clearnet_label.clone()],
                     refreshes: 0,
+                    kernel_fails: 0,
                 },
             ),
             (
@@ -23740,6 +24382,7 @@ addnode=host:notaport
                     attempts: 1,
                     tried: vec![dns_label.clone()],
                     refreshes: 0,
+                    kernel_fails: 0,
                 },
             ),
         ]);
@@ -24340,8 +24983,11 @@ addnode=host:notaport
         let mut recon = ReconAcc::default();
         let mut stats = Stats::default();
 
-        // PASS 1 — the rejection must be CONTAINED: Ok (never Err/exit),
-        // peer dropped, tip unchanged, heal fired, re-inject queued
+        // PASS 1 — the rejection must be CONTAINED: Ok (never Err/exit), the
+        // peer is KEPT (rollback-unwind pre-drop discriminator: one
+        // cross-peer re-fetch is armed before anyone is dropped — a
+        // kernel-state rejection may be OUR state), tip unchanged, heal
+        // fired, re-inject queued.
         let res = handle_message(
             &mut peer,
             &mut stg,
@@ -24368,7 +25014,20 @@ addnode=host:notaport
             "an inbound kernel failure must NEVER be a fatal error: {:?}",
             res.err()
         );
-        assert!(peer.dead, "the peer must be dropped");
+        assert!(
+            !peer.dead,
+            "a kernel-state rejection of our own tip+1 body must NOT drop the peer before one cross-peer re-fetch"
+        );
+        assert_eq!(
+            body_tries.get(&block_hash).map(|t| t.kernel_fails),
+            Some(1),
+            "the failed hash stays in flight with its retry counter armed"
+        );
+        assert_eq!(
+            outstanding.get(&block_hash),
+            Some(&(base + n as u64)),
+            "the failed hash is never left out of `outstanding` unarmed"
+        );
         assert_eq!(
             stg.tip_height,
             base + n as u64 - 1,
