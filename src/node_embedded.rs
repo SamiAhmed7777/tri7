@@ -1320,9 +1320,66 @@ enum ReconOutcome {
     NeedAnchorLocator,
     /// repeated unresolved reconciliations — drop the peer
     DropPeer,
-    /// SWITCH executed: rolled back to the fork, their headers queued as
-    /// pending (bodies then flow through the normal validated getdata path)
+    /// SWITCH selected: the branch is heavier by HEADER work only. The tip is
+    /// NOT rolled back here — the rollback is DEFERRED until the branch's
+    /// first body passes validate_block (see PendingAdoption). `fork` is the
+    /// divergence point the deferred adoption will roll back to.
     Switched { fork: u64, adopted: usize },
+}
+
+/// (T7-03) A branch fork choice selected on HEADERS ALONE.
+///
+/// Header `bits` are an unvalidated claim: before the fix, `work_of` returned
+/// u128::MAX for crafted bits and the judge rolled our tip back BEFORE any
+/// body had been checked, so one peer could make us discard a good tip for
+/// free (and the branch could then never produce a valid body). The rollback
+/// is now deferred: the branch is recorded here, its bodies are requested as
+/// usual, and `rollback_tip` runs only once the FIRST body of the branch
+/// passes `validate_block` against the fork ancestor. If no body ever
+/// validates, our tip stays and polling continues.
+#[derive(Debug, Clone)]
+struct PendingAdoption {
+    /// divergence point: the absolute height the rollback will target
+    fork_h: u64,
+    /// hash of the branch's first body (height fork_h + 1) — the trigger
+    first_hash: Hash,
+    /// header-accumulated work of the challenger (diagnostics / re-judge)
+    their_work: u128,
+    /// when the branch was selected (the pending record expires)
+    since: Instant,
+}
+
+/// How long a header-selected branch may wait for its first validated body
+/// before the pending record is discarded (our tip is kept either way).
+const PENDING_ADOPTION_TTL: Duration = Duration::from_secs(300);
+
+static PENDING_ADOPTION: Mutex<Option<PendingAdoption>> = Mutex::new(None);
+
+fn set_pending_adoption(p: PendingAdoption) {
+    if let Ok(mut g) = PENDING_ADOPTION.lock() {
+        *g = Some(p);
+    }
+}
+
+fn clear_pending_adoption() {
+    if let Ok(mut g) = PENDING_ADOPTION.lock() {
+        *g = None;
+    }
+}
+
+/// The pending branch record if `hash` is its first body and the record is
+/// still fresh. An expired record is dropped here.
+fn pending_adoption_for(hash: &Hash, now: Instant) -> Option<PendingAdoption> {
+    let mut g = PENDING_ADOPTION.lock().ok()?;
+    let p = g.as_ref()?;
+    if now.duration_since(p.since) > PENDING_ADOPTION_TTL {
+        *g = None;
+        return None;
+    }
+    if &p.first_hash != hash {
+        return None;
+    }
+    g.clone()
 }
 
 /// getheaders locator spanning our whole window: the tip first, then every
@@ -1601,28 +1658,15 @@ fn recon_intake(
         }
         tri7_core::forkchoice::ForkChoice::Switch { reason } => {
             let target = fork_h; // branch_base - 1: the REAL divergence point
+            // (T7-03) DEFERRED ROLLBACK: this decision rests on header work
+            // alone. Rolling back now would let a peer discard our validated
+            // tip with an unproven claim (crafted bits used to win outright).
+            // Record the branch as pending, queue its bodies as usual, and let
+            // the first body that passes validate_block trigger the rollback.
             log(&format!(
-                "FORK CHOICE (reconciliation): {} — rolling back to h{}, adopting {} block(s) via the validated body path",
-                reason,
-                target,
-                adopted
+                "FORK CHOICE (reconciliation): {} — branch selected on headers only (claimed work {}); rollback to h{} DEFERRED until its first body validates ({} block(s) queued)",
+                reason, judged_work, target, adopted
             ));
-            let mut rollback_failed = false;
-            while st.tip_height > target {
-                if let Err(e) = rollback_tip(st) {
-                    log(&format!(
-                        "recon: rollback to h{} failed at h{}: {} — aborting the adoption (keeping the current tip; the branch will re-arrive and re-judge)",
-                        target,
-                        st.tip_height,
-                        e
-                    ));
-                    rollback_failed = true;
-                    break;
-                }
-            }
-            if rollback_failed {
-                return ReconOutcome::Ignored;
-            }
             // (item 28) cancel-on-supersede: a Switch while body requests
             // from a PREVIOUS adoption are still queued REPLACES them.
             // Keeping the old entries made the live adopt-fail-remint loop
@@ -1643,7 +1687,17 @@ fn recon_intake(
                 st.pending_headers.insert(hash, hdr.clone());
                 pending_from_headers.push_back((hash, fork_h + 1 + i as u64));
             }
-            stats.reorgs += 1;
+            if let Some(first) = branch.first() {
+                set_pending_adoption(PendingAdoption {
+                    fork_h: target,
+                    first_hash: first.hash(),
+                    their_work: judged_work,
+                    since: Instant::now(),
+                });
+            }
+            // stats.reorgs is incremented where the rollback actually happens
+            // (block handler, after the first body validates) — the reorg
+            // counter must never claim a switch we did not execute.
             ReconOutcome::Switched {
                 fork: target,
                 adopted,
@@ -2995,6 +3049,53 @@ fn read_rpc_creds(cfg: &Config) -> (String, String) {
     (user, pass)
 }
 
+/// (TRI7-RPC-03) Contain a wallet export/backup destination inside the
+/// state (wallet) directory.
+///
+/// The legacy dumpwallet/backupwallet take a caller-supplied PATH. Without a
+/// containment check an unauthenticated/authenticated RPC caller can write a
+/// full key dump to `../../etc/cron.d/x` or an absolute path anywhere on the
+/// box. Rules: the leaf's PARENT (canonicalized, so `..`, symlinks and
+/// absolute escapes all resolve first) must be inside the canonical state
+/// dir, and the leaf must not already exist when `must_not_exist` is set.
+fn contained_wallet_path(
+    state_dir: &Path,
+    dest: &str,
+    must_not_exist: bool,
+) -> Result<PathBuf, String> {
+    if dest.trim().is_empty() {
+        return Err("empty destination path".into());
+    }
+    let root = std::fs::canonicalize(state_dir)
+        .map_err(|e| format!("state dir {}: {e}", state_dir.display()))?;
+    let raw = PathBuf::from(dest);
+    let candidate = if raw.is_absolute() {
+        raw
+    } else {
+        state_dir.join(raw)
+    };
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| format!("destination {} has no parent directory", candidate.display()))?;
+    let parent_c = std::fs::canonicalize(parent)
+        .map_err(|e| format!("destination directory {}: {e}", parent.display()))?;
+    if !parent_c.starts_with(&root) {
+        return Err(format!(
+            "destination {} resolves outside the wallet/state directory {} — refused",
+            candidate.display(),
+            root.display()
+        ));
+    }
+    let name = candidate
+        .file_name()
+        .ok_or_else(|| format!("destination {} has no file name", candidate.display()))?;
+    let full = parent_c.join(name);
+    if must_not_exist && full.exists() {
+        return Err(format!("destination {} already exists", full.display()));
+    }
+    Ok(full)
+}
+
 fn state_path(cfg: &Config) -> PathBuf {
     let mut p = cfg.state_dir.clone();
     p.push("tipstate.json");
@@ -3977,6 +4078,27 @@ fn validate_block(
         }
     }
 
+    // 3b. money range (MoneyRange, main.h:65): EVERY output value must be a
+    // legal amount. (T7-02) Without this, a negative vout value flows into the
+    // stake kernel's coin-day product — `value as u128` wraps to ~2^128, so
+    // the kernel target becomes astronomically large and every crafted kernel
+    // "meets" it. Values above MAX_MONEY are equally unsound (they can only be
+    // minted, never spent by consensus).
+    for (ti, tx) in block.vtx.iter().enumerate() {
+        for (oi, out) in tx.vout.iter().enumerate() {
+            if !tri7_core::spend::money_range(out.value) {
+                return Err(format!(
+                    "h{}: tx[{}] output[{}] value {} outside money range [0, {}]",
+                    h,
+                    ti,
+                    oi,
+                    out.value,
+                    tri7_core::spend::MAX_MONEY
+                ));
+            }
+        }
+    }
+
     // 4. merkle root over the received transactions vs the header field
     if block.merkle_root() != block.merkle_root {
         return Err(format!("h{}: merkle root mismatch", h));
@@ -4072,8 +4194,9 @@ fn validate_block(
                                         res.coin_day_weight
                                     ));
                                 }
-                            } else if st.base as usize + res.block_from_height
-                                < CHECKPOINT_HORIZON as usize
+                            } else if !ctx.live
+                                && st.base as usize + res.block_from_height
+                                    < CHECKPOINT_HORIZON as usize
                             {
                                 // FULL zone, but this kernel's stake modifier
                                 // derives from the assume-valid region: our
@@ -4083,6 +4206,12 @@ fn validate_block(
                                 // our own index divergence. Tolerate with a
                                 // loud stat; modifiers generated above the
                                 // horizon are fully enforced as before.
+                                //
+                                // (T7-01) HISTORICAL/REPLAY ONLY. A LIVE block
+                                // (ctx.live) is a fresh tip candidate: there is
+                                // no assume-valid excuse for it, so a target
+                                // miss is a hard rejection even when the coin
+                                // it spends predates the checkpoint horizon.
                                 stats.kernel_target_tol_assumed += 1;
                                 log(&format!(
                                     "h{}: KERNEL TARGET MISS tolerated — consumed modifier predates the checkpoint horizon (block_from abs h{})",
@@ -4120,7 +4249,9 @@ fn validate_block(
                                 ));
                             }
                             proof = [0u8; 32];
-                        } else if input_abs < CHECKPOINT_HORIZON {
+                        } else if !ctx.live && input_abs < CHECKPOINT_HORIZON {
+                            // (T7-01) HISTORICAL/REPLAY ONLY — a live block may
+                            // never buy a kernel-guard skip with an old coin.
                             stats.kernel_target_tol_assumed += 1;
                             log(&format!(
                                 "h{}: kernel recomputation error tolerated — coinstake input predates the checkpoint horizon (abs h{}): {}",
@@ -4139,6 +4270,16 @@ fn validate_block(
                     // horizon; the index proof stays 0 exactly like the
                     // deployed client's own stored proofhash for this range.
                     stats.kernel_skipped_assume_valid += 1;
+                } else if ctx.live {
+                    // (T7-05) LIVE FullStrict: an unresolvable coinstake has NO
+                    // kernel evidence at all. Accepting it with proof=0 would
+                    // let any relayed block that spends an unknown (or already
+                    // spent / never existed) output mint a tip. Historical /
+                    // replay paths keep the documented skip below.
+                    return Err(format!(
+                        "h{}: coinstake input does not resolve to a tracked UTXO — kernel evidence unavailable in live validation (refused)",
+                        h
+                    ));
                 } else {
                     // No external proof oracle in the tri7-only topology: the rpc
                     // client points at THIS node (self-comparison is vacuous) or
@@ -9302,10 +9443,19 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     .wallet_path
                     .clone()
                     .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                // (TRI7-RPC-03) containment: a dump holds the plaintext private
+                // keys — it may only land inside the wallet/state directory,
+                // and it never overwrites an existing file.
+                let path = contained_wallet_path(&self.state_dir, &dest, true)
+                    .map_err(|e| (-8, format!("dumpwallet: {e}")))?;
                 let (rows, n) = tri7_core::keytool::dump_wallet(&wp)
                     .map_err(|e| (-1, format!("dumpwallet: {e}")))?;
-                let path = PathBuf::from(&dest);
-                let mut f = std::fs::File::create(&path)
+                // create_new == O_EXCL: refuses an existing destination even if
+                // one appeared between the containment check and this open.
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
                     .map_err(|e| (-1, format!("dumpwallet: create {}: {e}", path.display())))?;
                 tri7_core::keytool::write_dump(&mut f, &rows, None)
                     .map_err(|e| (-1, format!("dumpwallet: write: {e}")))?;
@@ -10147,7 +10297,10 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 let src = self.wallet_path.clone().ok_or_else(|| {
                     (-1, "no wallet loaded (start the node with --wallet)".to_string())
                 })?;
-                let dest = PathBuf::from(dest);
+                // (TRI7-RPC-03) a backup may only land inside the wallet/state
+                // directory (no `..`/absolute escapes) and never overwrites.
+                let dest = contained_wallet_path(&self.state_dir, &dest, true)
+                    .map_err(|e| (-8, format!("backupwallet: {e}")))?;
                 if dest.exists() {
                     return Err((
                         -4,
@@ -11027,14 +11180,123 @@ fn handle_message(
             }
             let mut links_tip = b.prev_hash == st.tip_hash;
             if !links_tip {
-                // a competing block: adopt it only if its branch is heavier
-                match try_adopt_heavier_branch(st, &b, &hash) {
-                    Ok(true) => {
-                        links_tip = b.prev_hash == st.tip_hash;
-                        stats.reorgs += 1;
+                // (T7-03) DEFERRED HEADER-WORK ADOPTION. If this body is the
+                // FIRST block of a branch that fork choice selected on headers
+                // alone, it must pass validate_block against the fork ancestor
+                // BEFORE any rollback runs: header bits are an unproven claim,
+                // and a branch that cannot produce one valid body must never
+                // cost us our validated tip.
+                if let Some(pending) = pending_adoption_for(&hash, Instant::now()) {
+                    let ancestor = st
+                        .entry_abs(pending.fork_h)
+                        .filter(|e| e.hash == b.prev_hash)
+                        .cloned();
+                    let Some(prev_entry) = ancestor else {
+                        clear_pending_adoption();
+                        log(&format!(
+                            "fork choice: deferred adoption refused — h{} does not descend from the recorded fork point h{}",
+                            pending.fork_h + 1,
+                            pending.fork_h
+                        ));
+                        return Ok(());
+                    };
+                    let header = st.pending_headers.get(&hash).cloned();
+                    // live:false — the probe must see the window TRUNCATED at
+                    // the fork ancestor (expected nBits / median time for
+                    // fork_h+1), not the chain we are about to leave.
+                    let probe = validate_block(
+                        &*st,
+                        rpc,
+                        stats,
+                        &b,
+                        &BlockCtx {
+                            height_abs: pending.fork_h + 1,
+                            header: header.as_ref(),
+                            prev_entry,
+                            live: false,
+                        },
+                    );
+                    match probe {
+                        Ok(_) => {
+                            let mut rolled = true;
+                            while st.tip_height > pending.fork_h {
+                                if let Err(e) = rollback_tip(st) {
+                                    log(&format!(
+                                        "fork choice: deferred rollback to h{} failed at h{}: {} — keeping the current tip",
+                                        pending.fork_h,
+                                        st.tip_height,
+                                        e
+                                    ));
+                                    rolled = false;
+                                    break;
+                                }
+                            }
+                            clear_pending_adoption();
+                            if !rolled {
+                                return Ok(());
+                            }
+                            stats.reorgs += 1;
+                            links_tip = b.prev_hash == st.tip_hash;
+                        }
+                        Err(e) => {
+                            clear_pending_adoption();
+                            log(&format!(
+                                "fork choice: deferred adoption of the h{}.. branch REFUSED — its first body failed validation: {} (our tip h{} stands)",
+                                pending.fork_h + 1,
+                                e,
+                                st.tip_height
+                            ));
+                            return Ok(());
+                        }
                     }
-                    Ok(false) => {}
-                    Err(e) => log(&format!("fork choice: rollback failed: {}", e)),
+                }
+                if !links_tip {
+                    // (T7-03) A competing body may only cost us our tip once
+                    // IT is known-good: probe-validate it against its in-window
+                    // ancestor BEFORE try_adopt_heavier_branch is allowed to
+                    // roll anything back. (The work comparison alone is a
+                    // header claim — real-looking hard bits on an invalid body
+                    // used to buy a rollback.)
+                    let ancestor_h = st
+                        .index_of_hash(&b.prev_hash)
+                        .map(|i| st.base + i as u64);
+                    let mut body_ok = true;
+                    if let Some(ah) = ancestor_h {
+                        if let Some(prev_entry) = st.entry_abs(ah).cloned() {
+                            let header = st.pending_headers.get(&hash).cloned();
+                            if let Err(e) = validate_block(
+                                &*st,
+                                rpc,
+                                stats,
+                                &b,
+                                &BlockCtx {
+                                    height_abs: ah + 1,
+                                    header: header.as_ref(),
+                                    prev_entry,
+                                    live: false,
+                                },
+                            ) {
+                                body_ok = false;
+                                log(&format!(
+                                    "fork choice: competing body for h{} REFUSED before rollback — {} (our tip h{} stands)",
+                                    ah + 1,
+                                    e,
+                                    st.tip_height
+                                ));
+                            }
+                        }
+                    }
+                    if body_ok {
+                        // a competing block: adopt it only if its branch is heavier
+                        match try_adopt_heavier_branch(st, &b, &hash) {
+                            Ok(true) => {
+                                links_tip = b.prev_hash == st.tip_hash;
+                                stats.reorgs += 1;
+                            }
+                            Ok(false) => {}
+                            Err(e) => log(&format!("fork choice: rollback failed: {}", e)),
+                        }
+                    }
                 }
             }
             let height_abs = if links_tip { st.tip_height + 1 } else { 0 };
@@ -12922,6 +13184,45 @@ pub fn main_args(argv: &[String]) -> i32 {
         }
     }
     if cfg.rpc_enabled {
+        // (TRI7-RPC-01 integration) per-boot capability token for the wallet
+        // GUI's own RPC client. The GUI cannot ship rpcuser/rpcpassword
+        // through its shared rpc_call surface, so the node publishes a
+        // capability file in the state dir (loopback host, recreated every
+        // boot) and the supervisor hands it to the client. HTTP Basic with
+        // the conf credentials remains valid for human/legacy callers.
+        let mut tok_h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        (
+            &user,
+            &pass,
+            cfg.rpc_listen_port,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        )
+            .hash(&mut tok_h);
+        let mut tok_h2 = std::collections::hash_map::DefaultHasher::new();
+        tok_h.finish().hash(&mut tok_h2);
+        cfg.rpc_listen_port.hash(&mut tok_h2);
+        let rpc_token = format!("{:016x}{:016x}", tok_h.finish(), tok_h2.finish());
+        let token_path = cfg.state_dir.join("node_rpc.token");
+        match std::fs::write(&token_path, rpc_token.as_bytes()) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &token_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+            Err(e) => log(&format!(
+                "rpc: token file write failed ({e}) — the GUI client will fail auth until it can read it"
+            )),
+        }
         let deps = Arc::new(rpc::ServerDeps {
             tip: Arc::new(LiveTip {
                 st: Arc::clone(&st_shared),
@@ -12992,6 +13293,14 @@ pub fn main_args(argv: &[String]) -> i32 {
                 debug: cfg.rpc_debug,
                 max_body: cfg.rpc_max_body,
                 read_timeout: Duration::from_secs(15),
+            },
+            // (TRI7-RPC-01) the HTTP surface authenticates every request but
+            // the getblockcount liveness probe against the node's own
+            // rpcuser/rpcpassword, and only answers loopback Host headers.
+            auth: {
+                let mut a = rpc::RpcAuth::new(&user, &pass, cfg.rpc_listen_port);
+                a.token = rpc_token;
+                a
             },
         });
         let listener = rpc::bind_loopback(&cfg.rpc_bind, cfg.rpc_listen_port)
@@ -17881,7 +18190,9 @@ mod tests {
     #[test]
     fn inbound_claim_divergence_triggers_recon_and_adopts_the_heavier_branch() {
         let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
         let mut stg = synthetic_chain(100, 105);
+        let our_tip_hash = stg.tip_hash;
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
         let mut stats = Stats::default();
@@ -17924,13 +18235,24 @@ mod tests {
         // ...which records the peer's claim (the trigger keeps measuring
         // against the branch while it stays alive)
         assert_eq!(recon.judged_claim.take(), Some((106, branch_tip)));
-        assert_eq!(stg.tip_height, 102, "rolled back to the fork point");
-        assert_eq!(stg.tip_hash, fork_hash);
-        assert_eq!(stats.reorgs, 1);
+        // (T7-03) HEADERS-ONLY SELECTION NEVER ROLLS BACK: the tip is intact
+        // until a branch body validates. The branch is recorded as pending and
+        // its bodies are queued at the fork+1 heights.
+        assert_eq!(
+            stg.tip_height, 105,
+            "a header-work switch must not roll back before any body validates"
+        );
+        assert_eq!(stg.tip_hash, our_tip_hash);
+        assert_eq!(stats.reorgs, 0, "no reorg has actually happened yet");
+        let pending = pending_adoption_for(&branch[0].hash(), Instant::now())
+            .expect("the selected branch must be recorded as pending");
+        assert_eq!(pending.fork_h, 102);
+        assert_eq!(pending.first_hash, branch[0].hash());
         for (i, hdr) in branch.iter().enumerate() {
             assert!(stg.pending_headers.contains_key(&hdr.hash()));
             assert_eq!(pend[i], (hdr.hash(), 103 + i as u64));
         }
+        clear_pending_adoption();
     }
 
     /// (item 21, r2) THE body-source choice, pinned: the recon branch's OWN
@@ -18068,6 +18390,7 @@ mod tests {
     #[test]
     fn recon_dispatch_transfers_claim_and_source_to_the_peer() {
         let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let mut peer = i2p_test_peer(stream);
@@ -18091,10 +18414,12 @@ mod tests {
 
         recon_dispatch(&mut stg, &mut peer, &branch, &mut recon, &mut pend, &mut stats)
             .expect("dispatch ok");
-        // (a) adopted
-        assert_eq!(stg.tip_height, 102, "rolled back to the fork point");
-        assert_eq!(stg.tip_hash, fork_hash);
-        assert_eq!(stats.reorgs, 1);
+        // (a) SELECTED, not executed: the tip stays until a body validates
+        assert_eq!(
+            stg.tip_height, 105,
+            "recon_dispatch must not roll back on headers alone"
+        );
+        assert_eq!(stats.reorgs, 0);
         assert_eq!(pend.len(), 4);
         // (b) the judged claim moved onto the Peer
         assert_eq!(peer.claimed_tip, Some((106, branch_tip)));
@@ -19225,12 +19550,18 @@ mod tests {
         }
         assert_eq!(
             stg.tip_height, 64,
-            "header-work switch never advances past an unvalidated body"
+            "header-work switch never rolls back before a body validates"
         );
         assert_eq!(pend.len(), 1999);
         assert_eq!(pend[0], (branch[0].hash(), 65));
         assert_eq!(pend[1998], (branch[1998].hash(), 2063));
-        assert_eq!(stats.reorgs, 1);
+        assert_eq!(stats.reorgs, 0, "selection is not an executed reorg");
+        // the fork IS our tip here, so the branch's first body (h65) links
+        // directly and the deferred record is simply consumed by it.
+        let pending = pending_adoption_for(&branch[0].hash(), Instant::now())
+            .expect("branch recorded as pending");
+        assert_eq!(pending.fork_h, 64);
+        clear_pending_adoption();
 
         // THE ADOPTION PIPELINE (item-23 shape: pop in chain order, pin ONLY
         // on a successful send — here the peer serves every body): with the
@@ -19298,7 +19629,7 @@ mod tests {
                 other
             ),
         }
-        assert_eq!(stats.reorgs, 1, "no second reorg after the tip advanced");
+        assert_eq!(stats.reorgs, 0, "no reorg ever executed in this scenario");
         assert!(pend2.is_empty(), "re-fire must not re-queue the same bodies");
     }
 
@@ -19516,7 +19847,9 @@ mod tests {
     #[test]
     fn recon_heavier_branch_switches_and_queues_the_validated_body_path() {
         let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
         let mut stg = synthetic_chain(100, 105);
+        let our_tip_hash = stg.tip_hash;
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
         let mut stats = Stats::default();
@@ -19539,9 +19872,17 @@ mod tests {
             }
             other => panic!("expected Switched, got {:?}", other),
         }
-        assert_eq!(stg.tip_height, 102, "rolled back to the fork point");
-        assert_eq!(stg.tip_hash, fork_hash);
-        assert_eq!(stats.reorgs, 1);
+        // (T7-03) the switch is SELECTED, not executed: the rollback waits for
+        // the branch's first validated body.
+        assert_eq!(
+            stg.tip_height, 105,
+            "no rollback before a validated body from the challenger"
+        );
+        assert_eq!(stg.tip_hash, our_tip_hash);
+        assert_eq!(stats.reorgs, 0);
+        let pending = pending_adoption_for(&branch[0].hash(), Instant::now())
+            .expect("the selected branch must be recorded as pending");
+        assert_eq!(pending.fork_h, 102);
         // their headers are queued as pending with ABSOLUTE heights — bodies
         // flow through the normal getdata → validate_block consensus path
         for (i, hdr) in branch.iter().enumerate() {
@@ -19552,6 +19893,7 @@ mod tests {
         // accumulator closed after the judge
         assert!(recon.fork_height.is_none());
         assert!(recon.headers.is_empty());
+        clear_pending_adoption();
     }
 
     #[test]
@@ -19621,6 +19963,7 @@ mod tests {
     #[test]
     fn recon_accumulates_cap_sized_batches_before_judging() {
         let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
         let mut stg = synthetic_chain(100, 105);
         let mut recon = ReconAcc::default();
         let mut pend = VecDeque::new();
@@ -19671,8 +20014,21 @@ mod tests {
             }
             other => panic!("expected Switched, got {:?}", other),
         }
-        assert_eq!(stg.tip_height, 101);
+        // (T7-03) selected, not executed: the tip survives until the branch
+        // produces a validated body; the branch is recorded as pending.
+        assert_eq!(
+            stg.tip_height, 105,
+            "header-work switch must not roll back before a body validates"
+        );
         assert_eq!(pend.len(), 2001);
+        assert_eq!(stats.reorgs, 0);
+        assert_eq!(
+            pending_adoption_for(&batch[0].hash(), Instant::now())
+                .expect("branch recorded as pending")
+                .fork_h,
+            101
+        );
+        clear_pending_adoption();
     }
 
     /// Build a ChainState whose window entries ARE the given headers — lets
@@ -19799,7 +20155,17 @@ mod tests {
         assert_eq!(pend.len(), 6);
         assert_eq!(pend[0].1, 106);
         assert_eq!(pend[5].1, 111);
-        assert_eq!(stats.reorgs, 1);
+        // (T7-03) the switch is only SELECTED here — the reorg counter moves
+        // when the branch's first body validates and the (trivial) rollback
+        // actually runs.
+        assert_eq!(stats.reorgs, 0);
+        assert_eq!(
+            pending_adoption_for(&batch[5].hash(), Instant::now())
+                .expect("branch recorded as pending")
+                .fork_h,
+            105
+        );
+        clear_pending_adoption();
     }
 
     #[test]

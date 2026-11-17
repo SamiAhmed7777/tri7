@@ -16,6 +16,17 @@
 
 use crate::legacy::Hash;
 
+/// Highest per-block work fork choice will credit.
+///
+/// (T7-03) `work_of` is fed HEADERS, i.e. attacker-chosen bits that no body
+/// has vouched for. The chain's real blocks sit around 3.7e24 (bits
+/// 0x1f04..0x1f06); crafted bits (tiny exponent) imply a difficulty near
+/// 1e70 and used to return `u128::MAX`, making ONE announced header outweigh
+/// any real branch. Work above this ceiling cannot come from a producible
+/// block, so it is credited as 0 (the branch simply gains nothing) instead of
+/// being treated as a winning claim.
+const MAX_PLAUSIBLE_WORK: u128 = 1u128 << 100; // ~1.27e30
+
 /// Work represented by one block with these compact bits, in units of
 /// 2^-29 (the same normalisation the daemon's difficulty_from_bits uses):
 ///
@@ -33,18 +44,23 @@ pub fn work_of(bits: u32) -> u128 {
     }
     let d = crate::rpc::difficulty_from_bits(bits);
     if !(d.is_finite()) || d <= 0.0 {
-        return 1;
+        return 0;
     }
     // 1 / difficulty is the fraction of the space a block must hit
     // (difficulty = FULL/2^256 * target^-1 * ...); invert and scale to u128.
     // difficulty is SMALL when the target is large (easy block): work is the
     // inverse, so divide by difficulty directly
     let inv = d;
-    if inv >= 1.7e38 {
-        u128::MAX
-    } else {
-        (inv * 1e30).max(1.0) as u128
+    // Non-finite / absurd implied work (uncomputable target or crafted bits):
+    // credit nothing — an unvalidated header must never carry a winning claim.
+    if !inv.is_finite() || inv > MAX_PLAUSIBLE_WORK as f64 / 1e30 {
+        return 0;
     }
+    let w = (inv * 1e30).max(1.0);
+    if !w.is_finite() || w > MAX_PLAUSIBLE_WORK as f64 {
+        return 0;
+    }
+    w as u128
 }
 
 /// The decision the node needs: keep our tip, or switch to theirs.
@@ -113,6 +129,21 @@ mod tests {
         let b = work_of(0x1f06_0000);
         assert!(a > b, "mantissa 0x030000 target is smaller -> more work");
         assert_eq!(work_of(0), 0);
+    }
+
+    #[test]
+    fn crafted_bits_are_not_a_winning_work_claim() {
+        // (T7-03) a tiny exponent implies an impossible difficulty; it used to
+        // return u128::MAX, i.e. one announced header outweighed the whole
+        // chain. It must now be credited as nothing.
+        assert_eq!(work_of(0x0000_ffff), 0, "crafted easy-exponent bits");
+        assert_eq!(work_of(0x0100_ffff), 0, "crafted bits, unbounded exponent");
+        assert_eq!(work_of(0x0000_0001), 0, "degenerate mantissa");
+        // real chain bits stay well under the ceiling and still order correctly
+        let real = work_of(0x1f04_1cb2);
+        assert!(real > 0 && real < MAX_PLAUSIBLE_WORK);
+        // a branch with MAX work can never be out-voted by crafted bits
+        assert!(real > work_of(0x0000_ffff));
     }
 
     #[test]

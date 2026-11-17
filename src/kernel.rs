@@ -679,7 +679,17 @@ pub fn check_proof_of_stake<R: KernelOutputResolver>(
     let meta = outputs
         .kernel_meta(&(txin.prev_hash, txin.prev_n))
         .ok_or_else(|| "CheckProofOfStake: coinstake input not a tracked UTXO".to_string())?;
-    let tx_prev_block = &idx.entries[meta.height];
+    // (T7-06) Bounds-guard the entry index: a coinstake input whose recorded
+    // height is outside the index is a foreign/synthetic UTXO, not a panic.
+    // Same skip-coin Err shape as get_kernel_stake_modifier (kernel.cpp
+    // 2269-2271 heritage), or one malformed relay block kills the daemon.
+    let tx_prev_block = idx.entries.get(meta.height).ok_or_else(|| {
+        format!(
+            "GetKernelStakeModifier: block height {} outside the index ({} entries) — coin skipped",
+            meta.height,
+            idx.entries.len()
+        )
+    })?;
 
     // CheckStakeKernelHash guards (kernel.cpp:314-318).
     if tx.time < meta.tx_time {
@@ -690,9 +700,34 @@ pub fn check_proof_of_stake<R: KernelOutputResolver>(
     }
 
     // Weight and target (kernel.cpp:322-327) — integer division order matters.
+    // (T7-02) A stake input with a non-positive value must never reach the
+    // coin-day product: `n_value_in as u128` on a negative i64 wraps to a
+    // near-2^128 weight, which multiplied by the target makes EVERY kernel
+    // "meet" it (target bypass). Negative / over-cap outputs are already
+    // rejected by validate_block's MoneyRange check; this is the kernel-side
+    // backstop, before any modular arithmetic.
     let n_value_in = meta.value;
+    if n_value_in <= 0 {
+        return Err(format!(
+            "CheckStakeKernelHash: stake input value {} is not positive — coin skipped",
+            n_value_in
+        ));
+    }
+    if n_value_in > crate::spend::MAX_MONEY {
+        return Err(format!(
+            "CheckStakeKernelHash: stake input value {} exceeds MAX_MONEY ({}) — coin skipped",
+            n_value_in,
+            crate::spend::MAX_MONEY
+        ));
+    }
     let weight = stake_weight_era(meta.tx_time, tx.time, tip_height + 1);
     let coin_day_weight = (n_value_in as i128 * weight as i128) / COIN as i128 / 86_400i128;
+    if coin_day_weight <= 0 {
+        return Err(format!(
+            "CheckStakeKernelHash: coin-day weight {} is not positive (value {} weight {}) — coin skipped",
+            coin_day_weight, n_value_in, weight
+        ));
+    }
 
     // Modifier from the fixed-600s walk (kernel.cpp:236-277 via 373).
     let modifier = get_kernel_stake_modifier(idx, meta.height)?;
@@ -741,7 +776,15 @@ pub fn recompute_stake_kernel<R: KernelOutputResolver>(
     let meta = outputs
         .kernel_meta(&input)
         .ok_or_else(|| "CheckProofOfStake: coinstake input not a tracked UTXO".to_string())?;
-    let tx_prev_block = &idx.entries[meta.height];
+    // (T7-06) same bounds guard as check_proof_of_stake: an out-of-index
+    // recorded height is a skip-coin Err, never a panic.
+    let tx_prev_block = idx.entries.get(meta.height).ok_or_else(|| {
+        format!(
+            "GetKernelStakeModifier: block height {} outside the index ({} entries) — coin skipped",
+            meta.height,
+            idx.entries.len()
+        )
+    })?;
     // CheckStakeKernelHash guards (kernel.cpp:314-318) — same strings as
     // check_proof_of_stake.
     if block_time < meta.tx_time {
@@ -1291,7 +1334,7 @@ mod tests {
                     script_pubkey: vec![],
                 },
                 Vout {
-                    value: 5_000_000,
+                    value: 500_000_000,
                     script_pubkey: vec![0xac],
                 },
             ],
@@ -1325,7 +1368,7 @@ mod tests {
                     script_pubkey: vec![],
                 },
                 Vout {
-                    value: 5_000_000,
+                    value: 500_000_000,
                     script_pubkey: vec![0xac],
                 },
             ],
@@ -1365,10 +1408,35 @@ mod tests {
         let b = mk_block(&coinstake(t_fund + 1800));
         let err = check_proof_of_stake(&idx, &b, &utxos, 0x207f_ffff, 0).unwrap_err();
         assert!(err.contains("min age violation"), "got: {}", err);
-        // exactly at min age the guards pass and the kernel is computed
-        let b = mk_block(&coinstake(t_fund + 3600));
+        // one hour PAST min age the era weight is > 0 and the kernel
+        // computes. (At exactly min age the era weight is 0 — the T7-02
+        // coin-day guard skips such coins: a zero-weight kernel would be
+        // trivially minable, which is correct-to-reject, not a regression.)
+        let b = mk_block(&coinstake(t_fund + 7200));
         let res =
             check_proof_of_stake(&idx, &b, &utxos, 0x207f_ffff, 0).expect("guards pass at min age");
         let _ = res.hash_proof_of_stake;
+        // (T7-02 regression) a non-positive stake input must be skipped by
+        // the coin-day guard, never allowed to wrap the target product
+        let zero_fund = {
+            let mut f = fund.clone();
+            f.vout[1].value = 0;
+            f
+        };
+        let mut utxos_zero = UtxoSet::new();
+        let blk0z = Block {
+            vtx: vec![zero_fund.clone()],
+            ..blk0.clone()
+        };
+        utxos_zero.apply_block_reported(&blk0z, 0);
+        let txid0 = zero_fund.hash();
+        let stake0 = {
+            let mut s = coinstake(t_fund + 7200);
+            s.vin[0].prev_hash = txid0;
+            s
+        };
+        let bz = mk_block(&stake0);
+        let err = check_proof_of_stake(&idx, &bz, &utxos_zero, 0x207f_ffff, 0).unwrap_err();
+        assert!(err.contains("not positive"), "got: {}", err);
     }
 }

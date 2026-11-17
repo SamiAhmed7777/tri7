@@ -4103,7 +4103,30 @@ pub struct HttpReject {
 }
 
 /// Read one POST request; returns the body string or an HTTP-level rejection.
-pub fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<String, HttpReject> {
+///
+/// (TRI7-RPC-01) The listener is loopback-only, but "loopback-only" is not an
+/// authorization boundary: any local process — and any BROWSER page via a
+/// cross-origin POST (which carries an Origin header and a non-loopback Host)
+/// — can reach 127.0.0.1. So the request must prove it is the wallet talking:
+///
+///   * `Origin` is refused outright: JSON-RPC has no browser/CORS surface, and
+///     a page-initiated request always carries one.
+///   * `Host` must be `127.0.0.1:<port>` or `localhost:<port>` — this defeats
+///     DNS-rebinding, where the browser sends `Host: attacker.example:<port>`.
+///   * `Content-Type` must be `application/json` (the legacy proxy and the
+///     GUI's client both send it).
+///   * HTTP Basic auth must match the configured `rpcuser`/`rpcpassword`
+///     (constant-time compare) for EVERY method EXCEPT `getblockcount`, which
+///     stays open as an unauthenticated health probe. That single exception
+///     exists because the GUI supervisor's liveness probe
+///     (gui/node_supervisor.rs → gui/rpc_client.rs, which we do not own and
+///     which sends no credentials) must keep working; `getblockcount` leaks
+///     nothing but the tip height.
+pub fn read_request(
+    stream: &mut TcpStream,
+    max_body: usize,
+    auth: &RpcAuth,
+) -> Result<String, HttpReject> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     // header block (capped at 64 KB)
@@ -4138,14 +4161,19 @@ pub fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<String, H
             message: "only POST is supported (JSON-RPC)".into(),
         });
     }
-    let mut content_length: Option<usize> = None;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse::<usize>().ok();
-            }
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
+    let header = |name: &str| -> Option<String> {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    let content_length: Option<usize> = header("content-length").and_then(|v| v.parse::<usize>().ok());
     let cl = content_length.ok_or_else(|| HttpReject {
         status: 400,
         message: "missing Content-Length".into(),
@@ -4155,6 +4183,54 @@ pub fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<String, H
             status: 413,
             message: format!("request body {} exceeds cap {} bytes", cl, max_body),
         });
+    }
+    // --- transport-level policy (cheap, before any body is read) ---
+    if let Some(origin) = header("origin") {
+        return Err(HttpReject {
+            status: 403,
+            message: format!(
+                "Origin header ({origin}) is not accepted: JSON-RPC is a local POST surface, never a browser one"
+            ),
+        });
+    }
+    match header("host") {
+        Some(h) if auth.host_ok(&h) => {}
+        Some(h) => {
+            return Err(HttpReject {
+                status: 403,
+                message: format!(
+                    "Host {h:?} is not the loopback RPC listener (expected 127.0.0.1:{} or localhost:{})",
+                    auth.port, auth.port
+                ),
+            })
+        }
+        None => {
+            return Err(HttpReject {
+                status: 400,
+                message: "missing Host header".into(),
+            })
+        }
+    }
+    match header("content-type") {
+        Some(v)
+            if v
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json") => {}
+        Some(v) => {
+            return Err(HttpReject {
+                status: 415,
+                message: format!("unsupported Content-Type {v:?} (expected application/json)"),
+            })
+        }
+        None => {
+            return Err(HttpReject {
+                status: 415,
+                message: "missing Content-Type (expected application/json)".into(),
+            })
+        }
     }
     let mut body = buf[split + 4..].to_vec();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -4186,10 +4262,108 @@ pub fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<String, H
     if body.len() > cl {
         body.truncate(cl); // pipelined extra bytes discarded (Connection: close)
     }
-    String::from_utf8(body).map_err(|_| HttpReject {
+    let text = String::from_utf8(body).map_err(|_| HttpReject {
         status: 400,
         message: "request body is not valid UTF-8".into(),
-    })
+    })?;
+    // --- authorization: everything except the getblockcount health probe ---
+    if !is_health_probe(&text) {
+        match header("authorization") {
+            // (TRI7-RPC-01) Basic (human/legacy clients) or Bearer (the
+            // wallet GUI's per-boot capability token) both authenticate;
+            // the bare getblockcount liveness probe stays open by design
+            Some(h) if auth.basic_ok(&h) || auth.bearer_ok(&h) => {}
+            _ => {
+                return Err(HttpReject {
+                    status: 401,
+                    message: "unauthorized: HTTP Basic rpcuser/rpcpassword required".into(),
+                })
+            }
+        }
+    }
+    Ok(text)
+}
+
+/// Constant-time byte comparison (credential check): length differences are
+/// not secret, content differences must not leak through timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// (TRI7-RPC-01) The ONE unauthenticated method: `getblockcount`. The GUI
+/// supervisor's liveness probe sends no credentials and must keep working;
+/// every other method requires Basic auth. Batches are never probes.
+fn is_health_probe(body: &str) -> bool {
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => v
+            .get("method")
+            .and_then(|m| m.as_str())
+            .map(|m| m == "getblockcount")
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Loopback RPC auth policy, plumbed from the node's `rpcuser`/`rpcpassword`
+/// (node_embedded::read_rpc_creds) and its native listener port.
+#[derive(Clone, Debug)]
+pub struct RpcAuth {
+    pub user: String,
+    pub pass: String,
+    pub port: u16,
+    /// (TRI7-RPC-01) per-boot capability token for the wallet GUI's own
+    /// client; empty = no Bearer acceptance
+    pub token: String,
+}
+
+impl RpcAuth {
+    pub fn new(user: &str, pass: &str, port: u16) -> RpcAuth {
+        RpcAuth {
+            user: user.to_string(),
+            pass: pass.to_string(),
+            port,
+            token: String::new(),
+        }
+    }
+
+    /// Constant-time Bearer check against the per-boot capability token.
+    fn bearer_ok(&self, header: &str) -> bool {
+        if self.token.is_empty() {
+            return false;
+        }
+        let Some((scheme, token)) = header.split_once(' ') else {
+            return false;
+        };
+        if !scheme.trim().eq_ignore_ascii_case("bearer") {
+            return false;
+        }
+        ct_eq(token.trim().as_bytes(), self.token.as_bytes())
+    }
+
+    /// Constant-time Basic check against the configured credentials.
+    fn basic_ok(&self, header: &str) -> bool {
+        let Some((scheme, token)) = header.split_once(' ') else {
+            return false;
+        };
+        if !scheme.trim().eq_ignore_ascii_case("basic") {
+            return false;
+        }
+        let want = base64_encode_fast(format!("{}:{}", self.user, self.pass).as_bytes());
+        ct_eq(token.trim().as_bytes(), want.as_bytes())
+    }
+
+    fn host_ok(&self, host: &str) -> bool {
+        let h = host.trim();
+        h.eq_ignore_ascii_case(&format!("127.0.0.1:{}", self.port))
+            || h.eq_ignore_ascii_case(&format!("localhost:{}", self.port))
+    }
 }
 
 fn find_split(buf: &[u8]) -> Option<usize> {
@@ -4200,10 +4374,13 @@ fn status_text(code: u16) -> &'static str {
     match code {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
@@ -4229,6 +4406,10 @@ pub struct ServerDeps {
     pub proxy: Option<Arc<dyn Proxy>>,
     pub ops: Option<Arc<dyn NodeOps>>,
     pub http: HttpServerConfig,
+    /// (TRI7-RPC-01) loopback auth policy: rpcuser/rpcpassword + the native
+    /// listener port (for the Host check). Requests other than the
+    /// getblockcount health probe must present these credentials.
+    pub auth: RpcAuth,
 }
 
 /// Accept loop — one thread per connection, one request per connection
@@ -4266,7 +4447,11 @@ pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
                             return;
                         }
                         let started = Instant::now();
-                        let body = match read_request(&mut stream, deps.http.max_body) {
+                        let body = match read_request(
+                            &mut stream,
+                            deps.http.max_body,
+                            &deps.auth,
+                        ) {
                             Ok(b) => b,
                             Err(rej) => {
                                 let msg = json!({
@@ -6819,60 +7004,171 @@ mod tests {
         assert_eq!(v["error"]["code"], -5);
     }
 
-    #[test]
-    fn read_request_rejects_oversized_body() {
+    /// Drive one raw request through `read_request` over a real loopback
+    /// socket (child = server side, main = client). `{PORT}` in `raw` is
+    /// substituted with the listener's port so tests can present a real Host.
+    /// An auth policy with port == 0 is bound to that same port.
+    fn drive_read_request(raw: String, auth: RpcAuth) -> Result<String, HttpReject> {
         use std::io::Write as _;
-        use std::sync::mpsc;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (tx_chan, rx) = mpsc::channel();
+        let auth = if auth.port == 0 {
+            RpcAuth::new(&auth.user, &auth.pass, port)
+        } else {
+            auth
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
         let child = std::thread::spawn(move || {
-            // SERVER side: read_request is what tri7d runs on inbound sockets
-            let (mut s, _) = listener.accept().unwrap();
-            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let res = read_request(&mut s, DEFAULT_MAX_BODY);
-            tx_chan.send(res.map(|b| b.len())).unwrap();
+            let (mut srv, _) = listener.accept().unwrap();
+            srv.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let res = read_request(&mut srv, DEFAULT_MAX_BODY, &auth)
+                .map_err(|rej| (rej.status, rej.message));
+            let _ = tx.send(res);
         });
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
             .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let hdr = "POST / HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n";
-        stream.write_all(hdr.as_bytes()).unwrap();
-        let res = rx.recv().unwrap();
-        match res {
-            Err(rej) => {
-                assert_eq!(rej.status, 413);
-                assert!(rej.message.contains("exceeds cap"));
-            }
-            Ok(n) => panic!("oversized request must be rejected, got {} bytes", n),
-        }
+        let raw = raw.replace("{PORT}", &port.to_string());
+        stream.write_all(raw.as_bytes()).unwrap();
+        let res = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server side returned");
         child.join().unwrap();
+        res.map_err(|(status, message)| HttpReject { status, message })
+    }
+
+    fn post_raw(body: &str, extra: &str) -> String {
+        // (fix) assemble headers via push_str: the old format! emitted a
+        // blank line before Content-Length when `extra` was empty, ending
+        // the header block early ('missing Content-Length')
+        let mut head = String::from(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nContent-Type: application/json\r\n",
+        );
+        if !extra.is_empty() {
+            head.push_str(extra);
+            head.push_str("\r\n");
+        }
+        head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        head.push_str(body);
+        head
+    }
+
+    #[test]
+    fn read_request_rejects_oversized_body() {
+        // the declared length alone is over the cap: 413 before any body byte
+        // and before the transport policy (cheap rejection wins)
+        let err = drive_read_request(
+            "POST / HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n".to_string(),
+            RpcAuth::new("u", "p", 0),
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 413);
+        assert!(err.message.contains("exceeds cap"));
     }
 
     #[test]
     fn read_request_parses_simple_post() {
-        use std::io::Write as _;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
         let body = r#"{"method":"getblockcount"}"#;
-        let child = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let req = format!(
-                "POST / HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            s.write_all(req.as_bytes()).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
-        });
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let got = read_request(&mut stream, DEFAULT_MAX_BODY).unwrap();
+        let got = drive_read_request(post_raw(body, ""), RpcAuth::new("u", "p", 0)).unwrap();
         assert_eq!(got, body);
-        child.join().unwrap();
+    }
+
+    /// (TRI7-RPC-01) Everything but the health probe needs the configured
+    /// rpcuser/rpcpassword, compared constant-time; the probe stays open.
+    #[test]
+    fn read_request_requires_basic_auth_except_for_getblockcount() {
+        let auth = || RpcAuth::new("u", "p", 0);
+
+        // the health probe is the ONE unauthenticated method
+        let probe = r#"{"jsonrpc":"1.0","id":"x","method":"getblockcount","params":[]}"#;
+        assert_eq!(
+            drive_read_request(post_raw(probe, ""), auth()).unwrap(),
+            probe,
+            "getblockcount must stay open as the liveness probe"
+        );
+
+        // any other method without credentials is refused
+        let body = r#"{"jsonrpc":"1.0","id":"x","method":"getinfo","params":[]}"#;
+        let err = drive_read_request(post_raw(body, ""), auth()).unwrap_err();
+        assert_eq!(err.status, 401, "{}", err.message);
+
+        // wrong password is refused too (constant-time compare, same status)
+        let wrong = format!(
+            "Authorization: Basic {}",
+            base64_encode_fast(b"u:nope")
+        );
+        let err = drive_read_request(post_raw(body, &wrong), auth()).unwrap_err();
+        assert_eq!(err.status, 401, "{}", err.message);
+
+        // a batch is never a probe
+        let batch = r#"[{"jsonrpc":"1.0","id":"1","method":"getblockcount","params":[]}]"#;
+        let err = drive_read_request(post_raw(batch, ""), auth()).unwrap_err();
+        assert_eq!(err.status, 401, "batches must authenticate: {}", err.message);
+
+        // correct credentials: served
+        let good = format!(
+            "Authorization: Basic {}",
+            base64_encode_fast(b"u:p")
+        );
+        assert_eq!(
+            drive_read_request(post_raw(body, &good), auth()).unwrap(),
+            body
+        );
+    }
+
+    /// (TRI7-RPC-01) Browser-shaped requests are refused: an Origin header
+    /// (cross-origin POST) and a foreign Host (DNS rebinding) both 403, and a
+    /// non-JSON Content-Type is 415.
+    #[test]
+    fn read_request_refuses_origin_and_foreign_host() {
+        let auth = || RpcAuth::new("u", "p", 0);
+        let probe = r#"{"method":"getblockcount"}"#;
+        let good = format!("Authorization: Basic {}", base64_encode_fast(b"u:p"));
+
+        let with_origin = post_raw(probe, &format!("{good}\r\nOrigin: https://evil.example"));
+        let err = drive_read_request(with_origin, auth()).unwrap_err();
+        assert_eq!(err.status, 403, "{}", err.message);
+        assert!(err.message.contains("Origin"));
+
+        let foreign_host = format!(
+            "POST / HTTP/1.1\r\nHost: attacker.example:{{PORT}}\r\nContent-Type: application/json\r\n{good}\r\nContent-Length: {}\r\n\r\n{}",
+            probe.len(),
+            probe
+        );
+        let err = drive_read_request(foreign_host, auth()).unwrap_err();
+        assert_eq!(err.status, 403, "{}", err.message);
+        assert!(err.message.contains("Host"));
+
+        let missing_host = format!(
+            "POST / HTTP/1.1\r\nContent-Type: application/json\r\n{good}\r\nContent-Length: {}\r\n\r\n{}",
+            probe.len(),
+            probe
+        );
+        let err = drive_read_request(missing_host, auth()).unwrap_err();
+        assert_eq!(err.status, 400, "{}", err.message);
+
+        let wrong_ct = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1:{{PORT}}\r\nContent-Type: text/plain\r\n{good}\r\nContent-Length: {}\r\n\r\n{}",
+            probe.len(),
+            probe
+        );
+        let err = drive_read_request(wrong_ct, auth()).unwrap_err();
+        assert_eq!(err.status, 415, "{}", err.message);
+
+        // localhost:<port> is an accepted Host spelling
+        assert_eq!(
+            drive_read_request(
+                format!(
+                    "POST / HTTP/1.1\r\nHost: localhost:{{PORT}}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    probe.len(),
+                    probe
+                ),
+                auth()
+            )
+            .unwrap(),
+            probe
+        );
     }
 
     #[test]
@@ -8613,7 +8909,7 @@ fn read_until_sse(stream: &mut TcpStream, needle: &str, budget: Duration) -> Str
     }
 }
 
-fn sse_deps(ops: Option<Arc<dyn NodeOps>>) -> Arc<ServerDeps> {
+fn sse_deps(ops: Option<Arc<dyn NodeOps>>, port: u16) -> Arc<ServerDeps> {
     Arc::new(ServerDeps {
         tip: Arc::new(T),
         wallet: Arc::new(StubWallet::default()),
@@ -8625,6 +8921,9 @@ fn sse_deps(ops: Option<Arc<dyn NodeOps>>) -> Arc<ServerDeps> {
             max_body: 1_000_000,
             read_timeout: Duration::from_secs(5),
         },
+        // (TRI7-RPC-01) real auth policy on the real dispatcher: the tests
+        // below drive serve() over a loopback socket exactly like the node.
+        auth: RpcAuth::new("testuser", "testpass", port),
     })
 }
 
@@ -8644,7 +8943,7 @@ fn sse_frame_shape_through_the_real_dispatcher() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops }))), listener));
+    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
     let mut s = sse_get(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     // handshake: SSE headers, then the retry hint proves the subscriber is
@@ -8692,7 +8991,7 @@ fn sse_frame_shape_through_the_real_dispatcher() {
 fn sse_without_a_live_engine_is_an_honest_404() {
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(None), listener));
+    std::thread::spawn(move || serve(sse_deps(None, port), listener));
     let mut s = sse_get(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let resp = read_until_sse(&mut s, "no live node engine", Duration::from_secs(5));
@@ -8705,7 +9004,7 @@ fn sse_without_a_live_engine_is_an_honest_404() {
     let listener2 = bind_loopback("127.0.0.1", 0).expect("bind");
     let port2 = listener2.local_addr().unwrap().port();
     let ops: Arc<dyn NodeOps> = Arc::new(StubOps::new(true));
-    std::thread::spawn(move || serve(sse_deps(Some(ops)), listener2));
+    std::thread::spawn(move || serve(sse_deps(Some(ops), port2), listener2));
     let mut s2 = sse_get(port2);
     s2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let resp2 = read_until_sse(&mut s2, "no live node engine", Duration::from_secs(5));
@@ -8776,7 +9075,7 @@ fn oversized_request_headers_still_complete_peek_and_post() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops }))), listener));
+    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
 
     // GET /events with >1024 bytes of headers: full SSE handshake
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
@@ -8799,7 +9098,8 @@ fn oversized_request_headers_still_complete_peek_and_post() {
     p.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
     let body = json!({"method":"getblockcount","params":[]}).to_string();
     let req = format!(
-        "POST / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST / HTTP/1.1\r\nHost: localhost:{}\r\nX-Pad: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        port,
         "b".repeat(2048),
         body.len(),
         body
@@ -8832,7 +9132,7 @@ fn peek_ceiling_is_deterministic_for_absurd_heads() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops }))), listener));
+    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
 
     // (a) just under the ceiling: terminator inside the window — full SSE
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
@@ -8879,7 +9179,8 @@ fn peek_ceiling_is_deterministic_for_absurd_heads() {
     p.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
     let body = json!({"method":"getblockcount","params":[]}).to_string();
     let over_post = format!(
-        "POST / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST / HTTP/1.1\r\nHost: localhost:{}\r\nX-Pad: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        port,
         "c".repeat(12000),
         body.len(),
         body
@@ -8907,7 +9208,7 @@ fn sse_cap_full_answers_503_through_the_real_listener() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops }))), listener));
+    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
     let mut s = sse_get(port);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = String::new();
