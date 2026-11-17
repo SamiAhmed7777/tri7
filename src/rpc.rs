@@ -370,6 +370,13 @@ pub trait TipProvider: Send + Sync {
     fn peers(&self) -> u32;
     fn uptime_secs(&self) -> u64;
     fn state_write_age_secs(&self) -> Option<u64>;
+    /// (TRI7-RPC-07) the node's ACTUAL inbound P2P listen port, None when it
+    /// was started with --no-listen. `getlocalinfo.listen` must never report
+    /// the peer COUNT (that is `peers`). Default None keeps every stub honest:
+    /// an adapter that does not know its listener must not claim one.
+    fn listen_port(&self) -> Option<u16> {
+        None
+    }
 }
 
 pub struct BalanceView {
@@ -1461,6 +1468,11 @@ enum NativeOutcome {
     Miss(String),
 }
 
+/// (TRI7-RPC-04) hard cap on one JSON-RPC batch array. Each element is a full
+/// request (some of them O(chain-window) reads), so an unbounded array is a
+/// single-connection CPU amplifier.
+pub const MAX_BATCH_ELEMS: usize = 20;
+
 /// Handle one raw request body (single object or batch array).
 /// Returns (http status, response body).
 pub fn handle_body(deps: &Deps, body: &str) -> (u16, String) {
@@ -1480,6 +1492,21 @@ pub fn handle_body(deps: &Deps, body: &str) -> (u16, String) {
                 return (
                     200,
                     env_err(&Value::Null, -32600, "Invalid Request: empty batch").to_string(),
+                );
+            }
+            if items.len() > MAX_BATCH_ELEMS {
+                return (
+                    200,
+                    env_err(
+                        &Value::Null,
+                        -32600,
+                        &format!(
+                            "Invalid Request: batch of {} exceeds the {} element cap",
+                            items.len(),
+                            MAX_BATCH_ELEMS
+                        ),
+                    )
+                    .to_string(),
                 );
             }
             let outs: Vec<Value> = items.iter().map(|it| handle_one(deps, it).1).collect();
@@ -2056,6 +2083,11 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 Some(a) => a,
                 None => return NativeOutcome::Err(-8, "expected address parameter".into()),
             };
+            // (TRI7-RPC-04) address-shaped params are capped before any
+            // decode/lookup work — no legal address is longer than 35 chars
+            if addr.len() > MAX_ADDRESS_CHARS {
+                return NativeOutcome::Err(-5, "Invalid address: too long".into());
+            }
             // minconf accepted for daemon-compat; the snapshot is fully
             // confirmed at its coverage height, so minconf is informational
             let _minconf = ptry!(p_u64(params, 1, "minconf")).unwrap_or(1);
@@ -2483,17 +2515,36 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 "hidden_service/hostname",
                 "tor/hostname",
             ]);
-            let i2p = read_first(&["i2p_destination.txt", "i2p/hostname"]);
+            // (TRI7-I2P-02) an i2p identity is only useful when the node is
+            // actually LISTENING for inbound circuits. A destination file
+            // with --no-listen is not reachable, so report it as absent and
+            // say why instead of handing out a dead address.
+            let listen_port = deps.tip.listen_port();
+            let i2p_file = read_first(&["i2p_destination.txt", "i2p/hostname"]);
+            let i2p_suppressed = i2p_file.is_some() && listen_port.is_none();
+            let i2p = if listen_port.is_some() {
+                i2p_file
+            } else {
+                None
+            };
+            let note = if i2p_suppressed {
+                "i2p destination exists but the node is NOT listening (inbound disabled: \
+                 --no-listen) — restart with --listen-bind to accept i2p peers"
+            } else if onion.is_none() && i2p.is_none() {
+                "no Tor/I2P identity configured for this node"
+            } else {
+                ""
+            };
             NativeOutcome::Ok(json!({
                 "onion": onion,
                 "i2p": i2p,
-                "listen": deps.tip.peers(),
+                // (TRI7-RPC-07) `listen` is the inbound P2P listen PORT (null
+                // when --no-listen) — it used to carry the peer COUNT, which
+                // made a listening node indistinguishable from a busy one.
+                "listen": listen_port,
+                "peers": deps.tip.peers(),
                 "state_dir": sd_owned,
-                "note": if onion.is_none() && i2p.is_none() {
-                    "no Tor/I2P identity configured for this node"
-                } else {
-                    ""
-                },
+                "note": note,
             }))
         }
 
@@ -3630,7 +3681,9 @@ fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
         "stop" => {
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                crate::shutdown::request();
+                // (TRI7-RPC-02) mark it as an OPERATOR stop: the supervisor
+                // must attribute the exit to `stop`, not to a crash
+                crate::shutdown::request_rpc();
             });
             NativeOutcome::Ok(json!("tri7 server stopping"))
         }
@@ -4018,7 +4071,29 @@ pub fn format_tx_json(hit: &TxHit, tip_height: u64) -> (Value, String) {
 // Address codec — decode side of address.rs's base58check encoder
 // ---------------------------------------------------------------------------
 
+/// (TRI7-RPC-04) cap on any address-shaped string handed to a decoder. The
+/// base58 decode below is O(n²) in the string length and every caller parses
+/// an attacker-controlled RPC/GUI parameter, so an unbounded string is a
+/// cheap CPU DoS. 128 is ~4× the longest legal address and still admits any
+/// future payload width.
+pub const MAX_ADDRESS_CHARS: usize = 128;
+/// A base58check(25-byte payload) address is never shorter than 25 chars
+/// (all leading '1's) and never longer than 35 — lengths outside that band
+/// cannot decode to 25 bytes, so they are rejected BEFORE the O(n²) walk.
+pub const MIN_ENCODED_ADDRESS_CHARS: usize = 25;
+pub const MAX_ENCODED_ADDRESS_CHARS: usize = 35;
+
+/// Length gate for address-shaped params: cheap, and it rejects every string
+/// that cannot yield a 25-byte payload before any decoding work happens.
+pub fn address_shape_ok(s: &str) -> bool {
+    s.len() >= MIN_ENCODED_ADDRESS_CHARS && s.len() <= MAX_ENCODED_ADDRESS_CHARS
+}
+
 fn base58_decode(s: &str) -> Option<Vec<u8>> {
+    // (TRI7-RPC-04) hard cap before the quadratic accumulate
+    if s.len() > MAX_ADDRESS_CHARS {
+        return None;
+    }
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let mut rank = [255u8; 256];
     for (i, &c) in ALPHABET.iter().enumerate() {
@@ -4055,6 +4130,11 @@ fn base58_decode(s: &str) -> Option<Vec<u8>> {
 /// base58check decode → (version byte, hash160 payload). Checks the 4-byte
 /// sha256d checksum and the 25-byte length.
 pub fn decode_address(addr: &str) -> Option<(u8, [u8; 20])> {
+    // (TRI7-RPC-04) a length that cannot be a 25-byte payload is rejected
+    // before the decoder runs at all
+    if !address_shape_ok(addr) {
+        return None;
+    }
     let raw = base58_decode(addr)?;
     if raw.len() != 25 {
         return None;
@@ -4412,16 +4492,53 @@ pub struct ServerDeps {
     pub auth: RpcAuth,
 }
 
+/// (TRI7-RPC-04) per-listener cap on concurrent RPC connections. Before this
+/// the accept loop spawned one unbounded thread per connection; loopback load
+/// is trivial, so 8 in flight is generous and a 9th gets an honest 503.
+pub const MAX_RPC_CONNS: usize = 8;
+
+/// RAII slot for one accepted connection: the per-listener counter is
+/// decremented on EVERY exit path of the handler thread (including panics).
+struct ConnSlot(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Accept loop — one thread per connection, one request per connection
 /// (Connection: close). Loopback load is trivial; this keeps the code tiny.
 pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // per-listener (not process-global) so independent servers — the daemon
+    // and every test listener — never starve each other
+    let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let deps = Arc::clone(&deps);
         match conn {
             Ok(mut stream) => {
+                // (TRI7-RPC-04) bounded concurrency: past the cap the
+                // connection is answered 503 and dropped, never given a
+                // thread of its own.
+                if active.fetch_add(1, Ordering::SeqCst) >= MAX_RPC_CONNS {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let msg = json!({
+                        "result": Value::Null,
+                        "error": {"code": -32000, "message": format!(
+                            "too many concurrent RPC connections (max {MAX_RPC_CONNS}) — retry"
+                        )},
+                        "id": Value::Null,
+                        "source": "tri7"
+                    })
+                    .to_string();
+                    let _ = write_response(&mut stream, 503, &msg);
+                    continue;
+                }
+                let slot = ConnSlot(Arc::clone(&active));
                 std::thread::Builder::new()
                     .name("rpc-conn".into())
                     .spawn(move || {
+                        let _slot = slot;
                         let _ = stream.set_read_timeout(Some(deps.http.read_timeout));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
                         // SSE: GET /events is a long-lived push stream the
@@ -5082,6 +5199,79 @@ mod tests {
         let (_, out) = handle_body(&d, "[]");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"]["code"], -32600);
+    }
+
+    /// (TRI7-RPC-04) a batch array is capped BEFORE dispatch — an unbounded
+    /// array was one connection amplifying arbitrarily many full requests.
+    #[test]
+    fn oversized_batch_is_rejected_and_the_cap_still_dispatches() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = deps(&t, &w, &b, None);
+        let over: Vec<Value> = (0..=MAX_BATCH_ELEMS)
+            .map(|i| json!({"id": i, "method": "getblockcount"}))
+            .collect();
+        let (status, out) = handle_body(&d, &json!(over).to_string());
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"]["code"], -32600);
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("element cap"),
+            "the rejection must name the cap: {v}"
+        );
+        assert!(v.get("result").is_some(), "one envelope, not an array");
+        // exactly at the cap: normal dispatch
+        let at_cap: Vec<Value> = (0..MAX_BATCH_ELEMS)
+            .map(|i| json!({"id": i, "method": "getblockcount"}))
+            .collect();
+        let (_, out) = handle_body(&d, &json!(at_cap).to_string());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v.as_array().map(|a| a.len()), Some(MAX_BATCH_ELEMS));
+    }
+
+    /// (TRI7-RPC-04) address-shaped params are length-capped before the O(n²)
+    /// base58 walk, and out-of-band lengths are rejected outright.
+    #[test]
+    fn address_params_are_length_capped_before_decoding() {
+        let long = "1".repeat(100_000);
+        assert!(!address_shape_ok(&long));
+        assert!(decode_address(&long).is_none());
+        assert!(!address_shape_ok("1234"));
+        assert!(address_shape_ok(&"1".repeat(MIN_ENCODED_ADDRESS_CHARS)));
+        assert!(address_shape_ok(&"1".repeat(MAX_ENCODED_ADDRESS_CHARS)));
+        assert!(!address_shape_ok(&"1".repeat(MAX_ENCODED_ADDRESS_CHARS + 1)));
+
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = deps(&t, &w, &b, None);
+        // validateaddress answers isvalid=false instead of decoding 100k chars
+        let v = call(&d, "validateaddress", json!([long]));
+        assert_eq!(v["result"]["isvalid"], json!(false));
+        // getreceivedbyaddress refuses an oversized param before any lookup
+        let v = call(&d, "getreceivedbyaddress", json!(["1".repeat(129)]));
+        assert_eq!(v["error"]["code"], -5);
+    }
+
+    /// (TRI7-RPC-07) `listen` is the inbound PORT (null with --no-listen),
+    /// never the peer count (that is `peers`).
+    #[test]
+    fn getlocalinfo_reports_listen_port_and_peer_count_separately() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = deps(&t, &w, &b, None);
+        let v = call(&d, "getlocalinfo", json!([]));
+        assert_eq!(v["result"]["listen"], Value::Null, "stub has no listener");
+        assert_eq!(v["result"]["peers"], json!(StubTip.peers()));
+        assert_ne!(
+            v["result"]["listen"], v["result"]["peers"],
+            "listen must not alias the peer count"
+        );
     }
 
     #[test]
@@ -8935,6 +9125,39 @@ fn sse_get(port: u16) -> std::net::TcpStream {
     )
     .expect("send GET");
     s
+}
+
+/// (TRI7-RPC-04) the accept loop is bounded: past MAX_RPC_CONNS a new
+/// connection is answered 503 instead of getting its own thread.
+#[test]
+fn concurrent_connections_past_the_cap_get_503() {
+    let listener = bind_loopback("127.0.0.1", 0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || serve(sse_deps(None, port), listener));
+    // occupy every slot with connections that never send a request: each
+    // handler thread blocks in read_request until its timeout
+    let mut held: Vec<TcpStream> = Vec::new();
+    for _ in 0..MAX_RPC_CONNS {
+        held.push(TcpStream::connect(("127.0.0.1", port)).expect("connect"));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let mut over = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    over.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut acc = Vec::new();
+    let mut chunk = [0u8; 512];
+    while !String::from_utf8_lossy(&acc).contains("\r\n\r\n") {
+        match over.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => acc.extend_from_slice(&chunk[..n]),
+            Err(e) => panic!("read: {e}"),
+        }
+    }
+    let head = String::from_utf8_lossy(&acc).to_string();
+    assert!(
+        head.starts_with("HTTP/1.1 503"),
+        "the connection past the cap must get an honest 503: {head}"
+    );
+    drop(held);
 }
 
 #[test]

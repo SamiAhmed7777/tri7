@@ -671,7 +671,11 @@ const RECENT_CAP: usize = 4000;
 //       (the "phantom" tip is invalidated honestly in the log + a marker
 //       file) and staking mints a FRESH block at that height.
 // ---------------------------------------------------------------------------
-const GAP_TAIL_MAX: u64 = 8; // walk at most this many heights below the tip
+/// (F9) The gap band must cover the crash tail: `append_block` fsyncs only
+/// every 256 frames, so a hard kill can leave up to 255 bodies unwritten.
+/// The old band of 8 could not even see the hole; 32 covers the window the
+/// follow loop can still repair before the rollback branch would fire.
+const GAP_TAIL_MAX: u64 = 32; // walk at most this many heights below the tip
 const GAP_ROLLBACK_TICKS: u32 = 20; // consecutive unresolved ticks (30s each)
 
 #[derive(Default)]
@@ -6936,6 +6940,61 @@ fn backfill_pick_indices(got_len: usize, k: usize, tip: u64, start_h: u64) -> Ve
     picks
 }
 
+/// (F9) the MEASURED store shortfall at boot: tipstate's tip minus the disk
+/// store's threaded tip. `append_block` fsyncs every 256 frames, so a crash
+/// can leave the store lagging tipstate by up to 255 bodies, which the old
+/// constant 100-body probe could not cover. None when no store is live or
+/// nothing is indexed yet (caller falls back to the configured span).
+fn boot_store_shortfall(tip: u64) -> Option<u64> {
+    let store = live_store()?;
+    let threaded = store.threaded_tip()?;
+    Some(tip.saturating_sub(threaded))
+}
+
+/// (F9) body-request span for the boot backfill: the configured evidence
+/// sample, EXTENDED to cover the measured shortfall so a crash-truncated
+/// store tail is actually refetched instead of probed at a constant 100.
+fn backfill_body_span(configured: usize, shortfall: Option<u64>, served: usize) -> usize {
+    let need = shortfall.unwrap_or(0) as usize;
+    configured.max(need).min(served)
+}
+
+/// (F9) pick indices for the body phase: the measured shortfall is requested
+/// CONTIGUOUSLY at the window top — a stride can step over exactly the bodies
+/// a crash left behind — and the remaining budget is the historical spread.
+fn backfill_pick_indices_tail(
+    got_len: usize,
+    k: usize,
+    tip: u64,
+    start_h: u64,
+    tail: usize,
+) -> Vec<usize> {
+    let mut picks: Vec<usize> = Vec::new();
+    if got_len == 0 || k == 0 {
+        return picks;
+    }
+    let in_window = got_len.min(tip.saturating_sub(start_h) as usize);
+    let tail = tail.min(k).min(in_window);
+    for n in 0..tail {
+        picks.push(in_window - 1 - n);
+    }
+    picks.sort_unstable();
+    picks.dedup();
+    let rest = k.saturating_sub(picks.len());
+    if rest > 0 {
+        for i in backfill_pick_indices(got_len, rest, tip, start_h) {
+            if picks.len() >= k {
+                break;
+            }
+            if !picks.contains(&i) {
+                picks.push(i);
+            }
+        }
+    }
+    picks.sort_unstable();
+    picks
+}
+
 fn run_backfill(
     sess: &mut Session,
     st: &ChainState,
@@ -7048,7 +7107,23 @@ fn run_backfill(
     ));
 
     // fetch a spread of full blocks across the range and validate them
-    let k = cfg.backfill_blocks.min(got.len());
+    // (F9) the body budget is the MEASURED shortfall between tipstate and the
+    // disk store (a crash can leave up to 255 un-fsynced bodies behind),
+    // floored at the configured evidence sample — never a blind constant.
+    let shortfall = boot_store_shortfall(st.tip_height);
+    let k = backfill_body_span(cfg.backfill_blocks, shortfall, got.len());
+    if let Some(s) = shortfall {
+        if s > cfg.backfill_blocks as u64 {
+            log(&format!(
+                "backfill: store is {} bod{} behind tipstate (measured) — widening the body \
+                 span from {} to {} so the crash tail is refetched, not probed",
+                s,
+                if s == 1 { "y" } else { "ies" },
+                cfg.backfill_blocks,
+                k
+            ));
+        }
+    }
     if k == 0 {
         return Ok(got);
     }
@@ -7059,7 +7134,13 @@ fn run_backfill(
     // above the tip has no local prev entry and used to abort the whole
     // process ("backfill block outside window" → exit(4) → systemd restart
     // → same peer → same abort, 6+ cycles live on DNS3).
-    let indices = backfill_pick_indices(got.len(), k, st.tip_height, start_h);
+    let indices = backfill_pick_indices_tail(
+        got.len(),
+        k,
+        st.tip_height,
+        start_h,
+        shortfall.unwrap_or(0) as usize,
+    );
     if indices.len() < k {
         log(&format!(
             "backfill: peer serves {} headers but the local window ends at h{} — body requests clamped to {} (17a)",
@@ -12307,6 +12388,9 @@ struct LiveTip {
     last_write: Arc<Mutex<Instant>>,
     peers: Arc<AtomicU32>,
     mirror: Arc<TipMirror>,
+    /// (TRI7-RPC-07) the port this node actually listens on, None when
+    /// --no-listen. `getlocalinfo.listen` reports THIS, never the peer count.
+    listen_port: Option<u16>,
 }
 
 /// Window entry → the rpc::EntryView shape (shared by both adapters).
@@ -12380,6 +12464,10 @@ impl TipProvider for LiveTip {
 
     fn state_write_age_secs(&self) -> Option<u64> {
         Some(self.last_write.lock().unwrap().elapsed().as_secs())
+    }
+
+    fn listen_port(&self) -> Option<u16> {
+        self.listen_port
     }
 }
 
@@ -12921,6 +13009,10 @@ pub fn store_has_bodies(blocks_file: &Path) -> bool {
 /// of exiting the process when embedded (see node_exit).
 pub fn main_args(argv: &[String]) -> i32 {
     let mut cfg = parse_args(argv);
+    // (TRI7-RPC-02) the shutdown flag is process-global; a run inherits the
+    // previous run's stop in the single-exe GUI. Clear it BEFORE anything
+    // reads it, so an RPC `stop` ends exactly the run it was issued against.
+    tri7_core::shutdown::reset();
     FULL_VALIDATE.store(cfg.full_validate, Ordering::Relaxed);
     if cfg.status {
         status_exit(&cfg); // early: no conf read, no network
@@ -13904,6 +13996,7 @@ pub fn main_args(argv: &[String]) -> i32 {
                 last_write: Arc::clone(&last_write_shared),
                 peers: Arc::clone(&peers_shared),
                 mirror: Arc::clone(&tip_mirror),
+                listen_port: cfg.listen_port,
             }),
             wallet: Arc::new(LiveWalletProvider {
                 snap: std::sync::RwLock::new(Arc::new(SnapshotWallet {
@@ -20612,6 +20705,50 @@ mod tests {
             vtx: vec![],
             block_sig: vec![],
         }
+    }
+
+    /// (F9) the boot body span is the MEASURED shortfall, not a constant: a
+    /// crash can leave up to 255 un-fsynced bodies behind tipstate.
+    #[test]
+    fn backfill_body_span_tracks_the_measured_store_shortfall() {
+        // store in sync (shortfall 0): the configured evidence sample stands
+        assert_eq!(backfill_body_span(100, Some(0), 3000), 100);
+        // crash tail of 255 bodies: the span grows to cover it
+        assert_eq!(backfill_body_span(100, Some(255), 3000), 255);
+        // no live store / no indexed body: fall back to the configured span
+        assert_eq!(backfill_body_span(100, None, 3000), 100);
+        // never more bodies than the peer actually served
+        assert_eq!(backfill_body_span(100, Some(255), 40), 40);
+        // a shortfall smaller than the sample does not shrink the evidence
+        assert_eq!(backfill_body_span(100, Some(3), 3000), 100);
+    }
+
+    /// (F9) the measured shortfall is picked CONTIGUOUSLY at the window top —
+    /// the old stride stepped over exactly the bodies a crash left behind.
+    #[test]
+    fn backfill_pick_indices_tail_covers_the_crash_tail_contiguously() {
+        let tip = 2_208_000u64;
+        let start_h = tip - 3000;
+        let got = 3000usize;
+        let picks = backfill_pick_indices_tail(got, 255, tip, start_h, 255);
+        assert_eq!(picks.len(), 255);
+        // the top 255 heights are all present (contiguous), i.e. the last
+        // in-window index is the newest block the store is missing
+        for n in 0..255usize {
+            assert!(
+                picks.contains(&(got - 1 - n)),
+                "tail index {} missing from the picks",
+                got - 1 - n
+            );
+        }
+        assert!(picks.windows(2).all(|w| w[0] < w[1]), "picks must be sorted");
+        // a shortfall larger than the budget cannot over-request
+        let capped = backfill_pick_indices_tail(got, 10, tip, start_h, 400);
+        assert_eq!(capped.len(), 10);
+        assert!(capped.iter().all(|i| *i < got));
+        // degenerate inputs stay empty
+        assert!(backfill_pick_indices_tail(0, 10, tip, start_h, 5).is_empty());
+        assert!(backfill_pick_indices_tail(got, 0, tip, start_h, 5).is_empty());
     }
 
     #[test]

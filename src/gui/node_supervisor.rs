@@ -1824,6 +1824,18 @@ pub struct EmbeddedNode {
     /// transient, so the restart counter is reset and the cap does not latch
     /// for the rest of the session
     healthy_since: Option<Instant>,
+    /// (TRI7-I2P-02) the CURRENT run was spawned with --no-listen because no
+    /// i2p destination existed yet. The listener argv is fixed at spawn time,
+    /// so a destination that first appears mid-run needs one fresh spawn with
+    /// --listen-bind — otherwise inbound i2p is never reached in that session.
+    spawn_without_listen: bool,
+    /// set once the one-shot "destination appeared → respawn with inbound"
+    /// has fired; a churning destination never respawn-loops the node
+    inbound_respawn_done: bool,
+    /// the pending cooperative stop was requested by US for the inbound
+    /// respawn (not by an operator RPC `stop`) — the reap must not label it
+    /// as an operator stop
+    respawn_for_inbound: bool,
     log_path: PathBuf,
     /// the in-process node thread (run_embedded)
     node_thread: Option<JoinHandle<()>>,
@@ -1856,6 +1868,9 @@ impl EmbeddedNode {
             restart_backoff_until: None,
             restart_backoff_base: RESTART_BACKOFF_BASE,
             healthy_since: None,
+            spawn_without_listen: false,
+            inbound_respawn_done: false,
+            respawn_for_inbound: false,
             log_path: log_path.clone(),
             node_thread: None,
             node_finished: Arc::new(AtomicBool::new(false)),
@@ -2174,6 +2189,29 @@ impl EmbeddedNode {
         //    WITHOUT i2p, never blocked on it.
         let i2p_status = self.i2p.ensure(node_dir, !self.attach_external);
         let i2p_port = i2p_status.socks_port();
+        // 0c. (TRI7-I2P-02) INBOUND CAN ONLY BE ENABLED AT SPAWN TIME. On a
+        //     first session the destination does not exist yet, so the run
+        //     below is spawned with --no-listen and nothing would ever add
+        //     the listener back. The instant the destination appears, ask
+        //     THIS run to stop cooperatively (state persists at a safe
+        //     point); the next ensure_running reaps it and spawns with
+        //     --listen-bind. Exactly once per session — a destination that
+        //     churns cannot respawn-loop the node.
+        if self.node_thread.is_some()
+            && !self.node_finished.load(Ordering::SeqCst)
+            && self.spawn_without_listen
+            && !self.inbound_respawn_done
+            && self.i2p.destination().is_some()
+        {
+            self.inbound_respawn_done = true;
+            self.respawn_for_inbound = true;
+            crate::shutdown::request();
+            crate::node_embedded::embedded_log(
+                "supervisor: i2p destination is now live but this run was spawned with \
+                 --no-listen — requesting one clean stop to respawn WITH the inbound listener \
+                 (intentional, not counted against MAX_RESTARTS)",
+            );
+        }
         // 1. already answering? (ours in-process, or a fleet node — either is
         //    fine)
         if crate::gui::rpc_client::rpc_call(
@@ -2212,45 +2250,69 @@ impl EmbeddedNode {
                 self.restarts + 1
             ));
             self.node_thread = None; // reap
-            // HEALTH RESET: a run that stayed up HEALTHY_RESET_WINDOW proves
-            // the earlier exits were transient — clear the counter so the cap
-            // is a crash-loop bound, not a permanent session latch.
-            if let Some(hs) = self.healthy_since.take() {
-                if hs.elapsed() >= HEALTHY_RESET_WINDOW {
-                    crate::node_embedded::embedded_log(&format!(
-                        "supervisor: previous run stayed healthy {}s — restart counter reset (was {})",
-                        hs.elapsed().as_secs(),
-                        self.restarts
-                    ));
-                    self.restarts = 0;
+            // (TRI7-RPC-02) / (TRI7-I2P-02) an INTENTIONAL stop is not a
+            // restart. Either the supervisor asked for one (the i2p inbound
+            // respawn) or an operator's RPC `stop` set the shared flag: the
+            // run exited on purpose, state is persisted, and counting it
+            // against MAX_RESTARTS burned all five restarts on one `stop`.
+            if self.respawn_for_inbound {
+                self.respawn_for_inbound = false;
+                self.healthy_since = None;
+                // the stop we just honoured is OURS: clear the sticky flag
+                // before the respawn or the new run exits on its first loop
+                crate::shutdown::reset();
+                crate::node_embedded::embedded_log(
+                    "supervisor: node stopped for the i2p inbound respawn (intentional) — \
+                     not counted against MAX_RESTARTS",
+                );
+            } else if crate::shutdown::rpc_stopped() {
+                self.healthy_since = None;
+                // clear the sticky flags before the respawn (the run resets
+                // them too, but the supervisor must not read a stale request)
+                crate::shutdown::reset();
+                crate::node_embedded::embedded_log(
+                    "supervisor: node stopped by RPC stop (intentional) — not counted \
+                     against MAX_RESTARTS",
+                );
+            } else {
+                // HEALTH RESET: a run that stayed up HEALTHY_RESET_WINDOW proves
+                // the earlier exits were transient — clear the counter so the cap
+                // is a crash-loop bound, not a permanent session latch.
+                if let Some(hs) = self.healthy_since.take() {
+                    if hs.elapsed() >= HEALTHY_RESET_WINDOW {
+                        crate::node_embedded::embedded_log(&format!(
+                            "supervisor: previous run stayed healthy {}s — restart counter reset (was {})",
+                            hs.elapsed().as_secs(),
+                            self.restarts
+                        ));
+                        self.restarts = 0;
+                    }
                 }
-            }
-            // r2 judge: count EVERY finished run — a node meant to run
-            // continuously exiting with code 0 is still an unexpected exit
-            // (a crash-loop that exits 0 would otherwise respawn forever).
-            // There is no user-facing intentional-stop path (RPC `stop` is
-            // not on the GUI allow list; Windows has no SIGINT), so any
-            // exit lands here honestly.
-            self.restarts += 1;
-            if self.restarts > MAX_RESTARTS {
-                return Err(format!(
-                    "embedded node kept exiting ({} restarts) — log: {}",
-                    self.restarts,
-                    self.log_path.display()
-                ));
-            }
-            // exponential backoff before the next spawn (never a tight
-            // relaunch loop): 5s, 10s, 20s … capped at 120s. ensure_running
-            // returning Ok(false) while the delay runs out is honest — the
-            // node is down and the UI keeps showing progress.
-            let delay = restart_backoff_delay(self.restart_backoff_base, self.restarts);
-            if !delay.is_zero() {
-                self.restart_backoff_until = Some(Instant::now() + delay);
-                crate::node_embedded::embedded_log(&format!(
-                    "supervisor: restart #{} backoff — next spawn in {}s",
-                    self.restarts,
-                    delay.as_secs()
-                ));
+                // r2 judge: count EVERY finished run — a node meant to run
+                // continuously exiting with code 0 is still an unexpected exit
+                // (a crash-loop that exits 0 would otherwise respawn forever).
+                // The intentional paths above are excluded by construction.
+                self.restarts += 1;
+                if self.restarts > MAX_RESTARTS {
+                    return Err(format!(
+                        "embedded node kept exiting ({} restarts) — log: {}",
+                        self.restarts,
+                        self.log_path.display()
+                    ));
+                }
+                // exponential backoff before the next spawn (never a tight
+                // relaunch loop): 5s, 10s, 20s … capped at 120s. ensure_running
+                // returning Ok(false) while the delay runs out is honest — the
+                // node is down and the UI keeps showing progress.
+                let delay = restart_backoff_delay(self.restart_backoff_base, self.restarts);
+                if !delay.is_zero() {
+                    self.restart_backoff_until = Some(Instant::now() + delay);
+                    crate::node_embedded::embedded_log(&format!(
+                        "supervisor: restart #{} backoff — next spawn in {}s",
+                        self.restarts,
+                        delay.as_secs()
+                    ));
+                }
             }
         }
         // 3b. the backoff gate: refuse to spawn before the delay elapses.
@@ -2323,10 +2385,10 @@ impl EmbeddedNode {
         // inbound: loopback-ONLY listener when our i2p server tunnel is live
         // (i2pd forwards <b32>:24113 → 127.0.0.1:24113 — the wallet becomes
         // i2p-reachable without exposing anything on the LAN). No tunnel yet
-        // → --no-listen (unchanged behavior; the tunnel usually finishes
-        // building after the node starts, so inbound activates on the next
-        // ensure_running/node restart — honest, disclosed sequencing).
-        if self.i2p.destination().is_some() {
+        // → --no-listen, and (TRI7-I2P-02) the one-shot respawn in 0c brings
+        //   the run back WITH the listener once the destination exists.
+        let listen_inbound = self.i2p.destination().is_some();
+        if listen_inbound {
             argv.push("--listen-bind".into());
             argv.push("127.0.0.1".into());
             argv.push("--listen-port".into());
@@ -2334,6 +2396,10 @@ impl EmbeddedNode {
         } else {
             argv.push("--no-listen".into());
         }
+        // (TRI7-I2P-02) record the inbound decision THIS run was spawned
+        // with — the flag is what lets a destination that first appears
+        // mid-run trigger exactly one respawn with the listener enabled.
+        self.spawn_without_listen = !listen_inbound;
         // the node keeps its own block store in the node state dir: full
         // function (staking/smsg/balance live view) needs bodies, not
         // headers-only (Sami laptop: ops engine never warmed without it)
@@ -2583,6 +2649,14 @@ mod tests {
         port
     }
 
+    /// Tests that write/read the PROCESS-GLOBAL shutdown flags must not run
+    /// concurrently: `request`/`request_rpc`/`reset` are process-wide, so a
+    /// parallel test's stop would be attributed as this test's own.
+    static SHUTDOWN_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn lock_shutdown_flags() -> std::sync::MutexGuard<'static, ()> {
+        SHUTDOWN_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn supervisor_starts_disconnected() {
         let mut n = EmbeddedNode::new(19199, std::env::temp_dir().join("ns.log"), false);
@@ -2747,6 +2821,7 @@ mod tests {
     /// RPC-wait path.
     #[test]
     fn in_process_node_answers_rpc() {
+        let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
         let dir = std::env::temp_dir().join(format!("nsinproc{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2901,6 +2976,7 @@ mod tests {
 
     #[test]
     fn exit0_crash_loop_is_bounded_by_max_restarts() {
+        let _flag_guard = lock_shutdown_flags();
         // ISOLATED from in_process_node_answers_rpc: the crash-loop used to
         // share that test's port/dir/threads, and a release-mode timing nudge
         // let run 3's lingering stub listener satisfy the already-answer
@@ -2938,6 +3014,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// (TRI7-RPC-02) an exit driven by the shared shutdown flag (RPC `stop`)
+    /// is INTENTIONAL: it must never burn the restart budget, so a stop —
+    /// then respawn — cycle can repeat indefinitely.
+    #[test]
+    fn rpc_stop_exit_is_not_counted_against_max_restarts() {
+        let _flag_guard = lock_shutdown_flags();
+        let port = free_dead_port();
+        let dir = std::env::temp_dir().join(format!("nsrpcstop{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let sc = Arc::clone(&spawns);
+        // the runner IS the node: it exits exactly like a run ended by RPC
+        // `stop` — the shared flag set, exit code 0
+        n.runner_override = Some(Arc::new(move |_argv: &[String]| {
+            crate::shutdown::request_rpc();
+            sc.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        }));
+        n.restart_backoff_base = Duration::ZERO;
+        for i in 0..(MAX_RESTARTS as usize + 4) {
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            // wait for this run to finish before the next reap
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && !n.node_finished.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                n.restarts == 0,
+                "call {i}: an RPC-stop exit must not count as a restart (restarts={})",
+                n.restarts
+            );
+        }
+        assert!(spawns.load(Ordering::SeqCst) > MAX_RESTARTS as usize,
+            "the supervisor must keep respawning after intentional stops");
+        // leave the process-global flag clean for the rest of the suite (the
+        // last respawn's run is still live and will request again on exit)
+        crate::shutdown::reset();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (TRI7-I2P-02) inbound can only be enabled at SPAWN time, so the first
+    /// session's --no-listen decision must be revisited the instant the i2p
+    /// destination appears: exactly ONE supervised respawn, then --listen-bind.
+    #[test]
+    fn i2p_destination_appearing_mid_run_respawns_once_with_the_listener() {
+        let _flag_guard = lock_shutdown_flags();
+        let port = free_dead_port();
+        let dir = std::env::temp_dir().join(format!("nsi2pin{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+
+        // Run 1 IS the node: it binds the RPC port, answers getblockcount and
+        // spins until the stop request; later runs exit at once (the argv is
+        // what this test asserts on).
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        n.restart_backoff_base = Duration::ZERO;
+        // no real i2pd in the test: ensure() must not spawn one (the
+        // destination is what this test drives, not the daemon)
+        n.i2p.spawn_gave_up = true;
+        // ...and probe a DEAD port: something on this host answers 4447, and
+        // a foreign listener would (correctly) drop our destination
+        n.i2p.system_probe_port = free_dead_port();
+        let argv_log: Arc<std::sync::Mutex<Vec<Vec<String>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let al = Arc::clone(&argv_log);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        n.runner_override = Some(Arc::new(move |argv: &[String]| {
+            al.lock().unwrap().push(argv.to_vec());
+            let _ = c.fetch_add(1, Ordering::SeqCst);
+            // every run binds the RPC port like the real node: ensure's
+            // warmup probe answers at once instead of waiting out RPC_WAIT
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).ok();
+            if let Some(l) = &listener {
+                l.set_nonblocking(true).ok();
+            }
+            while !crate::shutdown::requested() {
+                match listener.as_ref().map(|l| l.accept()) {
+                    Some(Ok((mut s, _))) => {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let _ = s.read(&mut buf);
+                        let body = r#"{"result":7,"error":null,"id":"tri7-gui"}"#;
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = s.write_all(http.as_bytes());
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            Ok(0)
+        }));
+
+        // 1. no destination yet → spawned with --no-listen
+        assert!(
+            n.ensure_running(&wallet, &dir, &[]).unwrap(),
+            "run 1 must answer RPC through its own stub listener"
+        );
+        assert!(n.spawn_without_listen, "no destination → --no-listen");
+        assert!(!argv_log.lock().unwrap()[0].iter().any(|a| a == "--listen-bind"));
+
+        // 2. the tunnel finishes building: the destination appears mid-run.
+        //    The stop is cooperative, so the reap+respawn lands on whichever
+        //    ensure call sees the run exit — poll until exactly one respawn.
+        n.i2p.destination = Some("abcdefghijklmnop.b32.i2p".into());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && argv_log.lock().unwrap().len() < 2 {
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(n.inbound_respawn_done, "the one respawn must be scheduled");
+        {
+            let log = argv_log.lock().unwrap();
+            assert_eq!(log.len(), 2, "exactly one respawn was spawned: {log:?}");
+            let run2 = &log[1];
+            assert!(
+                run2.iter().any(|a| a == "--listen-bind"),
+                "run 2 must enable the inbound listener: {run2:?}"
+            );
+            assert!(
+                !run2.iter().any(|a| a == "--no-listen"),
+                "run 2 must NOT stay headless: {run2:?}"
+            );
+        }
+        assert_eq!(n.restarts, 0, "the inbound respawn is intentional");
+        assert!(!n.spawn_without_listen, "run 2 listens");
+
+        // 3. run 2 is live WITH the listener: no second respawn may fire
+        let requested_before = crate::shutdown::requested();
+        assert!(n.ensure_running(&wallet, &dir, &[]).unwrap());
+        assert!(
+            !crate::shutdown::requested() || requested_before,
+            "the one-shot respawn must not fire twice"
+        );
+        assert_eq!(argv_log.lock().unwrap().len(), 2, "still one respawn");
+
+        // teardown: stop the live run 2 and leave the global flag clean
+        crate::shutdown::request();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !n.node_finished.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        crate::shutdown::reset();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// TRI7-GUI-02: the restart delay is 5s * 2^(n-1), capped at 120s.
     #[test]
     fn restart_backoff_is_exponential_and_capped() {
@@ -2955,6 +3186,7 @@ mod tests {
     /// at full speed until the silent latch).
     #[test]
     fn restart_backoff_blocks_the_respawn_until_it_elapses() {
+        let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
         let dir = std::env::temp_dir().join(format!("nsbackoff{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

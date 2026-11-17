@@ -131,7 +131,24 @@ pub fn payload_to_address(payload: &[u8; 21]) -> String {
 }
 
 /// Legacy DecodeBase58 (leading '1's → zero bytes). Inverse of `base58`.
+///
+/// (TRI7-RPC-04) the walk is O(n²) in the input length, so address-shaped
+/// user input is capped: 128 chars is ~4× the longest legal address (35 for a
+/// 25-byte payload) and still admits any future payload width.
+pub const MAX_BASE58_CHARS: usize = 128;
+/// base58check(25 bytes) is never shorter than 25 chars (all '1's) and never
+/// longer than 35 — anything outside that band cannot decode to 25 bytes.
+pub const MIN_ENCODED_ADDRESS_CHARS: usize = 25;
+pub const MAX_ENCODED_ADDRESS_CHARS: usize = 35;
+
 pub fn base58_decode(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() > MAX_BASE58_CHARS {
+        return Err(format!(
+            "base58 input too long ({} chars, max {})",
+            s.len(),
+            MAX_BASE58_CHARS
+        ));
+    }
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let mut bytes_map = [255usize; 128];
     for (i, &c) in ALPHABET.iter().enumerate() {
@@ -166,6 +183,15 @@ pub fn base58_decode(s: &str) -> Result<Vec<u8>, String> {
 /// Decode a base58check address back to its 21-byte payload (version +
 /// hash160), verifying the 4-byte checksum — legacy CTrianglesAddress.
 pub fn address_to_payload(address: &str) -> Result<[u8; 21], String> {
+    // (TRI7-RPC-04) cheap length gate BEFORE the quadratic decode: lengths
+    // outside [25, 35] cannot be a 25-byte base58check payload.
+    if address.len() < MIN_ENCODED_ADDRESS_CHARS || address.len() > MAX_ENCODED_ADDRESS_CHARS {
+        return Err(format!(
+            "address {}: length {} cannot be a 25-byte base58check payload",
+            address,
+            address.len()
+        ));
+    }
     let full = base58_decode(address)?;
     if full.len() != 25 {
         return Err(format!("address {}: decoded length {}", address, full.len()));
@@ -357,6 +383,22 @@ mod tests {
         let payload = address_to_payload(SWEEP_ADDRESS).expect("valid form decodes");
         assert_eq!(payload[0], PUBKEY_ADDRESS);
         assert_eq!(&payload[1..], unhex(SWEEP_HASH160).as_slice());
+    }
+
+    #[test]
+    fn address_to_payload_rejects_lengths_that_cannot_be_25_bytes() {
+        // (TRI7-RPC-04) the O(n²) decode must never run on an out-of-band
+        // length: nothing shorter than 25 chars or longer than 35 can be a
+        // base58check(25-byte) address.
+        let long = "1".repeat(MAX_ENCODED_ADDRESS_CHARS + 94);
+        let e = address_to_payload(&long).unwrap_err();
+        assert!(e.contains("cannot be a 25-byte"), "got: {e}");
+        assert!(address_to_payload("1234").is_err());
+        assert!(address_to_payload(&"1".repeat(36)).is_err());
+        // the decoder itself caps an unbounded string before the walk
+        assert!(base58_decode(&"1".repeat(100_000)).is_err());
+        // a legal-length string still reaches the checksum/length logic
+        assert!(address_to_payload(&"1".repeat(25)).is_err());
     }
 
     #[test]
