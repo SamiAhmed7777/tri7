@@ -646,8 +646,14 @@ impl TorSupervisor {
             }
             let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_MODULE);
             let mut found: Option<u32> = None;
+            // (crash fix 2026-11-17) MIB_TCPTABLE_OWNER_MODULE.table is the C
+            // flexible-array-member pattern: the binding types it as [ROW; 1],
+            // so indexing table.table[i] for i >= 1 panics ("len is 1 but the
+            // index is 1") on every real machine — this was the silent GUI
+            // crash loop. Walk rows by pointer offset from element 0 instead.
+            let rows_base = &table.table[0] as *const MIB_TCPROW_OWNER_MODULE;
             for i in 0..table.dwNumEntries as usize {
-                let row = &table.table[i];
+                let row = unsafe { &*rows_base.add(i) };
                 // dwLocalAddr is the wire-order address stored little-endian
                 // in the DWORD — to_le_bytes recovers 127.0.0.1 byte order
                 if row.dwLocalAddr.to_le_bytes() != [127, 0, 0, 1]

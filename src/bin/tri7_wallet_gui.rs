@@ -40,6 +40,45 @@ fn usage() -> ! {
 }
 
 fn main() {
+    // (crash forensics 2026-11-17) The GUI subsystem has no stderr: panics in
+    // the desktop session died SILENTLY (task Last Result 101, no WER entry,
+    // no log line) and were unattributable. Write every panic + backtrace to
+    // a file next to the node log so an unattended crash names itself.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "location unavailable".to_string());
+        let bt = std::backtrace::Backtrace::force_capture();
+        let entry = format!(
+            "[{}UTC] PANIC at {loc}: {msg}\nbacktrace:\n{bt}\n---\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        let primary = std::path::Path::new("E:\\Coins\\TRI\\node\\gui-debug.log");
+        let target = if primary.parent().map(|p| p.exists()).unwrap_or(false) {
+            primary.to_path_buf()
+        } else {
+            std::path::PathBuf::from("gui-debug.log")
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target)
+        {
+            let _ = std::io::Write::write_all(&mut f, entry.as_bytes());
+        }
+        eprintln!("PANIC at {loc}: {msg}");
+    }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let selfcheck = args.iter().any(|a| a == "--selfcheck");
     let history_probe = args.iter().any(|a| a == "--history-probe");
