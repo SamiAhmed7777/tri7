@@ -184,6 +184,16 @@ const POLL_SECS: u64 = 30;
 /// streak is the robust trigger. At POLL_SECS=30 this fires ~90 s into a
 /// silent-fork shape (the live sami-pc fork sat 25+ min before this existed).
 const EMPTY_REPLY_EVIDENCE_STREAK: u32 = 3;
+/// (item 33) the window-locator re-ask counts as IN FLIGHT only for this
+/// long after it was sent. An empty answer (the same-tip frozen peer:
+/// "nothing after your tip" is literally true when both sides sit on one
+/// tip) or a wedged session must not latch the evidence machinery off
+/// forever — the 2026-11-18 equal-work split left Pi (13:34:21Z) and DNS3
+/// (13:38:32Z) with ZERO recon lines for 17-28 min because their last
+/// re-ask's empty echo pinned the in-flight latch until the operator
+/// restart. Longer than one poll cadence (30 s) and the 60 s cooldown, so
+/// a re-armed loop re-fires at a calm ~90 s pace, never a storm.
+const WINDOW_REASK_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ---- keypool (legacy `pool` rows) — parity item KEYPOOLREFILL ------------
 /// Legacy default -keypool setting (bitcoin 0.8-era): 100 pre-derived keys.
@@ -816,16 +826,55 @@ struct ReconAcc {
     /// dispatch; each re-judge re-queued the same heights). Clearing the
     /// slots frees the cap for the new branch immediately.
     switch_epoch: u64,
+    /// (item 33) when the CURRENT in-flight window re-ask was SENT. The
+    /// in-flight latch is honored only for WINDOW_REASK_TIMEOUT after this
+    /// instant (see awaiting_window_reask): an empty echo (a same-tip peer
+    /// has nothing to serve) or a dead session must not swallow every later
+    /// empty reply forever. Every re-ask send site stamps this alongside
+    /// awaiting_window_reply.
+    window_reask_at: Option<Instant>,
+    /// (item 33) the empty-reply evidence trigger fired and the re-ask went
+    /// to the TRIGGERING peer — the main loop broadcasts the SAME locator to
+    /// every OTHER live peer right after the dispatch pass. The split's
+    /// followers re-asked only the peer whose empty reply crossed the streak
+    /// (a same-tip peer that correctly answers empty) while the one peer
+    /// holding the heavier branch was never asked at all.
+    reask_broadcast_skip: Option<String>,
 }
 
 /// (item 19) An empty headers reply just arrived: count it toward the
-/// consecutive-empty streak — unless it is the echo of our own in-flight
-/// window re-ask, which is "no overlap", not evidence (it neither counts
-/// nor resets the streak).
+/// consecutive-empty streak — unless the (TIME-BOXED, item 33) in-flight
+/// window re-ask is still current, in which case this is its echo: "no
+/// overlap", not evidence (it neither counts nor resets the streak).
 fn note_reply_empty(recon: &mut ReconAcc) {
-    if !recon.awaiting_window_reply {
+    if !awaiting_window_reask(recon) {
         recon.empty_tip_poll_streak += 1;
     }
+}
+
+/// (item 33) Stamp the in-flight window re-ask: every send site sets BOTH
+/// the latch and its timestamp, so the latch can time-box.
+fn mark_window_reask(recon: &mut ReconAcc) {
+    recon.awaiting_window_reply = true;
+    recon.window_reask_at = Some(Instant::now());
+}
+
+/// (item 33) The in-flight window re-ask latch, TIME-BOXED: true only while
+/// a re-ask was sent within WINDOW_REASK_TIMEOUT (an unstamped legacy flag
+/// — awaiting set without a stamp — still latches, preserving the r5
+/// semantics for any path that has not been migrated). An empty answer to
+/// the re-ask (same-tip peer: nothing to serve) or a wedged session used to
+/// pin this forever: the 2026-11-18 split's followers went fully mute — no
+/// trigger, no judge, no log line — from their last re-ask until a manual
+/// restart, because every later empty reply was classified as that one
+/// request's echo.
+fn awaiting_window_reask(recon: &ReconAcc) -> bool {
+    if !recon.awaiting_window_reply {
+        return false;
+    }
+    recon
+        .window_reask_at
+        .map_or(true, |t| t.elapsed() < WINDOW_REASK_TIMEOUT)
 }
 
 /// Any NON-empty headers reply answers whatever was in flight (tip poll,
@@ -834,6 +883,7 @@ fn note_reply_empty(recon: &mut ReconAcc) {
 /// again.
 fn note_reply_nonempty(recon: &mut ReconAcc) {
     recon.awaiting_window_reply = false;
+    recon.window_reask_at = None;
     recon.empty_tip_poll_streak = 0;
 }
 
@@ -1464,12 +1514,30 @@ fn pending_adoption_for(hash: &Hash, now: Instant) -> Option<PendingAdoption> {
 /// Live tip-poll locator: at tip h0 (fresh genesis state) there is no h(-1),
 /// so the two-hash form is impossible — return tip-hash-only (r-lapstop fix;
 /// the inline `tip_height - 1` underflowed u64 and panicked the main thread).
+/// (item 33) THE POLL IS THE RECON ASK: after [tip] (+ the parity prev) the
+/// locator now carries the full window stride — every RECON_LOCATOR_STEP-th
+/// entry down to the base, the same shape build_recon_locator serves from.
+/// A forked peer can resolve a shared anchor DIRECTLY FROM THE POLL and
+/// serve its branch in the reply — the 2026-11-18 equal-work split stayed
+/// stuck 25+ min because the [tip]/[tip, prev] poll held nothing a forked
+/// peer could anchor (both entries sit on our side of the fork), so every
+/// reply was empty, the followers' re-asks aimed at same-tip peers, and the
+/// heavier branch flowed only after manual restarts. Deepest-first
+/// throughout: when we share the tip the first match still anchors AT the
+/// tip (the normal chase is byte-identical), the strides only engage on a
+/// fork; the parity alternation stays (the legacy daemon silently drops a
+/// consecutive duplicate getheaders).
 fn tip_poll_locator(stg: &ChainState, poll_parity: bool) -> Vec<Hash> {
+    let mut loc = Vec::with_capacity(RECON_LOCATOR_MAX);
+    loc.push(stg.tip_hash);
     if poll_parity && stg.tip_height > 0 {
-        let prev_hash = stg
-            .entry_abs(stg.tip_height - 1)
-            .map(|e| e.hash)
-            .unwrap_or(stg.tip_hash);
+        if let Some(e) = stg.entry_abs(stg.tip_height - 1) {
+            // skip a duplicate of the tip (the old unwrap_or(tip_hash)
+            // fallback produced [tip, tip] — a wasted anchor slot)
+            if e.hash != stg.tip_hash {
+                loc.push(e.hash);
+            }
+        }
         // DEEPEST FIRST (fz-rec fix 2): collect_headers anchors at the FIRST
         // match, so locator[0] must be the most recent hash. The old
         // [prev, tip] order anchored one BELOW the tip — every parity poll
@@ -1479,10 +1547,20 @@ fn tip_poll_locator(stg: &ChainState, poll_parity: bool) -> Vec<Hash> {
         // judged a "competing branch" every other poll (live: laptop
         // 2026-11-11, FORK CHOICE churn at h64). Tip first anchors AT the
         // tip and the reply chains to the real tip.
-        vec![stg.tip_hash, prev_hash]
-    } else {
-        vec![stg.tip_hash]
     }
+    let tip_idx = stg.tip_height.saturating_sub(stg.base) as usize;
+    let mut i = tip_idx;
+    while i > 0 && loc.len() < RECON_LOCATOR_MAX {
+        i = i.saturating_sub(RECON_LOCATOR_STEP as usize);
+        let h = stg.entries[i].hash;
+        if loc.last() != Some(&h) {
+            loc.push(h);
+        }
+        if i == 0 {
+            break;
+        }
+    }
+    loc
 }
 
 fn build_recon_locator(st: &ChainState) -> Vec<Hash> {
@@ -11790,7 +11868,12 @@ fn handle_message(
                     peer.start_height,
                     st.tip_height,
                     recon.empty_tip_poll_streak,
-                    recon.awaiting_window_reply,
+                    // (item 33) the in-flight latch is TIME-BOXED: an empty
+                    // echo (same-tip peer, nothing to serve) or a wedged
+                    // session must not swallow every later empty reply
+                    // forever — that latch is what muted the split's
+                    // followers for 17-28 min until their restarts
+                    awaiting_window_reask(recon),
                     recon.empty_fork_recon_at,
                     claim_verdict,
                 ) {
@@ -11813,7 +11896,17 @@ fn handle_message(
                         .map(|(h, _)| h)
                         .unwrap_or(peer.start_height.max(0) as u64);
                     recon.empty_fork_recon_at = Some(Instant::now());
-                    recon.awaiting_window_reply = true;
+                    // (item 33) stamp the latch + flag the broadcast: the
+                    // re-ask goes to the triggering peer now, and the main
+                    // loop sends the SAME locator SHAPE (build_recon_locator
+                    // — the window stride, rebuilt from the state as of the
+                    // broadcast, so it also carries any tip movement since
+                    // the trigger) to every OTHER live peer right after the
+                    // dispatch pass — the split's followers kept re-asking
+                    // the same-tip peer that answers empty while the heavier
+                    // branch one hop away was never asked
+                    mark_window_reask(recon);
+                    recon.reask_broadcast_skip = Some(peer.label.clone());
                     recon.empty_tip_poll_streak = 0;
                     log(&format!(
                         "empty tip-poll reply ({} trigger) while {} claims h{} (we are h{}) — requesting window-locator reconciliation",
@@ -11855,8 +11948,9 @@ fn handle_message(
                 // takes the competing-branch path if it is one
                 log("headers batch partly unlinked to the tip — requesting window-locator reconciliation");
                 // mark the re-ask in flight (item 19): its empty reply is
-                // "no overlap", never streak evidence
-                recon.awaiting_window_reply = true;
+                // "no overlap", never streak evidence (item 33: stamped, so
+                // the latch time-boxes instead of pinning forever)
+                mark_window_reask(recon);
                 let stop = [0u8; 32];
                 peer.sess.send(
                     "getheaders",
@@ -11909,8 +12003,9 @@ fn handle_message(
                 // in-window ancestor to reconcile from — the reply re-enters
                 // the headers handler's competing-branch judge
                 // mark the re-ask in flight (item 19): its empty reply is
-                // "no overlap", never streak evidence
-                recon.awaiting_window_reply = true;
+                // "no overlap", never streak evidence (item 33: stamped, so
+                // the latch time-boxes instead of pinning forever)
+                mark_window_reask(recon);
                 let stop = [0u8; 32];
                 peer.sess.send(
                     "getheaders",
@@ -15152,6 +15247,35 @@ pub fn main_args(argv: &[String]) -> i32 {
                 ));
                 peers[pi].dead = true;
                 peers[pi].sess.shutdown();
+            }
+        }
+        // (item 33) BROADCAST the evidence re-ask to every OTHER live peer:
+        // the split's followers re-asked ONLY the peer whose empty reply
+        // crossed the streak — a same-tip peer that (correctly) answers
+        // empty — while the divergent heavier peer one hop away never got
+        // asked and its branch never flowed. The poll locator carries the
+        // window stride now (every poll is a recon ask), so the next tick
+        // would reach it anyway; this closes the gap within the same pass.
+        // Send failures here drop the peer exactly like the poll tick's.
+        if let Some(skip) = recon_acc.reask_broadcast_skip.take() {
+            let body = {
+                let stg = st_shared.lock().unwrap();
+                tri7_core::p2p::build_getheaders(&build_recon_locator(&stg), &[0u8; 32])
+            };
+            for p in peers.iter_mut() {
+                if p.dead || p.label == skip {
+                    continue;
+                }
+                if let Err(e) = p.sess.send("getheaders", &body, &mut stats) {
+                    log(&format!(
+                        "broadcast window-locator re-ask to {} (transport {}) failed: {} — dropping (send failure)",
+                        p.label,
+                        p.transport.as_str(),
+                        e
+                    ));
+                    p.dead = true;
+                    p.sess.shutdown();
+                }
             }
         }
         peers.retain(|p| p.sess_ok());
@@ -20569,11 +20693,24 @@ mod tests {
     fn tip_poll_locator_orders_deepest_first() {
         let st = synthetic_chain(0, 5);
         let loc = tip_poll_locator(&st, true);
-        assert_eq!(loc.len(), 2);
+        // (item 33) the locator carries the window stride now: tip, parity
+        // prev, then the strides down to the base. Deepest-first order is
+        // the invariant under test — the FIRST anchor is the tip itself, so
+        // a shared-tip reply still chains from the tip (never a below-tip
+        // re-serve), and the deeper anchors only engage on a fork.
         assert_eq!(loc[0], st.tip_hash, "locator[0] must be the TIP (deepest)");
         assert_eq!(loc[1], st.entry_abs(4).unwrap().hash);
+        assert!(
+            loc.contains(&st.entry_abs(0).unwrap().hash),
+            "the base anchor terminates the stride"
+        );
+        assert!(loc.len() <= RECON_LOCATOR_MAX);
         let loc_even = tip_poll_locator(&st, false);
-        assert_eq!(loc_even, vec![st.tip_hash]);
+        assert_eq!(loc_even[0], st.tip_hash);
+        assert!(
+            loc_even.contains(&st.entry_abs(0).unwrap().hash),
+            "the non-parity poll still carries the stride"
+        );
     }
 
     /// (fz-rec fix 1) laptop 2026-11-11: the boot peer answered the genesis
@@ -21330,6 +21467,166 @@ mod tests {
         // the next empty counts from one again
         note_reply_empty(&mut recon);
         assert_eq!(recon.empty_tip_poll_streak, 1);
+    }
+
+    /// (item 33) THE LATCH: an empty echo of the window re-ask pins the
+    /// in-flight flag only for WINDOW_REASK_TIMEOUT — after that, empty
+    /// replies count toward the streak again and the trigger re-fires
+    /// (cooldown permitting): the loop re-arms WITHOUT a restart. The live
+    /// 2026-11-18 split muted Pi (13:34:21Z) and DNS3 (13:38:32Z) for
+    /// 17-28 min because the flag had no timeout: every later empty reply
+    /// was classified as that one request's echo until the operator
+    /// restart. A FRESH re-ask (within the timeout) still swallows its echo,
+    /// and an UNSTAMPED legacy flag still latches — the r5 disjoint-peer pin
+    /// is preserved in both shapes.
+    #[test]
+    fn window_reask_latch_time_boxes_and_re_arms_without_a_restart() {
+        let mut recon = ReconAcc::default();
+        // fresh send: the echo is swallowed (r5, unchanged)...
+        mark_window_reask(&mut recon);
+        note_reply_empty(&mut recon);
+        assert_eq!(recon.empty_tip_poll_streak, 0, "a fresh echo is not evidence");
+        assert!(awaiting_window_reask(&recon));
+        // ...and while the latch is fresh the trigger cannot fire through it
+        assert!(!empty_reply_fork_recon_due(
+            2214624, 2214624, 3, awaiting_window_reask(&recon), None, None
+        ));
+        // the answer never came / was empty: past the timeout the latch expires
+        recon.window_reask_at =
+            Some(Instant::now() - WINDOW_REASK_TIMEOUT - Duration::from_secs(1));
+        assert!(!awaiting_window_reask(&recon), "the latch must time-box");
+        // empty replies count toward the streak again...
+        note_reply_empty(&mut recon);
+        assert_eq!(recon.empty_tip_poll_streak, 1);
+        // ...and once the streak re-accumulates (and the 60 s cooldown from
+        // the original send has passed) the trigger fires again: RE-ARMED
+        recon.empty_tip_poll_streak = EMPTY_REPLY_EVIDENCE_STREAK;
+        recon.empty_fork_recon_at = Some(Instant::now() - Duration::from_secs(120));
+        assert!(
+            empty_reply_fork_recon_due(
+                2214624,
+                2214624,
+                recon.empty_tip_poll_streak,
+                awaiting_window_reask(&recon),
+                recon.empty_fork_recon_at,
+                None,
+            ),
+            "the loop must re-arm without a restart"
+        );
+        // an UNSTAMPED legacy flag (awaiting set directly, no stamp — the
+        // pre-item-33 shape any unmigrated path could produce) still latches
+        let mut legacy = ReconAcc::default();
+        legacy.awaiting_window_reply = true;
+        note_reply_empty(&mut legacy);
+        assert_eq!(legacy.empty_tip_poll_streak, 0);
+    }
+
+    /// (item 33) the poll locator carries the window stride: tip first, the
+    /// parity prev second, then every RECON_LOCATOR_STEP-th entry down to
+    /// the base — deepest-first throughout, capped at RECON_LOCATOR_MAX,
+    /// genesis-safe.
+    #[test]
+    fn tip_poll_locator_carries_the_window_stride() {
+        let stg = synthetic_chain(100, 500);
+        let loc = tip_poll_locator(&stg, true);
+        assert_eq!(loc[0], stg.tip_hash);
+        assert_eq!(loc[1], stg.entry_abs(499).unwrap().hash);
+        assert!(
+            loc.contains(&stg.entry_abs(372).unwrap().hash),
+            "the tip-128 stride anchor is present"
+        );
+        assert!(
+            loc.contains(&stg.entry_abs(100).unwrap().hash),
+            "the base anchor terminates the stride"
+        );
+        assert!(loc.len() <= RECON_LOCATOR_MAX);
+        // non-parity: no prev, strides still present
+        let loc2 = tip_poll_locator(&stg, false);
+        assert_eq!(loc2[0], stg.tip_hash);
+        assert_ne!(loc2[1], stg.entry_abs(499).unwrap().hash);
+        assert!(loc2.contains(&stg.entry_abs(100).unwrap().hash));
+        // genesis: tip-hash only, never underflows (the r-lapstop pin)
+        let g = synthetic_chain(0, 0);
+        assert_eq!(tip_poll_locator(&g, true), vec![g.tip_hash]);
+        // a deep window hits the cap exactly, never exceeds it
+        let deep = synthetic_chain(0, 20_000);
+        assert_eq!(tip_poll_locator(&deep, true).len(), RECON_LOCATOR_MAX);
+    }
+
+    /// (item 33) THE 2026-11-18 FLEET SPLIT, REPLAYED AT THE JUDGE: an
+    /// equal-work race forks the fleet at h2214621/22; both sides extend and
+    /// the heavier side solo-climbs. The lighter follower's poll now carries
+    /// the window stride, so the heavier peer resolves a SHARED anchor below
+    /// the fork and serves its whole branch IN THE POLL REPLY — the
+    /// follower's judge adopts it in ONE exchange, with no re-ask
+    /// round-trip and no manual restart. The old locator ([tip]/[tip, prev])
+    /// held nothing the forked peer could anchor: every reply was empty, the
+    /// re-ask round-trip aimed at a same-tip peer that answered empty, the
+    /// in-flight latch pinned the loop mute, and the branch flowed only via
+    /// operator restarts (25+ min stuck; Pi/DNS3 sat frozen at h2214624).
+    #[test]
+    fn stride_poll_reply_adopts_the_heavier_split_branch_in_one_exchange() {
+        let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
+        // the lighter follower: window base h2214496, tip h2214624 — its own
+        // 3-block branch above the shared ancestor h2214621 (the live
+        // split's shape; synthetic entry hashes are a deterministic function
+        // of height, so every entry below the fork is shared ancestry)
+        let fork_h = 2214621;
+        let mut stg = synthetic_chain(2214496, 2214624);
+        let mut recon = ReconAcc::default();
+        let mut pend: VecDeque<(Hash, u64)> = VecDeque::new();
+        let mut stats = Stats::default();
+
+        // the poll locator the follower sends: it MUST contain a shared
+        // below-fork anchor (tip-128) — the entries the OLD locator carried
+        // ([tip, prev]) are both fork-side, which is why a forked peer
+        // could never anchor them and answered empty every time
+        let loc = tip_poll_locator(&stg, true);
+        assert_eq!(loc[0], stg.tip_hash, "tip first (the fz-rec fix 2 order)");
+        assert_eq!(loc[1], stg.entry_abs(2214623).unwrap().hash, "parity prev second");
+        assert!(
+            loc.contains(&stg.entry_abs(2214496).unwrap().hash),
+            "the stride anchor at tip-128 (shared ancestry) is in the poll locator"
+        );
+        assert!(loc.len() <= RECON_LOCATOR_MAX);
+        assert!(
+            !loc[0..2].contains(&stg.entry_abs(fork_h).unwrap().hash),
+            "the pre-stride anchors sit ABOVE the fork — the old all-empty shape"
+        );
+
+        // the heavier side solo-climbed: 9 blocks above the shared ancestor,
+        // each 256x harder (0x1e00ffff) — strictly more TOTAL work above the
+        // fork than the follower's 3-block branch, at a taller tip (the DNS2
+        // branch: h2214622..4630)
+        let ancestor = stg.entry_abs(fork_h).unwrap().hash;
+        let mut prev = ancestor;
+        let mut branch: Vec<Block> = Vec::new();
+        for i in 0..9u8 {
+            let hdr = mk_header(prev, 0x60 + i, 0x1e00_ffff);
+            prev = hdr.hash();
+            branch.push(hdr);
+        }
+        // THE EXCHANGE: the branch arrives as the poll reply (its first
+        // header does not chain to our tip → the competing-branch judge).
+        // One exchange adopts it — the acceptance bar is "the heavier branch
+        // must be adopted by the lighter side within N poll cadences with
+        // zero manual restarts"; this is cadence 1, restarts 0.
+        match recon_intake(&mut stg, &branch, &mut recon, &mut pend, &mut stats) {
+            ReconOutcome::Switched { fork, adopted } => {
+                assert_eq!(fork, fork_h);
+                assert_eq!(adopted, 9);
+            }
+            other => panic!("expected Switched, got {:?}", other),
+        }
+        // (T7-03) headers-only selection: no rollback until a body validates
+        assert_eq!(stg.tip_height, 2214624);
+        assert_eq!(pend.len(), 9);
+        assert_eq!(pend[0], (branch[0].hash(), fork_h + 1));
+        let pending = pending_adoption_for(&branch[0].hash(), Instant::now())
+            .expect("the selected branch must be recorded as pending");
+        assert_eq!(pending.fork_h, fork_h);
+        clear_pending_adoption();
     }
 
     // ---- item 17 FORK-REORG: backfill clamp + reconciliation judge ----
@@ -23487,19 +23784,29 @@ addnode=host:notaport
             let loc = tip_poll_locator(&st, parity);
             assert_eq!(loc, vec![st.tip_hash]);
         }
-        // tip >= 1 keeps the two-hash form on the odd parity — DEEPEST
-        // FIRST (fz-rec fix 2: collect_headers anchors at the FIRST match;
-        // the old [prev, tip] order anchored one below the tip and re-served
-        // our own tip header, feeding the recon judge a fork-at-tip with
-        // our_work = 0 every parity poll — the laptop-2026-11-11 churn)
+        // tip >= 1 keeps [tip, parity-prev, strides...] on the odd parity —
+        // DEEPEST FIRST (fz-rec fix 2: collect_headers anchors at the FIRST
+        // match; the old [prev, tip] order anchored one below the tip and
+        // re-served our own tip header, feeding the recon judge a fork-at-tip
+        // with our_work = 0 every parity poll — the laptop-2026-11-11 churn).
+        // (item 33) the strides join the poll locator: every poll is a recon
+        // ask, so a forked peer can anchor BELOW the fork and serve its
+        // branch in the poll reply.
         let st2 = synthetic_chain(0, 2);
         assert_eq!(st2.tip_height, 2);
         let loc2 = tip_poll_locator(&st2, true);
-        assert_eq!(loc2.len(), 2);
         assert_eq!(loc2[0], st2.tip_hash, "locator[0] must be the tip (deepest)");
         assert_eq!(loc2[1], st2.entry_abs(1).unwrap().hash);
+        assert!(
+            loc2.contains(&st2.entry_abs(0).unwrap().hash),
+            "the base stride anchor is present"
+        );
         let loc3 = tip_poll_locator(&st2, false);
-        assert_eq!(loc3, vec![st2.tip_hash]);
+        assert_eq!(loc3[0], st2.tip_hash);
+        assert!(
+            loc3.contains(&st2.entry_abs(0).unwrap().hash),
+            "the non-parity poll still carries the stride"
+        );
     }
 
     #[test]
