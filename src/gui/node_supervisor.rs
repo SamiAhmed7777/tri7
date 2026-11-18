@@ -612,7 +612,8 @@ impl TorSupervisor {
     fn listener_of_socks_port_native(port: u16) -> Option<(u32, String)> {
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
         use windows_sys::Win32::NetworkManagement::IpHelper::{
-            GetExtendedTcpTable, MIB_TCPTABLE_OWNER_MODULE, TCP_TABLE_OWNER_MODULE_ALL,
+            GetExtendedTcpTable, MIB_TCPROW_OWNER_MODULE, MIB_TCPTABLE_OWNER_MODULE,
+            TCP_TABLE_OWNER_MODULE_ALL,
         };
         use windows_sys::Win32::System::Threading::{
             OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
