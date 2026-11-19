@@ -1,0 +1,229 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index a50d7b1..4e5f3bd 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -15856,29 +15856,42 @@ fn peer_identity_host(p: &Peer) -> String {
+     p.label.clone()
+ }
+ 
+-/// (item 34) ONE SESSION PER ENDPOINT + STALE EVICTION: remove every live
+-/// session beyond the NEWEST one per peer identity, shutdown the evicted
+-/// sockets, and return one log line per eviction. Pure over the peers
+-/// vector so it is unit-testable with socket fixtures. This is what ends
+-/// the 18-concurrent-duplicate accumulation (fleet catch 2026-11-18: Tor
+-/// inbound sessions carry per-CONNECTION socket labels, so every re-dial
+-/// from the same peer looked like a NEW endpoint and nothing ever pruned
+-/// the older sessions — their frozen/None claims then poisoned the sweep's
+-/// peer-claim quorum). The NEWEST session wins: it just completed a
++/// (item 34 r2) ONE SESSION PER DIRECTION PER ENDPOINT + STALE EVICTION:
++/// remove every live session beyond the NEWEST one per (direction, peer
++/// identity), shutdown the evicted sockets, and return one log line per
++/// eviction. Pure over the peers vector so it is unit-testable with socket
++/// fixtures.
++///
++/// DIRECTION-SCOPED (r2 — the r1 live lesson, DNS2 2026-11-18 00:13-00:18Z):
++/// r1 evicted ACROSS directions (newest wins) and the fleet taught the
++/// refinement in 7 evictions / 5 minutes — DNS2's dialer rebuilt the
++/// outbound right after an inbound won, the peer's dialer rebuilt the
++/// inbound right after the outbound won, and the pair ping-ponged forever
++/// (~1 eviction/min, every eviction killing a healthy session). An inbound
++/// + an outbound to the SAME peer is the natural overlay mesh shape
++/// (bitcoin-legacy allows it too); the DEFECT was same-direction
++/// accumulation (18 concurrent INBOUND sessions from one peer, each with a
++/// per-CONNECTION socket label that looked like a new endpoint). So: one
++/// session per direction per identity. This is what ends the 18-session
++/// accumulation and the sweep-quorum poisoning (frozen/None claims on
++/// claim-less duplicates) without inventing a reconnect storm.
++///
++/// The NEWEST session per (direction, identity) wins: it just completed a
+ /// handshake, so it is the provably-live one.
+ fn evict_duplicate_peers(peers: &mut Vec<Peer>) -> Vec<String> {
+-    // identity host -> index of the current keeper
+-    let mut keeper: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
++    // (direction, identity host) -> index of the current keeper
++    let mut keeper: std::collections::HashMap<(bool, String), usize> =
++        std::collections::HashMap::new();
+     let mut evict: std::collections::HashSet<usize> = std::collections::HashSet::new();
+     for (i, p) in peers.iter().enumerate() {
+         if p.dead {
+             evict.insert(i); // already condemned: never a keeper
+             continue;
+         }
+-        let id = peer_identity_host(p);
+-        match keeper.get(&id) {
++        let key = (p.outbound, peer_identity_host(p));
++        match keeper.get(&key) {
+             None => {
+-                keeper.insert(id, i);
++                keeper.insert(key, i);
+             }
+             Some(&k) => {
+                 // duplicate: keep the newer connected_at, evict the older
+@@ -15888,7 +15901,7 @@ fn evict_duplicate_peers(peers: &mut Vec<Peer>) -> Vec<String> {
+                     (k, i)
+                 };
+                 evict.insert(old);
+-                keeper.insert(id, new);
++                keeper.insert(key, new);
+             }
+         }
+     }
+@@ -15900,7 +15913,7 @@ fn evict_duplicate_peers(peers: &mut Vec<Peer>) -> Vec<String> {
+         if evict.contains(&i) {
+             let id = peer_identity_host(p);
+             let kept = keeper
+-                .get(&id)
++                .get(&(p.outbound, id.clone()))
+                 .map(|&k| peers[k].label.clone())
+                 .unwrap_or_else(|| "?".into());
+             if p.dead {
+@@ -17070,7 +17083,7 @@ fn connect_and_handshake(
+         if !dialable_store_host(&host) {
+             continue;
+         }
+-        if self_idents.iter().any(|s| s == &host) {
++        if is_self_target(&host, &self_idents) {
+             log(&format!(
+                 "dial order: skipping SELF endpoint {}:{} (own onion in the store — poisoned row)",
+                 host, port
+@@ -17085,6 +17098,18 @@ fn connect_and_handshake(
+         }
+     }
+     for t in &cfg.peers {
++        // (item 34 r2) the SEED LIST gets the same self filter as the store
++        // walk: DNS2's own conf/argv carries its own onion + i2p destination
++        // as attach targets, and the unfiltered walk dialed itself right
++        // after boot (SOCKS code 1/4 + a self-echo handshake) — the exact
++        // self-dial class, second lane.
++        if is_self_target(&t.host, &self_idents) {
++            log(&format!(
++                "seed list: skipping SELF target {} (own identity in attach targets)",
++                t.endpoint()
++            ));
++            continue;
++        }
+         if !targets.iter().any(|e| e.host == t.host && e.port == t.port) {
+             targets.push(t.clone());
+         }
+@@ -17157,6 +17182,15 @@ fn dialable_store_host(host: &str) -> bool {
+     host.ends_with(".onion") || host.ends_with(".b32.i2p") || host.ends_with(".i2p")
+ }
+ 
++/// (item 34) Whether a candidate dial host IS one of our own identities —
++/// the predicate behind BOTH self-filter lanes (the store walk and the
++/// seed/attach-target walk). Onion and i2p hostnames are matched EXACTLY
++/// (they are canonical lowercase where they appear in the store, the
++/// hostname files, and addr_me reconstructions).
++fn is_self_target(host: &str, self_idents: &[String]) -> bool {
++    self_idents.iter().any(|s| s == host)
++}
++
+ /// (item 26) A peer-send transport failure — the socket (or the tor/i2p
+ /// circuit under it) died mid-write. That is a PEER/CIRCUIT fact, never a
+ /// chain fact: the trusted-tip-source stance has nothing to say about it
+@@ -22674,14 +22708,15 @@ addnode=host:notaport
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 
+-    /// (item 34) ONE SESSION PER ENDPOINT: the dedupe keys on the peer's
+-    /// IDENTITY (advertised onion), not the socket label — Tor inbound
+-    /// sessions carry per-CONNECTION loopback labels, which is exactly how
+-    /// 18 live sessions to ONE third-party peer accumulated on DNS2. The
+-    /// NEWEST session per identity survives (it just handshook); older
+-    /// duplicates — outbound or inbound, mixed directions — are evicted
+-    /// with a log line; an unidentified session (advertised None) is never
+-    /// evicted by guesswork.
++    /// (item 34 r2) ONE SESSION PER DIRECTION PER ENDPOINT: the dedupe keys
++    /// on (direction, identity) — Tor inbound sessions carry per-CONNECTION
++    /// loopback labels, which is exactly how 18 live INBOUND sessions to
++    /// ONE third-party peer accumulated on DNS2. The NEWEST session per
++    /// (direction, identity) survives; older duplicates are evicted with a
++    /// log line; an inbound + an outbound to the same peer BOTH survive
++    /// (r1's cross-direction eviction ping-ponged live ~1/min — the fleet
++    /// lesson that scoped this rule); an unidentified session (advertised
++    /// None) is never evicted by guesswork.
+     #[test]
+     fn evict_duplicate_peers_keeps_one_session_per_identity_and_the_newest() {
+         const PEER_ONION: &str = "ra32xf5ogexampleexampleexampleexampleexampleexamplex.onion";
+@@ -22724,32 +22759,70 @@ addnode=host:notaport
+             ),
+         ];
+         let lines = evict_duplicate_peers(&mut peers);
+-        assert_eq!(
+-            peers.len(),
+-            3,
+-            "one per identity + the unidentified + the distinct peer"
+-        );
+-        // the NEWEST session of the duplicate group survived (age 60s)
++        // r2 direction scoping: the 4 same-identity sessions collapse to
++        // ONE OUTBOUND (the fresh one) + ONE INBOUND (the fresh one); the
++        // unidentified inbound and the distinct peer survive untouched
++        assert_eq!(peers.len(), 4);
+         assert!(
+             peers
+                 .iter()
+                 .any(|p| p.label == "in:127.0.0.1:5002 (/tri7:7.0.0/ h0)"),
+-            "the newest duplicate session is the keeper"
++            "the newest INBOUND of the duplicate group is the keeper"
++        );
++        assert!(
++            peers.iter().any(|p| p.outbound
++                && p.label == format!("out:{PEER_ONION}:24112")
++                && p.connected_at
++                    >= Instant::now() - Duration::from_secs(301)),
++            "the newest OUTBOUND of the duplicate group is the keeper"
+         );
+         assert!(
+             !peers
+                 .iter()
+-                .any(|p| p.label.starts_with("out:ra32xf5og")),
+-            "all older duplicates evicted, regardless of direction"
++                .any(|p| p.label == "in:127.0.0.1:5001 (/tri7:7.0.0/ h0)"),
++            "the older inbound evicted"
+         );
+-        assert_eq!(lines.len(), 3, "one log line per eviction: {}", lines.len());
++        assert!(
++            peers
++                .iter()
++                .filter(|p| p.outbound && p.label.starts_with(&format!("out:{PEER_ONION}")))
++                .count()
++                == 1,
++            "exactly one outbound session to the identity remains"
++        );
++        assert_eq!(lines.len(), 2, "one log line per eviction: {:?}", lines);
+         assert!(lines.iter().all(|l| l.contains("duplicate session evicted")));
+         // idempotent: a second sweep over the survivors evicts nothing
+         let lines2 = evict_duplicate_peers(&mut peers);
+-        assert_eq!(peers.len(), 3);
++        assert_eq!(peers.len(), 4);
+         assert!(lines2.is_empty());
+     }
+ 
++    /// (item 34) The self-target predicate: our own onion/i2p hosts are
++    /// refused on BOTH filter lanes (store walk + seed/attach-target walk);
++    /// foreign overlay hosts pass.
++    #[test]
++    fn is_self_target_refuses_own_hosts_only() {
++        let idents = vec![
++            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion".to_string(),
++            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p".to_string(),
++        ];
++        assert!(is_self_target(
++            "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion",
++            &idents
++        ));
++        assert!(is_self_target(
++            "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p",
++            &idents
++        ));
++        assert!(!is_self_target(
++            "ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion",
++            &idents
++        ));
++        assert!(!is_self_target("100.85.236.10", &idents));
++        assert!(!is_self_target("gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion", &[]));
++    }
++
+     /// Test fixture: a real local-socket session labeled as an OUTBOUND i2p
+     /// peer (the fleet-defect shape: sami-pc→DNS2 over i2pd SOCKS 4447).
+     fn i2p_test_peer(stream: std::net::TcpStream) -> Peer {
