@@ -331,13 +331,29 @@ impl PeerStore {
 
     /// Register our own identities (onion hostname and/or hex tor key) so
     /// `merge_addr` can skip announcements of ourselves — the legacy
-    /// addrman never adds its own address.
-    pub fn set_self(&mut self, idents: &[String]) {
+    /// addrman never adds its own address. Also PURGES any store entry that
+    /// matches a self identity: a poisoned row (our own onion learned via
+    /// gossip BEFORE the identity was known — e.g. a node whose onion is
+    /// published from the tor hostname file rather than onion-state.json)
+    /// survives every ingest filter forever and the dialer re-dials itself
+    /// on every rotation (fleet catch 2026-11-18: DNS2 held its own onion
+    /// with 494+65 failed self-dials). Boot re-registers identities, so the
+    /// poison cannot survive a restart. Returns the number of rows purged.
+    pub fn set_self(&mut self, idents: &[String]) -> usize {
         for id in idents {
             if !id.is_empty() && !self.self_idents.iter().any(|s| s == id) {
                 self.self_idents.push(id.clone());
             }
         }
+        let before = self.peers.len();
+        let idents = self.self_idents.clone();
+        self.peers
+            .retain(|e| !idents.iter().any(|s| *s == e.host));
+        let removed = before - self.peers.len();
+        if removed > 0 {
+            self.dirty = true;
+        }
+        removed
     }
     fn is_self(&self, host: &str) -> bool {
         self.self_idents.iter().any(|s| s == host)
@@ -672,6 +688,36 @@ mod tests {
         assert_eq!(seed_peer.fail_count, 2);
         assert_eq!(seed_peer.last_fail, 1060);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// (item 34) set_self PURGES poisoned self rows: a store that learned
+    /// our own onion via gossip BEFORE the identity was registered (the
+    /// DNS2 self-dial shape — 494+65 failed dials to its own onion) must
+    /// lose the row at the next registration, and the ingest filter must
+    /// then hold. Non-self rows survive untouched.
+    #[test]
+    fn set_self_purges_existing_self_entries_from_the_store() {
+        const OWN: &str = "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion";
+        let mut store = PeerStore::default();
+        // poisoned BEFORE identity registration: the gossip of ourselves
+        // enters the store on both fleet ports (:24113 AND :24112)
+        assert!(store.upsert(OWN, 24113, 1, "addr", 1000));
+        assert!(store.upsert(OWN, 24112, 1, "addr", 1001));
+        assert!(store.upsert(KEY_B, 24113, 1, "addr", 1002));
+        assert_eq!(store.len(), 3);
+        // registration purges both poisoned rows, keeps the healthy one
+        let removed = store.set_self(&[OWN.to_string()]);
+        assert_eq!(removed, 2, "both self rows purged");
+        assert_eq!(store.len(), 1);
+        assert!(!store.contains(OWN, 24113));
+        assert!(!store.contains(OWN, 24112));
+        assert!(store.contains(KEY_B, 24113));
+        // the ingest filter now refuses the same host at both ports
+        assert!(!store.upsert(OWN, 24113, 1, "addr", 1003));
+        assert!(!store.upsert(OWN, 24112, 1, "addr", 1004));
+        assert_eq!(store.len(), 1);
+        // re-registration of the same identity is a no-op (nothing to purge)
+        assert_eq!(store.set_self(&[OWN.to_string()]), 0);
     }
 
     /// A5: a corrupt file yields an EMPTY store plus a log line — never an
