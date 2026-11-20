@@ -318,6 +318,18 @@ const BACKFILL_BODY_DEADLINE: Duration = Duration::from_secs(180);
 const GETDATA_TIMEOUT_SECS: u64 = 45;
 const MAX_BODY_ATTEMPTS: u32 = 6; // attempts before the stall line goes loud
 const BODY_TRIES_WASHOUT: u32 = 12; // attempts before rotation memory resets
+/// (item 35) total-attempts give-up ACROSS rotations for one queued body:
+/// past this many cumulative dispatch attempts the entry leaves the queue,
+/// `outstanding`, the tries AND `pending_headers` with a loud line. Live Pi
+/// 2026-11-19: two raced-and-lost branch bodies nobody on the peer set
+/// holds rotated "requeued, rotating targets" for 25+ min with NO bound,
+/// firing 13 cross-body peer demotions along the way. Clearing
+/// pending_headers lets the 30s tip poll re-queue the hash with a FRESH
+/// budget — bounded, loud cycles instead of an unbounded silent grind (a
+/// canonically dead era is ended outright by the stale drop + the item-28
+/// adoption give-up). Cadence note: 20 rotations × 45s age-out ≈ 15 min
+/// worst case per body before the loud give-up line resets the budget.
+const BODY_REQUEUE_GIVE_UP_ATTEMPTS: u32 = 20;
 /// (fleet-resilience, 2026-11-13 live laptop/DNS2 session) How fresh a peer's
 /// traffic must be for it to count as a dial-rotation SUPPRESSOR. The
 /// keepalive pass fires every POLL_SECS and the stale-link prune cuts at
@@ -1109,6 +1121,39 @@ fn age_out_unanswered_bodies(
     aged
 }
 
+/// (item 35) Aged-out body requests split at the CROSS-ROTATION give-up cap:
+/// entries whose cumulative attempts reached the cap land in the give-up set
+/// (the caller drops queue/outstanding/tries/pending_headers and logs the
+/// loud line); the rest requeue with their rotation memory intact. Pure so
+/// the cap semantics are regression-testable.
+fn split_body_requeue_give_up(
+    aged: Vec<(Hash, u64, u32)>,
+    cap: u32,
+) -> (Vec<(Hash, u64, u32)>, Vec<(Hash, u64, u32)>) {
+    let mut give_ups = Vec::new();
+    let mut keeps = Vec::new();
+    for entry in aged {
+        if entry.2 >= cap {
+            give_ups.push(entry);
+        } else {
+            keeps.push(entry);
+        }
+    }
+    (give_ups, keeps)
+}
+
+/// (item 35) A queued body request is STALE when the chain has already
+/// advanced past its height (the canonical block at that height is a
+/// DIFFERENT hash — this entry's body is canonically dead and no peer will
+/// ever honestly serve it) or when its body already arrived via another
+/// route (the hash is a chain entry; refetching is pure waste). This is the
+/// orphan-requeue-poisoning fix: raced-and-lost branch bodies sat in the
+/// queue BELOW a tip that had moved on, rotating getdata forever and
+/// demoting every healthy peer for bodies it can never hold. Pure.
+fn pending_entry_is_stale(height: u64, tip: u64, hash_in_chain: bool) -> bool {
+    height <= tip || hash_in_chain
+}
+
 /// (item 23, r2 judge) A REQUESTED block that does not extend the tip is
 /// NOT dropped: with per-history groups a higher-height group can answer
 /// before its predecessor has landed. The caller keeps the hash in
@@ -1259,6 +1304,11 @@ fn gapfill_range(len: usize, first_h: u64, next_h: u64, window: usize) -> (usize
 /// rounds arms a DEMOTION WINDOW: selection skips it until it serves
 /// (clear_served_peer_misses) or the window expires (DEMOTION_COOLDOWN_SECS,
 /// expiry resets the round budget — failing the fresh probe re-arms).
+/// (item 35) ORPHAN-CLASS SCOPING: a request at/below `tip_height` is
+/// canonically dead — no peer can ever serve it, so its empty replies are
+/// NOT a serving failure and must not arm a demotion window against a peer
+/// the node needs for real blocks (live Pi 2026-11-19: 13 cross-body
+/// demotions of gxvr/ztj5/brudz in 15 min off two dead-branch bodies).
 /// Returns the report lines (caller logs them; empty while healthy).
 #[allow(clippy::too_many_arguments)]
 fn credit_body_miss_round(
@@ -1269,10 +1319,13 @@ fn credit_body_miss_round(
     adv_fail_limit: u32,
     cooldown: Duration,
     timeout: Duration,
+    tip_height: u64,
     now: Instant,
 ) -> Vec<String> {
     let round_labels: std::collections::HashSet<String> = aged
         .iter()
+        // (item 35) only LIVE bodies (above our tip) may credit a miss round
+        .filter(|(_, ht, _)| *ht > tip_height)
         .filter_map(|(h, _, _)| body_tries.get(h))
         .flat_map(|t| t.tried.iter().cloned())
         .collect();
@@ -1384,9 +1437,15 @@ fn clear_served_peer_misses(
 /// the summary on the queue alone silenced it exactly there. A moving tip
 /// resets the tracker (progress, logged-at); a frozen tip past
 /// ADOPTION_STALL_LOG_SECS yields the summary line at most once per
-/// ADOPTION_STALL_LOG_SECS. Pure and Instant-parameterised so the
-/// outstanding-only terminal state is regression-testable. Complementary to
-/// the per-body 'adoption body STALL' line at MAX_BODY_ATTEMPTS.
+/// ADOPTION_STALL_LOG_SECS. (item 35) IDLE vs STALLED: while `at_claimed_tip`
+/// (our tip has reached every peer's claimed tip) there is nothing to adopt
+/// — a mint drought with only orphan-evidence getdata outstanding is NOT a
+/// stall and the freeze counter must stay FLAT (the 11m11s "TIP FROZEN"
+/// record was exactly this shape). The idle tick resets the clock so a
+/// LATER real stall measures from the fall-behind moment, not the drought.
+/// Pure and Instant-parameterised so the outstanding-only terminal state is
+/// regression-testable. Complementary to the per-body 'adoption body STALL'
+/// line at MAX_BODY_ATTEMPTS.
 #[derive(Debug)]
 struct AdoptionStall {
     last_tip: u64,
@@ -1397,6 +1456,7 @@ struct AdoptionStall {
 fn adoption_stall_tick(
     tr: &mut AdoptionStall,
     tip: u64,
+    at_claimed_tip: bool,
     queued: usize,
     outstanding: usize,
     oldest_outstanding_secs: u64,
@@ -1406,6 +1466,12 @@ fn adoption_stall_tick(
 ) -> Option<String> {
     if tip != tr.last_tip {
         tr.last_tip = tip;
+        tr.progress_at = now;
+        tr.logged_at = None;
+        return None;
+    }
+    // (item 35) at the claimed chain tip = IDLE: never a freeze metric.
+    if at_claimed_tip {
         tr.progress_at = now;
         tr.logged_at = None;
         return None;
@@ -14901,6 +14967,34 @@ pub fn main_args(argv: &[String]) -> i32 {
             &mut body_tries,
             Duration::from_secs(GETDATA_TIMEOUT_SECS),
         );
+        // (item 35) CROSS-ROTATION GIVE-UP: entries whose cumulative attempts
+        // reached the cap leave the rotation with a loud line — queue,
+        // outstanding, tries AND pending_headers (the tip poll then re-queues
+        // with a fresh budget: bounded loud cycles, not an unbounded silent
+        // grind). Split BEFORE the demote credit: an unservable entry never
+        // demotes anyone.
+        let (give_ups, aged) = split_body_requeue_give_up(aged, BODY_REQUEUE_GIVE_UP_ATTEMPTS);
+        if !give_ups.is_empty() {
+            {
+                let mut stg = st_shared.lock().unwrap();
+                for (h, _, _) in &give_ups {
+                    stg.pending_headers.remove(h);
+                }
+            }
+            for (h, _, _) in &give_ups {
+                body_tries.remove(h);
+            }
+            let glo = give_ups.iter().map(|(_, ht, _)| *ht).min().unwrap_or(0);
+            let ghi = give_ups.iter().map(|(_, ht, _)| *ht).max().unwrap_or(0);
+            let gmax = give_ups.iter().map(|(_, _, a)| *a).max().unwrap_or(0);
+            log(&format!(
+                "body requeue GIVE-UP: {} request(s) h{}..h{} dropped after {} attempt(s) across rotations — canonically unservable (branch dead or peer set lacks it); the tip poll re-queues with a fresh budget",
+                give_ups.len(),
+                glo,
+                ghi,
+                gmax
+            ));
+        }
         // (fz-rec fix 5) demotion windows, grafted onto the item-23 age-out:
         // expire cooldowns FIRST (a peer past DEMOTION_COOLDOWN_SECS
         // re-enters selection with a FRESH probe budget — no all-demoted
@@ -14914,6 +15008,7 @@ pub fn main_args(argv: &[String]) -> i32 {
             Instant::now(),
             Duration::from_secs(DEMOTION_COOLDOWN_SECS),
         );
+        let tip_for_credit = st_shared.lock().unwrap().tip_height;
         for r in credit_body_miss_round(
             &aged,
             &body_tries,
@@ -14922,6 +15017,7 @@ pub fn main_args(argv: &[String]) -> i32 {
             ADVERTISER_FAIL_LIMIT,
             Duration::from_secs(DEMOTION_COOLDOWN_SECS),
             Duration::from_secs(GETDATA_TIMEOUT_SECS),
+            tip_for_credit,
             Instant::now(),
         ) {
             log(&r);
@@ -14983,17 +15079,46 @@ pub fn main_args(argv: &[String]) -> i32 {
             let capacity = MAX_OUTSTANDING_GETDATA - outstanding.len();
             let want = GETDATA_BATCH.min(capacity);
             let mut batch: Vec<(u32, Hash, u64)> = Vec::new();
-            while batch.len() < want {
-                match pending_from_headers.pop_front() {
-                    Some((hash, height)) => {
-                        if !outstanding.contains_key(&hash)
-                            && !batch.iter().any(|(_, h, _)| *h == hash)
-                        {
-                            batch.push((tri7_core::p2p::MSG_BLOCK, hash, height));
+            // (item 35) STALE DROP at pop time: a queued entry at/below our
+            // tip is canonically dead (the canonical block at that height is
+            // a different hash) and one whose body already arrived is waste —
+            // neither may ride the rotation again. Live Pi 2026-11-19: the
+            // two raced-and-lost branch bodies below a tip that had moved on
+            // rotated getdata for 25+ min (13 cross-body peer demotions)
+            // because pop only deduped against `outstanding`.
+            let mut stale_dropped: Vec<(Hash, u64)> = Vec::new();
+            {
+                let mut stg = st_shared.lock().unwrap();
+                let tip_dispatch = stg.tip_height;
+                while batch.len() < want {
+                    match pending_from_headers.pop_front() {
+                        Some((hash, height)) => {
+                            let in_chain = stg.entry_by_hash(&hash).is_some();
+                            if pending_entry_is_stale(height, tip_dispatch, in_chain) {
+                                body_tries.remove(&hash);
+                                stg.pending_headers.remove(&hash);
+                                stale_dropped.push((hash, height));
+                                continue;
+                            }
+                            if !outstanding.contains_key(&hash)
+                                && !batch.iter().any(|(_, h, _)| *h == hash)
+                            {
+                                batch.push((tri7_core::p2p::MSG_BLOCK, hash, height));
+                            }
                         }
+                        None => break,
                     }
-                    None => break,
                 }
+            }
+            if !stale_dropped.is_empty() {
+                let slo = stale_dropped.first().map(|(_, ht)| *ht).unwrap_or(0);
+                let shi = stale_dropped.last().map(|(_, ht)| *ht).unwrap_or(0);
+                log(&format!(
+                    "adoption body queue: dropped {} stale request(s) h{}..h{} (at/below tip or already in chain) — canonically dead, no further getdata (item 35 orphan-requeue)",
+                    stale_dropped.len(),
+                    slo,
+                    shi
+                ));
             }
             if !batch.is_empty() {
                 // (r1 judge) per-hash freshness with one send per history
@@ -15117,6 +15242,24 @@ pub fn main_args(argv: &[String]) -> i32 {
         // the per-body 'adoption body STALL' line at MAX_BODY_ATTEMPTS.
         if !pending_from_headers.is_empty() || !outstanding.is_empty() {
             let tip_now_stall = st_shared.lock().unwrap().tip_height;
+            // (item 35) IDLE vs STALLED: the claimed network tip is every
+            // live peer's freshest claim (claimed_tip, else its handshake
+            // start_height). At/above ALL claims = at the network tip = a
+            // mint drought with only orphan-evidence getdata outstanding —
+            // never a freeze metric.
+            let max_claimed = peers
+                .iter()
+                .map(|p| {
+                    p.claimed_tip
+                        .map(|(h, _)| h)
+                        .unwrap_or(p.start_height.max(0) as u64)
+                })
+                .max()
+                .unwrap_or(0);
+            // (polish r2) an EMPTY peer list cannot claim "at the network
+            // tip" — we are stranded, not idle: keep the stall line there
+            // (pre-item-35 behavior) so a disconnected node still reports.
+            let at_claimed_tip = !peers.is_empty() && tip_now_stall >= max_claimed;
             let oldest = outstanding
                 .keys()
                 .filter_map(|h| body_tries.get(h).map(|t| t.sent_at.elapsed().as_secs()))
@@ -15131,6 +15274,7 @@ pub fn main_args(argv: &[String]) -> i32 {
             if let Some(line) = adoption_stall_tick(
                 &mut adoption_stall,
                 tip_now_stall,
+                at_claimed_tip,
                 pending_from_headers.len(),
                 outstanding.len(),
                 oldest,
@@ -20967,7 +21111,7 @@ mod tests {
         // window opens outstanding-only; tip frozen; well past the threshold
         tr.last_tip = 777;
         tr.progress_at = stale(300);
-        let line = adoption_stall_tick(&mut tr, 777, 0, 5, 290, "in:advertiser", "out:x", stale(10));
+        let line = adoption_stall_tick(&mut tr, 777, false, 0, 5, 290, "in:advertiser", "out:x", stale(10));
         assert!(
             line
                 .as_deref()
@@ -20976,16 +21120,192 @@ mod tests {
             "outstanding-only stall must be NAMED, got {line:?}"
         );
         // rate limit: inside the window a second tick stays silent
-        let again = adoption_stall_tick(&mut tr, 777, 0, 5, 295, "in:advertiser", "out:x", stale(5));
+        let again = adoption_stall_tick(&mut tr, 777, false, 0, 5, 295, "in:advertiser", "out:x", stale(5));
         assert!(again.is_none(), "summary is rate-limited, got {again:?}");
         // a moving tip resets the tracker — no summary on the moving tick,
         // and the next frozen window must run its full threshold again
-        let moved = adoption_stall_tick(&mut tr, 778, 0, 5, 295, "in:advertiser", "out:x", stale(5));
+        let moved = adoption_stall_tick(&mut tr, 778, false, 0, 5, 295, "in:advertiser", "out:x", stale(5));
         assert!(moved.is_none(), "tip movement resets, got {moved:?}");
         assert_eq!(tr.last_tip, 778);
         // a healthy (empty) window never reports
-        let healthy = adoption_stall_tick(&mut tr, 778, 0, 0, 0, "in:advertiser", "out:x", stale(5));
+        let healthy = adoption_stall_tick(&mut tr, 778, false, 0, 0, 0, "in:advertiser", "out:x", stale(5));
         assert!(healthy.is_none());
+    }
+
+    /// (item 35) IDLE vs STALLED: at the claimed chain tip with only
+    /// orphan-evidence requests outstanding the freeze counter stays FLAT
+    /// (live Pi 2026-11-19: an 11m06s mint drought with two dead-branch
+    /// bodies outstanding read as an 11m11s "TIP FROZEN" record). A later
+    /// genuine fall-behind counts from the fall-behind moment, not the
+    /// drought.
+    #[test]
+    fn adoption_stall_counter_flat_while_at_claimed_tip() {
+        let t0 = Instant::now();
+        let stale = |secs: u64| t0.checked_sub(Duration::from_secs(secs)).unwrap();
+        let mut tr = AdoptionStall {
+            last_tip: 2215607,
+            progress_at: stale(600),
+            logged_at: None,
+        };
+        // drought: tip unmoved, we ARE at every claimed tip, 2 orphan
+        // requests outstanding, well past the bar — IDLE, never a line
+        let idle = adoption_stall_tick(&mut tr, 2215607, true, 2, 2, 664, "out:gxvr", "out:gxvr", stale(100));
+        assert!(
+            idle.is_none(),
+            "mint drought at the claimed tip must NOT read frozen, got {idle:?}"
+        );
+        assert_eq!(
+            tr.progress_at,
+            stale(100),
+            "the idle tick resets the clock so the drought never accumulates"
+        );
+        // fall behind: a canonical claim moves above our tip; the counter
+        // starts FRESH (just fell behind — under the bar)
+        let fresh = adoption_stall_tick(&mut tr, 2215607, false, 2, 2, 5, "out:gxvr", "out:gxvr", stale(95));
+        assert!(
+            fresh.is_none(),
+            "a just-fell-behind window is under the bar, got {fresh:?}"
+        );
+        // genuinely stalled past the bar: the line fires with the short,
+        // honest interval
+        let stalled = adoption_stall_tick(&mut tr, 2215607, false, 2, 2, 65, "out:gxvr", "out:gxvr", stale(38));
+        assert!(
+            stalled
+                .as_deref()
+                .map(|l| l.contains("FROZEN") && l.contains("for 62s"))
+                .unwrap_or(false),
+            "the real stall measures from fall-behind, got {stalled:?}"
+        );
+    }
+
+    /// (item 35) The cross-rotation give-up: entries at/over the cap land in
+    /// the give-up set (caller drops them with the loud line); fresher
+    /// entries requeue with their memory intact.
+    #[test]
+    fn body_requeue_gives_up_after_total_attempts_across_rotations() {
+        let aged = vec![
+            ([0x01u8; 32], 100u64, BODY_REQUEUE_GIVE_UP_ATTEMPTS),
+            ([0x02u8; 32], 101u64, BODY_REQUEUE_GIVE_UP_ATTEMPTS + 3),
+            ([0x03u8; 32], 102u64, BODY_REQUEUE_GIVE_UP_ATTEMPTS - 1),
+        ];
+        let (give_ups, keeps) = split_body_requeue_give_up(aged, BODY_REQUEUE_GIVE_UP_ATTEMPTS);
+        assert_eq!(
+            give_ups.iter().map(|(_, ht, _)| *ht).collect::<Vec<_>>(),
+            vec![100, 101],
+            "at-cap and over-cap entries give up"
+        );
+        assert_eq!(
+            keeps.iter().map(|(_, ht, _)| *ht).collect::<Vec<_>>(),
+            vec![102],
+            "under-cap entries keep rotating"
+        );
+    }
+
+    /// (item 35) Stale queued entries: at/below tip (canonically dead — the
+    /// canonical block at that height is a different hash) or already in
+    /// chain (body arrived via another route). Above-tip unheld is live.
+    #[test]
+    fn pending_entry_stale_below_tip_or_already_in_chain() {
+        // the incident shape: dead-branch bodies at h2215593/h2215602 with
+        // the canonical tip already at h2215607
+        assert!(pending_entry_is_stale(2215593, 2215607, false));
+        assert!(pending_entry_is_stale(2215602, 2215607, false));
+        assert!(
+            pending_entry_is_stale(2215607, 2215607, false),
+            "an at-tip entry is stale: the chain holds a DIFFERENT block there"
+        );
+        assert!(
+            pending_entry_is_stale(2215608, 2215607, true),
+            "an already-in-chain entry is stale: refetch is waste"
+        );
+        assert!(
+            !pending_entry_is_stale(2215608, 2215607, false),
+            "above-tip and unheld is a LIVE request"
+        );
+    }
+
+    /// (item 35) ORPHAN-CLASS DEMOTE SCOPING: unserved rounds on a
+    /// canonically dead body (height <= tip) never credit a peer's miss
+    /// counter; the same round's LIVE body still does, and the live label
+    /// demotes at the limit while the healthy peer stays untouched.
+    #[test]
+    fn orphan_body_failures_do_not_demote_healthy_peers() {
+        let healthy_label = "out:gxvrhv3q.onion".to_string();
+        let live_label = "out:dns3.onion".to_string();
+        let mut orphan_hash = [0xB1u8; 32];
+        orphan_hash[0] = 1;
+        let mut live_hash = [0xB2u8; 32];
+        live_hash[0] = 2;
+        let tries = HashMap::from([
+            (
+                orphan_hash,
+                BodyTries {
+                    sent_at: Instant::now(),
+                    attempts: 6,
+                    tried: vec![healthy_label.clone()],
+                    refreshes: 0,
+                    kernel_fails: 0,
+                },
+            ),
+            (
+                live_hash,
+                BodyTries {
+                    sent_at: Instant::now(),
+                    attempts: 1,
+                    tried: vec![live_label.clone()],
+                    refreshes: 0,
+                    kernel_fails: 0,
+                },
+            ),
+        ]);
+        let mut misses: HashMap<String, u32> = HashMap::new();
+        let mut demoted: HashMap<String, Instant> = HashMap::new();
+        let tip = 2215607u64;
+        // round 1: the orphan body (h2215593 < tip) aged out unserved — its
+        // tried label must NOT be credited; the live body (h2215608 > tip)
+        // credits its label once
+        let r1 = credit_body_miss_round(
+            &[(orphan_hash, 2215593, 6), (live_hash, 2215608, 1)],
+            &tries,
+            &mut misses,
+            &mut demoted,
+            2,
+            Duration::from_secs(120),
+            Duration::from_secs(45),
+            tip,
+            Instant::now(),
+        );
+        assert!(
+            !misses.contains_key(&healthy_label),
+            "an orphan body's empty replies must not poison a healthy peer: {misses:?}"
+        );
+        assert!(r1.is_empty(), "no demotion in round 1: {r1:?}");
+        assert_eq!(misses.get(&live_label).copied(), Some(1));
+        // rounds 2..3: only the LIVE body keeps aging out; at the limit the
+        // live label demotes and the healthy peer is STILL untouched
+        let mut reports = Vec::new();
+        for _ in 0..2 {
+            reports.extend(credit_body_miss_round(
+                &[(orphan_hash, 2215593, 6), (live_hash, 2215608, 1)],
+                &tries,
+                &mut misses,
+                &mut demoted,
+                2,
+                Duration::from_secs(120),
+                Duration::from_secs(45),
+                tip,
+                Instant::now(),
+            ));
+        }
+        assert!(
+            demoted.contains_key(&live_label),
+            "the genuinely unserved live body still demotes its source: {demoted:?}"
+        );
+        assert!(
+            !demoted.contains_key(&healthy_label) && !misses.contains_key(&healthy_label),
+            "13 cross-body demotions of a healthy peer must be impossible now: misses={misses:?} demoted={demoted:?}"
+        );
+        assert!(reports.iter().any(|r| r.contains("dns3.onion")));
     }
 
     /// (fz-rec fix 5) advertiser-first protects the initial request; while a
@@ -21096,6 +21416,7 @@ mod tests {
             ADVERTISER_FAIL_LIMIT,
             Duration::from_secs(DEMOTION_COOLDOWN_SECS),
             Duration::from_secs(GETDATA_TIMEOUT_SECS),
+            0,
             Instant::now(),
         );
         assert!(demoted_at.contains_key("in:advertiser"), "window armed at the limit");
@@ -25067,13 +25388,14 @@ addnode=host:notaport
         // crosses the limit immediately (adv_fail_limit 1) and DEMOTES; the
         // b32 i2p one is skipped entirely
         let reports = credit_body_miss_round(
-            &[(hash_a, 0, 1)],
+            &[(hash_a, 1, 1)],
             &tries,
             &mut misses,
             &mut demoted,
             1,
             Duration::from_secs(120),
             Duration::from_secs(45),
+            0,
             Instant::now(),
         );
         assert!(
@@ -25095,13 +25417,14 @@ addnode=host:notaport
         // round 2: the plain-`.i2p` inbound label is i2p too — credited, and
         // still not demoted before the i2p threshold (4 rounds)
         let reports2 = credit_body_miss_round(
-            &[(hash_b, 0, 1)],
+            &[(hash_b, 1, 1)],
             &tries,
             &mut misses,
             &mut demoted,
             1,
             Duration::from_secs(120),
             Duration::from_secs(45),
+            0,
             Instant::now(),
         );
         assert!(
@@ -25113,13 +25436,14 @@ addnode=host:notaport
         // never-serving peer can no longer own dispatch forever
         for _ in 0..3 {
             let r = credit_body_miss_round(
-                &[(hash_b, 0, 1)],
+                &[(hash_b, 1, 1)],
                 &tries,
                 &mut misses,
                 &mut demoted,
                 1,
                 Duration::from_secs(120),
                 Duration::from_secs(45),
+                0,
                 Instant::now(),
             );
             let _ = r;
