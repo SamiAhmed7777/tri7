@@ -1105,17 +1105,28 @@ impl BlockStore {
         })();
         match outcome {
             Ok(b) => {
+                // .write(true), NOT .append(true): the torn-tail heal in
+                // append_block truncates via set_len, and on Windows an
+                // append-only handle (FILE_APPEND_DATA — what Rust's
+                // .append(true) requests) is refused with ERROR_ACCESS_DENIED
+                // (os error 5): SetEndOfFile needs FILE_WRITE_DATA. Linux
+                // maps read+append to O_RDWR, so the defect was Windows-only
+                // (CI windows-build: "append: truncate torn tail: Access is
+                // denied"). Every write site seeks End explicitly under
+                // append_lock, so O_APPEND's atomic-append semantics are not
+                // load-bearing here.
                 let file = std::fs::OpenOptions::new()
                     .read(true)
-                    .append(true)
+                    .write(true)
                     .open(self.path.as_ref().unwrap())
                     .or_else(|_| File::open(self.path.as_ref().unwrap()))
                     .map_err(|e| format!("open blocks file: {}", e));
                 match file {
                     Ok(file) => {
-                        // probe writability with a throwaway append handle
+                        // probe writability with a throwaway WRITE handle —
+                        // the access append actually needs (set_len included)
                         let writable = std::fs::OpenOptions::new()
-                            .append(true)
+                            .write(true)
                             .open(self.path.as_ref().unwrap())
                             .is_ok();
                         eprintln!(
