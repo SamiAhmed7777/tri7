@@ -2838,35 +2838,41 @@ mod tests {
         n.restart_backoff_base = Duration::ZERO;
         let runner_calls = Arc::new(AtomicUsize::new(0));
         let rpc_served = Arc::new(AtomicUsize::new(0));
+        // run 1's lifetime is owned by the TEST, not a wall-clock deadline:
+        // the old fixed 2s serve window raced the liveness assertion on slow
+        // runners (macOS CI flake: the RPC answer arrived near the deadline,
+        // the stub exited, and `assert!(n.running())` saw a dead thread).
+        // The stub now serves until this flag is set — the test asserts
+        // liveness FIRST, then releases, then waits for node_finished.
+        let release1 = Arc::new(AtomicBool::new(false));
         // capture run 1's argv: the empty state dir is FRESH, so the
         // supervisor must request the full-body from-zero fetch on it
         let argv_seen: Arc<std::sync::Mutex<Vec<String>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (rc, served, argv_cap) = (
+        let (rc, served, argv_cap, rel) = (
             Arc::clone(&runner_calls),
             Arc::clone(&rpc_served),
             Arc::clone(&argv_seen),
+            Arc::clone(&release1),
         );
         n.runner_override = Some(Arc::new(move |argv: &[String]| {
             rc.fetch_add(1, Ordering::SeqCst);
             argv_cap.lock().unwrap().extend_from_slice(argv);
             // canned loopback server: exactly the tri7d envelope (the shape
-            // gui::rpc_client::rpc_call parses). Nonblocking accept + 2s
-            // deadline so run 1 FINISHES (the exit+restart phase needs the
-            // thread gone and node_finished=true).
+            // gui::rpc_client::rpc_call parses). Nonblocking accept; serves
+            // until the test releases it (30s hang-safety net only) so run 1
+            // FINISHES deterministically for the exit+restart phase below.
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
             listener
                 .set_nonblocking(true)
                 .expect("set_nonblocking");
-            let serve_deadline = Instant::now() + std::time::Duration::from_secs(2);
-            let mut served_v1 = 0;
-            while served_v1 < 3 && Instant::now() < serve_deadline {
+            let safety_deadline = Instant::now() + std::time::Duration::from_secs(30);
+            while !rel.load(Ordering::SeqCst) && Instant::now() < safety_deadline {
                 match listener.accept() {
                     Ok((mut s, _)) => {
                         // BSD/macOS: accepted sockets inherit the listener's
                         // O_NONBLOCK — restore blocking (Linux no-op).
                         let _ = s.set_nonblocking(false);
-                        served_v1 += 1;
                         served.fetch_add(1, Ordering::SeqCst);
                         let mut buf = [0u8; 8192];
                         let _ = std::io::Read::read(&mut s, &mut buf);
@@ -2910,10 +2916,14 @@ mod tests {
             "runner must be invoked exactly once"
         );
         assert!(rpc_served.load(Ordering::SeqCst) >= 1);
-        // run 1's server serves up to 3 connections then EXITS: wait for the
-        // thread to finish (node_finished=true) so run 2 is a REAL restart
-        // (the supervisor must not skip it as already-running)
-        let fin_deadline = Instant::now() + std::time::Duration::from_secs(3);
+        // liveness + wiring proven — NOW release run 1 so the exit+restart
+        // phase gets a REAL finished run (deterministic: the stub exits within
+        // one 25ms poll of the flag, no wall-clock race on the asserts above)
+        release1.store(true, Ordering::SeqCst);
+        // run 1's server exits on the release flag: wait for the thread to
+        // finish (node_finished=true) so run 2 is a REAL restart (the
+        // supervisor must not skip it as already-running)
+        let fin_deadline = Instant::now() + std::time::Duration::from_secs(5);
         while Instant::now() < fin_deadline && !n.node_finished.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(50));
         }
