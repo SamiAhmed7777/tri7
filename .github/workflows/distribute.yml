@@ -11,12 +11,6 @@ name: Distribute Release (tri7)
 # clear warning if it is not set, so the workflow can be merged and tested
 # before secrets are configured (same pattern as the legacy pipeline).
 #
-# Judge grades (GLM stand-in, kind=code):
-#   round 1: C  urn:ump:wclvh7lsdefiyiv3sma4fizf56xe27sa7zr4xz7qwone3d3vetba
-#            -> fixes in commit d6b5de9 (choco URL rewrite, AUR pkgver/sha bump)
-#   round 2: B  urn:ump:cajdx3ohvsdnlxj3apyjmlyizarmlmvdal7wvsryyxdvok7l2pla
-#            zero blockers
-#
 # IMPORTANT (visibility): package-manager submissions fetch the release
 # assets from a PUBLIC url. While the tri7 repo is private, the "wait for
 # release artifacts" steps will 404 and each job aborts with a clear error.
@@ -44,28 +38,38 @@ jobs:
   version:
     name: Resolve version
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - id: v
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$DISPATCH_VERSION" ]; then
+            VERSION="$DISPATCH_VERSION"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF_NAME#v}"
           fi
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Resolved version '$VERSION' is not a release version (expected X.Y.Z)."
+            echo "::error::Run this workflow from a v* tag, or pass a version like 7.0.1 via workflow_dispatch."
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
       - run: echo "Distributing tri7 v${{ steps.v.outputs.version }}"
 
   winget:
     name: WinGet (Triangles.CryptographicTriangles)
     needs: version
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check WINGET_TOKEN
         run: |
@@ -240,12 +244,13 @@ jobs:
     name: Chocolatey (cryptographictriangles)
     needs: version
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check CHOCO_API_KEY
         shell: bash
@@ -339,6 +344,7 @@ jobs:
     name: Homebrew tap (SamiAhmed7777/homebrew-tap)
     needs: version
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     env:
       HOMEBREW_GITHUB_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
       VERSION: ${{ needs.version.outputs.version }}
@@ -353,27 +359,27 @@ jobs:
       - name: Wait for release artifacts
         if: env.HOMEBREW_GITHUB_TOKEN != ''
         run: |
-          URL="$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
+          URL="$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-macos-arm64.tar.gz"
           for i in {1..90}; do
             if curl -fsSL --head "$URL" >/dev/null 2>&1; then
-              echo "✓ Release setup.exe available: $URL"
+              echo "✓ Release macOS tarball available: $URL"
               exit 0
             fi
-            echo "  waiting for release v${VERSION} setup.exe... ($i/90)"
+            echo "  waiting for release v${VERSION} macOS tarball... ($i/90)"
             sleep 20
           done
-          echo "::error::Release v${VERSION} setup.exe never became publicly available after 30 minutes (is the tri7 repo still private?)"
+          echo "::error::Release v${VERSION} macOS tarball never became publicly available after 30 minutes (is the tri7 repo still private?)"
           exit 1
 
-      - name: Compute installer SHA256
+      - name: Compute macOS tarball SHA256
         if: env.HOMEBREW_GITHUB_TOKEN != ''
         id: sha
         run: |
-          curl -fsSL -o /tmp/tri7-setup.exe \
-            "$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-win64-setup.exe"
-          SHA=$(sha256sum /tmp/tri7-setup.exe | awk '{print $1}')
+          curl -fsSL -o /tmp/tri7-macos.tar.gz \
+            "$RELEASE_URL_BASE/v${VERSION}/CryptographicTriangles-${VERSION}-macos-arm64.tar.gz"
+          SHA=$(sha256sum /tmp/tri7-macos.tar.gz | awk '{print $1}')
           echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "Cask installer SHA256: $SHA"
+          echo "Cask macOS tarball SHA256: $SHA"
 
       - name: Clone homebrew-tap
         if: env.HOMEBREW_GITHUB_TOKEN != ''
@@ -396,9 +402,17 @@ jobs:
           sha = os.environ['SHA']
           with open(path) as f:
               content = f.read()
-          content = re.sub(r'^\s*version\s+"[\d.]+"', f'  version "{version}"', content, count=1, flags=re.MULTILINE)
-          content = re.sub(r'^\s*sha256\s+"[a-f0-9]+"', f'  sha256 "{sha}"', content, count=1, flags=re.MULTILINE)
-          content = re.sub(r'https://github\.com/SamiAhmed7777/tri7/releases/download/v[\d.]+/', f'https://github.com/SamiAhmed7777/tri7/releases/download/v{version}/', content)
+          content, n_ver = re.subn(r'^\s*version\s+"[\d.]+"', f'  version "{version}"', content, count=1, flags=re.MULTILINE)
+          content, n_sha = re.subn(r'^\s*sha256\s+"[a-f0-9]+"', f'  sha256 "{sha}"', content, count=1, flags=re.MULTILINE)
+          content, n_url = re.subn(r'https://github\.com/SamiAhmed7777/tri7/releases/download/v[\d.]+/', f'https://github.com/SamiAhmed7777/tri7/releases/download/v{version}/', content)
+          # point the cask at the macOS release asset (the updater-shape
+          # tarball built by ci.yml macos-build), not the Windows NSIS exe
+          content, n_asset = re.subn(r'CryptographicTriangles-[\d.]+-[\w.\-]+', f'CryptographicTriangles-{version}-macos-arm64.tar.gz', content)
+          if not (n_ver == 1 and n_sha == 1 and n_url == 1 and n_asset == 1):
+              raise SystemExit(
+                  "::error::cask layout changed — substitution counts "
+                  f"version={n_ver} sha={n_sha} url={n_url} asset={n_asset} (expected 1 each); "
+                  "fix the rewrite script instead of committing a partial cask")
           with open(path, 'w') as f:
               f.write(content)
           PYEOF
@@ -434,13 +448,14 @@ jobs:
     name: AUR (tri7d-bin)
     needs: version
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     container:
       image: archlinux:latest
     env:
       AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check AUR_SSH_KEY
         run: |
@@ -457,42 +472,6 @@ jobs:
           useradd -m -s /bin/bash build
           echo 'build ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
           chown -R build:build "$GITHUB_WORKSPACE"
-
-      - name: Update PKGBUILD pkgver + sha256sums, regenerate .SRCINFO
-        if: env.AUR_SSH_KEY != ''
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          # Fetch the tagged source tarball (public URL once the repo is
-          # public) and rewrite pkgver + sha256sums in the AUR PKGBUILD,
-          # then regenerate .SRCINFO — without this, releases after 7.0.0
-          # would leave the AUR stale or fail checksum validation.
-          curl -fsSL -o /tmp/tri7-src.tar.gz \
-            "https://github.com/SamiAhmed7777/tri7/archive/refs/tags/v${VERSION}.tar.gz"
-          SRC_SHA=$(sha256sum /tmp/tri7-src.tar.gz | awk '{print $1}')
-          python3 - "$VERSION" "$SRC_SHA" <<'PYEOF'
-          import re, sys
-          version, sha = sys.argv[1], sys.argv[2]
-          with open('/tmp/PKGBUILD') as f:
-              content = f.read()
-          content = re.sub(r"^pkgver=.*", f"pkgver={version}", content, count=1, flags=re.MULTILINE)
-          content = re.sub(r"^pkgrel=.*", "pkgrel=1", content, count=1, flags=re.MULTILINE)
-          content = re.sub(r"^sha256sums=.*", f"sha256sums=('{sha}')", content, count=1, flags=re.MULTILINE)
-          with open('/tmp/PKGBUILD', 'w') as f:
-              f.write(content)
-          PYEOF
-          grep -E "^(pkgver|pkgrel|sha256sums)" /tmp/PKGBUILD
-          chown build:build /tmp/PKGBUILD
-          sudo -u build bash -c '
-            set -e
-            cd /tmp
-            mkdir -p pkgbuild
-            cp PKGBUILD pkgbuild/
-            cd pkgbuild
-            makepkg --printsrcinfo > .SRCINFO
-            echo "--- generated .SRCINFO ---"
-            cat .SRCINFO
-          '
 
       - name: Setup SSH key for AUR
         if: env.AUR_SSH_KEY != ''
@@ -513,13 +492,44 @@ jobs:
             ls -la /tmp/tri7d-bin
           '
 
+      - name: Update PKGBUILD pkgver + sha256sums, regenerate .SRCINFO
+        if: env.AUR_SSH_KEY != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Fetch the tagged source tarball (public URL once the repo is
+          # public) and rewrite pkgver + sha256sums IN THE CLONED AUR
+          # PKGBUILD (no template exists in this repo), then regenerate
+          # .SRCINFO — without this, releases after 7.0.0 would leave the
+          # AUR stale or fail checksum validation.
+          curl -fsSL -o /tmp/tri7-src.tar.gz \
+            "https://github.com/SamiAhmed7777/tri7/archive/refs/tags/v${VERSION}.tar.gz"
+          SRC_SHA=$(sha256sum /tmp/tri7-src.tar.gz | awk '{print $1}')
+          python3 - "$VERSION" "$SRC_SHA" <<'PYEOF'
+          import re, sys
+          version, sha = sys.argv[1], sys.argv[2]
+          with open('/tmp/tri7d-bin/PKGBUILD') as f:
+              content = f.read()
+          content = re.sub(r"^pkgver=.*", f"pkgver={version}", content, count=1, flags=re.MULTILINE)
+          content = re.sub(r"^pkgrel=.*", "pkgrel=1", content, count=1, flags=re.MULTILINE)
+          content = re.sub(r"^sha256sums=.*", f"sha256sums=('{sha}')", content, count=1, flags=re.MULTILINE)
+          with open('/tmp/tri7d-bin/PKGBUILD', 'w') as f:
+              f.write(content)
+          PYEOF
+          grep -E "^(pkgver|pkgrel|sha256sums)" /tmp/tri7d-bin/PKGBUILD
+          sudo -u build bash -c '
+            set -e
+            cd /tmp/tri7d-bin
+            makepkg --printsrcinfo > .SRCINFO
+            echo "--- generated .SRCINFO ---"
+            cat .SRCINFO
+          '
+
       - name: Commit and push to AUR
         if: env.AUR_SSH_KEY != ''
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cp /tmp/pkgbuild/PKGBUILD /tmp/tri7d-bin/PKGBUILD
-          cp /tmp/pkgbuild/.SRCINFO /tmp/tri7d-bin/.SRCINFO
           chown -R build:build /tmp/tri7d-bin
           sudo -u build bash -c '
             cd /tmp/tri7d-bin
