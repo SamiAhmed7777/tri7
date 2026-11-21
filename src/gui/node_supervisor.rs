@@ -4225,14 +4225,27 @@ mod tests {
         raw
     }
 
-    /// stub i2pd spawn: a REAL long-lived child that binds the PINNED SOCKS
-    /// port and KEEPS it bound + answering — exactly what real i2pd does
-    /// across repeated ensure calls (the r1 one-shot stub RELEASED the port
-    /// after one greeting, which masked the r2 self-detection bug: probe-
-    /// before-child-check reclassified our own live daemon as System and
-    /// killed it). ALSO materializes the tunnel keys dat (the tunnel
-    /// registering) so the readback path runs.
-    fn stub_i2p_spawn(req: I2pSpawnRequest) -> Result<Child, String> {
+    /// stub i2pd spawn: a REAL long-lived child plus a SOCKS listener on the
+    /// PINNED port that KEEPS answering across repeated ensure calls (the r1
+    /// one-shot stub RELEASED the port after one greeting, which masked the
+    /// r2 self-detection bug: probe-before-child-check reclassified our own
+    /// live daemon as System and killed it). ALSO materializes the tunnel
+    /// keys dat (the tunnel registering) so the readback path runs.
+    ///
+    /// `registry` mirrors stub_tor_spawn: when present, the spawned child's
+    /// pid is recorded so the test's injected listener_resolver
+    /// (child_identity_pair) can report the PRODUCTION identity shape — the
+    /// spawned i2pd owns the pinned SOCKS port. The listener thread below
+    /// lives in the TEST process, so without that pair the port's true
+    /// listener pid is the test harness and the Windows native attribution
+    /// correctly refuses it: the live child was killed and reclassified as a
+    /// foreign System daemon on every ensure after the first (deterministic
+    /// windows-build CI red on the two attribution tests; Linux/macOS
+    /// resolve nothing so the mismatch was invisible there).
+    fn stub_i2p_spawn(
+        req: I2pSpawnRequest,
+        registry: Option<&Arc<std::sync::Mutex<Option<u32>>>>,
+    ) -> Result<Child, String> {
         let mut cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "ping", "-n", "60", "127.0.0.1"]);
@@ -4248,6 +4261,9 @@ mod tests {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, same as prod
         }
         let child = cmd.spawn().map_err(|e| e.to_string())?;
+        if let Some(reg) = registry {
+            *reg.lock().unwrap() = Some(child.id());
+        }
         // the keys dat lands in the DATADIR ROOT (relative keys name in
         // tunnels.conf) — exactly what production i2pd does
         let keys = req.data_dir.join(I2P_DEST_KEYS_FILE);
@@ -4532,7 +4548,7 @@ mod tests {
         let sc = Arc::clone(&spawns);
         sup.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_i2p_spawn(req)
+            stub_i2p_spawn(req, None)
         }));
         // hand-plant an ALIVE child whose SOCKS port has NO listener
         sup.child = Some(long_lived_child());
@@ -4570,6 +4586,13 @@ mod tests {
         let mut sup = i2p_supervisor(&dir, probe);
         std::fs::write(dir.join("i2pd-fake"), b"").unwrap(); // exists → used
         sup.exe_override = Some(dir.join("i2pd-fake"));
+        // production identity shape: the spawned child owns the pinned port
+        // (child_identity_pair — the tor lane's fix for the same Windows
+        // attribution refusal; without it the test harness is the listener)
+        let (pid_reg, resolver) =
+            child_identity_pair(dir.join("i2pd-fake").to_string_lossy().to_string());
+        sup.listener_resolver = Some(resolver);
+        let reg_for_spawn = Arc::clone(&pid_reg);
         let kills = sup.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
@@ -4583,7 +4606,7 @@ mod tests {
                 req.data_dir.join("tunnels.conf"),
                 "tunnels.conf lives IN the datadir"
             );
-            stub_i2p_spawn(req)
+            stub_i2p_spawn(req, Some(&reg_for_spawn))
         }));
         // 1. spawn → Bundled + destination readback
         let st = sup.ensure(&dir, true);
@@ -4630,9 +4653,11 @@ mod tests {
     /// repeated ensure calls — the child binds the SAME pinned port the
     /// system probe uses, so probe-before-child-check reclassified our own
     /// daemon as System and killed it on every poll tick. The stub listener
-    /// stays bound across ensures (real-i2pd shape) and the assertions are
-    /// exactly the judge's: the child is neither killed nor reclassified,
-    /// the pid is unchanged, and the destination survives.
+    /// stays bound across ensures, and the injected child_identity_pair
+    /// reports the spawned child as the port's owner (the production i2pd
+    /// shape on Windows, where the native attribution enforces it); the
+    /// assertions are exactly the judge's: the child is neither killed nor
+    /// reclassified, the pid is unchanged, and the destination survives.
     #[test]
     fn i2p_own_child_is_never_reclassified_or_killed_across_ensures() {
         let probe = free_dead_port();
@@ -4642,12 +4667,17 @@ mod tests {
         let mut sup = i2p_supervisor(&dir, probe);
         std::fs::write(dir.join("i2pd-fake"), b"").unwrap();
         sup.exe_override = Some(dir.join("i2pd-fake"));
+        // production identity shape (see stub_i2p_spawn / child_identity_pair)
+        let (pid_reg, resolver) =
+            child_identity_pair(dir.join("i2pd-fake").to_string_lossy().to_string());
+        sup.listener_resolver = Some(resolver);
+        let reg_for_spawn = Arc::clone(&pid_reg);
         let kills = sup.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
         sup.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
             sc.fetch_add(1, Ordering::SeqCst);
-            stub_i2p_spawn(req)
+            stub_i2p_spawn(req, Some(&reg_for_spawn))
         }));
         // spawn → Bundled
         let st1 = sup.ensure(&dir, true);
@@ -4938,7 +4968,7 @@ mod tests {
         let i2p_spawns = Arc::clone(&spawns);
         n.i2p.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
             i2p_spawns.fetch_add(1, Ordering::SeqCst);
-            stub_i2p_spawn(req)
+            stub_i2p_spawn(req, None)
         }));
         let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
         let av = Arc::clone(&argvs);
