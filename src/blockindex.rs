@@ -953,6 +953,53 @@ fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut off: u64) -> std:
     Ok(())
 }
 
+/// (2026-11-22) positional bounded read for the debris-resync scan: fills up
+/// to buf.len() bytes, fewer near EOF.
+fn read_at_most(file: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let n = file.read_at(&mut buf[filled..], off + filled as u64)?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        Ok(filled)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let n = file.seek_read(&mut buf[done..], off + done as u64)?;
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        Ok(done)
+    }
+}
+
+/// Resync events are logged once per corrupt offset (the seed retries the
+/// same offset every few seconds — unbounded logging would spam node.log).
+fn log_resync(from: u64, to: u64) {
+    static LOGGED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+    let mut g = match LOGGED.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if !g.contains(&from) {
+        g.push(from);
+        eprintln!(
+            "blockstore: resync — skipped debris at offset {from}, resumed at frame {to}"
+        );
+    }
+}
+
 impl BlockStore {
     pub fn new(path: Option<PathBuf>, cache_dir: Option<PathBuf>) -> Arc<BlockStore> {
         Arc::new(BlockStore {
@@ -1194,7 +1241,55 @@ impl BlockStore {
 
     /// Read the frame body at a frame offset. Positional read — safe from
     /// concurrent request threads.
+    ///
+    /// (2026-11-22) DEBRIS RESYNC: force-killed appends can leave a torn
+    /// frame mid-file (the next boot appends after the tear instead of
+    /// truncating it). A positional read of that region returns garbage and
+    /// — with the full-history wallet seed — bricked the balance forever
+    /// (sami-pc 227857036 / sami-laptop 275471636, both live-caught). On a
+    /// bad header, scan FORWARD up to 32 MiB for a plausible frame header
+    /// (correct magic, sane length) and serve THAT; the callers verify the
+    /// body against the height map / chain hashes anyway, so a wrong frame
+    /// can never be presented as a block — a miss is a skipped height, never
+    /// silent wrongness. Every resync is logged.
     fn read_frame(inner: &StoreInner, off: u64) -> Result<Vec<u8>, String> {
+        match Self::read_frame_strict(inner, off) {
+            Ok(b) => Ok(b),
+            Err(bad) => {
+                const RESYNC_LIMIT: u64 = 32 << 20;
+                const CHUNK: u64 = 1 << 20;
+                let mut scan = off + 1;
+                let end = off + 1 + RESYNC_LIMIT;
+                let file_len = inner.file.metadata().map(|m| m.len()).unwrap_or(0);
+                while scan + 8 < end && scan + 8 < file_len {
+                    let mut buf = vec![0u8; CHUNK as usize];
+                    let n = read_at_most(&inner.file, &mut buf, scan)
+                        .map_err(|e| format!("resync read at {}: {}", scan, e))?;
+                    if n < 8 {
+                        break;
+                    }
+                    buf.truncate(n);
+                    let mut i = 0usize;
+                    while i + 8 <= buf.len() {
+                        let magic = u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
+                        let len = u32::from_le_bytes(buf[i + 4..i + 8].try_into().unwrap()) as usize;
+                        if magic == FRAME_MAGIC && len > 0 && len <= MAX_FRAME {
+                            let found = scan + i as u64;
+                            if let Ok(body) = Self::read_frame_strict(inner, found) {
+                                log_resync(off, found);
+                                return Ok(body);
+                            }
+                        }
+                        i += 1;
+                    }
+                    scan += CHUNK - 8; // overlap so a header straddling a chunk edge is found
+                }
+                Err(bad)
+            }
+        }
+    }
+
+    fn read_frame_strict(inner: &StoreInner, off: u64) -> Result<Vec<u8>, String> {
         let mut hdr = [0u8; 8];
         read_exact_at(&inner.file, &mut hdr, off)
             .map_err(|e| format!("frame header read at {}: {}", off, e))?;
