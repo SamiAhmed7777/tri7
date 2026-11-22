@@ -163,8 +163,14 @@ pub fn set_rpc_token(token: &str) {
     }
 }
 
-fn rpc_token() -> Option<String> {
+pub fn rpc_token() -> Option<String> {
     RPC_TOKEN.lock().ok().and_then(|g| g.clone())
+}
+
+/// (2026-11-22 diagnostics) whether a capability token is loaded — for the
+/// GUI's own refresh diagnostics (does the supervisor handoff reach us?).
+pub fn rpc_token_is_set() -> bool {
+    rpc_token().is_some()
 }
 
 pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, String> {

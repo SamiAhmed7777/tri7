@@ -2813,7 +2813,53 @@ impl AppState {
     }
 
     pub fn refresh_debug_info_action(&mut self) {
+        // (2026-11-22, fused18) LIVE BRIDGE short-circuit — operator directive
+        // "fuse them together completely": in embedded mode the daemon
+        // publishes its live wallet facts to an in-process bridge and the GUI
+        // reads them DIRECTLY (no HTTP, no token, no poll boundary). Attach
+        // mode keeps the RPC poll below. The bridge ALSO refreshes the status
+        // bar with a truthful "node running" line per tip advance, replacing
+        // the stale boot-time "restarting it…" text.
+        if !self.cfg.attach_external {
+            if let Some(s) = crate::node_embedded::live_bridge_snapshot() {
+                let mut info = DebugInfo::default();
+                info.reachable = true;
+                info.connections = Some(s.peers as u64);
+                info.blocks = Some(s.tip);
+                info.daemon_balance_sats = Some(s.balance_sats as i64);
+                info.daemon_balance_height = Some(s.tip);
+                info.daemon_balance_source = Some("live bridge".to_string());
+                info.daemon_balance_partial = false;
+                self.debug_info = Some(info);
+                if s.tip != crate::node_embedded::bridge_pushed_tip() {
+                    crate::node_embedded::set_bridge_pushed_tip(s.tip);
+                    self.status_log.push(format!(
+                        "node running · tip h{} · balance {} sats{}",
+                        s.tip,
+                        s.balance_sats,
+                        if s.locked { " (wallet locked)" } else { "" }
+                    ));
+                }
+                return;
+            }
+        }
         let mut info = DebugInfo::default();
+        // (2026-11-22 diagnostics) the GUI displays zeros while the embedded
+        // node answers authenticated RPC externally — log THIS function's own
+        // view (addr, token presence, per-call outcome, resulting reachable)
+        // to a file next to the node log so the failing link names itself.
+        let diag_path = std::path::Path::new(&self.cfg.wallet_path)
+            .parent()
+            .map(|p| p.join("node").join("gui-refresh.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("gui-refresh.log"));
+        let mut diag = format!(
+            "refresh: addr={:?} token_set={} wallet_open={}\n",
+            self.cfg.rpc_addr,
+            crate::gui::rpc_client::rpc_token_is_set(),
+            self.wallet.is_some()
+        );
+        let _ = std::fs::create_dir_all(diag_path.parent().unwrap_or(std::path::Path::new(".")));
+        let _ = std::fs::write(&diag_path, &diag);
         if let Some(addr) = self.cfg.rpc_addr.clone() {
             // pick up the node's live fee setting on the same poll as the rest
             // of the status (the Send estimate and Options both read it)

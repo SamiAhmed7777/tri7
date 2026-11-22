@@ -97,6 +97,37 @@ struct NodeExit(pub i32);
 static EMBEDDED: AtomicBool = AtomicBool::new(false);
 /// last exit code that flowed through node_exit() while embedded
 static NODE_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// (2026-11-22, fused18) LIVE BRIDGE — the in-process wallet facts the GUI
+/// reads DIRECTLY (operator directive: "fuse them together completely" —
+/// the GUI is the daemon's own viewer, not a poll client). Published by the
+/// wallet-seed thread (initial view) and refreshed by the stake tick
+/// (~every 15s); consumed by gui/app_state's refresh short-circuit. No
+/// HTTP, no token, no poll boundary — nothing left to desync.
+#[derive(Clone, Copy, Debug)]
+pub struct LiveBridge {
+    pub tip: u64,
+    pub balance_sats: u64,
+    pub owned: usize,
+    pub peers: usize,
+    pub locked: bool,
+}
+pub static LIVE_BRIDGE: std::sync::Mutex<Option<LiveBridge>> = std::sync::Mutex::new(None);
+static BRIDGE_PUSHED_TIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn publish_live_bridge(s: LiveBridge) {
+    if let Ok(mut g) = LIVE_BRIDGE.lock() {
+        *g = Some(s);
+    }
+}
+pub fn live_bridge_snapshot() -> Option<LiveBridge> {
+    LIVE_BRIDGE.lock().ok().and_then(|g| *g)
+}
+pub fn bridge_pushed_tip() -> u64 {
+    BRIDGE_PUSHED_TIP.load(std::sync::atomic::Ordering::SeqCst)
+}
+pub fn set_bridge_pushed_tip(t: u64) {
+    BRIDGE_PUSHED_TIP.store(t, std::sync::atomic::Ordering::SeqCst);
+}
 /// supervisor-provided file the embedded run TEEs its log() lines into
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -9560,6 +9591,15 @@ fn stake_tick(
     }
     stake_st.locked_logged = false;
     let balance = wl.balance();
+    // (fused18) LIVE BRIDGE refresh — publish the tick's live facts for the
+    // GUI's direct read (see the static's docs at the top of this file).
+    publish_live_bridge(LiveBridge {
+        tip: tip_height as u64,
+        balance_sats: balance as u64,
+        owned: wl.owned_count(),
+        peers: peers.len(),
+        locked: wl.locked,
+    });
     if balance <= tri7_core::stake::reserve_balance() {
         stake_st.searches += 1;
         return Ok(false);
@@ -14477,6 +14517,15 @@ pub fn main_args(argv: &[String]) -> i32 {
                         }
                         let nkeys = w.wallet.keys.len();
                         *wl2.lock().unwrap() = Some(w);
+                        // (fused18) LIVE BRIDGE initial publish — see the
+                        // static's docs at the top of this file.
+                        publish_live_bridge(LiveBridge {
+                            tip: seed_tip as u64,
+                            balance_sats: bal as u64,
+                            owned: owned_n,
+                            peers: 0,
+                            locked: locked_at_start,
+                        });
                         log(&format!(
                             "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats{}",
                             base,
@@ -27107,5 +27156,35 @@ addnode=host:notaport
         let s = provider.snap_view();
         assert_eq!(s.coverage().unwrap(), (300, h1.clone()), "retry adopts");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live_bridge_tests {
+    use super::*;
+
+    /// (fused18) LIVE BRIDGE round trip: the daemon publishes, the GUI reads
+    /// the same process-global verbatim, and the tip-change watermark tracks.
+    #[test]
+    fn live_bridge_round_trip() {
+        publish_live_bridge(LiveBridge {
+            tip: 2217343,
+            balance_sats: 1_464_934_211,
+            owned: 67,
+            peers: 2,
+            locked: false,
+        });
+        let s = live_bridge_snapshot().expect("bridge snapshot must be readable");
+        assert_eq!(s.tip, 2217343);
+        assert_eq!(s.balance_sats, 1_464_934_211);
+        assert_eq!(s.owned, 67);
+        assert_eq!(s.peers, 2);
+        assert!(!s.locked);
+        assert_ne!(s.tip, bridge_pushed_tip());
+        set_bridge_pushed_tip(s.tip);
+        assert_eq!(bridge_pushed_tip(), s.tip);
+        // an empty bridge (node seeding) reads as None — the GUI falls back
+        LIVE_BRIDGE.lock().unwrap().take();
+        assert!(live_bridge_snapshot().is_none());
     }
 }
