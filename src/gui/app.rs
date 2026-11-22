@@ -2047,6 +2047,12 @@ impl eframe::App for Tri7App {
         if DEBUG_TOGGLE.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.console_open = true;
         }
+        // (2026-11-22) STAY ALIVE WHEN IDLE: egui only repaints on input by
+        // default — an unfocused/covered window froze every poll cadence
+        // (refresh, ensure_running/token handoff, status) until the operator
+        // interacted, which is exactly the "GUI doesn't match the daemon"
+        // class. A 2s repaint keeps every cadence live in the background.
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
         // live-panel polling: staking + peers every ~5s (cheap loopback RPCs)
         self.poll_ticker = self.poll_ticker.wrapping_add(1);
         if self.poll_ticker % 10 == 0 {
