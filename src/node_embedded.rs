@@ -14574,6 +14574,15 @@ pub fn main_args(argv: &[String]) -> i32 {
                     let g = st2.lock().unwrap();
                     (g.base, g.tip_height)
                 };
+                // (2026-11-22, fused20) FULL-HISTORY LIVE VIEW: seed from h0,
+                // NOT the kernel-window base. The sliding window made wallet
+                // facts lie: coins received BEFORE the window base (sami's
+                // laptop: 250 TRI at h2207570, ~10k blocks back) were
+                // invisible to the balance forever, and every wallet
+                // regeneration reset the view to zero. A full scan is the
+                // same replay the balances-build proves (~70s once at boot)
+                // and the live map only holds WALLET-owned rows (cheap).
+                let base = 0u64;
                 let Some(wp) = &wp2 else { return };
                 // CLAMP the seed tip: the tip block arrives as a HEADER first
                 // and its body lands a beat later (and live follow keeps the
