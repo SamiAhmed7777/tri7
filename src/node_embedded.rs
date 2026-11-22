@@ -2602,10 +2602,24 @@ impl WindowOutputs {
     /// Shift every stored window-relative height down after the window base
     /// advanced (ChainState::trim re-basing; keeps kernel-meta consumers
     /// aligned with entries' relative heights in-session).
+    ///
+    /// item 37 STALE-RESOLVER-OFFBYONE: a coin whose containing block fell
+    /// below the NEW base (relative height < excess) has NO evidence slot in
+    /// the slid window — clamping it to 0 (the old saturating_sub) silently
+    /// re-pointed its meta at entries[0], i.e. the block AT the new base, so
+    /// resolve_stake_evidence compared the coin's facts against a block ABOVE
+    /// its own (live DNS2 2026-11-21: exactly H+1's block_time at conf ==
+    /// WINDOW_ENTRIES) and flagged a false facts-mismatch no rebuild could
+    /// clear. Such a coin is past the staking horizon by design (the item-24
+    /// classification), so DROP it here: kernel_meta → None → the resolver's
+    /// below-base branch counts it unresolvable (a kernel-coverage fact —
+    /// never actionable, never fed to the repairwallet remedy) and the
+    /// validator's None path already rejects such evidence honestly.
     fn rebase(&mut self, excess: usize) {
         if excess == 0 {
             return;
         }
+        self.map.retain(|_, m| m.height >= excess);
         for m in self.map.values_mut() {
             m.height = m.height.saturating_sub(excess);
         }
@@ -8472,6 +8486,21 @@ struct StakeState {
     /// bounded rebuild passes per restart), never worth persistence.
     autoheal_episode: Option<String>,
     autoheal_attempts: u32,
+    /// item 37 STALE-RESOLVER-OFFBYONE: the episode (`first_utc`) whose
+    /// in-process rebuild returned ZERO owned-output mismatches while the
+    /// stale flag kept firing — the RESOLVER-fault latch. The repairwallet
+    /// remedy is a proven no-op for that class, so the episode's attempt
+    /// budget is retired (no further rebuilds until a fresh episode) and
+    /// the STALE line's remedy text stops recommending repairwallet.
+    /// IN-MEMORY ONLY (this struct never persists).
+    autoheal_fault_episode: Option<String>,
+    /// item 37: consecutive stake ticks with ≥1 unresolvable candidate
+    /// (below-base / out-of-horizon coins — a growing, permanent set once a
+    /// coin crosses the WINDOW_ENTRIES edge). Rate-limits the
+    /// kernel-coverage log line to the house cadence (first tick, then every
+    /// 40th ≈10 min) so aging-out coins don't spam the journal every 15s.
+    /// IN-MEMORY ONLY.
+    unresolvable_ticks: u64,
 }
 
 type SharedStake = Arc<Mutex<StakeState>>;
@@ -9230,12 +9259,17 @@ fn resolve_stake_evidence(
 /// blocker): those gates used to return before this ran, so a stale live
 /// view went undetected — or a stale flag stuck uncleared — for exactly as
 /// long as the wallet could not stake anyway.
-fn note_stale_evidence(stg: &mut ChainState, stale_coins: &[StaleLiveView]) {
+fn note_stale_evidence(
+    stg: &mut ChainState,
+    stale_coins: &[StaleLiveView],
+    fault_episode: Option<&str>,
+) {
     if stale_coins.is_empty() {
         if stg.staking_impaired.is_some() {
             log(
-                "stake: stale live view CLEARED — wallet evidence matches the chain again \
-                 (repairwallet took effect)",
+                "stake: stale live view CLEARED — no live-view coin contradicts the chain \
+                 anymore (a repairwallet/autoheal rebuild took effect, or the flagged \
+                 coin(s) left the staking window — the AUTOHEAL/resolver log tells which)",
             );
         }
         stg.staking_impaired = None;
@@ -9243,6 +9277,12 @@ fn note_stale_evidence(stg: &mut ChainState, stale_coins: &[StaleLiveView]) {
     }
     let coins = stale_coins.len();
     let first = &stale_coins[0];
+    // item 37 STALE-RESOLVER-OFFBYONE: when this episode's in-process rebuild
+    // already returned ZERO owned-output mismatches, the flag is a resolver
+    // fault (the wallet was never wrong) and the remedy text must NOT point
+    // at repairwallet — that advice turned DNS2's false flag into a repair
+    // recommendation for a proven no-op.
+    let resolver_fault = fault_episode == Some(first.first_utc.as_str());
     let impaired = stg.staking_impaired.get_or_insert_with(|| first.clone());
     impaired.coins = coins;
     impaired.ticks += 1;
@@ -9281,11 +9321,18 @@ fn note_stale_evidence(stg: &mut ChainState, stale_coins: &[StaleLiveView]) {
                 impaired.chain_tx_time,
             )
         };
+        let remedy = if resolver_fault {
+            "the in-process rebuild returned ZERO owned-output mismatches — RESOLVER FAULT \
+             (item 37), NOT wallet corruption: do NOT run repairwallet, look at the \
+             resolver's chain-evidence lookup"
+        } else {
+            "A fork adoption does not roll the wallet live view back: run `repairwallet` \
+             to rebuild it from the store."
+        };
         log(&format!(
             "STAKE: STALE LIVE VIEW — {}; \
-             wallet evidence is not chain evidence — {} coin(s) excluded from staking. \
-             A fork adoption does not roll the wallet live view back: run `repairwallet` to rebuild it from the store.",
-            why, coins,
+             wallet evidence is not chain evidence — {} coin(s) excluded from staking. {}",
+            why, coins, remedy,
         ));
     }
 }
@@ -9308,6 +9355,15 @@ fn autoheal_due(impaired: &StaleLiveView, stake_st: &mut StakeState) -> bool {
     if stake_st.autoheal_episode.as_deref() != Some(impaired.first_utc.as_str()) {
         stake_st.autoheal_episode = Some(impaired.first_utc.clone());
         stake_st.autoheal_attempts = 0;
+        stake_st.autoheal_fault_episode = None;
+    }
+    // item 37 STALE-RESOLVER-OFFBYONE: an episode whose rebuild already
+    // returned ZERO owned-output mismatches while the flag kept firing is
+    // a RESOLVER fault — the wallet was never wrong and the repairwallet
+    // remedy is a proven no-op for that class. Retire the episode: no
+    // further attempts until a fresh episode (new first_utc) re-arms.
+    if stake_st.autoheal_fault_episode.as_deref() == Some(impaired.first_utc.as_str()) {
+        return false;
     }
     if stake_st.autoheal_attempts >= AUTOHEAL_MAX_ATTEMPTS {
         return false;
@@ -9374,11 +9430,29 @@ fn autoheal_stale_live_view(
             return false;
         }
     };
-    stake_st.autoheal_attempts += 1;
     let diff = {
         let owns = |o: &LiveOut| wl.owns(o);
         repair_diff(&wl.live, &fresh.live, &owns)
     };
+    // item 37 STALE-RESOLVER-OFFBYONE: a rebuild that finds ZERO owned-output
+    // mismatches while the stale flag still fires (this pass only ran because
+    // stale_coins was non-empty) proves the RESOLVER at fault — the wallet
+    // was never wrong, and re-swapping an identical view heals nothing. Log
+    // it LOUDLY ONCE per episode, retire the episode's attempt budget (no
+    // burn, no swap), and leave the remedy to the resolver's own fix. Live
+    // DNS2 2026-11-21: three silent no-op rebuilds ("0 owned-output
+    // mismatch(es) totalling 0 sats") burned the full item-27 episode cap
+    // feeding a false flag that ran for hours.
+    if diff.count() == 0 {
+        if stake_st.autoheal_fault_episode.as_deref() != Some(impaired.first_utc.as_str()) {
+            log(&format!(
+                "stake: AUTOHEAL — rebuild h{base}..h{replay_tip} found ZERO owned-output mismatch(es) while the stale flag still fires: RESOLVER FAULT (item 37), NOT wallet corruption — the repairwallet remedy is a no-op for this class; this episode's attempt budget is retired, look at the resolver's chain-evidence lookup, not the wallet"
+            ));
+            stake_st.autoheal_fault_episode = Some(impaired.first_utc.clone());
+        }
+        return false;
+    }
+    stake_st.autoheal_attempts += 1;
     log(&format!(
         "stake: AUTOHEAL — ran the repairwallet remedy in-process: rebuilt live view h{base}..h{replay_tip} (walked back {back} from tip h{tip_hint}) — {} owned-output mismatch(es) totalling {} sats ({} phantom, {} lost)",
         diff.count(),
@@ -9452,7 +9526,7 @@ fn stake_tick(
     stake_st.coins_considered = candidates.len() as u64;
     let (mut candidates_rel, mut stale_coins, mut unresolvable_coins) =
         resolve_stake_evidence(stg, candidates);
-    note_stale_evidence(stg, &stale_coins);
+    note_stale_evidence(stg, &stale_coins, stake_st.autoheal_fault_episode.as_deref());
     if !stale_coins.is_empty() && autoheal_stale_live_view(stg, wl, store, stake_st) {
         // item 27 §16-RACED-MINT-AUTOHEAL: the rebuild ran — re-resolve with
         // the fresh view so THIS tick stakes on the restored coins instead of
@@ -9497,10 +9571,20 @@ fn stake_tick(
     let started = Instant::now();
     let fees = pool.total_fees();
     if unresolvable_coins > 0 {
-        log(&format!(
-            "stake: {} candidate coin(s) outside the chain kernel coverage (base {} / coverage floor window-rel {}) — skipped (the validator could not resolve their prevouts either; a below-floor coin is a kernel-coverage fact, NOT wallet corruption — repairwallet cannot fix it; item 24 boot backfill lifts the floor to 0)",
-            unresolvable_coins, stg.base, stg.utxo_floor_rel
-        ));
+        // item 37 STALE-RESOLVER-OFFBYONE: out-of-horizon coins are a
+        // PERMANENT, growing set (every reward UTXO crosses the WINDOW_ENTRIES
+        // edge eventually and then lives below base forever) — log at the
+        // house cadence (first tick + every 40th ≈10 min at the 15s stake
+        // tick), not every pass.
+        stake_st.unresolvable_ticks += 1;
+        if stake_st.unresolvable_ticks == 1 || stake_st.unresolvable_ticks % 40 == 0 {
+            log(&format!(
+                "stake: {} candidate coin(s) outside the chain kernel coverage (base {} / coverage floor window-rel {}) — skipped (the validator could not resolve their prevouts either; a below-floor coin is a kernel-coverage fact, NOT wallet corruption — repairwallet cannot fix it; item 24 boot backfill lifts the floor to 0)",
+                unresolvable_coins, stg.base, stg.utxo_floor_rel
+            ));
+        }
+    } else {
+        stake_st.unresolvable_ticks = 0;
     }
     let (plan, rep) = tri7_core::stake::create_coinstake(
         &stg.rel_index(),
@@ -19176,6 +19260,8 @@ mod tests {
             coins_meeting_min_age: 0,
             autoheal_episode: None,
             autoheal_attempts: 0,
+            autoheal_fault_episode: None,
+            unresolvable_ticks: 0,
         }
     }
 
@@ -19230,7 +19316,7 @@ mod tests {
         assert_eq!((resolved.len(), unres), (0, 0), "never a silent skip");
         assert_eq!(stale.len(), 1);
         assert!(stale[0].absent);
-        note_stale_evidence(&mut stg, &stale);
+        note_stale_evidence(&mut stg, &stale, None);
         let impaired = stg.staking_impaired.clone().expect("impaired");
         assert!(impaired.absent);
         assert_eq!(impaired.ticks, 1);
@@ -24475,7 +24561,7 @@ addnode=host:notaport
         let (_rel, stale, _unres) = resolve_stake_evidence(&stg, cands);
         assert_eq!(stale.len(), 1);
         assert!(!stale[0].absent, "the raced-mint shape is a facts mismatch");
-        note_stale_evidence(&mut stg, &stale);
+        note_stale_evidence(&mut stg, &stale, None);
         let first_utc = stg.staking_impaired.as_ref().unwrap().first_utc.clone();
         let honest_before = wl.live.values().find(|o| o.height == 2 && o.value != 250_592_524).unwrap().clone();
 
@@ -24539,6 +24625,264 @@ addnode=host:notaport
         );
         assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
         assert_eq!(stake_st.autoheal_attempts, 1);
+    }
+
+    // ---- item 37 STALE-RESOLVER-OFFBYONE ----
+
+    /// THE DNS2 2026-11-21 INCIDENT REPLAY AT THE EXACT BOUNDARY. A coin
+    /// whose containing block sits at conf == WINDOW_ENTRIES (the window's
+    /// FAR EDGE — live first fire: tip h2217051, coin at h2212451 = base − 1)
+    /// has NO slot in the slid window: rebase must DROP its meta, never
+    /// clamp it onto entries[0] (the block AT the new base — the H+1
+    /// evidence read that produced the false facts-mismatch: resolver
+    /// claimed chain_block_time 1794744738 = h2212452's time while the
+    /// wallet's 1794744458 matched h2212451 EXACTLY). Post-fix the edge
+    /// coin classifies unresolvable (item 24, kernel-coverage fact) and
+    /// flags NOTHING, while a coin minted at the new base still resolves
+    /// through the chain-evidence read AT its claimed height (H-vs-H+1 pin).
+    #[test]
+    fn window_edge_coin_at_exactly_window_entries_conf_is_not_flagged() {
+        // synthetic_chain(0, WINDOW_ENTRIES): WINDOW_ENTRIES+1 entries →
+        // trim() slides exactly one (base 0 → 1) — the live first-fire shape.
+        let mut stg = synthetic_chain(0, WINDOW_ENTRIES as u64);
+        assert_eq!(stg.entries.len(), WINDOW_ENTRIES + 1);
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("window-edge-4600");
+        let pubkey = pubkey.to_vec();
+        // synthetic entries: time = 1.7e9 + h*600. The edge coin minted at
+        // abs 0 (conf == WINDOW_ENTRIES after the slide) with CORRECT wallet
+        // facts; a healthy coin minted at abs 1 (the new base).
+        let edge_time = 1_700_000_000u32;
+        let base_time = 1_700_000_000u32 + 600;
+        stg.utxo.map.insert(
+            ([0x31u8; 32], 0),
+            crate::kernel::UtxoMeta {
+                height: 0,
+                tx_offset: 181,
+                tx_time: edge_time,
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        stg.utxo.map.insert(
+            ([0x32u8; 32], 0),
+            crate::kernel::UtxoMeta {
+                height: 1,
+                tx_offset: 181,
+                tx_time: base_time,
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        stg.trim(); // the slide: drain 1 entry, base 0 → 1, rebase
+        assert_eq!(stg.base, 1);
+        assert!(
+            !stg.utxo.map.contains_key(&([0x31u8; 32], 0)),
+            "the edge coin's meta must be DROPPED, not clamped to slot 0"
+        );
+        assert!(stg.utxo.map.contains_key(&([0x32u8; 32], 0)));
+        let mk = |txid: [u8; 32], block_height: usize, t: u32| {
+            tri7_core::stake::StakeCandidate {
+                txid,
+                n: 0,
+                value: 50 * tri7_core::consensus::COIN,
+                script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey).unwrap(),
+                block_height,
+                block_time: t,
+                tx_time: t,
+                tx_offset: 181,
+                secret,
+                pubkey: pubkey.clone(),
+            }
+        };
+        let cands = vec![
+            mk([0x31u8; 32], 0, edge_time), // conf == WINDOW_ENTRIES
+            mk([0x32u8; 32], 1, base_time), // the new base, conf WINDOW_ENTRIES-1
+        ];
+        let (resolved, stale, unres) = resolve_stake_evidence(&stg, cands);
+        assert!(
+            stale.is_empty(),
+            "the false H+1 evidence read must NOT flag: got {stale:?}"
+        );
+        assert_eq!(
+            unres, 1,
+            "the edge coin leaves the candidate set as unresolvable (item 24)"
+        );
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].txid, [0x32u8; 32]);
+        assert_eq!(resolved[0].block_height, 0, "survivor resolved window-relative");
+        assert_eq!(
+            resolved[0].block_time, base_time,
+            "chain evidence read AT the claimed height, not H+1"
+        );
+    }
+
+    /// item 37 (b): a coin whose containing block is PAST the evidence
+    /// horizon (conf > WINDOW_ENTRIES, several slides back) is counted
+    /// unresolvable on every pass and NEVER re-judged into the stale set —
+    /// the false flag must not persist past the edge the way the live DNS2
+    /// flag did (still firing at conf 4642, coins:2, no CLEARED ever).
+    #[test]
+    fn coin_past_the_horizon_is_never_rejudged_as_stale() {
+        let mut stg = synthetic_chain(0, (WINDOW_ENTRIES + 5) as u64);
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("past-horizon");
+        let pubkey = pubkey.to_vec();
+        let old_time = 1_700_000_000u32; // h0's time; the wallet claims it correctly
+        stg.utxo.map.insert(
+            ([0x41u8; 32], 0),
+            crate::kernel::UtxoMeta {
+                height: 0,
+                tx_offset: 181,
+                tx_time: old_time,
+                value: 25 * tri7_core::consensus::COIN,
+            },
+        );
+        stg.trim(); // excess 6 → base 6; the coin (abs 0) is 6 slides deep
+        assert_eq!(stg.base, 6);
+        assert!(!stg.utxo.map.contains_key(&([0x41u8; 32], 0)));
+        let cand = tri7_core::stake::StakeCandidate {
+            txid: [0x41u8; 32],
+            n: 0,
+            value: 25 * tri7_core::consensus::COIN,
+            script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey).unwrap(),
+            block_height: 0,
+            block_time: old_time,
+            tx_time: old_time,
+            tx_offset: 181,
+            secret,
+            pubkey,
+        };
+        for pass in 1..=3u8 {
+            let (resolved, stale, unres) = resolve_stake_evidence(&stg, vec![cand.clone()]);
+            assert!(
+                stale.is_empty(),
+                "pass {pass}: out-of-horizon coins are never re-judged as stale"
+            );
+            assert_eq!(
+                (resolved.len(), unres),
+                (0, 1),
+                "pass {pass}: counted+skipped (item 24), never a silent drop"
+            );
+        }
+    }
+
+    /// item 37 (c): a rebuild that finds ZERO owned-output mismatches while
+    /// the stale flag still fires is a RESOLVER fault — the fault line fires,
+    /// NO attempt burns, nothing swaps (the view was already correct), the
+    /// episode retires (a later re-log tick fires no further rebuild), and a
+    /// fresh episode re-arms via autoheal_due. Live DNS2: three silent no-op
+    /// rebuilds burned the full item-27 episode cap feeding an infinite
+    /// false flag.
+    #[test]
+    fn autoheal_rebuild_clean_latches_the_resolver_fault_and_burns_no_attempts() {
+        // the map-coverage fault shape: the wallet holds the honest coin with
+        // CORRECT chain-slot facts but stg.utxo lost the row — the resolver's
+        // absent branch flags it, the replay rebuilds the SAME view, diff 0.
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("resolver-fault");
+        let _ = secret;
+        let pubkey = pubkey.to_vec();
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-item37-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = autoheal_store_with_honest_coin(
+            &dir,
+            &pubkey,
+            50 * tri7_core::consensus::COIN,
+        );
+        let wallet_keys = wallet_live_with(&[pubkey.clone()], vec![]).wallet;
+        let fresh0 = WalletLive::seed(&store, wallet_keys, 0, 4).unwrap();
+        let honest_key = *fresh0
+            .live
+            .keys()
+            .find(|k| fresh0.owns(&fresh0.live[k]))
+            .expect("honest coin in the replay");
+        let mut wl = wallet_live_with(
+            &[pubkey],
+            vec![(honest_key, fresh0.live[&honest_key].clone())],
+        );
+        wl.base = 0;
+        let mut stg = synthetic_chain(0, 4);
+        // stg.utxo stays EMPTY — the claimed h2 is inside the window and at/
+        // above the floor, so the absent branch fires: resolver fault, the
+        // wallet is right.
+        let (cands, _nk, _ul, _ns) = wl.candidates();
+        let (_rel, stale, _unres) = resolve_stake_evidence(&stg, cands);
+        assert_eq!(stale.len(), 1);
+        assert!(stale[0].absent, "the map-coverage fault shape is the absent class");
+        note_stale_evidence(&mut stg, &stale, None);
+        let first_utc = stg.staking_impaired.as_ref().unwrap().first_utc.clone();
+        let mut stake_st = gate_stake_state();
+        // first re-log tick: the rebuild runs, finds ZERO mismatches → latch
+        assert!(
+            !autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st),
+            "nothing to swap — the view was already correct"
+        );
+        assert_eq!(
+            stake_st.autoheal_attempts, 0,
+            "rebuild-clean burns NO attempt budget"
+        );
+        assert_eq!(
+            stake_st.autoheal_fault_episode.as_deref(),
+            Some(first_utc.as_str()),
+            "the episode is latched as a resolver fault"
+        );
+        // later re-log tick: the latch retires the episode — no rebuild runs
+        stg.staking_impaired.as_mut().unwrap().ticks = 40;
+        assert!(!autoheal_stale_live_view(
+            &mut stg,
+            &mut wl,
+            &store,
+            &mut stake_st
+        ));
+        assert_eq!(stake_st.autoheal_attempts, 0);
+        // a fresh episode (new first_utc) re-arms: the latch clears
+        let impaired_now = {
+            let i = stg.staking_impaired.as_mut().unwrap();
+            i.first_utc = "2026-11-22T00:00:00Z".into();
+            i.ticks = 1;
+            i.clone()
+        };
+        assert!(autoheal_due(&impaired_now, &mut stake_st));
+        assert_eq!(stake_st.autoheal_fault_episode, None, "fresh episode re-arms");
+    }
+
+    /// item 37: the resolver-fault latch drives the STALE line's remedy —
+    /// the re-log must NOT tell the operator to run repairwallet when this
+    /// episode's rebuild already proved the wallet clean (the no-op advice
+    /// was DNS2's false alarm remedy). Observable state: the fault latch is
+    /// keyed by the episode's first_utc, and note_stale_evidence only swaps
+    /// the remedy text for the latched episode — assert the latch keying
+    /// both note_stale_evidence consumers share.
+    #[test]
+    fn resolver_fault_remedy_text_is_keyed_to_the_latched_episode() {
+        let mut stg = synthetic_chain(0, 4);
+        let mk = |first: &str| StaleLiveView {
+            txid: "fault".into(),
+            n: 0,
+            wallet_height: 2,
+            wallet_block_time: 1,
+            chain_block_time: 2,
+            wallet_tx_time: 1,
+            chain_tx_time: 1,
+            absent: true,
+            coins: 1,
+            first_utc: first.into(),
+            ticks: 0,
+        };
+        note_stale_evidence(&mut stg, &[mk("e1")], Some("e1"));
+        assert_eq!(stg.staking_impaired.as_ref().unwrap().first_utc, "e1");
+        // the latched episode keeps flagging (ticks climb) — the remedy text
+        // selector stays on the fault arm for THIS episode only
+        note_stale_evidence(&mut stg, &[mk("e1")], Some("e1"));
+        assert_eq!(stg.staking_impaired.as_ref().unwrap().ticks, 2);
+        // an UNLATCHED episode (no fault recorded) takes the repairwallet arm
+        stg.staking_impaired = None;
+        note_stale_evidence(&mut stg, &[mk("e2")], None);
+        assert_eq!(stg.staking_impaired.as_ref().unwrap().first_utc, "e2");
+        // a fault latched for a DIFFERENT episode does not swap this one
+        stg.staking_impaired = None;
+        note_stale_evidence(&mut stg, &[mk("e3")], Some("e1"));
+        assert_eq!(stg.staking_impaired.as_ref().unwrap().first_utc, "e3");
     }
 
     #[test]
@@ -25217,6 +25561,8 @@ addnode=host:notaport
                 coins_meeting_min_age: 0,
                 autoheal_episode: None,
                 autoheal_attempts: 0,
+                autoheal_fault_episode: None,
+                unresolvable_ticks: 0,
             })),
             announce: Arc::new(std::sync::Mutex::new(Default::default())),
             peers_table: Arc::new(std::sync::Mutex::new(Vec::new())),
