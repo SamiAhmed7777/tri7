@@ -2858,6 +2858,16 @@ impl AppState {
             crate::gui::rpc_client::rpc_token_is_set(),
             self.wallet.is_some()
         );
+        if let Some(addr) = self.cfg.rpc_addr.clone() {
+            match rpc_client::rpc_call(&addr, "getblockcount", &[]) {
+                Ok(v) => diag.push_str(&format!("probe_ok={}\n", v)),
+                Err(e) => diag.push_str(&format!("probe_err={}\n", e)),
+            }
+            match rpc_client::rpc_call(&addr, "getconnectioncount", &[]) {
+                Ok(_) => diag.push_str("auth_ok\n"),
+                Err(e) => diag.push_str(&format!("auth_err={}\n", e)),
+            }
+        }
         let _ = std::fs::create_dir_all(diag_path.parent().unwrap_or(std::path::Path::new(".")));
         let _ = std::fs::write(&diag_path, &diag);
         if let Some(addr) = self.cfg.rpc_addr.clone() {
@@ -2892,6 +2902,23 @@ impl AppState {
                 Ok(v) => {
                     info.reachable = true;
                     info.connections = v.as_u64();
+                    {
+                        let mut d = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(diag_path)
+                            .ok();
+                        if let Some(f) = d.as_mut() {
+                            let _ = std::io::Write::write_all(
+                                f,
+                                format!(
+                                    "conn_ok=true reachable=true blocks={:?} bal={:?}\n",
+                                    info.blocks, info.daemon_balance_sats
+                                )
+                                .as_bytes(),
+                            );
+                        }
+                    }
                     if let Ok(v2) = rpc_client::rpc_call(&addr, "getblockcount", &[]) {
                         info.blocks = v2.as_u64();
                     }

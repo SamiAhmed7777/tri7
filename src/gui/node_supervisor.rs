@@ -2533,18 +2533,40 @@ impl EmbeddedNode {
                 // node writes the file before binding the listener, but the
                 // write can trail the first successful probe on a cold start
                 let token_path = state_dir.join("node_rpc.token");
+                // (2026-11-22 diagnostics) the GUI's auth calls 401'd while
+                // the node answered external probes — confess the handoff's
+                // own view to gui-refresh.log so the failing link names
+                // itself.
+                let mut handoff = format!(
+                    "handoff: file_exists={} ",
+                    token_path.exists()
+                );
                 for _ in 0..5 {
                     match std::fs::read_to_string(&token_path) {
                         Ok(t) => {
                             let t = t.trim().to_string();
                             if !t.is_empty() {
                                 crate::gui::rpc_client::set_rpc_token(&t);
+                                handoff.push_str(&format!(
+                                    "set=true len={}",
+                                    t.len()
+                                ));
                                 break;
                             }
+                            handoff.push_str("empty_read ");
                         }
-                        Err(_) => std::thread::sleep(Duration::from_millis(200)),
+                        Err(e) => {
+                            handoff.push_str(&format!("read_err={e} "));
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
                     }
                 }
+                handoff.push('\n');
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(state_dir.join("gui-refresh.log"))
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, handoff.as_bytes()));
                 return Ok(true);
             }
             if self.node_finished.load(Ordering::SeqCst) {
