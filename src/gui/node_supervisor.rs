@@ -3748,13 +3748,21 @@ mod tests {
         let pinned = sup.bundled_probe_port;
         sup.listener_resolver = Some(Arc::new(move |_p: u16| None));
         sup.spawn_override = Some(Arc::new(move |_req: TorSpawnRequest| exiting_child()));
-        // the SOCKS speaker appears only AFTER the child has exited (a
-        // 400ms-delayed bind vs a stub that exits immediately): every socks
-        // sighting this test can observe is post-death, so the claim path
-        // runs against a provably dead child — no scheduling race
+        // The SOCKS speaker appears only AFTER the child has exited so every
+        // claim path runs against a provably dead child. The bind delay is
+        // platform-gated: Linux `true` exits in ~10ms (400ms delay is safely
+        // after death AND inside the 1s deadline, pinning the observed-answer
+        // refusal), but a Windows runner's cmd.exe can take SECONDS to
+        // initialize under Defender — a 400ms speaker would answer while the
+        // "exiting" child is still initializing, and the loop would correctly
+        // claim it (live-caught on the windows-build CI runner: the test saw
+        // Bundled where Linux saw Unavailable). On Windows the speaker binds
+        // at 3s — past the 1s deadline — so no answer is ever observed and
+        // the death path is deterministic there too.
         let delayed = pinned;
+        let bind_delay_ms: u64 = if cfg!(windows) { 3000 } else { 400 };
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(Duration::from_millis(bind_delay_ms));
             orphan_socks_on(delayed, 10);
         });
         sup.socks_wait = Duration::from_secs(1);
