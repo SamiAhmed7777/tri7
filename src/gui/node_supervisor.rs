@@ -2211,6 +2211,24 @@ impl EmbeddedNode {
         node_dir: &Path,
         peers: &[&str],
     ) -> Result<bool, String> {
+        // (2026-11-22 diagnostics) the handoff at step 1 has never fired on
+        // sami-pc while external RPC probes succeed — confess each entry and
+        // the step-1 outcome to state\gui-refresh.log.
+        let diag_path = node_dir.join("state").join("gui-refresh.log");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&diag_path)
+            .and_then(|mut f| {
+                std::io::Write::write_all(
+                    &mut f,
+                    format!(
+                        "ensure: enter attach_external={} rpc_port={}\n",
+                        self.attach_external, self.rpc_port
+                    )
+                    .as_bytes(),
+                )
+            });
         // 0. tor BEFORE the node spawns (Sami 2026-11-11): probe the system
         //    tor (already-answer rule — never spawn a second one) or run the
         //    bundled tor.exe child. Attach mode (fleet daemon) probes only
@@ -2253,13 +2271,28 @@ impl EmbeddedNode {
         }
         // 1. already answering? (ours in-process, or a fleet node — either is
         //    fine)
-        if crate::gui::rpc_client::rpc_call(
+        let step1 = crate::gui::rpc_client::rpc_call(
             &format!("127.0.0.1:{}", self.rpc_port),
             "getblockcount",
             &[],
-        )
-        .is_ok()
+        );
         {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&diag_path)
+                .and_then(|mut f| {
+                    std::io::Write::write_all(
+                        &mut f,
+                        match &step1 {
+                            Ok(v) => format!("ensure: step1_ok={}\n", v),
+                            Err(e) => format!("ensure: step1_err={}\n", e),
+                        }
+                        .as_bytes(),
+                    )
+                });
+        }
+        if step1.is_ok() {
             // health witness: start the "has this run stayed up?" clock the
             // first time OUR thread answers RPC (a run that survives
             // HEALTHY_RESET_WINDOW resets the restart counter when it ends)

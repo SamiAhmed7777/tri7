@@ -16,8 +16,15 @@ fn main() {
         .unwrap_or_else(|| "/root/.triangles/wallet.dat".to_string());
     let strict_labels = args.iter().any(|a| a == "--strict-labels");
     let p = std::path::Path::new(&path);
+    let addresses_only = args.iter().any(|a| a == "--addresses");
     let w = wallet::read_wallet(p).expect("wallet read failed");
 
+    if addresses_only {
+        for k in &w.keys {
+            println!("{}", k.address);
+        }
+        return;
+    }
     println!("wallet version : {:?}", w.version);
     println!("encrypted      : {}", w.encrypted);
     println!("keys           : {}", w.keys.len());
