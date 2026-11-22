@@ -276,13 +276,23 @@ impl TorSupervisor {
                 let owned = socks_endpoint_answers("127.0.0.1", p)
                     && match resolved {
                         Some(_) => Self::listener_pid_is(&resolved, child_pid),
-                        // Windows: FAIL CLOSED — an unresolvable listener is
-                        // never claimed as our child (a transient PowerShell
-                        // failure must not hand the wallet to a foreign
-                        // proxy). Non-Windows ships no bundled payload at
-                        // all, so the handshake is the only possible gate.
+                        // (2026-11-21, sami-pc) TRUST-THE-SPAWN: AVG's
+                        // behavior sandbox virtualizes the spawned tor's
+                        // listener — the OS TCP table shows NO row for the
+                        // pinned port while the SOCKS5 handshake answers
+                        // (verified live: a control .NET listener appears in
+                        // the table, the freshly spawned tor's does not). OS
+                        // attribution cannot be the trust anchor on AV'd
+                        // machines: our child is alive, this supervisor
+                        // generated its torrc binding exactly this port
+                        // seconds ago, and the port speaks SOCKS5 — claim
+                        // it. The strict pid guard still applies whenever
+                        // the table RESOLVES (a foreign pid is refused
+                        // outright), and a DEAD child with an answering port
+                        // still fails this branch (child_alive=false) and is
+                        // handled as a foreign resident below.
                         #[cfg(windows)]
-                        None => false,
+                        None => child_alive,
                         #[cfg(not(windows))]
                         None => true,
                     };
@@ -481,16 +491,27 @@ impl TorSupervisor {
                     Self::resolve_listener(self.listener_resolver.as_deref(), port);
                 let attributed = match resolved {
                     Some(_) => Self::listener_pid_is(&resolved, Some(child.id())),
-                    // Windows: FAIL CLOSED (judge r4) — an unresolvable
-                    // listener must never let a foreign answer pass as our
-                    // child's. Non-Windows ships no bundled payload, so the
-                    // handshake is the only possible gate there.
-                    #[cfg(windows)]
-                    None => false,
-                    #[cfg(not(windows))]
-                    None => true,
+                    // (2026-11-21, sami-pc) TRUST-THE-SPAWN (the ensure-path
+                    // twin of that comment): the torrc this spawn generated
+                    // pins exactly this port and the port speaks SOCKS5 —
+                    // the handshake is the gate; OS attribution is only a
+                    // guard when it RESOLVES (foreign pid = never ours).
+                    // Aliveness is RE-CHECKED at the claim instant: a child
+                    // that exited mid-wait is a startup failure, and the
+                    // answering port is then a foreign speaker, never ours
+                    // (both platforms — the AV-sandbox blindness must not
+                    // turn into a blind ADOPTION of a dead child's port).
+                    None => !matches!(child.try_wait(), Ok(Some(_))),
                 };
                 if attributed {
+                    if resolved.is_none() {
+                        self.tlog(&format!(
+                            "tor: socks answered on {} with the resolver blind (AV sandbox \
+                             virtualizes listeners) — claimed via trust-the-spawn (child pid {})",
+                            port,
+                            child.id()
+                        ));
+                    }
                     return (Some(child), true, String::new());
                 }
                 saw_foreign_answer = true;
@@ -3639,6 +3660,76 @@ mod tests {
             st,
             TorStatus::Unavailable,
             "an unidentified pinned-port resident must never be adopted: {st:?}"
+        );
+        drop(sup);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (2026-11-21, sami-pc) TRUST-THE-SPAWN: with the OS table BLIND (the
+    /// AV-sandbox signature — the spawned tor's listener has no row while
+    /// the SOCKS5 handshake answers), a LIVE spawned child is CLAIMED. The
+    /// old fail-closed rule (judge r4) wedged every spawn on AV'd machines:
+    /// tor answered, attribution returned None forever, the supervisor
+    /// refused its own healthy child, the wallet ran transport-less, and the
+    /// node died EXIT_SEED in the restart loop. The strict pid guard still
+    /// holds whenever the table RESOLVES (the foreign-pid and orphan tests
+    /// above pin that side); this test pins the blind side.
+    #[test]
+    fn tor_trust_the_spawn_when_the_resolver_is_blind() {
+        let probe = free_dead_port();
+        let dir = std::env::temp_dir().join(format!("torblind{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fake_bundle_exe(&dir);
+        let mut sup = tor_supervisor(&dir, probe);
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let sc = Arc::clone(&spawns);
+        // the AV-sandbox signature: the OS table NEVER resolves the listener
+        sup.listener_resolver = Some(Arc::new(move |_p: u16| None));
+        sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
+            sc.fetch_add(1, Ordering::SeqCst);
+            stub_tor_spawn(req, None) // live stub + the SOCKS5 greeting thread
+        }));
+        let st = sup.ensure(&dir, true);
+        assert!(
+            matches!(st, TorStatus::Bundled(_)),
+            "a live spawned child + a SOCKS5 answer on the pinned port must be \
+             claimed even when the OS table is blind: {st:?}"
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "exactly one spawn");
+        drop(sup);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// the blind-table claim must NOT extend past our child's death: a DEAD
+    /// child with an answering pinned port is a foreign resident, never ours
+    /// (the orphan rule intact under the new trust model).
+    #[test]
+    fn tor_blind_table_with_a_dead_child_stays_unavailable() {
+        let probe = free_dead_port();
+        let dir = std::env::temp_dir().join(format!("tordblind{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fake_bundle_exe(&dir);
+        let mut sup = tor_supervisor(&dir, probe);
+        let pinned = sup.bundled_probe_port;
+        sup.listener_resolver = Some(Arc::new(move |_p: u16| None));
+        sup.spawn_override = Some(Arc::new(move |_req: TorSpawnRequest| exiting_child()));
+        // the SOCKS speaker appears only AFTER the child has exited (a
+        // 400ms-delayed bind vs a stub that exits immediately): every socks
+        // sighting this test can observe is post-death, so the claim path
+        // runs against a provably dead child — no scheduling race
+        let delayed = pinned;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            orphan_socks_on(delayed, 10);
+        });
+        sup.socks_wait = Duration::from_secs(1);
+        let st = sup.ensure(&dir, true);
+        assert_eq!(
+            st,
+            TorStatus::Unavailable,
+            "blind attribution + a dead child must never claim a foreign speaker: {st:?}"
         );
         drop(sup);
         let _ = std::fs::remove_dir_all(&dir);

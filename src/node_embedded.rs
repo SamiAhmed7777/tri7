@@ -13751,16 +13751,38 @@ pub fn main_args(argv: &[String]) -> i32 {
     // machine too — seeding/from-zero needs a live peer even when no
     // tipstate exists yet.
     if have_state || from_zero {
-        match try_connect(&cfg, &mut stats, 0, 0) {
-            Some((p, idx)) => {
-                outbound_start = (idx + 1) % cfg.peers.len();
-                peers.push(p);
+        // (2026-11-21) TRANSPORT INVARIANT: PARK, don't go headless. A
+        // transport outage (AV killed tor, i2pd absent) used to strand the
+        // run with zero peers — a fresh install then hit the from-zero seed
+        // path and exited EXIT_SEED, loop-wedging the supervisor ("restarting
+        // over and over"). Park on a fixed cadence instead: the GUI's
+        // ensure_running respawns tor/i2pd under us every ~15s and the next
+        // dial connects. Zero configured targets still means genuinely
+        // headless (nothing to park for).
+        loop {
+            match try_connect(&cfg, &mut stats, 0, 0) {
+                Some((p, idx)) => {
+                    outbound_start = (idx + 1) % cfg.peers.len();
+                    peers.push(p);
+                    break;
+                }
+                None if cfg.peers.is_empty() => {
+                    log(&format!(
+                        "no outbound targets configured ({} configured) — starting HEADLESS \
+                         (native RPCs from persisted state)",
+                        cfg.peers.len()
+                    ));
+                    break;
+                }
+                None => {
+                    log(&format!(
+                        "no outbound target reachable ({} configured) — PARKED: transports \
+                         down, redialing in 20s (the supervisor respawns tor/i2p under us)",
+                        cfg.peers.len()
+                    ));
+                    std::thread::sleep(Duration::from_secs(20));
+                }
             }
-            None => log(&format!(
-                "no outbound target reachable ({} configured) — starting HEADLESS \
-                 (native RPCs from persisted state)",
-                cfg.peers.len()
-            )),
         }
     }
 
@@ -13823,16 +13845,31 @@ pub fn main_args(argv: &[String]) -> i32 {
         // fresh state from genesis: fetch block 0, pin it to the compiled-in
         // genesis hash, build height-0 state — then the backfill below walks
         // the ENTIRE chain through the normal acceptance gate
-        let gen = match peers.first_mut() {
-            Some(p) => fetch_genesis_block(&mut p.sess, &mut stats),
-            None => die(
-                EXIT_SEED,
-                "from-zero: needs a live peer but all outbound targets are unreachable",
-            ),
-        };
-        let gen = match gen {
-            Ok(g) => g,
-            Err(e) => die(EXIT_SEED, &e),
+        // (2026-11-21) TRANSPORT INVARIANT (operator directive: the wallet
+        // must always run with at least one anonymity network and always
+        // aim for both): a fresh install used to exit EXIT_SEED here when no
+        // transport was up yet — burning a supervisor restart each cycle and
+        // wedge-looping. PARK instead: stay in the run, redial on a fixed
+        // cadence; the GUI respawns transports under us every ~15s.
+        let gen = loop {
+            let fetch = peers
+                .first_mut()
+                .map(|p| fetch_genesis_block(&mut p.sess, &mut stats));
+            match fetch {
+                Some(Ok(g)) => break g,
+                Some(Err(e)) => log(&format!(
+                    "from-zero: genesis fetch failed ({e}) — parked, redialing in 20s"
+                )),
+                None => log(
+                    "from-zero: no live peer yet — PARKED (transports down): the supervisor \
+                     keeps respawning tor/i2p; retrying the dial in 20s",
+                ),
+            }
+            std::thread::sleep(Duration::from_secs(20));
+            peers.clear();
+            if let Some((p, _idx)) = try_connect(&cfg, &mut stats, 0, 0) {
+                peers.push(p);
+            }
         };
         let st = genesis_state(&gen);
         write_state_atomic(&cfg, &st.to_file())
