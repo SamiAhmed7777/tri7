@@ -286,6 +286,46 @@ mod tests {
         assert!(err.contains("connect"), "unexpected error: {}", err);
     }
 
+    /// (2026-11-21, sami-pc) regression pin: the per-boot capability token
+    /// must ride the Authorization header VERBATIM ("Bearer <token>" + CRLF)
+    /// and no redaction-style placeholder may ever reach the wire. The GUI's
+    /// whole daemon poll depends on these bytes being exact.
+    #[test]
+    fn rpc_call_sends_the_real_bearer_token() {
+        set_rpc_token("test-capability-token");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let cap = std::sync::Arc::clone(&captured);
+        let body = r#"{"result":{"connections":1},"error":null}"#;
+        let http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = std::io::Read::read(&mut s, &mut buf).unwrap_or(0);
+                *cap.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = s.write_all(http.as_bytes());
+            }
+        });
+        let v = rpc_call(&format!("127.0.0.1:{}", port), "getconnectioncount", &[])
+            .expect("canned call must parse");
+        assert_eq!(v["connections"], 1);
+        let req = captured.lock().unwrap().clone();
+        assert!(
+            req.contains("Authorization: Bearer test-capability-token\r\n"),
+            "the real token must ride the Authorization header: {req:?}"
+        );
+        assert!(
+            !req.contains("***"),
+            "the redaction placeholder must never reach the wire: {req:?}"
+        );
+        set_rpc_token(""); // global hygiene for sibling tests
+    }
+
     /// TRI7-RPC-05: only loopback spellings are accepted, and a non-loopback
     /// rpc_addr is refused BEFORE any connection attempt (no DNS, no wire).
     #[test]

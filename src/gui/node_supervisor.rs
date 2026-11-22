@@ -1091,7 +1091,18 @@ fn i2pd_spawn_argv(conf_path: &Path, data_dir: &Path, windows_like: bool) -> Vec
         "--datadir={}",
         i2p_path(data_dir)
     ))];
-    if !windows_like {
+    if windows_like {
+        // (2026-11-21, sami-laptop + sami-pc) i2pd runs on its BUILT-IN
+        // defaults on Windows (the mingw build hangs on conf-path flags, so
+        // no i2pd.conf is written), and those defaults bind the webconsole
+        // on 127.0.0.1:7070 — which is FORBIDDEN on Sami's machines
+        // (WSAEACCES 10013): i2pd pops a fatal dialog and dies, and every
+        // supervisor respawn re-pops the dialog on the operator's desktop.
+        // The wallet needs only socksproxy 4447 + SAM 7656; disable the
+        // console at the CLI (dotted long option, verified against i2pd
+        // 3.0.0 Config.cpp: http.enabled bool, default true).
+        argv.push(std::ffi::OsString::from("--http.enabled=false"));
+    } else {
         argv.push(std::ffi::OsString::from(format!(
             "--conf={}",
             i2p_path(conf_path)
@@ -4964,9 +4975,12 @@ mod tests {
     /// (f) the spawn ARGUMENTS, extracted pure (judge r1: the executable is
     /// Command::new(exe) and must NEVER appear in the args — i2pd aborts a
     /// duplicate path with "unrecognised option"). Windows carries ONLY
-    /// --datadir (the mingw 3.0.0 conf-path-flag hang); every path renders
-    /// FORWARD-slashed; non-Windows adds --conf; tunnels.conf is never a
-    /// flag (the datadir convention).
+    /// --datadir + --http.enabled=false (the mingw 3.0.0 conf-path-flag
+    /// hang; the built-in webconsole default binds 7070, which is forbidden
+    /// on AV'd/WinNAT machines — WSAEACCES 10013 fatal dialog, the
+    /// sami-pc/sami-laptop 2026-11-21 respawn-dialog loop); every path
+    /// renders FORWARD-slashed; non-Windows adds --conf; tunnels.conf is
+    /// never a flag (the datadir convention).
     #[test]
     fn i2pd_argv_shapes_by_platform() {
         let exe = std::path::PathBuf::from("C:\\Wallet\\i2pd\\i2pd.exe");
@@ -4983,7 +4997,11 @@ mod tests {
             win_s.iter().all(|a| !a.contains('\\')),
             "windows argv arguments must be forward-slashed: {win_s:?}"
         );
-        assert_eq!(win_s.len(), 1, "windows: --datadir only");
+        assert_eq!(
+            win_s.len(),
+            2,
+            "windows: --datadir + the webconsole disable flag: {win_s:?}"
+        );
         assert_eq!(
             win_s[0],
             "--datadir=C:/Wallet/node/state/i2p/data",
@@ -4992,6 +5010,11 @@ mod tests {
         assert!(
             !win_s.iter().any(|a| a.contains("--conf")),
             "windows argv must carry NO conf flag (mingw 3.0.0 hang): {win_s:?}"
+        );
+        assert!(
+            win_s.contains(&"--http.enabled=false".to_string()),
+            "the webconsole must be disabled at the CLI (the 7070 bind is \
+             forbidden on Sami's machines — 10013 fatal dialog loop): {win_s:?}"
         );
         assert!(
             !win_s.iter().any(|a| a.contains("tunnels")),
