@@ -2086,6 +2086,17 @@ impl eframe::App for Tri7App {
                     .next_back()
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(19114);
+                // (2026-11-21, sami-pc) BACK-FILL rpc_addr in single-exe mode:
+                // the GUI spawns and owns this node — its RPC is the GUI's own
+                // data source. A task argv without --rpc (the PC default task)
+                // left cfg.rpc_addr None, refresh_debug_info_action's
+                // `if let Some(addr)` gate never opened, reachable stayed
+                // false, and the Overview showed "No coins yet" forever while
+                // the embedded node answered getbalance on this very port.
+                // Attach mode keeps its explicit addr (never overridden).
+                if self.st.cfg.rpc_addr.is_none() && !self.st.cfg.attach_external {
+                    self.st.cfg.rpc_addr = Some(format!("127.0.0.1:{port}"));
+                }
                 self.node = Some(crate::gui::node_supervisor::EmbeddedNode::new(
                     port,
                     node_dir.join("node.log"),
