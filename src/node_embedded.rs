@@ -10747,6 +10747,19 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     Err(e) => Err((-5, e)),
                 }
             }
+            // Read-only ownership probe backing validateaddress: the balances
+            // snapshot's `mine` set lags by design, so the live wallet key
+            // store is the authority for "does the loaded wallet control
+            // this address?" (same lookup path dumpprivkey uses).
+            "walletownsaddress" => {
+                let addr = ps(0).ok_or_else(|| (-8, "expected address".to_string()))?;
+                let wp = self
+                    .wallet_path
+                    .clone()
+                    .ok_or_else(|| (-1, "no wallet loaded (start the node with --wallet)".to_string()))?;
+                let owns = tri7_core::keytool::dump_privkey(&wp, &addr).is_ok();
+                Ok(serde_json::json!({ "address": addr, "owns": owns }))
+            }
             "dumpwallet" => {
                 let dest = ps(0).ok_or_else(|| (-8, "expected filename".to_string()))?;
                 let wp = self

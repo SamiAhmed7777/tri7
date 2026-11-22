@@ -2379,7 +2379,25 @@ fn native_call(deps: &Deps, method: &str, params: &Value) -> NativeOutcome {
                 Some((version, h160)) => {
                     o.insert("isvalid".into(), json!(true));
                     o.insert("address".into(), json!(addr));
-                    o.insert("ismine".into(), json!(deps.wallet.is_mine(&addr)));
+                    // Snapshot `mine` lags by design (balances.json regenerates
+                    // on its own cadence), so a key imported since the last
+                    // regen — via importprivkey, importwallet, or a fresh
+                    // getnewaddress keypool handout — is wallet-owned but
+                    // absent from the snapshot set. The live engine's wallet
+                    // key store is authoritative: ask it before saying no.
+                    let mut ismine = deps.wallet.is_mine(&addr);
+                    if !ismine {
+                        if let Some(ops) = deps.ops {
+                            if let Ok(v) =
+                                ops.call("walletownsaddress", &json!([addr.as_str()]))
+                            {
+                                if v.get("owns").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                    ismine = true;
+                                }
+                            }
+                        }
+                    }
+                    o.insert("ismine".into(), json!(ismine));
                     o.insert("version".into(), json!(version));
                     o.insert("pubkey_hash".into(), json!(hex_encode(&h160)));
                     o.insert(
@@ -5433,6 +5451,58 @@ mod tests {
             json!(["T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY", 0]),
         );
         assert_eq!(v["result"], json!(0.0));
+    }
+
+    /// Engine-backed ownership probe: a key imported after the balances
+    /// snapshot regen reports ismine=true through the live key store.
+    struct EngineSaysOwns {
+        owns: bool,
+    }
+    impl NodeOps for EngineSaysOwns {
+        fn call(&self, method: &str, _params: &Value) -> Result<Value, (i64, String)> {
+            match method {
+                "walletownsaddress" => Ok(json!({ "owns": self.owns })),
+                m => Err((-32601, format!("method not found: {m}"))),
+            }
+        }
+    }
+
+    #[test]
+    fn validateaddress_imported_key_reports_mine_via_engine() {
+        let t = StubTip;
+        let mut w = StubWallet::default();
+        w.mine.clear(); // snapshot lag: address absent from balances `mine`
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let ops = EngineSaysOwns { owns: true };
+        let d = Deps {
+            tip: &t,
+            wallet: &w,
+            blocks: &b,
+            proxy: None,
+            ops: Some(&ops),
+        };
+        let v = call(
+            &d,
+            "validateaddress",
+            json!(["TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7"]),
+        );
+        assert_eq!(v["result"]["isvalid"], true);
+        assert_eq!(v["result"]["ismine"], true);
+        // engine says the key store does not hold it → stays false
+        let ops_no = EngineSaysOwns { owns: false };
+        let d2 = Deps {
+            tip: &t,
+            wallet: &w,
+            blocks: &b,
+            proxy: None,
+            ops: Some(&ops_no),
+        };
+        let v2 = call(
+            &d2,
+            "validateaddress",
+            json!(["TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7"]),
+        );
+        assert_eq!(v2["result"]["ismine"], false);
     }
 
     #[test]
