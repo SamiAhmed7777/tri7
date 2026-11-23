@@ -16566,7 +16566,16 @@ fn stale_link_reason(p: &Peer, cut: Duration, now: Instant) -> Option<String> {
 }
 
 fn tri7_rpc(cfg: &Config, user: &str, pass: &str) -> Rpc {
-    Rpc::new(&cfg.rpc_host, cfg.rpc_port, user, pass)
+    // (2026-11-23) SELF-SERVE PORT FIX: this client dials the node's OWN
+    // listener (the kernel-window backfill's pass 2 and the follow loop's
+    // self-serve fetches), so it must dial `rpc_listen_port` — the port the
+    // supervisor passes via --rpc-port and the listener actually binds.
+    // Dialing `rpc_port` (the never-populated legacy default 19112) produced
+    // a permanent connection-refused loop on every machine whose supervisor
+    // picked a different port (sami-laptop binds 19114): the kernel window
+    // could never complete its backfill, and the item-24 retry lane spammed
+    // every 60s forever.
+    Rpc::new(&cfg.rpc_host, cfg.rpc_listen_port, user, pass)
 }
 
 /// Blocks-file resolution for the native block index: explicit flag wins,
@@ -19617,6 +19626,20 @@ mod tests {
             coinstake: false,
             coinbase: false,
         }
+    }
+
+    /// (2026-11-23) The node's self-serve client must dial the port its own
+    /// listener binds (rpc_listen_port), NOT the legacy rpc_port default —
+    /// the laptop's 19114 listener vs the 19112 dial caused the kernel-window
+    /// backfill's permanent connection-refused loop.
+    #[test]
+    fn tri7_rpc_dials_the_listener_port() {
+        let cfg = Config {
+            rpc_listen_port: 19114,
+            ..gate_test_cfg()
+        };
+        let rpc = tri7_rpc(&cfg, "u", "p");
+        assert_eq!(rpc.port, 19114, "self-serve client must dial the bind port");
     }
 
     /// Placeholder Config for the gate tests: the locked / below-reserve
