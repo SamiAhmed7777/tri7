@@ -109,17 +109,64 @@ impl BlkFileReader {
                     return Ok(None);
                 }
                 Err(FrameRead::Corrupt(_m)) => {
-                    // (2026-11-23) MAGIC HUNT: garbage bytes rarely align to a
-                    // frame boundary — advance one byte and retry from there.
-                    // Without this, the resync returned Err at the FIRST
-                    // corrupt header while the reader never advanced, so the
-                    // callers retried the same offset forever (the measured
-                    // stall: both machines' builds and seeds wedged at the
-                    // debris, ~5% CPU, no error, no progress).
-                    self.offset += 1;
-                    use std::io::{Seek, SeekFrom};
-                    if self.inner.seek(SeekFrom::Start(self.offset)).is_err() {
+                    // (2026-11-23) BATCHED MAGIC HUNT: garbage bytes rarely
+                    // align to a frame boundary, and a one-byte-at-a-time
+                    // seek grind through a multi-megabyte debris region took
+                    // minutes (measured: the walk wedged in (h400000, h500000)
+                    // with ~5% CPU). Scan a 1 MiB window IN MEMORY for the
+                    // established frame magic and jump to the next candidate;
+                    // the outer loop's len/parse/chain validation rejects
+                    // false candidates, and the next hunt continues from
+                    // there (strictly past the rejected offset, so no loop).
+                    let want_bytes = match self.next_magic {
+                        Some(m) => m.to_le_bytes(),
+                        // no established magic yet (resync at the file
+                        // head): fall back to the one-byte advance; the
+                        // first valid frame establishes the magic.
+                        None => {
+                            self.offset += 1;
+                            use std::io::{Seek, SeekFrom};
+                            if self.inner.seek(SeekFrom::Start(self.offset)).is_err() {
+                                return Err("resync: seek failed during magic hunt".into());
+                            }
+                            continue;
+                        }
+                    };
+                    use std::io::{Read, Seek, SeekFrom};
+                    if self
+                        .inner
+                        .seek(SeekFrom::Start(self.offset))
+                        .is_err()
+                    {
                         return Err("resync: seek failed during magic hunt".into());
+                    }
+                    let mut buf = vec![0u8; 1 << 20];
+                    let n = match self.inner.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => return Err(format!("resync: hunt read: {}", e)),
+                    };
+                    if n == 0 {
+                        return Ok(None); // EOF: no more frames
+                    }
+                    // STRICTLY past the current offset: the candidate at i=0
+                    // is the offset that just failed validation.
+                    let mut found: Option<u64> = None;
+                    let scan_end = n.saturating_sub(3);
+                    let mut i = 1usize;
+                    while i < scan_end {
+                        if buf[i..i + 4] == want_bytes {
+                            found = Some(self.offset + i as u64);
+                            break;
+                        }
+                        i += 1;
+                    }
+                    let next = match found {
+                        Some(pos) => pos,
+                        None => self.offset + (n as u64).saturating_sub(3),
+                    };
+                    self.offset = next;
+                    if self.inner.seek(SeekFrom::Start(next)).is_err() {
+                        return Err("resync: seek to magic candidate failed".into());
                     }
                     continue;
                 }
