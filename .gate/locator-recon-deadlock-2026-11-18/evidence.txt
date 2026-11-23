@@ -1,0 +1,27 @@
+# Item 33 live evidence — journal lines (UTC, 2026-11-18)
+
+== DNS2 (vmi3080415): loop ALIVE, judged the stale branch correctly every ~60s ==
+Nov 18 13:33:20 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:20Z] empty tip-poll reply (streak trigger) while in:127.0.0.1:41614 (/tri7:7.0.0/ h2214619) claims h2214620 (we are h2214622) — requesting window-locator reconciliation
+Nov 18 13:33:26 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:26Z] STAKE MINTED → h2214623 b02621d713268ad0a543f2d5d05ecd5693fb7260468053b81532664e36b75dbf (self-validated: kernel enforced, nbits enforced) — relaying to 5 peer(s)
+Nov 18 13:33:28 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:28Z] recon: competing branch h2214621..h2214623 (2 blk, work 2413611297716921710936064) is NOT heavier than ours h2214623 (work 2430822551450240799473664) above the fork — ignored, reconciliation closed
+Nov 18 13:33:28 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:28Z] recon: competing branch h2214621..h2214623 (2 blk, work 2413611297716921710936064) is NOT heavier than ours h2214623 (work 2430822551450240799473664) above the fork — ignored, reconciliation closed
+Nov 18 13:33:30 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:30Z] recon: competing branch h2214621..h2214623 (2 blk, work 2413611297716921710936064) is NOT heavier than ours h2214623 (work 2430822551450240799473664) above the fork — ignored, reconciliation closed
+Nov 18 13:33:30 vmi3080415 follow_tip[3844124]: [2026-11-18T13:33:30Z] recon: competing branch h2214621..h2214623 (2 blk, work 2413611297716921710936064) is NOT heavier than ours h2214623 (work 2430822551450240799473664) above the fork — ignored, reconciliation closed
+Nov 18 13:34:14 vmi3080415 follow_tip[3844124]: [2026-11-18T13:34:14Z] STAKE MINTED → h2214624 f4f4046303a63a078ff9efcb5da801df622ec464f8e3fff96c45cd2c2a406f2f (self-validated: kernel enforced, nbits enforced) — relaying to 5 peer(s)
+Nov 18 13:34:23 vmi3080415 follow_tip[3844124]: [2026-11-18T13:34:23Z] empty tip-poll reply (streak+claim-divergence trigger) while in:127.211.5.65:45907 (/tri7:7.0.0/ h2214139) claims h2214623 (we are h2214624) — requesting window-locator reconciliation
+
+== Pi (ubuntu-4gb-hel1-1): last follow-loop line 13:34:21Z, then SILENCE to the 14:02:31Z restart (9 total journal lines in 28 min, none from the follow loop) ==
+Nov 18 13:33:20 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:33:20Z] empty tip-poll reply (claim-divergence trigger) while in:127.0.0.1:52682 (/tri7:7.0.0/ h2214139) claims h2214601 (we are h2214622) — requesting window-locator reconciliation
+Nov 18 13:33:21 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:33:21Z] FORK CHOICE (reconciliation): their branch h2214623 carries more work (2413611297716921710936064) than ours h2214622 (1191528982848795695906816) — branch selected on headers only (claimed work 2413611297716921710936064); rollback to h2214621 DEFERRED until its first body validates (2 block(s) queued)
+Nov 18 13:33:24 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:33:24Z] TIP ADVANCE → h2214622 8e3cb0cba52db9bc2e4c2e6709cfbf9b313658e552612c758a97c1ddb8698dbc (kernel enforced) via in:127.0.0.1:52682 (/tri7:7.0.0/ h2214139)
+Nov 18 13:33:24 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:33:24Z] TIP ADVANCE → h2214623 046ee0f819d820790e1e71eff7d2bc6889273a8282ef5b6f1f6e5b7d126a738a (kernel enforced) via in:127.0.0.1:52682 (/tri7:7.0.0/ h2214139)
+Nov 18 13:34:21 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:34:21Z] empty tip-poll reply (streak trigger) while in:127.0.0.1:52682 (/tri7:7.0.0/ h2214139) claims h2214623 (we are h2214623) — requesting window-locator reconciliation
+Nov 18 13:36:45 ubuntu-4gb-hel1-1 follow_tip[694432]: [2026-11-18T13:36:45Z] STAKE MINTED → h2214624 abb474afe8b6fb92a9d7ddeb7927ecc1888014be7bc46b00abf1d4461604345e (self-validated: kernel enforced, nbits enforced) — relaying to 6 peer(s)
+--- Pi full-window line count between 13:34:21 and 14:02:31:
+9
+
+== DNS3 (appt): last follow-loop line 13:38:32Z, then SILENCE to the 13:58:58Z restart (32 lines in 20.4 min = balances-build thread + 4x EMFILE accept noise + boot, ZERO follow-loop lines) ==
+Nov 18 13:38:32 appt follow_tip[2914157]: [2026-11-18T13:38:32Z] empty tip-poll reply (streak trigger) while out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 claims h2214624 (we are h2214624) — requesting window-locator reconciliation
+Nov 18 13:59:29 appt follow_tip[3220850]: [2026-11-18T13:59:29Z] empty tip-poll reply (start-height trigger) while out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 claims h2214633 (we are h2214624) — requesting window-locator reconciliation
+--- DNS3 full-window line count between 13:38:33 and 13:58:57:
+32

@@ -1,0 +1,629 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 3de5849..3762d65 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -9375,6 +9375,12 @@ fn note_stale_evidence(
+ /// tip, a persistent fork) and an operator must look — the
+ /// STAKE: STALE LIVE VIEW line keeps firing on its loud cadence either way.
+ const AUTOHEAL_MAX_ATTEMPTS: u32 = 3;
++/// (item 38 WALLET-SELFSEND-UNDERHOLD) cadence of the keystore-refresh
++/// thread's wallet-file re-read. Low on purpose: read_wallet scans every row
++/// of the SQLite container. The FIRST check runs ~5s after boot (waiting for
++/// the wallet-seed thread's view), so keys imported before a restart surface
++/// immediately; imports while running surface within one cadence.
++const KEYSTORE_REFRESH_SECS: u64 = 120;
+ 
+ /// Should this tick fire the in-process repair attempt? Pure policy so the
+ /// cadence/cap tests need no store: fires on the impairment's loud re-log
+@@ -9402,6 +9408,39 @@ fn autoheal_due(impaired: &StaleLiveView, stake_st: &mut StakeState) -> bool {
+     impaired.ticks == 1 || impaired.ticks % 40 == 0
+ }
+ 
++/// Merge keys found in the wallet FILE into the in-memory keystore
++/// (item 38 WALLET-SELFSEND-UNDERHOLD). Merge-ONLY by pubkey: existing keys
++/// are never removed or touched, because the in-memory entries may carry
++/// runtime state a file re-read must not clobber (walletpassphrase-filled
++/// secrets on an encrypted wallet). Returns the keys that were ADDED.
++fn merge_wallet_keys(
++    wallet: &mut tri7_core::wallet::WalletKeys,
++    fresh: tri7_core::wallet::WalletKeys,
++) -> Vec<tri7_core::wallet::WalletKey> {
++    let mut have: std::collections::HashSet<Vec<u8>> =
++        wallet.keys.iter().map(|k| k.pubkey.clone()).collect();
++    let mut added = Vec::new();
++    for k in fresh.keys {
++        // insert() is the single gate: skips keys already in the wallet AND
++        // duplicates within the file read itself
++        if have.insert(k.pubkey.clone()) {
++            added.push(k);
++        }
++    }
++    wallet.keys.extend(added.iter().cloned());
++    added
++}
++
++/// Re-read the wallet FILE's key store — the same authority `dumpprivkey`
++/// serves from (a fresh read per call). `None` = unreadable (no wallet path,
++/// encrypted container, parse error): callers skip the refresh and stay on
++/// their current keys.
++fn refresh_keys_from_file(
++    path: Option<&std::path::Path>,
++) -> Option<tri7_core::wallet::WalletKeys> {
++    tri7_core::wallet::read_wallet(path?).ok()
++}
++
+ /// One in-process `repairwallet` attempt, fired by the stake tick when its
+ /// stale-evidence determination is live (item 27 §16-RACED-MINT-AUTOHEAL).
+ ///
+@@ -9428,6 +9467,7 @@ fn autoheal_stale_live_view(
+     wl: &mut WalletLive,
+     store: &BlockStore,
+     stake_st: &mut StakeState,
++    wallet_path: Option<&std::path::Path>,
+ ) -> bool {
+     let Some(impaired) = stg.staking_impaired.as_ref() else {
+         return false;
+@@ -9435,6 +9475,27 @@ fn autoheal_stale_live_view(
+     if !autoheal_due(impaired, stake_st) {
+         return false;
+     }
++    // (item 38 WALLET-SELFSEND-UNDERHOLD) the live view's key set is the
++    // BOOT-TIME read_wallet snapshot; keys imported after boot were invisible
++    // to every ownership check. Refresh from the file before the replay so
++    // the rebuilt view credits coins the boot-time key set never knew (the
++    // DNS2 2026-11-22 shape: two full post-tx rebuilds both refused to credit
++    // an externally-funded fresh own address because the key post-dated the
++    // boot). Encrypted/locked keystores manage keys via walletpassphrase —
++    // never touch those.
++    if !wl.wallet.encrypted && !wl.locked {
++        if let Some(fresh) = refresh_keys_from_file(wallet_path) {
++            let added = merge_wallet_keys(&mut wl.wallet, fresh);
++            if !added.is_empty() {
++                let addrs: Vec<String> = added.iter().map(|k| k.address.clone()).collect();
++                log(&format!(
++                    "stake: AUTOHEAL keystore refresh — +{} key(s) from the wallet file ({}…)",
++                    added.len(),
++                    addrs.join(", ")
++                ));
++            }
++        }
++    }
+     // the exact repairwallet replay window (RPC verb): base = min of the
+     // view's seed base and the chain-state base — a forkchoice rollback can
+     // walk the chain-state base back below the view's seed base, and
+@@ -9558,7 +9619,9 @@ fn stake_tick(
+     let (mut candidates_rel, mut stale_coins, mut unresolvable_coins) =
+         resolve_stake_evidence(stg, candidates);
+     note_stale_evidence(stg, &stale_coins, stake_st.autoheal_fault_episode.as_deref());
+-    if !stale_coins.is_empty() && autoheal_stale_live_view(stg, wl, store, stake_st) {
++    if !stale_coins.is_empty()
++        && autoheal_stale_live_view(stg, wl, store, stake_st, cfg.wallet_path.as_deref())
++    {
+         // item 27 §16-RACED-MINT-AUTOHEAL: the rebuild ran — re-resolve with
+         // the fresh view so THIS tick stakes on the restored coins instead of
+         // waiting a tick. A cleared evidence set clears the impairment (the
+@@ -10402,6 +10465,25 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                         ),
+                     ));
+                 }
++                // (item 38 WALLET-SELFSEND-UNDERHOLD) refresh the keystore
++                // from the file BEFORE the replay — keys imported after boot
++                // must be owned by the rebuilt view too (same guard as the
++                // AUTOHEAL path: encrypted/locked keystores are managed by
++                // walletpassphrase, never by a file re-read).
++                if !w.wallet.encrypted && !w.locked {
++                    if let Some(fresh) = refresh_keys_from_file(self.wallet_path.as_deref()) {
++                        let added = merge_wallet_keys(&mut w.wallet, fresh);
++                        if !added.is_empty() {
++                            let addrs: Vec<String> =
++                                added.iter().map(|k| k.address.clone()).collect();
++                            log(&format!(
++                                "repairwallet: keystore refresh — +{} key(s) from the wallet file ({}…)",
++                                added.len(),
++                                addrs.join(", ")
++                            ));
++                        }
++                    }
++                }
+                 let fresh = WalletLive::seed(store, w.wallet.clone(), base, replay_tip)
+                     .map_err(|e| (-1, format!("repairwallet replay: {e}")))?;
+                 let diff = {
+@@ -14559,6 +14641,82 @@ pub fn main_args(argv: &[String]) -> i32 {
+             })
+             .expect("spawn wallet-seed thread");
+     }
++    // (item 38 WALLET-SELFSEND-UNDERHOLD) RUNTIME KEYSTORE REFRESH — the live
++    // view's key set is the BOOT-TIME read_wallet snapshot, and nothing ever
++    // re-read the wallet file: a key imported after boot (importprivkey /
++    // operator tooling writing the SQLite keystore) was invisible to every
++    // ownership check forever. Live DNS2 2026-11-22 11:29Z: an externally
++    // signed self-send funded a fresh OWN address (key imported 11:13Z, tx in
++    // the daemon's own mint h2217415); the coin sat in wl.live the whole time
++    // — only the key was missing — so it was debited but never credited
++    // (listunspent 0 rows, plainbal −100 TRI) across two full AUTOHEAL
++    // rebuilds, while dumpprivkey/validateaddress (fresh file reads) said
++    // ismine=true. This thread re-reads the file on a low cadence and MERGES
++    // new keys into the live view in place (never removes — unlock state
++    // lives in the in-memory secrets; merge-only keeps walletpassphrase
++    // semantics intact). Encrypted wallets are skipped: read_wallet refuses
++    // them and their keys are unlock-flow managed.
++    if let Some(refresh_wp) = cfg.wallet_path.clone() {
++        let wl3 = Arc::clone(&wl_shared);
++        std::thread::Builder::new()
++            .name("keystore-refresh".into())
++            .spawn(move || {
++                let mut err_logged = false;
++                loop {
++                    std::thread::sleep(Duration::from_secs(5));
++                    // merge only once the seed thread has produced the view
++                    // (its final swap carries the boot-time set — anything
++                    // merged earlier would be lost); wait cheaply until then
++                    {
++                        let g = wl3.lock().unwrap();
++                        match g.as_ref() {
++                            None => continue,
++                            Some(w) if w.wallet.encrypted || w.locked => {
++                                // unlock-managed keystore: the file is not
++                                // the authority — quiet, retry on cadence
++                            }
++                            Some(_) => {}
++                        }
++                    }
++                    let fresh = match tri7_core::wallet::read_wallet(&refresh_wp) {
++                        Ok(f) => {
++                            err_logged = false;
++                            f
++                        }
++                        Err(e) => {
++                            if !err_logged {
++                                log(&format!(
++                                    "wallet keystore refresh: wallet file unreadable ({e}) — runtime key refresh idle (encrypted wallets manage keys via walletpassphrase)"
++                                ));
++                                err_logged = true;
++                            }
++                            std::thread::sleep(Duration::from_secs(
++                                KEYSTORE_REFRESH_SECS,
++                            ));
++                            continue;
++                        }
++                    };
++                    let mut g = wl3.lock().unwrap();
++                    if let Some(w) = g.as_mut() {
++                        if !w.wallet.encrypted && !w.locked {
++                            let added = merge_wallet_keys(&mut w.wallet, fresh);
++                            if !added.is_empty() {
++                                let addrs: Vec<String> =
++                                    added.iter().map(|k| k.address.clone()).collect();
++                                log(&format!(
++                                    "wallet keystore refresh: +{} key(s) from the wallet file ({}…) — ownership credited in place",
++                                    added.len(),
++                                    addrs.join(", ")
++                                ));
++                            }
++                        }
++                    }
++                    drop(g);
++                    std::thread::sleep(Duration::from_secs(KEYSTORE_REFRESH_SECS));
++                }
++            })
++            .expect("spawn keystore-refresh thread");
++    }
+     {
+         // chain-threading oracle: the daemon-anchored window hashes
+         let oracle = {
+@@ -24638,7 +24796,9 @@ addnode=host:notaport
+         // (bodies still landing): skip, and do NOT burn the attempt budget
+         let store = BlockStore::new(None, None);
+         let mut stake_st = gate_stake_state();
+-        assert!(!autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert!(!autoheal_stale_live_view(
++            &mut stg, &mut wl, &store, &mut stake_st, None
++        ));
+         assert_eq!(stake_st.autoheal_attempts, 0);
+         assert_eq!(
+             stake_st.autoheal_episode.as_deref(),
+@@ -24647,10 +24807,371 @@ addnode=host:notaport
+         );
+         // a later re-log tick: same shape, still no burn
+         stg.staking_impaired.as_mut().unwrap().ticks = 40;
+-        assert!(!autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert!(!autoheal_stale_live_view(
++            &mut stg, &mut wl, &store, &mut stake_st, None
++        ));
+         assert_eq!(stake_st.autoheal_attempts, 0);
+     }
+ 
++    // ---- item 38 WALLET-SELFSEND-UNDERHOLD ----
++
++    /// h0..=h4 store whose h2 body carries the DNS2 2026-11-22 11:29Z
++    /// self-send shape: coinbase + a coinstake-shaped tx1 + tx2 = the
++    /// externally signed self-send (vin spends a wallet coin; vout0 pays the
++    /// FRESH key B 100 TRI via P2PKH — the 6c3af322 → TRsxnwXe shape — and
++    /// vout1 pays the FUNDED key A 15.691664 TRI change).
++    fn item38_selfsend_store(
++        dir: &std::path::Path,
++        funded_pk: &[u8],
++        fresh_pk: &[u8],
++    ) -> std::sync::Arc<BlockStore> {
++        let change = tri7_core::spend::script_pubkey_p2pk(funded_pk).unwrap();
++        let fresh = tri7_core::spend::script_pubkey_p2pkh(fresh_pk);
++        const FRESH_V: i64 = 100 * tri7_core::consensus::COIN;
++        const CHANGE_V: i64 = 15_691_664; // 15.691664 TRI
++        let mut frames = Vec::new();
++        let mut hashes = Vec::new();
++        let mut prev = [0u8; 32];
++        for h in 0..=4u64 {
++            let mut b = Block {
++                version: 2,
++                prev_hash: prev,
++                merkle_root: [0u8; 32],
++                time: 1_700_000_000u32 + (h * 600) as u32,
++                bits: 0x2000_ffff,
++                nonce: 7,
++                vtx: vec![tri7_core::legacy::Tx {
++                    version: 1,
++                    time: 0,
++                    vin: vec![tri7_core::legacy::Vin {
++                        prev_hash: [0u8; 32],
++                        prev_n: u32::MAX,
++                        script_sig: vec![0x01],
++                        sequence: u32::MAX,
++                    }],
++                    vout: vec![tri7_core::legacy::Vout {
++                        value: 0,
++                        script_pubkey: vec![],
++                    }],
++                    locktime: 0,
++                }],
++                block_sig: vec![],
++            };
++            if h == 2 {
++                b.vtx = vec![
++                    // coinbase (empty)
++                    tri7_core::legacy::Tx {
++                        version: 1,
++                        time: b.time,
++                        vin: vec![tri7_core::legacy::Vin {
++                            prev_hash: [0u8; 32],
++                            prev_n: u32::MAX,
++                            script_sig: vec![0x02],
++                            sequence: u32::MAX,
++                        }],
++                        vout: vec![tri7_core::legacy::Vout {
++                            value: 0,
++                            script_pubkey: vec![],
++                        }],
++                        locktime: 0,
++                    },
++                    // coinstake-shaped tx1: real vin, value-0 empty first vout
++                    tri7_core::legacy::Tx {
++                        version: 1,
++                        time: b.time,
++                        vin: vec![tri7_core::legacy::Vin {
++                            prev_hash: [1u8; 32],
++                            prev_n: 0,
++                            script_sig: vec![],
++                            sequence: u32::MAX,
++                        }],
++                        vout: vec![tri7_core::legacy::Vout {
++                            value: 0,
++                            script_pubkey: vec![],
++                        }],
++                        locktime: 0,
++                    },
++                    // tx2: THE SELF-SEND
++                    tri7_core::legacy::Tx {
++                        version: 1,
++                        time: b.time,
++                        vin: vec![tri7_core::legacy::Vin {
++                            prev_hash: [9u8; 32],
++                            prev_n: 0,
++                            script_sig: vec![],
++                            sequence: u32::MAX,
++                        }],
++                        vout: vec![
++                            tri7_core::legacy::Vout {
++                                value: FRESH_V,
++                                script_pubkey: fresh.clone(),
++                            },
++                            tri7_core::legacy::Vout {
++                                value: CHANGE_V,
++                                script_pubkey: change.clone(),
++                            },
++                        ],
++                        locktime: 0,
++                    },
++                ];
++            }
++            b.merkle_root = b.merkle_root();
++            hashes.push(b.hash());
++            frames.extend_from_slice(&bin_frame(&b));
++            prev = b.hash();
++        }
++        let path = dir.join("blocks.bin");
++        std::fs::write(&path, &frames).unwrap();
++        let store = tri7_core::blockindex::BlockStore::new(Some(path), Some(dir.join("idx")));
++        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
++            base: 0,
++            hashes,
++            tip: 4,
++        }));
++        wait_store_ready(&store);
++        store
++    }
++
++    /// The boot-time world: keys = A only, view replayed over the self-send
++    /// store. The wallet FILE (path returned) holds fresh key B — the
++    /// post-boot import the view never saw. (The raced-phantom trigger is
++    /// added by the autoheal test itself, so the credit test's balance sees
++    /// exactly the self-send's two vouts.)
++    #[allow(clippy::type_complexity)]
++    fn item38_fixture(
++        tag: &str,
++    ) -> (
++        ChainState,
++        WalletLive,
++        std::sync::Arc<BlockStore>,
++        std::path::PathBuf,
++        i64,
++    ) {
++        const CHANGE_V: i64 = 15_691_664;
++        let (_sec_a, pk_a) = tri7_core::spend::synthetic_key(&format!("{tag}-funded"));
++        let (sec_b, pk_b) = tri7_core::spend::synthetic_key(&format!("{tag}-fresh"));
++        let pk_a = pk_a.to_vec();
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-{}-{}-{}",
++            tag,
++            std::process::id(),
++            now_secs()
++        ));
++        std::fs::create_dir_all(&dir).unwrap();
++        let store = item38_selfsend_store(&dir, &pk_a, &pk_b);
++        let mut wl = WalletLive::seed(
++            &store,
++            wallet_live_with(&[pk_a.clone()], vec![]).wallet,
++            0,
++            4,
++        )
++        .unwrap();
++        wl.base = 0;
++        // canonical meta for the change coin (facts straight from the replay)
++        let change_k = wl
++            .live
++            .iter()
++            .find(|(_, o)| o.value == CHANGE_V)
++            .map(|(k, _)| *k)
++            .expect("change coin in the replay");
++        let change = wl.live[&change_k].clone();
++        let mut stg = synthetic_chain(0, 4);
++        stg.utxo.map.insert(
++            change_k,
++            crate::kernel::UtxoMeta {
++                height: 2,
++                tx_offset: change.tx_offset,
++                tx_time: change.tx_time,
++                value: change.value,
++            },
++        );
++        // the wallet FILE gains key B (the 11:13Z import the boot missed)
++        let file = dir.join("wallet-file.dat");
++        bootstrap_wallet_file(&file);
++        let mut wh = tri7_core::wallet::WalletHandle::open_readwrite(&file).unwrap();
++        let added = wh.add_key(&sec_b, "imported").unwrap();
++        wh.close();
++        assert_eq!(added.pubkey, pk_b, "the file holds exactly the fresh key");
++        (stg, wl, store, file, CHANGE_V)
++    }
++
++    /// THE INCIDENT REGRESSION (item text bar ii): a self-send whose vout0
++    /// funds a FRESH own address and vout1 the change must credit BOTH vouts
++    /// once the post-boot key arrives — in the live view (in place, no
++    /// rebuild) AND through the AUTOHEAL/repairwallet rebuild path.
++    #[test]
++    fn selfsend_credits_both_vouts_once_the_post_boot_key_arrives() {
++        let (_stg, mut wl, store, file, change_v) = item38_fixture("item38-credit");
++        let fresh_v = 100 * tri7_core::consensus::COIN;
++        let fresh_k = wl
++            .live
++            .iter()
++            .find(|(_, o)| o.value == fresh_v)
++            .map(|(k, _)| *k)
++            .expect("fresh coin in the replay");
++        let change_k = wl
++            .live
++            .iter()
++            .find(|(_, o)| o.value == change_v)
++            .map(|(k, _)| *k)
++            .expect("change coin in the replay");
++        // THE INCIDENT: debited but never credited
++        assert!(
++            !wl.owns(&wl.live[&fresh_k]),
++            "the boot-time keystore must not own the fresh address"
++        );
++        assert!(wl.owns(&wl.live[&change_k]), "change to a funded address credits");
++        assert_eq!(wl.balance(), change_v, "plainbal fell by exactly the coin");
++        // the refresh merges the imported key and ownership flips IN PLACE
++        let fresh_file = refresh_keys_from_file(Some(&file)).expect("file readable");
++        let added = merge_wallet_keys(&mut wl.wallet, fresh_file);
++        assert_eq!(added.len(), 1, "exactly the imported key lands");
++        assert!(wl.owns(&wl.live[&fresh_k]), "fresh own address credited");
++        assert_eq!(
++            wl.balance(),
++            fresh_v + change_v,
++            "wallet == addrindex to the coin"
++        );
++        // staking candidates include the fresh coin now
++        let (cands, _nk, _ul, _ns) = wl.candidates();
++        assert!(cands.iter().any(|c| c.txid == fresh_k.0 && c.n == fresh_k.1));
++        // AND through the rebuild path: a fresh WalletLive::seed with the
++        // refreshed keys credits both vouts; repair_diff sees no mismatch
++        let rebuilt = WalletLive::seed(&store, wl.wallet.clone(), 0, 4).unwrap();
++        assert!(rebuilt.owns(&rebuilt.live[&fresh_k]));
++        assert!(rebuilt.owns(&rebuilt.live[&change_k]));
++        let owns = |o: &LiveOut| wl.owns(o);
++        assert_eq!(repair_diff(&wl.live, &rebuilt.live, &owns).count(), 0);
++    }
++
++    /// Merge-only discipline: existing in-memory entries (with runtime
++    /// unlock state) are never touched; the same key never double-adds.
++    #[test]
++    fn keystore_refresh_merge_is_additive_and_idempotent() {
++        let (_sa, pa) = tri7_core::spend::synthetic_key("item38-merge-a");
++        let (_sb, pb) = tri7_core::spend::synthetic_key("item38-merge-b");
++        let (_sc, pc) = tri7_core::spend::synthetic_key("item38-merge-c");
++        let (pa, pb, pc) = (pa.to_vec(), pb.to_vec(), pc.to_vec());
++        let mut wallet = wallet_live_with(&[pa.clone()], vec![]).wallet;
++        wallet.keys[0].secret = [0x11; 32]; // runtime unlock state
++        let mut fresh = wallet_live_with(&[pa.clone(), pb.clone()], vec![]).wallet;
++        fresh.keys.iter_mut().for_each(|k| k.secret = [0x22; 32]);
++        let added = merge_wallet_keys(&mut wallet, fresh);
++        assert_eq!(added.len(), 1, "only the unknown pubkey lands");
++        assert_eq!(added[0].pubkey, pb);
++        assert_eq!(wallet.keys[0].secret, [0x11; 32], "existing key untouched");
++        // a re-read carrying one more new key adds exactly that one
++        let fresh2 = wallet_live_with(&[pa.clone(), pb.clone(), pc.clone()], vec![]).wallet;
++        let added2 = merge_wallet_keys(&mut wallet, fresh2);
++        assert_eq!(added2.len(), 1);
++        assert_eq!(added2[0].pubkey, pc);
++        // and a fully-known key set is a no-op
++        let fresh3 = wallet_live_with(&[pa, pb, pc], vec![]).wallet;
++        assert!(merge_wallet_keys(&mut wallet, fresh3).is_empty());
++        assert_eq!(wallet.keys.len(), 3);
++    }
++
++    /// The full AUTOHEAL path refreshes the keystore BEFORE the replay, so
++    /// the rebuilt (swapped) view owns the self-send's fresh vout too.
++    #[test]
++    fn autoheal_rebuild_refreshes_keys_from_the_wallet_file_first() {
++        let (mut stg, mut wl, store, file, change_v) = item38_fixture("item38-autoheal");
++        let fresh_v = 100 * tri7_core::consensus::COIN;
++        // the raced phantom: A-owned, wallet block_time contradicts the chain
++        // (the autoheal trigger class, the autoheal_fixture shape)
++        let change_k = wl
++            .live
++            .iter()
++            .find(|(_, o)| o.value == change_v)
++            .map(|(k, _)| *k)
++            .expect("change coin in the replay");
++        let change = wl.live[&change_k].clone();
++        let raced_key: (Hash, u32) = ([0x5Bu8; 32], 1);
++        stg.utxo.map.insert(
++            raced_key,
++            crate::kernel::UtxoMeta {
++                height: 2,
++                tx_offset: change.tx_offset,
++                tx_time: change.tx_time,
++                value: 25_059_252,
++            },
++        );
++        wl.live.insert(
++            raced_key,
++            LiveOut {
++                height: 2,
++                block_time: change.block_time - 20,
++                tx_time: change.tx_time,
++                tx_offset: change.tx_offset,
++                value: 25_059_252,
++                script: change.script.clone(),
++                created_epoch: change.block_time - 20,
++                coinstake: false,
++                coinbase: false,
++            },
++        );
++        // trigger: the raced phantom is the facts-mismatch class
++        let (cands, _nk, _ul, _ns) = wl.candidates();
++        let (_rel, stale, _unres) = resolve_stake_evidence(&stg, cands);
++        assert_eq!(stale.len(), 1);
++        assert!(!stale[0].absent);
++        note_stale_evidence(&mut stg, &stale, None);
++        let mut stake_st = gate_stake_state();
++        assert!(
++            autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st, Some(&file)),
++            "the rebuild ran and swapped"
++        );
++        assert_eq!(stake_st.autoheal_attempts, 1);
++        assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
++        let fresh_k = wl
++            .live
++            .iter()
++            .find(|(_, o)| o.value == fresh_v)
++            .map(|(k, _)| *k)
++            .expect("fresh coin survived the swap");
++        assert!(
++            wl.owns(&wl.live[&fresh_k]),
++            "the rebuilt view owns the self-send's fresh vout"
++        );
++        assert_eq!(
++            wl.balance(),
++            fresh_v + change_v,
++            "the swapped view serves the whole wallet"
++        );
++    }
++
++    /// Unreadable wallet files (no path, missing file, ENCRYPTED container)
++    /// are a silent skip — the caller stays on its current keys.
++    #[test]
++    fn keystore_refresh_skips_unreadable_wallet_files() {
++        assert!(refresh_keys_from_file(None).is_none());
++        assert!(refresh_keys_from_file(Some(std::path::Path::new(
++            "/nonexistent/item38-no-such-wallet.dat"
++        )))
++        .is_none());
++        let dir = std::env::temp_dir().join(format!(
++            "tri7-item38-enc-{}-{}",
++            std::process::id(),
++            now_secs()
++        ));
++        std::fs::create_dir_all(&dir).unwrap();
++        let file = dir.join("enc.dat");
++        let conn = rusqlite::Connection::open(&file).unwrap();
++        conn.execute_batch(&format!(
++            "PRAGMA application_id = {}; CREATE TABLE main (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL);",
++            tri7_core::wallet::WALLET_APP_ID
++        ))
++        .unwrap();
++        // one mkey row is enough to mark the container encrypted
++        conn.execute(
++            "INSERT INTO main (key, value) VALUES (?1, ?2)",
++            [vec![4u8, b'm', b'k', b'e', b'y', 0u8], vec![0u8]],
++        )
++        .unwrap();
++        drop(conn);
++        assert!(refresh_keys_from_file(Some(&file)).is_none());
++    }
++
+     #[test]
+     fn autoheal_rebuild_removes_the_raced_phantom_and_keeps_the_honest_coin() {
+         let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-rebuild");
+@@ -24667,7 +25188,9 @@ addnode=host:notaport
+         // heal: one in-process pass removes the phantom, keeps the honest
+         // coin with identical facts, burns exactly one attempt
+         let mut stake_st = gate_stake_state();
+-        assert!(autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st));
++        assert!(autoheal_stale_live_view(
++            &mut stg, &mut wl, &store, &mut stake_st, None
++        ));
+         assert_eq!(stake_st.autoheal_attempts, 1);
+         assert_eq!(stake_st.autoheal_episode.as_deref(), Some(first_utc.as_str()));
+         assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
+@@ -24913,7 +25436,7 @@ addnode=host:notaport
+         let mut stake_st = gate_stake_state();
+         // first re-log tick: the rebuild runs, finds ZERO mismatches → latch
+         assert!(
+-            !autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st),
++            !autoheal_stale_live_view(&mut stg, &mut wl, &store, &mut stake_st, None),
+             "nothing to swap — the view was already correct"
+         );
+         assert_eq!(
+@@ -24928,10 +25451,7 @@ addnode=host:notaport
+         // later re-log tick: the latch retires the episode — no rebuild runs
+         stg.staking_impaired.as_mut().unwrap().ticks = 40;
+         assert!(!autoheal_stale_live_view(
+-            &mut stg,
+-            &mut wl,
+-            &store,
+-            &mut stake_st
++            &mut stg, &mut wl, &store, &mut stake_st, None
+         ));
+         assert_eq!(stake_st.autoheal_attempts, 0);
+         // a fresh episode (new first_utc) re-arms: the latch clears

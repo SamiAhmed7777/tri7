@@ -1,0 +1,50 @@
+diff --git a/tests/legacy_tests.rs b/tests/legacy_tests.rs
+index 149e491..4b35434 100644
+--- a/tests/legacy_tests.rs
++++ b/tests/legacy_tests.rs
+@@ -1,7 +1,7 @@
+ //! Unit tests for the legacy wire-format layer (src/legacy.rs, src/blkfile.rs).
+ 
+ use std::path::PathBuf;
+-use tri7_core::blkfile::BlkFileReader;
++use tri7_core::blkfile::{BlkFileReader, FrameRead};
+ use tri7_core::legacy::{hash9, hash_to_display, sha256d, Block, Hash, Reader, Tx, Vin, Vout};
+ 
+ // ---------------------------------------------------------------------------
+@@ -408,15 +408,34 @@ fn frame_rejects_oversized_length() {
+     std::fs::remove_file(&p).ok();
+ }
+ 
++/// A plausible length prefix whose body is cut short at EOF is a TORN TAIL,
++/// not an error: the tolerant view (`next_frame`) reports a clean EOF at the
++/// last complete frame, and the strict view (`next_frame_checked`) returns the
++/// distinct `FrameRead::TornTail` signal carrying the cut point. Mid-file
++/// corruption and implausible lengths still error (see the neighbours above).
+ #[test]
+-fn frame_truncated_body_errors() {
++fn frame_truncated_body_is_a_torn_tail() {
+     let mut bytes = Vec::new();
+     bytes.extend_from_slice(&CHAIN_MAGIC.to_le_bytes());
+     bytes.extend_from_slice(&100u32.to_le_bytes());
+     bytes.extend_from_slice(&[0x55; 20]); // body cut short
+     let p = write_tmp("trunc", &bytes);
+     let mut r = BlkFileReader::open(&p).unwrap();
+-    assert!(r.next_frame().is_err());
++    // tolerant view: clean EOF, archive served up to the last whole frame
++    assert!(r.next_frame().unwrap().is_none());
++    assert_eq!(r.last_complete_offset(), 0);
++    // strict view: the torn-tail signal with the cut point, not Corrupt
++    let mut r2 = BlkFileReader::open(&p).unwrap();
++    match r2.next_frame_checked() {
++        Err(FrameRead::TornTail {
++            last_complete,
++            offset,
++        }) => {
++            assert_eq!(last_complete, 0);
++            assert_eq!(offset, 0);
++        }
++        other => panic!("expected a torn tail, got {:?}", other),
++    }
+     std::fs::remove_file(&p).ok();
+ }
+ 

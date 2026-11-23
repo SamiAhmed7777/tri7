@@ -1,0 +1,96 @@
+setup: stubs installed from /root/tri7/.gate/item39-fleet-deploy-2026-11-23, fakes old=d3a55a588acf new=d0e3372cfdb0
+
+=== DNS3 leg (deploy_dns3.sh) ===
+D1 success: rc=0 (1.5s) DEPLOYED: digest proven, running inode == installed binary, unit restarted, RPC healthy (OK height=100 tip=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+  PASS  D1 exit=0 (deployed+healthy)  rc=0
+  PASS  D1 binary==new  
+  PASS  D1 backup==old  
+  PASS  D1 running inode==new  pid=2299023
+D2 health-fail->rollback: rc=1 (120.9s)
+  PASS  D2 exit=1 (clean rollback)  rc=1
+  PASS  D2 binary restored==old  
+  PASS  D2 backup intact==old  
+  PASS  D2 running inode==old  pid=2301867
+  PASS  D2 unit active  
+  PASS  D2 poll bounded <=140s  120.9s
+D3 wrong-sha abort: rc=3
+  PASS  D3 exit=3 (pre-mutation abort)  rc=3
+  PASS  D3 binary untouched==old  
+  PASS  D3 no backup created  
+D5 unit-inactive abort: rc=3
+  PASS  D5 exit=3 (unit inactive)  rc=3
+  PASS  D5 no backup created  
+D6 missing-binary abort: rc=3
+  PASS  D6 exit=3 (missing live binary)  rc=3
+  PASS  D6 daemon still alive  
+  PASS  D6 no backup created  
+D7 rollback-restart-fail: rc=2 (120.7s)
+  PASS  D7 exit=2 (FATAL rollback restart failed)  rc=2
+  PASS  D7 binary restored==old  
+D8 rollback-inode-mismatch: rc=2 (122.1s)
+  PASS  D8 exit=2 (FATAL running inode != restored)  rc=2
+  PASS  D8 binary path restored==old  
+  PASS  D8 running inode==WRONG bytes (mismatch detected)  
+
+=== Pi leg (deploy_pi.sh) ===
+P1 success: rc=0 (0.6s)
+  PASS  P1 exit=0 (deployed+healthy)  rc=0
+  PASS  P1 binary==new (built)  
+  PASS  P1 running inode==new  pid=2306148
+  PASS  P1 repo HEAD==pinned commit  406be0ff344b
+  PASS  P1 repo detached (on pinned)  detached
+  PASS  P1 backup==old  
+P2 health-fail->rollback: rc=1 (120.9s)
+  PASS  P2 exit=1 (clean rollback)  rc=1
+  PASS  P2 binary restored==old  
+  PASS  P2 repo HEAD==orig  5530d0eadecf
+  PASS  P2 repo branch restored==master  master
+  PASS  P2 running inode==old  pid=2307863
+  PASS  P2 unit active  
+P3 build-fail: rc=3 (0.4s)
+  PASS  P3 exit=3 (build failed, proven restore)  rc=3
+  PASS  P3 binary restored==old  
+  PASS  P3 repo HEAD==orig  6d563967fc10
+  PASS  P3 repo branch==master  master
+  PASS  P3 daemon NEVER restarted (same pid)  pre=2307976 post=2307976
+  PASS  P3 running inode==old  
+P4 dirty-tree abort: rc=3
+  PASS  P4 exit=3 (dirty tree refused)  rc=3
+  PASS  P4 binary untouched==old  
+  PASS  P4 no backup created  
+  PASS  P4 dirty tree left as-is  
+P5 unknown-commit: rc=3 (0.3s)
+  PASS  P5 exit=3 (checkout failed, proven restore, no restart)  rc=3
+  PASS  P5 binary restored==old  
+  PASS  P5 repo HEAD==orig  c7bee76b046b
+  PASS  P5 repo branch==master  master
+  PASS  P5 daemon NEVER restarted (same pid)  pre=2308164 post=2308164
+  PASS  P5 running inode==old  pid=2308164
+P6 rollback-restart-fail: rc=2 (120.7s)
+  PASS  P6 exit=2 (FATAL rollback restart failed)  rc=2
+  PASS  P6 binary restored==old  
+  PASS  P6 repo HEAD==orig  a0248d922518
+P10 fetch-fail: rc=3 (0.3s)
+  PASS  P10 exit=3 (fetch failed, proven restore, no restart)  rc=3
+  PASS  P10 binary restored==old  
+  PASS  P10 repo HEAD==orig  06c324a341ff
+  PASS  P10 repo branch==master  master
+  PASS  P10 daemon NEVER restarted (same pid)  pre=2310311 post=2310311
+  PASS  P10 running inode==old  
+P11 rollback-inode-mismatch: rc=2 (120.9s)
+  PASS  P11 exit=2 (FATAL running inode != restored)  rc=2
+  PASS  P11 binary path restored==old  
+  PASS  P11 repo HEAD==orig  8c7743103bac
+  PASS  P11 running inode==WRONG bytes (mismatch detected)  
+P7 missing-binary abort: rc=3
+  PASS  P7 exit=3 (missing live binary)  rc=3
+  PASS  P7 daemon still alive  
+  PASS  P7 repo untouched==orig  
+  PASS  P7 no backup created  
+P8 backup-dir-uncreatable abort: rc=3
+  PASS  P8 exit=3 (backup dir not creatable)  rc=3
+  PASS  P8 binary untouched==old  
+  PASS  P8 repo untouched==orig  
+P9 repo-not-git abort: rc=3
+  PASS  P9 exit=3 (not a git repo)  rc=3
+  PASS  P9 no backup created  

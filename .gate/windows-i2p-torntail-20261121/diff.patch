@@ -1,0 +1,230 @@
+diff --git a/src/blockindex.rs b/src/blockindex.rs
+index be4c1a0..66a60d3 100644
+--- a/src/blockindex.rs
++++ b/src/blockindex.rs
+@@ -1105,17 +1105,28 @@ impl BlockStore {
+         })();
+         match outcome {
+             Ok(b) => {
++                // .write(true), NOT .append(true): the torn-tail heal in
++                // append_block truncates via set_len, and on Windows an
++                // append-only handle (FILE_APPEND_DATA — what Rust's
++                // .append(true) requests) is refused with ERROR_ACCESS_DENIED
++                // (os error 5): SetEndOfFile needs FILE_WRITE_DATA. Linux
++                // maps read+append to O_RDWR, so the defect was Windows-only
++                // (CI windows-build: "append: truncate torn tail: Access is
++                // denied"). Every write site seeks End explicitly under
++                // append_lock, so O_APPEND's atomic-append semantics are not
++                // load-bearing here.
+                 let file = std::fs::OpenOptions::new()
+                     .read(true)
+-                    .append(true)
++                    .write(true)
+                     .open(self.path.as_ref().unwrap())
+                     .or_else(|_| File::open(self.path.as_ref().unwrap()))
+                     .map_err(|e| format!("open blocks file: {}", e));
+                 match file {
+                     Ok(file) => {
+-                        // probe writability with a throwaway append handle
++                        // probe writability with a throwaway WRITE handle —
++                        // the access append actually needs (set_len included)
+                         let writable = std::fs::OpenOptions::new()
+-                            .append(true)
++                            .write(true)
+                             .open(self.path.as_ref().unwrap())
+                             .is_ok();
+                         eprintln!(
+diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+index 1ecf1e0..af5b22b 100644
+--- a/src/gui/node_supervisor.rs
++++ b/src/gui/node_supervisor.rs
+@@ -2838,35 +2838,41 @@ mod tests {
+         n.restart_backoff_base = Duration::ZERO;
+         let runner_calls = Arc::new(AtomicUsize::new(0));
+         let rpc_served = Arc::new(AtomicUsize::new(0));
++        // run 1's lifetime is owned by the TEST, not a wall-clock deadline:
++        // the old fixed 2s serve window raced the liveness assertion on slow
++        // runners (macOS CI flake: the RPC answer arrived near the deadline,
++        // the stub exited, and `assert!(n.running())` saw a dead thread).
++        // The stub now serves until this flag is set — the test asserts
++        // liveness FIRST, then releases, then waits for node_finished.
++        let release1 = Arc::new(AtomicBool::new(false));
+         // capture run 1's argv: the empty state dir is FRESH, so the
+         // supervisor must request the full-body from-zero fetch on it
+         let argv_seen: Arc<std::sync::Mutex<Vec<String>>> =
+             Arc::new(std::sync::Mutex::new(Vec::new()));
+-        let (rc, served, argv_cap) = (
++        let (rc, served, argv_cap, rel) = (
+             Arc::clone(&runner_calls),
+             Arc::clone(&rpc_served),
+             Arc::clone(&argv_seen),
++            Arc::clone(&release1),
+         );
+         n.runner_override = Some(Arc::new(move |argv: &[String]| {
+             rc.fetch_add(1, Ordering::SeqCst);
+             argv_cap.lock().unwrap().extend_from_slice(argv);
+             // canned loopback server: exactly the tri7d envelope (the shape
+-            // gui::rpc_client::rpc_call parses). Nonblocking accept + 2s
+-            // deadline so run 1 FINISHES (the exit+restart phase needs the
+-            // thread gone and node_finished=true).
++            // gui::rpc_client::rpc_call parses). Nonblocking accept; serves
++            // until the test releases it (30s hang-safety net only) so run 1
++            // FINISHES deterministically for the exit+restart phase below.
+             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+             listener
+                 .set_nonblocking(true)
+                 .expect("set_nonblocking");
+-            let serve_deadline = Instant::now() + std::time::Duration::from_secs(2);
+-            let mut served_v1 = 0;
+-            while served_v1 < 3 && Instant::now() < serve_deadline {
++            let safety_deadline = Instant::now() + std::time::Duration::from_secs(30);
++            while !rel.load(Ordering::SeqCst) && Instant::now() < safety_deadline {
+                 match listener.accept() {
+                     Ok((mut s, _)) => {
+                         // BSD/macOS: accepted sockets inherit the listener's
+                         // O_NONBLOCK — restore blocking (Linux no-op).
+                         let _ = s.set_nonblocking(false);
+-                        served_v1 += 1;
+                         served.fetch_add(1, Ordering::SeqCst);
+                         let mut buf = [0u8; 8192];
+                         let _ = std::io::Read::read(&mut s, &mut buf);
+@@ -2910,10 +2916,14 @@ mod tests {
+             "runner must be invoked exactly once"
+         );
+         assert!(rpc_served.load(Ordering::SeqCst) >= 1);
+-        // run 1's server serves up to 3 connections then EXITS: wait for the
+-        // thread to finish (node_finished=true) so run 2 is a REAL restart
+-        // (the supervisor must not skip it as already-running)
+-        let fin_deadline = Instant::now() + std::time::Duration::from_secs(3);
++        // liveness + wiring proven — NOW release run 1 so the exit+restart
++        // phase gets a REAL finished run (deterministic: the stub exits within
++        // one 25ms poll of the flag, no wall-clock race on the asserts above)
++        release1.store(true, Ordering::SeqCst);
++        // run 1's server exits on the release flag: wait for the thread to
++        // finish (node_finished=true) so run 2 is a REAL restart (the
++        // supervisor must not skip it as already-running)
++        let fin_deadline = Instant::now() + std::time::Duration::from_secs(5);
+         while Instant::now() < fin_deadline && !n.node_finished.load(Ordering::SeqCst) {
+             std::thread::sleep(Duration::from_millis(50));
+         }
+@@ -4225,14 +4235,27 @@ mod tests {
+         raw
+     }
+ 
+-    /// stub i2pd spawn: a REAL long-lived child that binds the PINNED SOCKS
+-    /// port and KEEPS it bound + answering — exactly what real i2pd does
+-    /// across repeated ensure calls (the r1 one-shot stub RELEASED the port
+-    /// after one greeting, which masked the r2 self-detection bug: probe-
+-    /// before-child-check reclassified our own live daemon as System and
+-    /// killed it). ALSO materializes the tunnel keys dat (the tunnel
+-    /// registering) so the readback path runs.
+-    fn stub_i2p_spawn(req: I2pSpawnRequest) -> Result<Child, String> {
++    /// stub i2pd spawn: a REAL long-lived child plus a SOCKS listener on the
++    /// PINNED port that KEEPS answering across repeated ensure calls (the r1
++    /// one-shot stub RELEASED the port after one greeting, which masked the
++    /// r2 self-detection bug: probe-before-child-check reclassified our own
++    /// live daemon as System and killed it). ALSO materializes the tunnel
++    /// keys dat (the tunnel registering) so the readback path runs.
++    ///
++    /// `registry` mirrors stub_tor_spawn: when present, the spawned child's
++    /// pid is recorded so the test's injected listener_resolver
++    /// (child_identity_pair) can report the PRODUCTION identity shape — the
++    /// spawned i2pd owns the pinned SOCKS port. The listener thread below
++    /// lives in the TEST process, so without that pair the port's true
++    /// listener pid is the test harness and the Windows native attribution
++    /// correctly refuses it: the live child was killed and reclassified as a
++    /// foreign System daemon on every ensure after the first (deterministic
++    /// windows-build CI red on the two attribution tests; Linux/macOS
++    /// resolve nothing so the mismatch was invisible there).
++    fn stub_i2p_spawn(
++        req: I2pSpawnRequest,
++        registry: Option<&Arc<std::sync::Mutex<Option<u32>>>>,
++    ) -> Result<Child, String> {
+         let mut cmd = if cfg!(windows) {
+             let mut c = std::process::Command::new("cmd");
+             c.args(["/C", "ping", "-n", "60", "127.0.0.1"]);
+@@ -4248,6 +4271,9 @@ mod tests {
+             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, same as prod
+         }
+         let child = cmd.spawn().map_err(|e| e.to_string())?;
++        if let Some(reg) = registry {
++            *reg.lock().unwrap() = Some(child.id());
++        }
+         // the keys dat lands in the DATADIR ROOT (relative keys name in
+         // tunnels.conf) — exactly what production i2pd does
+         let keys = req.data_dir.join(I2P_DEST_KEYS_FILE);
+@@ -4532,7 +4558,7 @@ mod tests {
+         let sc = Arc::clone(&spawns);
+         sup.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
+             sc.fetch_add(1, Ordering::SeqCst);
+-            stub_i2p_spawn(req)
++            stub_i2p_spawn(req, None)
+         }));
+         // hand-plant an ALIVE child whose SOCKS port has NO listener
+         sup.child = Some(long_lived_child());
+@@ -4570,6 +4596,13 @@ mod tests {
+         let mut sup = i2p_supervisor(&dir, probe);
+         std::fs::write(dir.join("i2pd-fake"), b"").unwrap(); // exists → used
+         sup.exe_override = Some(dir.join("i2pd-fake"));
++        // production identity shape: the spawned child owns the pinned port
++        // (child_identity_pair — the tor lane's fix for the same Windows
++        // attribution refusal; without it the test harness is the listener)
++        let (pid_reg, resolver) =
++            child_identity_pair(dir.join("i2pd-fake").to_string_lossy().to_string());
++        sup.listener_resolver = Some(resolver);
++        let reg_for_spawn = Arc::clone(&pid_reg);
+         let kills = sup.kills_handle();
+         let spawns = Arc::new(AtomicUsize::new(0));
+         let sc = Arc::clone(&spawns);
+@@ -4583,7 +4616,7 @@ mod tests {
+                 req.data_dir.join("tunnels.conf"),
+                 "tunnels.conf lives IN the datadir"
+             );
+-            stub_i2p_spawn(req)
++            stub_i2p_spawn(req, Some(&reg_for_spawn))
+         }));
+         // 1. spawn → Bundled + destination readback
+         let st = sup.ensure(&dir, true);
+@@ -4630,9 +4663,11 @@ mod tests {
+     /// repeated ensure calls — the child binds the SAME pinned port the
+     /// system probe uses, so probe-before-child-check reclassified our own
+     /// daemon as System and killed it on every poll tick. The stub listener
+-    /// stays bound across ensures (real-i2pd shape) and the assertions are
+-    /// exactly the judge's: the child is neither killed nor reclassified,
+-    /// the pid is unchanged, and the destination survives.
++    /// stays bound across ensures, and the injected child_identity_pair
++    /// reports the spawned child as the port's owner (the production i2pd
++    /// shape on Windows, where the native attribution enforces it); the
++    /// assertions are exactly the judge's: the child is neither killed nor
++    /// reclassified, the pid is unchanged, and the destination survives.
+     #[test]
+     fn i2p_own_child_is_never_reclassified_or_killed_across_ensures() {
+         let probe = free_dead_port();
+@@ -4642,12 +4677,17 @@ mod tests {
+         let mut sup = i2p_supervisor(&dir, probe);
+         std::fs::write(dir.join("i2pd-fake"), b"").unwrap();
+         sup.exe_override = Some(dir.join("i2pd-fake"));
++        // production identity shape (see stub_i2p_spawn / child_identity_pair)
++        let (pid_reg, resolver) =
++            child_identity_pair(dir.join("i2pd-fake").to_string_lossy().to_string());
++        sup.listener_resolver = Some(resolver);
++        let reg_for_spawn = Arc::clone(&pid_reg);
+         let kills = sup.kills_handle();
+         let spawns = Arc::new(AtomicUsize::new(0));
+         let sc = Arc::clone(&spawns);
+         sup.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
+             sc.fetch_add(1, Ordering::SeqCst);
+-            stub_i2p_spawn(req)
++            stub_i2p_spawn(req, Some(&reg_for_spawn))
+         }));
+         // spawn → Bundled
+         let st1 = sup.ensure(&dir, true);
+@@ -4938,7 +4978,7 @@ mod tests {
+         let i2p_spawns = Arc::clone(&spawns);
+         n.i2p.spawn_override = Some(Arc::new(move |req: I2pSpawnRequest| {
+             i2p_spawns.fetch_add(1, Ordering::SeqCst);
+-            stub_i2p_spawn(req)
++            stub_i2p_spawn(req, None)
+         }));
+         let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+         let av = Arc::clone(&argvs);

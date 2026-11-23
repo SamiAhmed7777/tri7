@@ -1,0 +1,130 @@
+--- item38.diff	2026-11-22 06:25:56.436664370 -0800
++++ item38-r2.diff	2026-11-22 06:33:33.313765565 -0800
+@@ -1,5 +1,5 @@
+ diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+-index 3de5849..3762d65 100644
++index 3de5849..3a45844 100644
+ --- a/src/node_embedded.rs
+ +++ b/src/node_embedded.rs
+ @@ -9375,6 +9375,12 @@ fn note_stale_evidence(
+@@ -15,7 +15,7 @@
+  
+  /// Should this tick fire the in-process repair attempt? Pure policy so the
+  /// cadence/cap tests need no store: fires on the impairment's loud re-log
+-@@ -9402,6 +9408,39 @@ fn autoheal_due(impaired: &StaleLiveView, stake_st: &mut StakeState) -> bool {
++@@ -9402,6 +9408,41 @@ fn autoheal_due(impaired: &StaleLiveView, stake_st: &mut StakeState) -> bool {
+      impaired.ticks == 1 || impaired.ticks % 40 == 0
+  }
+  
+@@ -33,7 +33,9 @@
+ +    let mut added = Vec::new();
+ +    for k in fresh.keys {
+ +        // insert() is the single gate: skips keys already in the wallet AND
+-+        // duplicates within the file read itself
+++        // duplicates within the file read itself. Dedupe is pubkey-level by
+++        // design — two pubkeys deriving the same address are NOT a duplicate
+++        // (each is its own spendable identity), only a same-pubkey row is.
+ +        if have.insert(k.pubkey.clone()) {
+ +            added.push(k);
+ +        }
+@@ -55,7 +57,7 @@
+  /// One in-process `repairwallet` attempt, fired by the stake tick when its
+  /// stale-evidence determination is live (item 27 §16-RACED-MINT-AUTOHEAL).
+  ///
+-@@ -9428,6 +9467,7 @@ fn autoheal_stale_live_view(
++@@ -9428,6 +9469,7 @@ fn autoheal_stale_live_view(
+      wl: &mut WalletLive,
+      store: &BlockStore,
+      stake_st: &mut StakeState,
+@@ -63,7 +65,7 @@
+  ) -> bool {
+      let Some(impaired) = stg.staking_impaired.as_ref() else {
+          return false;
+-@@ -9435,6 +9475,27 @@ fn autoheal_stale_live_view(
++@@ -9435,6 +9477,27 @@ fn autoheal_stale_live_view(
+      if !autoheal_due(impaired, stake_st) {
+          return false;
+      }
+@@ -91,7 +93,7 @@
+      // the exact repairwallet replay window (RPC verb): base = min of the
+      // view's seed base and the chain-state base — a forkchoice rollback can
+      // walk the chain-state base back below the view's seed base, and
+-@@ -9558,7 +9619,9 @@ fn stake_tick(
++@@ -9558,7 +9621,9 @@ fn stake_tick(
+      let (mut candidates_rel, mut stale_coins, mut unresolvable_coins) =
+          resolve_stake_evidence(stg, candidates);
+      note_stale_evidence(stg, &stale_coins, stake_st.autoheal_fault_episode.as_deref());
+@@ -102,7 +104,7 @@
+          // item 27 §16-RACED-MINT-AUTOHEAL: the rebuild ran — re-resolve with
+          // the fresh view so THIS tick stakes on the restored coins instead of
+          // waiting a tick. A cleared evidence set clears the impairment (the
+-@@ -10402,6 +10465,25 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
++@@ -10402,6 +10467,25 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                          ),
+                      ));
+                  }
+@@ -128,7 +130,7 @@
+                  let fresh = WalletLive::seed(store, w.wallet.clone(), base, replay_tip)
+                      .map_err(|e| (-1, format!("repairwallet replay: {e}")))?;
+                  let diff = {
+-@@ -14559,6 +14641,82 @@ pub fn main_args(argv: &[String]) -> i32 {
++@@ -14559,6 +14643,84 @@ pub fn main_args(argv: &[String]) -> i32 {
+              })
+              .expect("spawn wallet-seed thread");
+      }
+@@ -164,7 +166,9 @@
+ +                            None => continue,
+ +                            Some(w) if w.wallet.encrypted || w.locked => {
+ +                                // unlock-managed keystore: the file is not
+-+                                // the authority — quiet, retry on cadence
+++                                // the authority — skip the guaranteed-to-fail
+++                                // file scan too, retry on the 5s tick
+++                                continue;
+ +                            }
+ +                            Some(_) => {}
+ +                        }
+@@ -211,7 +215,7 @@
+      {
+          // chain-threading oracle: the daemon-anchored window hashes
+          let oracle = {
+-@@ -24638,7 +24796,9 @@ addnode=host:notaport
++@@ -24638,7 +24800,9 @@ addnode=host:notaport
+          // (bodies still landing): skip, and do NOT burn the attempt budget
+          let store = BlockStore::new(None, None);
+          let mut stake_st = gate_stake_state();
+@@ -222,7 +226,7 @@
+          assert_eq!(stake_st.autoheal_attempts, 0);
+          assert_eq!(
+              stake_st.autoheal_episode.as_deref(),
+-@@ -24647,10 +24807,371 @@ addnode=host:notaport
++@@ -24647,10 +24811,371 @@ addnode=host:notaport
+          );
+          // a later re-log tick: same shape, still no burn
+          stg.staking_impaired.as_mut().unwrap().ticks = 40;
+@@ -595,7 +599,7 @@
+      #[test]
+      fn autoheal_rebuild_removes_the_raced_phantom_and_keeps_the_honest_coin() {
+          let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-rebuild");
+-@@ -24667,7 +25188,9 @@ addnode=host:notaport
++@@ -24667,7 +25192,9 @@ addnode=host:notaport
+          // heal: one in-process pass removes the phantom, keeps the honest
+          // coin with identical facts, burns exactly one attempt
+          let mut stake_st = gate_stake_state();
+@@ -606,7 +610,7 @@
+          assert_eq!(stake_st.autoheal_attempts, 1);
+          assert_eq!(stake_st.autoheal_episode.as_deref(), Some(first_utc.as_str()));
+          assert!(!wl.live.contains_key(&raced_key), "raced phantom removed");
+-@@ -24913,7 +25436,7 @@ addnode=host:notaport
++@@ -24913,7 +25440,7 @@ addnode=host:notaport
+          let mut stake_st = gate_stake_state();
+          // first re-log tick: the rebuild runs, finds ZERO mismatches → latch
+          assert!(
+@@ -615,7 +619,7 @@
+              "nothing to swap — the view was already correct"
+          );
+          assert_eq!(
+-@@ -24928,10 +25451,7 @@ addnode=host:notaport
++@@ -24928,10 +25455,7 @@ addnode=host:notaport
+          // later re-log tick: the latch retires the episode — no rebuild runs
+          stg.staking_impaired.as_mut().unwrap().ticks = 40;
+          assert!(!autoheal_stale_live_view(

@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:knewqfh6vcjp5hultg7pmgpepjeqxcvp6e2dlhexegq72vqdb27a
+{
+  "blocking": [],
+  "polish": [
+    "Consider asserting rpc_served >= 1 AFTER release1 is set but before node_finished wait, or keep a bounded accept count so a misbehaving client cannot spin the stub forever within the 30s window",
+    "The writability probe opening a second handle could race with other processes; a comment noting it is best-effort diagnostics only would help",
+    "Once the pushed CI windows-build and macos-build jobs come back green, attach those run/job IDs to close the runtime-proof gap and this becomes a clean A"
+  ]
+}
+
+--- STDERR ---

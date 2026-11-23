@@ -1,0 +1,24 @@
+
+[STDERR]Traceback (most recent call last):
+  File "/root/.hermes/skills/autonomous-ai-agents/glm-judge-on-demand/scripts/glm-standin-judge.py", line 147, in <module>
+    main()
+    ~~~~^^
+  File "/root/.hermes/skills/autonomous-ai-agents/glm-judge-on-demand/scripts/glm-standin-judge.py", line 87, in main
+    with urllib.request.urlopen(req, timeout=420) as r:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 493, in open
+    response = meth(req, response)
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 464, in _call_chain
+    result = func(*args)
+  File "/root/.hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/urllib/request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 429: Too Many Requests

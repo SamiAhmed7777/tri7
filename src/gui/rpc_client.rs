@@ -180,6 +180,18 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
             method
         ));
     }
+    // (fused30) EMBEDDED MODE: when the node runs in THIS process and its
+    // RPC stack is up, route the call through the in-process dispatcher —
+    // the same providers and the same handle_body the loopback listener
+    // serves. No socket to race, no per-boot capability token to hand
+    // off: the balance card's getwalletinfo answers the moment the RPC
+    // stack exists (sami-laptop 2026-11-23: the card froze at "Not
+    // connected yet" + 0.000 TRI because the HTTP path 401'd on a token
+    // the warmup never handed over, while the daemon served getbalance
+    // 250.0 externally).
+    if crate::node_embedded::local_rpc_ready() {
+        return crate::node_embedded::local_rpc(method, params).map_err(humanize_error);
+    }
     // loopback-only (TRI7-RPC-05): never send wallet verbs to a remote host
     if !is_loopback_addr(addr) {
         let msg = format!(
@@ -290,6 +302,35 @@ mod tests {
     fn rpc_call_unreachable_is_clean_error() {
         let err = rpc_call("127.0.0.1:9", "getblockcount", &[]).unwrap_err();
         assert!(err.contains("connect"), "unexpected error: {}", err);
+    }
+
+    /// (fused30) THE routing the balance card depends on: with the embedded
+    /// node's in-process dispatcher registered, rpc_call must answer from
+    /// the closure — no socket, no capability token, so a port NOTHING
+    /// listens on still answers (this is the branch that ends the 401
+    /// "Not connected yet" + 0.000 TRI freeze).
+    #[test]
+    fn rpc_call_routes_in_process_when_the_embedded_dispatcher_is_live() {
+        crate::node_embedded::set_local_rpc(Box::new(|method, params| {
+            Ok(serde_json::json!({
+                "via": "in-process",
+                "method": method,
+                "params": params,
+            }))
+        }));
+        let r = rpc_call("127.0.0.1:1", "getconnectioncount", &[]);
+        // global hygiene: sibling tests must not route through the stub
+        crate::node_embedded::clear_local_rpc();
+        let v = r.expect("the in-process dispatcher answers without a socket");
+        assert_eq!(v["via"], "in-process");
+        assert_eq!(v["method"], "getconnectioncount");
+        // error envelopes still flow through the humanizer
+        crate::node_embedded::set_local_rpc(Box::new(|_m, _p| {
+            Err("rpc error: {\"code\":-1,\"message\":\"nope\"}".to_string())
+        }));
+        let e = rpc_call("127.0.0.1:1", "getconnectioncount", &[]).unwrap_err();
+        crate::node_embedded::clear_local_rpc();
+        assert_eq!(e, "nope", "rpc error envelopes are humanized as on the wire");
     }
 
     /// (2026-11-21, sami-pc) regression pin: the per-boot capability token

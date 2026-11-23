@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:rwamjaqxibqr5izk3uhuhah5ql4hrb7uw2p3mqrnz4huvvqwofaq
+{
+  "blocking": [],
+  "polish": [
+    "Land the CI windows-build run on push before merge; if green, this is promotion-eligible at A",
+    "Consider a brief comment noting the multi-writer caveat (O_APPEND removal assumes single-process writes; if another process ever opens the store append-only, atomic append is lost)",
+    "The or_else File::open read-only fallback now silently yields a handle that cannot append; a distinct error message there would aid future diagnosis"
+  ]
+}
+
+--- STDERR ---

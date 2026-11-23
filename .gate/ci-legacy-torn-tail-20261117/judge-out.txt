@@ -1,0 +1,9 @@
+attempt 1 did not parse; re-running once
+GRADE=A urn=urn:ump:syg5ap2a562ab4vhuah6l2ixy7awi3zazrr5x5nyutuodiibuipa
+{
+  "blocking": [],
+  "polish": [
+    "The strict-view match could use assert_eq! with the TornTail literal since FrameRead derives PartialEq, avoiding the verbose match arm",
+    "Cleanup uses remove_file(...).ok(); consider remove_dir_all-style parent cleanup or a drop guard for consistency, though temp-dir collisions are effectively harmless here"
+  ]
+}

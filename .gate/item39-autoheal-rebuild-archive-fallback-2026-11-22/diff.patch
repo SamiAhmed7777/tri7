@@ -1,0 +1,675 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 4399d92..5b5548d 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -114,6 +114,44 @@ pub struct LiveBridge {
+ }
+ pub static LIVE_BRIDGE: std::sync::Mutex<Option<LiveBridge>> = std::sync::Mutex::new(None);
+ static BRIDGE_PUSHED_TIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// (item 39 AUTOHEAL-REBUILD-ARCHIVE-FALLBACK, 2026-11-22 DNS2 21:03Z) Set
++/// while an in-process repairwallet/AUTOHEAL replay holds the wallet
++/// live-view mutex across its seed+diff+swap (the boot wallet-seed thread
++/// does NOT hold the lock across its replay, so it never sets this). While
++/// true, every money surface skips the live-view tier and answers from the
++/// snapshot pair LABELED partial (`balance_source=snapshot-pair`,
++/// `balance_partial=true`) instead of blocking on the mutex for the whole
++/// replay (~70s at full-history seed) or serving a hole-y/mid-swap view as
++/// current. The 2026-11-22 window (surfaces read the frozen archive pair
++/// and a -3713 TRI hole as if current for ~4 minutes mid-rebuild) must
++/// never read as current again. A COUNTER, not a bool: the two repair paths
++/// (AUTOHEAL in the stake tick, the `repairwallet` RPC verb) can overlap —
++/// one waits on the mutex while the other holds it — and a bool would let
++/// the first guard's drop clear the flag while the second replay still runs.
++static LIVE_VIEW_REBUILDING: AtomicU64 = AtomicU64::new(0);
++
++/// True while an in-process wallet live-view rebuild is mid-flight.
++pub fn live_view_rebuilding() -> bool {
++    LIVE_VIEW_REBUILDING.load(Ordering::SeqCst) > 0
++}
++
++/// RAII guard for [`begin_live_view_rebuild`]: clears the flag on EVERY
++/// exit path (early returns, `?`, panics) — a rebuild must never leave the
++/// surfaces stuck on the labelled pair tier.
++struct LiveViewRebuildGuard;
++impl Drop for LiveViewRebuildGuard {
++    fn drop(&mut self) {
++        LIVE_VIEW_REBUILDING.fetch_sub(1, Ordering::SeqCst);
++    }
++}
++
++/// Raise the live-view-rebuilding flag for the enclosing scope.
++fn begin_live_view_rebuild() -> LiveViewRebuildGuard {
++    LIVE_VIEW_REBUILDING.fetch_add(1, Ordering::SeqCst);
++    LiveViewRebuildGuard
++}
++
+ pub fn publish_live_bridge(s: LiveBridge) {
+     if let Ok(mut g) = LIVE_BRIDGE.lock() {
+         *g = Some(s);
+@@ -8062,6 +8100,14 @@ struct WalletLive {
+     locked: bool,
+     /// unix time at which a timed unlock expires
+     unlock_until: Option<u64>,
++    /// (item 39) the LOWEST height the seed could not read (debris-tolerant
++    /// skip: a torn/garbage or missing block, fused23) — None = the view is
++    /// gap-free over its claimed [base, tip]. A skip BELOW a snapshot pair's
++    /// coverage means the view is NOT a superset of the pair even when its
++    /// base is: the tier-1.5 gate must refuse it (the labelled pair tier
++    /// answers instead), or the false superset would serve a silent hole as
++    /// current — the exact alarm-integrity class item 39 exists to kill.
++    first_skip: Option<u64>,
+ }
+ 
+ /// txpool::UtxoView over the live map — unspent-only (spends removed).
+@@ -8294,13 +8340,56 @@ impl WalletLive {
+             spent: HashMap::new(),
+             locked: false,
+             unlock_until: None,
++            first_skip: None,
+         };
++        // (2026-11-22, fused23) DEBRIS TOLERANCE: force-killed appends left
++        // torn/garbage frames mid-archive (both sami machines, 2026-11-22).
++        // A parse-failing or missing block is SKIPPED and counted — the
++        // debris sits at old heights far from any live wallet coin, and the
++        // alternative was a permanent zero balance (the view never seeded).
++        // The skip summary lands in node.log so the coverage hole is known.
++        let mut skipped = 0usize;
++        let mut first_skip: Option<u64> = None;
++        let mut last_skip = 0u64;
+         for h in base..=tip {
+-            let hit = store
+-                .block_by_height(h)?
+-                .ok_or_else(|| format!("store missing block body at h{}", h))?;
++            let hit = match store.block_by_height(h) {
++                Ok(Some(b)) => b,
++                Ok(None) => {
++                    skipped += 1;
++                    if first_skip.is_none() {
++                        first_skip = Some(h);
++                    }
++                    last_skip = h;
++                    continue;
++                }
++                Err(_) => {
++                    skipped += 1;
++                    if first_skip.is_none() {
++                        first_skip = Some(h);
++                    }
++                    last_skip = h;
++                    continue;
++                }
++            };
+             wl.apply_block(&hit.block, h);
+         }
++        if skipped > 0 {
++            // (item 39) the hole is now STRUCTURED, not just greppable: the
++            // lowest skipped height rides on the view (first_skip) so the
++            // tier-1.5 gate can refuse a gapped view as a pair superset, and
++            // the summary goes through the node's log channel so it lands in
++            // node.log (alarmable) instead of bare stderr.
++            wl.first_skip = first_skip;
++            log(&format!(
++                "wallet live seed: skipped {} debris/gap block(s) (first h{}, last h{}) — \
++                 archive coverage hole; balances exclude those heights; tier 1.5 will \
++                 refuse this view over any snapshot pair covering h{} or above",
++                skipped,
++                first_skip.unwrap_or(base),
++                last_skip,
++                first_skip.unwrap_or(base),
++            ));
++        }
+         Ok(wl)
+     }
+ 
+@@ -8923,6 +9012,12 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+     fn live_wallet_total(
+         &self,
+     ) -> Option<tri7_core::rpc::LiveWalletTotal> {
++        // (item 39) mid-rebuild the mutex is held by the replay — answer
++        // None so tier 1.5 is skipped (wallet_total also checks the flag
++        // before calling here; this guards any future caller).
++        if live_view_rebuilding() {
++            return None;
++        }
+         // The wallet's OWN unspent set, ready and current — tier 1.5. NO
+         // base==0 filter here (that gate guards the balance() fallback
+         // policy against wallets whose records predate the chain window);
+@@ -8951,9 +9046,23 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+             sats: w.balance(),
+             utxos: w.live.len(),
+             coverage_height: tip,
++            // (item 39) the view's coverage FLOOR: it covers [w.base, tip].
++            // The tier gate compares this against the pair's coverage — a
++            // view whose floor sits above the pair's era must never outrank
++            // it (the hole-y rebuild class).
++            coverage_floor: w.base,
++            // (item 39) the seed's lowest unread height (debris/gap skip) —
++            // the gap half of the superset gate.
++            first_skip_height: w.first_skip,
+         })
+     }
+ 
++    // (item 39) the in-process rebuild flag — money surfaces read this to
++    // skip the live-view tier mid-rebuild instead of blocking on the mutex.
++    fn live_view_rebuilding(&self) -> bool {
++        live_view_rebuilding()
++    }
++
+     fn default_key(&self) -> Option<Vec<u8>> {
+         tri7_core::rpc::WalletProvider::default_key(self.snap_view().as_ref())
+     }
+@@ -8967,7 +9076,10 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+     }
+ 
+     fn balance(&self) -> Option<BalanceView> {
+-        if let Ok(g) = self.wl.lock() {
++        // (item 39) mid-rebuild the mutex is held by the replay — fall
++        // straight to the snapshot aggregate instead of blocking.
++        if !live_view_rebuilding() {
++            if let Ok(g) = self.wl.lock() {
+             // The live view is the wallet's UNSPENT set, and it only knows
+             // about coins that appeared in the range it replayed. It is
+             // seeded from the chain-state window base, so on a node that
+@@ -9025,20 +9137,25 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+                     replay_target_height: Some(tip),
+                 });
+             }
++            }
+         }
+         self.snap_view().balance()
+     }
+ 
+     fn coverage(&self) -> Option<(u64, String)> {
+         // live view present: the window IS the coverage (tip + its hash) —
+-        // confirmations are keyed against the live tip, not a stale snapshot
+-        if let Ok(g) = self.wl.lock() {
+-            if g.is_some() {
+-                if let Ok(s) = self.st.try_lock() {
+-                    return Some((
+-                        s.tip_height,
+-                        tri7_core::p2p::internal_to_display(&s.tip_hash),
+-                    ));
++        // confirmations are keyed against the live tip, not a stale snapshot.
++        // (item 39) EXCEPT mid-rebuild: the mutex is held by the replay, and
++        // the pair's own coverage is the honest keying while it runs.
++        if !live_view_rebuilding() {
++            if let Ok(g) = self.wl.lock() {
++                if g.is_some() {
++                    if let Ok(s) = self.st.try_lock() {
++                        return Some((
++                            s.tip_height,
++                            tri7_core::p2p::internal_to_display(&s.tip_hash),
++                        ));
++                    }
+                 }
+             }
+         }
+@@ -9120,7 +9237,17 @@ impl tri7_core::rpc::WalletProvider for LiveWalletProvider {
+         let has_snapshot = snap_coverage.is_some();
+         let coverage = snap_coverage.map(|(h, _)| h).unwrap_or(0);
+         let snapshot_rows = self.snap_view().utxos();
+-        let (live_rows, spends, live_base) = live_rows_for(&self.wl);
++        // (item 39) mid-rebuild the mutex is held by the replay: serve the
++        // pair rows ALONE — consistently with wallet_total tier 2 (both
++        // surfaces read THIS function, so the total and the list cannot
++        // split), keyed at the pair's coverage, and getwalletinfo labels
++        // the tier `balance_partial=true`. The alternative — blocking on
++        // the mutex for a whole replay (~70s) — stalls every money RPC.
++        let (live_rows, spends, live_base) = if live_view_rebuilding() {
++            (Vec::new(), Vec::new(), 0)
++        } else {
++            live_rows_for(&self.wl)
++        };
+         merge_whole_wallet_utxos(
+             snapshot_rows,
+             live_rows,
+@@ -9477,6 +9604,12 @@ fn autoheal_stale_live_view(
+     if !autoheal_due(impaired, stake_st) {
+         return false;
+     }
++    // (item 39) the caller holds the live-view mutex across this whole
++    // remedy (seed+diff+swap): raise the rebuild flag so the money surfaces
++    // answer from the labelled pair tier instead of blocking mid-replay or
++    // serving the hole-y/mid-swap view as current. Cleared on every return
++    // path by the guard.
++    let _rebuilding = begin_live_view_rebuild();
+     // (item 38 WALLET-SELFSEND-UNDERHOLD) the live view's key set is the
+     // BOOT-TIME read_wallet snapshot; keys imported after boot were invisible
+     // to every ownership check. Refresh from the file before the replay so
+@@ -10441,6 +10574,12 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
+                             .into(),
+                     ));
+                 };
++                // (item 39) the wl lock is held across seed+diff+swap below:
++                // raise the rebuild flag so the money surfaces answer from
++                // the labelled pair tier instead of blocking on this replay
++                // or serving the mid-swap view as current. Cleared on every
++                // return path by the guard.
++                let _rebuilding = begin_live_view_rebuild();
+                 let mut wl = self
+                     .wl
+                     .lock()
+@@ -18360,6 +18499,7 @@ mod tests {
+             spent: HashMap::new(),
+             locked: false,
+             unlock_until: None,
++            first_skip: None,
+         }
+     }
+ 
+@@ -24287,6 +24427,7 @@ addnode=host:notaport
+             spent: HashMap::new(),
+             locked: false,
+             unlock_until: None,
++            first_skip: None,
+         };
+         // a funded block at h=101: coinbase + p2pkh output to our key
+         let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+@@ -25552,6 +25693,7 @@ addnode=host:notaport
+             spent: HashMap::new(),
+             locked: false,
+             unlock_until: None,
++            first_skip: None,
+         };
+         let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+         let fund_tx = Tx {
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 40632e9..4145919 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -444,10 +444,22 @@ pub trait WalletProvider: Send + Sync {
+     /// the stale pair answered 1531-3192 TRI from rows counting outputs the
+     /// wallet's keys do not own — the overview showed a figure ~100x wrong.
+     /// The pair is the boot-time estimate; the live view is the wallet's own
+-    /// unspent set, and the fresher of the two wins.
++    /// unspent set, and the fresher of the two wins. (item 39) "Fresher" is
++    /// a SUPERSET test, not a tip test: the view must also reach back to at
++    /// or below the pair's coverage (its `coverage_floor`), else it is
++    /// missing the pair's era and the labelled pair tier answers instead.
+     fn live_wallet_total(&self) -> Option<LiveWalletTotal> {
+         None
+     }
++    /// (item 39 AUTOHEAL-REBUILD-ARCHIVE-FALLBACK) true while an in-process
++    /// repairwallet/AUTOHEAL rebuild holds the live-view mutex across its
++    /// seed+diff+swap. Money surfaces must neither block on that mutex nor
++    /// serve tier 1.5 mid-rebuild: the pair tier answers instead, honestly
++    /// labelled partial. Default false (snapshot-only providers never
++    /// rebuild in process).
++    fn live_view_rebuilding(&self) -> bool {
++        false
++    }
+     fn address_entries(&self) -> Vec<AddressEntry>;
+     /// lifetime regular-tx receipts (daemon getreceivedbyaddress semantics:
+     /// P2PKH-script outputs only). None = never received → treated as 0.
+@@ -1171,7 +1183,9 @@ fn live_authoritative(deps: &Deps) -> Option<serde_json::Value> {
+ ///   1. LIVE-INDEX — the address index, PROVEN authoritative (finished, and
+ ///      it applied exactly the chain this node serves: same height AND hash).
+ ///   1.5 WALLET-LIVE — the wallet's own seeded/replayed unspent set, when
+-///      ready and at least as fresh as the snapshot pair's coverage. The
++///      ready and at least as fresh as the snapshot pair's coverage (a
++///      SUPERSET test: the view must also reach back to at-or-below the
++///      pair's coverage — item 39), and no in-process rebuild is mid-flight. The
+ ///      pair is the boot-time estimate; the live view is the wallet's own
+ ///      unspent set (2026-11-16: the stale pair answered 1531-3192 TRI for
+ ///      Sami's wallet while the ready live view held the true 14.53).
+@@ -1218,6 +1232,21 @@ pub struct LiveWalletTotal {
+     pub utxos: usize,
+     /// the replay tip the live view covers (the node tip it has applied)
+     pub coverage_height: u64,
++    /// the height BELOW which the view has no knowledge — its seed/replay
++    /// base. The view covers [floor, tip]: a view whose floor sits ABOVE a
++    /// snapshot pair's coverage is missing the pair's era (the rebuild-hole
++    /// class) and must never outrank it. 0 = whole history (genesis seed).
++    /// (item 39 AUTOHEAL-REBUILD-ARCHIVE-FALLBACK, 2026-11-22: the tier gate
++    /// compared only the TIP, so a rebuilt view covering [h2212919..tip]
++    /// served a -3713 TRI hole as `balance_partial=false` — DNS2's 21:03Z
++    /// window.)
++    pub coverage_floor: u64,
++    /// (item 39) the LOWEST height the view's seed could not read (a
++    /// debris/gap skip) — None = gap-free over [coverage_floor, tip]. A skip
++    /// at-or-below a pair's coverage means the view is NOT a superset of it
++    /// even with floor <= coverage: the tier gate refuses it, so a gapped
++    /// (debris-tolerant) seed can never serve a silent hole as current.
++    pub first_skip_height: Option<u64>,
+ }
+ 
+ /// One wallet-total answer: the figure AND the facts that say how fresh it
+@@ -1320,6 +1349,12 @@ fn index_facts(deps: &Deps) -> (Option<u64>, Option<bool>, Option<u64>) {
+ /// THE source hierarchy every money-path surface answers from. See
+ /// [`TotalSource`] for the tier contract and the incident that fixed it.
+ pub(crate) fn wallet_total(deps: &Deps) -> Option<WalletTotal> {
++    // (item 39) an in-process rebuild holds the live-view mutex across its
++    // seed+diff+swap: tier 1.5 is skipped and the tier-2 partial probe (which
++    // locks the same mutex) is bypassed, so every money surface answers
++    // immediately from the labelled pair tier instead of stalling for the
++    // whole replay (post-full-history seed that replay can run ~70s).
++    let rebuilding = deps.wallet.live_view_rebuilding();
+     // ---- TIER 1: the authoritative live index --------------------------
+     if let Some(live) = live_authoritative(deps) {
+         let sats = live.get("balance_sats").and_then(|x| x.as_i64())?;
+@@ -1363,24 +1398,49 @@ pub(crate) fn wallet_total(deps: &Deps) -> Option<WalletTotal> {
+     // keys do not own) while the ready live view held the true 14.53 —
+     // this tier is what makes the overview show the wallet's own figure.
+     let pair_cov = deps.wallet.coverage();
+-    if let Some(lw) = deps.wallet.live_wallet_total() {
+-        if lw.utxos > 0 {
+-            let live_at_least_as_fresh = pair_cov
+-                .as_ref()
+-                .map(|(cov_h, _)| lw.coverage_height >= *cov_h)
+-                .unwrap_or(true);
+-            if live_at_least_as_fresh {
+-                return Some(WalletTotal {
+-                    sats: lw.sats,
+-                    utxos: lw.utxos,
+-                    source: TotalSource::LiveWallet,
+-                    coverage_height: Some(lw.coverage_height),
+-                    coverage_hash: None,
+-                    partial: false,
+-                    index_height,
+-                    index_complete,
+-                    index_chain_tip,
+-                });
++    // (item 39) skip tier 1.5 entirely while a rebuild is mid-flight — the
++    // pair below answers, labelled — instead of blocking on the held mutex.
++    if !rebuilding {
++        if let Some(lw) = deps.wallet.live_wallet_total() {
++            if lw.utxos > 0 {
++                let live_at_least_as_fresh = pair_cov
++                    .as_ref()
++                    .map(|(cov_h, _)| {
++                        lw.coverage_height >= *cov_h
++                            // (item 39) COVERAGE-FLOOR gate: the view covers
++                            // [floor, tip]. A floor ABOVE the pair's coverage
++                            // (a rebuild that walked back only to the
++                            // kernel-window base) is missing the pair's era —
++                            // the 2026-11-22 DNS2 window served a hole-y
++                            // 1832.17 as balance_partial=false while the
++                            // live-index truth was 5545. A hole-y view must
++                            // fall to the labelled pair tier, never pose as
++                            // current.
++                            && lw.coverage_floor <= *cov_h
++                            // (item 39) GAP gate: the debris-tolerant seed
++                            // skips torn/missing blocks — a skip AT OR BELOW
++                            // the pair's coverage punches a hole INSIDE the
++                            // era the pair covers, so the view is not a
++                            // superset even with floor <= coverage. Refuse
++                            // (the labelled pair tier answers) unless every
++                            // skip sits strictly above it.
++                            && lw.first_skip_height
++                                .map_or(true, |fs| fs > *cov_h)
++                    })
++                    .unwrap_or(true);
++                if live_at_least_as_fresh {
++                    return Some(WalletTotal {
++                        sats: lw.sats,
++                        utxos: lw.utxos,
++                        source: TotalSource::LiveWallet,
++                        coverage_height: Some(lw.coverage_height),
++                        coverage_hash: None,
++                        partial: false,
++                        index_height,
++                        index_complete,
++                        index_chain_tip,
++                    });
++                }
+             }
+         }
+     }
+@@ -1396,7 +1456,11 @@ pub(crate) fn wallet_total(deps: &Deps) -> Option<WalletTotal> {
+     if let Some((cov_h, cov_hash)) = pair_cov {
+         let rows = deps.wallet.utxos();
+         let sats = rows.iter().map(|r| r.value_sats).sum::<i64>();
+-        let partial = match deps.wallet.balance() {
++        // (item 39) balance() locks the live-view mutex: mid-rebuild it would
++        // block for the whole seed. Skip the aggregate-agree probe and take
++        // the honest default — the pair mid-episode trails the tip, which is
++        // exactly what the default labels.
++        let partial = match (!rebuilding).then(|| deps.wallet.balance()).flatten() {
+             // an aggregate published by the SAME replay run (same coverage
+             // height AND hash) carries the pair's completeness proof
+             Some(b) if b.coverage_height == cov_h && b.coverage_hash == cov_hash => {
+@@ -5884,11 +5948,16 @@ mod tests {
+         /// the wallet's own live view answer (live_wallet_total) — None =
+         /// no ready live view
+         live: Option<LiveWalletTotal>,
++        /// (item 39) the in-process rebuild flag (live_view_rebuilding)
++        rebuilding: bool,
+     }
+     impl WalletProvider for TierWallet {
+         fn live_wallet_total(&self) -> Option<LiveWalletTotal> {
+             self.live.clone()
+         }
++        fn live_view_rebuilding(&self) -> bool {
++            self.rebuilding
++        }
+         fn balance(&self) -> Option<BalanceView> {
+             self.aggregate.map(|sats| {
+                 let (coverage_height, coverage_hash) =
+@@ -6066,6 +6135,7 @@ mod tests {
+                 aggregate: Some(stale_aggregate),
+                 rows: rows.clone(),
+                 live: None,
++                rebuilding: false,
+             };
+             let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
+             let listed: i64 = call(&d, "listunspent", json!([]))["result"]
+@@ -6123,7 +6193,7 @@ mod tests {
+             assert_eq!(info1["index_behind"], 0, "variant {v}");
+ 
+             // ---- TIER 3: NO pair — the aggregate is all there is ---------
+-            let w3 = TierWallet { pair: None, aggregate: Some(stale_aggregate), rows, live: None };
++            let w3 = TierWallet { pair: None, aggregate: Some(stale_aggregate), rows, live: None, rebuilding: false };
+             let d3 = Deps { tip: &t, wallet: &w3, blocks: &b, proxy: None, ops: None };
+             let lu3 = call(&d3, "listunspent", json!([]));
+             assert!(
+@@ -6161,6 +6231,7 @@ mod tests {
+             pair: Some((pair_h, tip_hash_at(pair_h))),
+             aggregate: Some(999_000_000), // must never win over the pair
+             live: None,
++            rebuilding: false,
+             rows: vec![
+                 UtxoRow {
+                     txid: format!("{:064x}", 1u64),
+@@ -6242,6 +6313,7 @@ mod tests {
+             pair: Some((pair_h, tip_hash_at(pair_h))),
+             aggregate: Some(999_000_000),
+             live: None,
++            rebuilding: false,
+             rows: vec![UtxoRow {
+                 txid: format!("{:064x}", 1u64),
+                 n: 0,
+@@ -6308,6 +6380,7 @@ mod tests {
+             pair: Some((pair_h, tip_hash_at(pair_h))),
+             aggregate: Some(250_000_000), // the frozen 250.0
+             live: None,
++            rebuilding: false,
+             rows: vec![
+                 UtxoRow {
+                     txid: format!("{:064x}", 1u64),
+@@ -6377,7 +6450,7 @@ mod tests {
+         assert_eq!(info_a["index_behind"], 0);
+ 
+         // the aggregate tier labels itself and stays flagged
+-        let w3 = TierWallet { pair: None, aggregate: Some(250_000_000), rows: vec![], live: None };
++        let w3 = TierWallet { pair: None, aggregate: Some(250_000_000), rows: vec![], live: None, rebuilding: false };
+         let d3 = Deps { tip: &t, wallet: &w3, blocks: &b, proxy: None, ops: None };
+         let info3 = call(&d3, "getwalletinfo", json!([]))["result"].clone();
+         assert_eq!(info3["balance_source"], "snapshot-aggregate");
+@@ -6386,6 +6459,176 @@ mod tests {
+         assert_eq!(info3["index_behind"], Value::Null);
+     }
+ 
++    // ------------------------------------------------------------------
++    // (item 39 AUTOHEAL-REBUILD-ARCHIVE-FALLBACK, 2026-11-22 DNS2 21:03Z)
++    // The tier-1.5 gate used to compare only the chain TIP, so a wallet
++    // live view rebuilt over [h2212919..tip] — floor ABOVE the pair's
++    // frozen coverage h2208645 — served a -3713 TRI hole as
++    // balance_partial=false, and mid-rebuild the surfaces stalled on the
++    // held mutex. The gate is now a superset test (floor <= pair
++    // coverage), and a mid-flight rebuild is skipped outright.
++    // ------------------------------------------------------------------
++
++    /// The exact DNS2 21:03Z shape: a rebuilt live view whose coverage
++    /// floor sits ABOVE the pair's frozen coverage is missing the pair's
++    /// era and must NOT pose as current — the labelled pair tier answers.
++    #[test]
++    fn item39_holey_live_view_falls_to_the_labelled_pair_tier() {
++        let t = StubTip;
++        let b = StubBlocks { ready: true, chain_hash: None };
++        let pair_h = TIP_H - 674; // the frozen archive pair's coverage
++        let w = TierWallet {
++            pair: Some((pair_h, tip_hash_at(pair_h))),
++            aggregate: None,
++            rows: vec![UtxoRow {
++                txid: format!("{:064x}", 1u64),
++                n: 0,
++                address: "TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7".into(),
++                script_hex: "76a91486cb0e9408ee60c88d72a126801a29904d7770df88ac".into(),
++                value_sats: 1_811_638_517, // the archive pair's total
++                height: pair_h - 10,
++                tx_time: 1_700_000_000,
++                prev_kind: "regular".into(),
++            }],
++            live: Some(LiveWalletTotal {
++                // the hole-y rebuilt view: fresh tip, but a floor ABOVE the
++                // pair's coverage — h2212919 vs h2208645 in the incident
++                sats: 1_832_171_267,
++                utxos: 215,
++                coverage_height: TIP_H,
++                coverage_floor: pair_h + 674,
++                first_skip_height: None,
++            }),
++            rebuilding: false,
++        };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(
++            info["balance_source"], "snapshot-pair",
++            "item 39: a view whose floor is above the pair's coverage is missing the pair's era — the pair tier answers, labelled"
++        );
++        assert_eq!(
++            info["balance_partial"], json!(true),
++            "item 39: the frozen pair trails the tip — labelled, never silent"
++        );
++        // the total is the PAIR figure, never the hole (1832.17 in the incident)
++        assert_eq!(info["balance_sats"], 1_811_638_517i64);
++        // and getbalance still equals the listed rows at this tier
++        let gb = call(&d, "getbalance", json!([]))["result"].as_f64().unwrap();
++        assert_eq!((gb * 1_000_000.0).round() as i64, 1_811_638_517i64);
++    }
++
++    /// A superset view (floor at-or-below the pair's coverage, tip at-or
++    /// above it) still wins tier 1.5 — the 2026-11-16 fix must not regress.
++    #[test]
++    fn item39_superset_live_view_still_wins_tier_15() {
++        let t = StubTip;
++        let b = StubBlocks { ready: true, chain_hash: None };
++        let pair_h = TIP_H - 674;
++        let w = TierWallet {
++            pair: Some((pair_h, tip_hash_at(pair_h))),
++            aggregate: None,
++            rows: vec![],
++            live: Some(LiveWalletTotal {
++                sats: 5_545_048_964,
++                utxos: 344,
++                coverage_height: TIP_H,
++                coverage_floor: 0, // genesis seed — whole history
++                first_skip_height: None,
++            }),
++            rebuilding: false,
++        };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(info["balance_source"], "wallet-live");
++        assert_eq!(info["balance_partial"], json!(false));
++        assert_eq!(info["balance_sats"], 5_545_048_964i64);
++    }
++
++    /// While the in-process rebuild holds the live-view mutex, tier 1.5 is
++    /// skipped even for a READY superset view: the surfaces answer from the
++    /// labelled pair tier instead of stalling for the whole replay.
++    #[test]
++    fn item39_rebuilding_flag_skips_tier_15_to_the_labelled_pair() {
++        let t = StubTip;
++        let b = StubBlocks { ready: true, chain_hash: None };
++        let pair_h = TIP_H - 674;
++        let w = TierWallet {
++            pair: Some((pair_h, tip_hash_at(pair_h))),
++            aggregate: None,
++            rows: vec![UtxoRow {
++                txid: format!("{:064x}", 1u64),
++                n: 0,
++                address: "TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7".into(),
++                script_hex: "76a91486cb0e9408ee60c88d72a126801a29904d7770df88ac".into(),
++                value_sats: 1_811_638_517,
++                height: pair_h - 10,
++                tx_time: 1_700_000_000,
++                prev_kind: "regular".into(),
++            }],
++            live: Some(LiveWalletTotal {
++                sats: 5_545_048_964,
++                utxos: 344,
++                coverage_height: TIP_H,
++                coverage_floor: 0,
++                first_skip_height: None,
++            }),
++            // mid-flight rebuild
++            rebuilding: true,
++        };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(
++            info["balance_source"], "snapshot-pair",
++            "item 39: mid-rebuild the live view is skipped, not served mid-swap"
++        );
++        assert_eq!(info["balance_partial"], json!(true));
++        assert_eq!(info["balance_sats"], 1_811_638_517i64);
++    }
++
++    /// A debris-skipped seed whose lowest unread height sits INSIDE the
++    /// pair's era is not a superset of it even with a passing floor: the
++    /// gap gate refuses it and the labelled pair tier answers (judge
++    /// round-1 blocker on this item — a false superset must be impossible).
++    #[test]
++    fn item39_seeded_gap_inside_pair_era_falls_to_the_labelled_pair() {
++        let t = StubTip;
++        let b = StubBlocks { ready: true, chain_hash: None };
++        let pair_h = TIP_H - 674;
++        let w = TierWallet {
++            pair: Some((pair_h, tip_hash_at(pair_h))),
++            aggregate: None,
++            rows: vec![UtxoRow {
++                txid: format!("{:064x}", 1u64),
++                n: 0,
++                address: "TNFvoQdbk7VDj8oZD1EbKkrPmZAEGh6Md7".into(),
++                script_hex: "76a91486cb0e9408ee60c88d72a126801a29904d7770df88ac".into(),
++                value_sats: 1_811_638_517,
++                height: pair_h - 10,
++                tx_time: 1_700_000_000,
++                prev_kind: "regular".into(),
++            }],
++            live: Some(LiveWalletTotal {
++                // genesis-floor view, but the seed skipped a torn block at
++                // h1500000 — INSIDE the pair's era [0, pair_h]
++                sats: 5_545_048_964,
++                utxos: 344,
++                coverage_height: TIP_H,
++                coverage_floor: 0,
++                first_skip_height: Some(1_500_000),
++            }),
++            rebuilding: false,
++        };
++        let d = Deps { tip: &t, wallet: &w, blocks: &b, proxy: None, ops: None };
++        let info = call(&d, "getwalletinfo", json!([]))["result"].clone();
++        assert_eq!(
++            info["balance_source"], "snapshot-pair",
++            "item 39: a seed gap inside the pair's era is not a superset — labelled pair answers"
++        );
++        assert_eq!(info["balance_partial"], json!(true));
++        assert_eq!(info["balance_sats"], 1_811_638_517i64);
++    }
++
+     /// A block applied while the wallet is being read must not tear the
+     /// answer. This test drives the PRODUCTION helper
+     /// (`addrindex::wallet_view`) against a real index while a writer thread

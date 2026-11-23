@@ -1,0 +1,320 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index 625188a..984b1bc 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -1150,8 +1150,31 @@ fn split_body_requeue_give_up(
+ /// orphan-requeue-poisoning fix: raced-and-lost branch bodies sat in the
+ /// queue BELOW a tip that had moved on, rotating getdata forever and
+ /// demoting every healthy peer for bodies it can never hold. Pure.
+-fn pending_entry_is_stale(height: u64, tip: u64, hash_in_chain: bool) -> bool {
+-    height <= tip || hash_in_chain
++///
++/// (item 36) DEFERRED-REORG GATE: while a header-selected branch adoption
++/// is pending, the height arm is SUSPENDED — the pending queue holds ONLY
++/// the selected branch's bodies (the Switch arm cleared it via item-28
++/// cancel-on-supersede), and the branch's fork body typically sits AT the
++/// pre-rollback tip height (live DNS3 2026-11-20: our own raced-and-lost
++/// mint occupied h2215652 while the heavier branch's first body wanted that
++/// exact slot; the height arm judged it canonically dead, never fetched it,
++/// its children could not validate, the rollback never completed and the
++/// re-fired Switch re-queued the same body — a deterministic ~30s
++/// drop/re-queue livelock, 27 min until the operator restart). During a
++/// pending reorg only the in_chain arm may drop; the pending record
++/// completes or expires (PENDING_ADOPTION_TTL) exactly when heights become
++/// honest again, resuming the byte-identical item-35 gate.
++fn pending_entry_is_stale(
++    height: u64,
++    tip: u64,
++    hash_in_chain: bool,
++    reorg_pending: bool,
++) -> bool {
++    if reorg_pending {
++        hash_in_chain
++    } else {
++        height <= tip || hash_in_chain
++    }
+ }
+ 
+ /// (item 23, r2 judge) A REQUESTED block that does not extend the tip is
+@@ -1571,6 +1594,26 @@ fn pending_adoption_for(hash: &Hash, now: Instant) -> Option<PendingAdoption> {
+     g.clone()
+ }
+ 
++/// (item 36) A live (unexpired) PendingAdoption exists. The dispatch-pop
++/// stale gate reads this to suspend its height arm (see
++/// pending_entry_is_stale): during a deferred reorg the pending queue holds
++/// only the selected branch's bodies, so no height in it is canonically
++/// dead. An expired record is dropped here exactly as pending_adoption_for
++/// drops it.
++fn pending_adoption_live(now: Instant) -> bool {
++    let mut g = match PENDING_ADOPTION.lock() {
++        Ok(g) => g,
++        Err(_) => return false,
++    };
++    match g.as_ref() {
++        Some(p) if now.duration_since(p.since) <= PENDING_ADOPTION_TTL => true,
++        _ => {
++            *g = None;
++            false
++        }
++    }
++}
++
+ /// getheaders locator spanning our whole window: the tip first, then every
+ /// RECON_LOCATOR_STEP-th entry down to the base. A peer that never saw our
+ /// tip (a fork we hold but it does not) can still find an in-window common
+@@ -15090,11 +15133,25 @@ pub fn main_args(argv: &[String]) -> i32 {
+             {
+                 let mut stg = st_shared.lock().unwrap();
+                 let tip_dispatch = stg.tip_height;
++                // (item 36) a live deferred reorg suspends the height arm of
++                // the stale gate below: the pending queue holds ONLY the
++                // selected branch's bodies (item-28 cancel-on-supersede
++                // cleared everything else) and its fork body sits AT the
++                // pre-rollback tip height — dropping it starves the rollback
++                // forever (live DNS3 2026-11-20: 32+ drops of the same fork
++                // body over 27 min, ~30s cadence). Without a live pending
++                // record the gate is byte-identical to item 35.
++                let reorg_pending = pending_adoption_live(Instant::now());
+                 while batch.len() < want {
+                     match pending_from_headers.pop_front() {
+                         Some((hash, height)) => {
+                             let in_chain = stg.entry_by_hash(&hash).is_some();
+-                            if pending_entry_is_stale(height, tip_dispatch, in_chain) {
++                            if pending_entry_is_stale(
++                                height,
++                                tip_dispatch,
++                                in_chain,
++                                reorg_pending,
++                            ) {
+                                 body_tries.remove(&hash);
+                                 stg.pending_headers.remove(&hash);
+                                 stale_dropped.push((hash, height));
+@@ -21204,26 +21261,222 @@ mod tests {
+     /// (item 35) Stale queued entries: at/below tip (canonically dead — the
+     /// canonical block at that height is a different hash) or already in
+     /// chain (body arrived via another route). Above-tip unheld is live.
++    /// (item 36) With NO pending adoption (reorg_pending=false) these
++    /// verdicts are byte-identical to the item-35 gate.
+     #[test]
+     fn pending_entry_stale_below_tip_or_already_in_chain() {
+         // the incident shape: dead-branch bodies at h2215593/h2215602 with
+         // the canonical tip already at h2215607
+-        assert!(pending_entry_is_stale(2215593, 2215607, false));
+-        assert!(pending_entry_is_stale(2215602, 2215607, false));
++        assert!(pending_entry_is_stale(2215593, 2215607, false, false));
++        assert!(pending_entry_is_stale(2215602, 2215607, false, false));
+         assert!(
+-            pending_entry_is_stale(2215607, 2215607, false),
++            pending_entry_is_stale(2215607, 2215607, false, false),
+             "an at-tip entry is stale: the chain holds a DIFFERENT block there"
+         );
+         assert!(
+-            pending_entry_is_stale(2215608, 2215607, true),
++            pending_entry_is_stale(2215608, 2215607, true, false),
+             "an already-in-chain entry is stale: refetch is waste"
+         );
+         assert!(
+-            !pending_entry_is_stale(2215608, 2215607, false),
++            !pending_entry_is_stale(2215608, 2215607, false, false),
+             "above-tip and unheld is a LIVE request"
+         );
+     }
+ 
++    /// (item 36) DEFERRED-REORG STALE-DROP GATE: with a live pending
++    /// adoption the height arm is SUSPENDED — the branch's fork body sits AT
++    /// the pre-rollback tip height and is canonically ALIVE (the rollback
++    /// will put the chain onto it); only an already-in-chain entry may drop.
++    /// Without a pending adoption the item-35 verdicts hold unchanged.
++    #[test]
++    fn deferred_reorg_suspends_the_height_arm_of_the_stale_gate() {
++        // the DNS3 incident slot: our own raced-and-lost mint occupied
++        // h2215652 (the pre-rollback tip) and the heavier branch's first
++        // body wanted that exact height with a different hash
++        let fork_body_h = 2215652u64;
++        let tip = 2215652u64;
++        assert!(
++            !pending_entry_is_stale(fork_body_h, tip, false, true),
++            "the branch's fork body at the pre-rollback tip height must dispatch as getdata, not stale-drop (the item-36 livelock)"
++        );
++        assert!(
++            !pending_entry_is_stale(2215653, tip, false, true),
++            "branch children above the tip stay live as before"
++        );
++        assert!(
++            pending_entry_is_stale(fork_body_h, tip, true, true),
++            "already-in-chain stays waste even mid-reorg"
++        );
++        assert!(
++            !pending_entry_is_stale(2215653, tip, false, false),
++            "no-pending above-tip verdicts unchanged"
++        );
++    }
++
++    /// (item 36) THE DNS3 REPLAY, live 2026-11-20 00:30-00:57Z: the node's
++    /// own mint LOST an equal-work race; fork choice switched to the heavier
++    /// branch on headers with the rollback DEFERRED, and the branch's fork
++    /// body sits AT the pre-rollback tip height. The dispatch-pop stale gate
++    /// must let it through (a live pending adoption suspends the height
++    /// arm), the body must validate against the fork ancestor, and the
++    /// rollback must COMPLETE with the tip advancing onto the branch.
++    /// Pre-fix this replay dropped the same fork body every ~30s for 27 min
++    /// (the give-up cap never fired: each drop erased the attempt memory).
++    #[test]
++    fn deferred_reorg_fork_body_at_tip_dispatches_and_the_rollback_completes() {
++        let _live_store_serial = lock_live_store_tests();
++        clear_pending_adoption();
++        // our chain: tip h105 = the LOST mint's slot (the race shape: the
++        // branch will put a DIFFERENT hash at this exact height)
++        let mut stg = synthetic_chain(100, 105);
++        let our_tip = stg.tip_hash;
++        let mut recon = ReconAcc::default();
++        let mut pend: VecDeque<(Hash, u64)> = VecDeque::new();
++        let mut stats = Stats::default();
++        let rpc = Rpc::new("127.0.0.1", 1, "", "");
++
++        // the winner branch: 3 blocks forking at h104, same bits → strictly
++        // heavier (3 vs our 1 block above the fork); its FIRST body lands at
++        // h105 == our tip height
++        let fork_hash = stg.entry_abs(104).unwrap().hash;
++        let mut prev = fork_hash;
++        let mut branch: Vec<Block> = Vec::new();
++        for i in 0..3u8 {
++            let time = 1_700_000_000u32 + ((105 + i as u64) * 600) as u32;
++            let hdr = mk_body_block(prev, 0x60 + i, 0x2000_ffff, time);
++            prev = hdr.hash();
++            branch.push(hdr);
++        }
++        assert_ne!(branch[0].hash(), our_tip, "equal-height different-hash");
++
++        match recon_intake(&mut stg, &branch, &mut recon, &mut pend, &mut stats) {
++            ReconOutcome::Switched { fork, adopted } => {
++                assert_eq!(fork, 104);
++                assert_eq!(adopted, 3);
++            }
++            other => panic!("expected Switched, got {:?}", other),
++        }
++        assert_eq!(stg.tip_height, 105, "rollback still deferred");
++        assert_eq!(stg.tip_hash, our_tip);
++
++        // a live pending adoption exists and the queue head is the fork body
++        // AT our tip height with an unheld hash — the exact incident slot.
++        assert!(
++            pending_adoption_live(Instant::now()),
++            "the header-only Switch must be pending"
++        );
++        let (fh, fht) = pend[0];
++        assert_eq!(fht, 105, "the fork body is queued AT the tip height");
++        assert!(stg.entry_by_hash(&fh).is_none(), "not in chain yet");
++        // the dispatch pop consumes the fork body (it passes the gate and is
++        // dispatched as getdata — the served body arrives below)
++        assert_eq!(pend.remove(0), Some((fh, fht)));
++        // THE FIX: the dispatch gate reads a live pending record and lets the
++        // fork body through as getdata…
++        let reorg_pending = pending_adoption_live(Instant::now());
++        assert!(
++            !pending_entry_is_stale(fht, stg.tip_height, false, reorg_pending),
++            "the fork body must dispatch, not stale-drop"
++        );
++        // …where the pre-fix item-35 gate judged this exact slot canonically
++        // dead (32+ drops, the 27-min livelock):
++        assert!(pending_entry_is_stale(fht, stg.tip_height, false, false));
++
++        // the peer serves the fork body: the deferred-adoption probe
++        // validates it against the fork ancestor (the main loop's exact
++        // live:false shape), the rollback runs, and the body advances the
++        // new tip.
++        let body = branch[0].clone();
++        let prev_entry = stg.entry_abs(104).cloned().unwrap();
++        assert_eq!(prev_entry.hash, body.prev_hash);
++        let header = stg.pending_headers.get(&fh).cloned();
++        let probe = validate_block(
++            &stg,
++            &rpc,
++            &mut stats,
++            &body,
++            &BlockCtx {
++                height_abs: 105,
++                header: header.as_ref(),
++                prev_entry,
++                live: false,
++            },
++        )
++        .expect("the winner branch's first body must validate against the fork ancestor");
++        let _ = probe;
++        while stg.tip_height > 104 {
++            rollback_tip(&mut stg).expect("rollback to the fork point");
++        }
++        clear_pending_adoption();
++        let header = stg.pending_headers.get(&fh).cloned();
++        let outcome = validate_block(
++            &stg,
++            &rpc,
++            &mut stats,
++            &body,
++            &BlockCtx {
++                height_abs: stg.tip_height + 1,
++                header: header.as_ref(),
++                prev_entry: stg.entries.last().cloned().unwrap(),
++                live: true,
++            },
++        )
++        .expect("post-rollback live validation of the fork body");
++        advance_with_block(&mut stg, &rpc, &mut stats, &body, &outcome)
++            .expect("adopted body must advance the tip");
++        assert_eq!(stg.tip_height, 105);
++        assert_eq!(
++            stg.tip_hash,
++            branch[0].hash(),
++            "tip advanced onto the branch"
++        );
++        assert!(
++            !pending_adoption_live(Instant::now()),
++            "the completed rollback consumed the pending record"
++        );
++
++        // the branch children drain through the normal pipeline (h106..h107)
++        // — no entry may stale-drop while the branch is being adopted
++        let bodies: HashMap<Hash, Block> =
++            branch.iter().map(|b| (b.hash(), b.clone())).collect();
++        for (hash, height) in pend.drain(..) {
++            assert!(
++                !pending_entry_is_stale(
++                    height,
++                    stg.tip_height,
++                    stg.entry_by_hash(&hash).is_some(),
++                    pending_adoption_live(Instant::now()),
++                ),
++                "no branch child may stale-drop while draining"
++            );
++            let b = bodies.get(&hash).unwrap();
++            let header = stg.pending_headers.remove(&hash);
++            let outcome = validate_block(
++                &stg,
++                &rpc,
++                &mut stats,
++                b,
++                &BlockCtx {
++                    height_abs: stg.tip_height + 1,
++                    header: header.as_ref(),
++                    prev_entry: stg.entries.last().cloned().unwrap(),
++                    live: true,
++                },
++            )
++            .expect("branch child must validate");
++            advance_with_block(&mut stg, &rpc, &mut stats, b, &outcome)
++                .expect("branch child must advance the tip");
++            assert_eq!(stg.tip_height, height);
++        }
++        assert_eq!(
++            stg.tip_hash,
++            branch[2].hash(),
++            "the full branch adopted"
++        );
++        assert!(stg.pending_headers.is_empty());
++        clear_pending_adoption();
++    }
++
+     /// (item 35) ORPHAN-CLASS DEMOTE SCOPING: unserved rounds on a
+     /// canonically dead body (height <= tip) never credit a peer's miss
+     /// counter; the same round's LIVE body still does, and the live label

@@ -166,6 +166,59 @@ pub fn bridge_pushed_tip() -> u64 {
 pub fn set_bridge_pushed_tip(t: u64) {
     BRIDGE_PUSHED_TIP.store(t, std::sync::atomic::Ordering::SeqCst);
 }
+
+/// (fused30) The embedded node's in-process RPC dispatch, registered by the
+/// node's startup right where the HTTP surface's providers are constructed.
+/// The GUI's own client (gui::rpc_client) routes its calls through this when
+/// the node runs embedded — the SAME providers and the SAME `rpc::handle_body`
+/// the loopback listener serves, with no socket, no per-boot token handoff,
+/// and no 401 window. This closes the "daemon answers but the GUI cannot
+/// authenticate" gap that starved the balance card (sami-laptop 2026-11-23:
+/// the card read "Not connected yet" + 0.000 TRI while the node's own RPC
+/// served getbalance 250.0 externally — the HTTP path 401'd on a capability
+/// token the warmup never handed over).
+/// type of the in-process dispatch closure (public so gui::rpc_client and
+/// tests can register one).
+pub type LocalRpcFn = Box<
+    dyn Fn(&str, &[serde_json::Value]) -> Result<serde_json::Value, String> + Send + Sync,
+>;
+static LOCAL_RPC: std::sync::RwLock<Option<LocalRpcFn>> = std::sync::RwLock::new(None);
+
+/// Register the in-process dispatch closure (the node startup calls this
+/// once; tests register stubs to pin the routing).
+pub fn set_local_rpc(f: LocalRpcFn) {
+    if let Ok(mut g) = LOCAL_RPC.write() {
+        *g = Some(f);
+    }
+}
+
+/// Drop the registration — tests only (the node registers once per
+/// process; sibling tests must not route through a stale stub).
+#[cfg(test)]
+pub fn clear_local_rpc() {
+    if let Ok(mut g) = LOCAL_RPC.write() {
+        *g = None;
+    }
+}
+
+/// Whether the in-process RPC dispatcher is live (the embedded node's RPC
+/// stack is up). The GUI's rpc_call checks this to route locally.
+pub fn local_rpc_ready() -> bool {
+    LOCAL_RPC.read().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// One JSON-RPC call against the embedded node, in-process. Error strings
+/// carry the "rpc error: …" prefix so the GUI client's humanizer treats
+/// them exactly like the wire answers.
+pub fn local_rpc(method: &str, params: &[serde_json::Value]) -> Result<serde_json::Value, String> {
+    let guard = LOCAL_RPC
+        .read()
+        .map_err(|_| "local rpc: dispatcher state poisoned".to_string())?;
+    let Some(f) = guard.as_ref() else {
+        return Err("local rpc: no embedded node".into());
+    };
+    f(method, params)
+}
 /// supervisor-provided file the embedded run TEEs its log() lines into
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -8360,22 +8413,33 @@ impl WalletLive {
         let mut skipped = 0usize;
         let mut first_skip: Option<u64> = None;
         let mut last_skip = 0u64;
+        // (fused30) the chain anchor — the hash of the LAST block phase 1
+        // delivered. Phase 2 chain-checks every index-resolved body against
+        // it so a raced or stale index row can never splice an orphan into
+        // the wallet's view.
+        let mut last_hash: Option<Hash> = None;
         let t0 = std::time::Instant::now();
         loop {
             let step = match walker.step() {
                 Ok(s) => s,
-                Err(e) => {
+                Err(_e) => {
                     // a hard frame error is a hole, not a dead wallet — and
                     // the recovery's delivered block MUST be applied (a
-                    // discard here would shift every later height by one)
+                    // discard here would shift every later height by one).
+                    // When the debris resync finds no replacement the
+                    // CONTIGUOUS archive is over: fall to phase 2 below —
+                    // the store's index can still serve the kernel window
+                    // above the hole (this is the fleet's normal shape: the
+                    // archive lags the chased tip, so the window's frames
+                    // do not chain onto the archive's last block).
                     skipped += 1;
                     if first_skip.is_none() {
                         first_skip = Some(walker.height() as u64);
                     }
                     last_skip = walker.height() as u64;
-                    let _ = e;
-                    match walker.step_past_stale()? {
-                        crate::replay::Step::Block(h, block, _hash) => {
+                    match walker.step_past_stale() {
+                        Ok(crate::replay::Step::Block(h, block, hash)) => {
+                            last_hash = Some(hash);
                             let h = h as u64;
                             if h >= base && h <= tip {
                                 wl.apply_block(&block, h);
@@ -8384,13 +8448,14 @@ impl WalletLive {
                                 break;
                             }
                         }
-                        _ => break, // no replacement found: the archive ends here
+                        _ => break, // contiguous chain over — phase 2 (resync budget exhausted counts here)
                     }
                     continue;
                 }
             };
             match step {
-                crate::replay::Step::Block(h, block, _hash) => {
+                crate::replay::Step::Block(h, block, hash) => {
+                    last_hash = Some(hash);
                     let h = h as u64;
                     if h < base {
                         continue; // below the base: the snapshot owns it
@@ -8408,8 +8473,9 @@ impl WalletLive {
                     last_skip = h as u64;
                     // the chain's own block for this height: found and
                     // delivered as the next step
-                    match walker.step_past_stale()? {
-                        crate::replay::Step::Block(h, block, _hash) => {
+                    match walker.step_past_stale() {
+                        Ok(crate::replay::Step::Block(h, block, hash)) => {
+                            last_hash = Some(hash);
                             let h = h as u64;
                             if h >= base && h <= tip {
                                 wl.apply_block(&block, h);
@@ -8418,14 +8484,48 @@ impl WalletLive {
                                 break;
                             }
                         }
-                        _ => break, // no replacement: the archive ends here
+                        _ => break, // contiguous chain over — phase 2
                     }
                 }
                 crate::replay::Step::Eof => break,
             }
         }
+        // (fused30) PHASE 2 — the store-index walk for what the contiguous
+        // archive could not deliver. A store whose archive lags the tip has
+        // an ARCHIVE COVERAGE HOLE (the fleet's normal shape: bodies above
+        // the hole are the kernel window's frames, which chain among
+        // themselves but NOT onto the archive's last block). The old
+        // per-height seed crossed that hole by construction; the sequential
+        // walk alone could not — it died in `resync: frame budget
+        // exhausted`, the wallet live view NEVER became ready, and the GUI
+        // balance froze at 0.000 while RPC getbalance served the truth
+        // (sami-laptop/sami-pc 2026-11-23). Walk [from..=tip] through the
+        // store's index: missing heights are the hole (counted — the
+        // tier-1.5 gap gate reads first_skip), bodies are chain-checked
+        // against the anchor, and the first body after a run of missing
+        // heights re-anchors the view onto the window's own chain.
+        let from = walker.height() as u64;
+        if from <= tip {
+            // Phase 2 needs per-height resolution: refuse (retry in 15s by
+            // the stake tick) while the index warms, instead of counting a
+            // warming index as one giant hole.
+            match store.status() {
+                tri7_core::blockindex::StoreStatus::Ready { heights_ok: true, .. } => {}
+                _ => {
+                    return Err(format!(
+                        "wallet live seed: block index not ready for the window above h{from} — retrying"
+                    ));
+                }
+            }
+            let lookup = |h: u64| -> Option<(Block, Hash)> {
+                store.block_by_height(h).ok().flatten().map(|hit| (hit.block, hit.hash))
+            };
+            Self::seed_tail_by_index(
+                &mut wl, &lookup, from, tip, last_hash, &mut skipped, &mut first_skip, &mut last_skip,
+            );
+        }
         log(&format!(
-            "wallet live seed: sequential walk done in {:.1}s ({} frame skips, first h{}, last h{}{})",
+            "wallet live seed: sequential walk + index window done in {:.1}s ({} skipped height(s), first h{}, last h{}{})",
             t0.elapsed().as_secs_f64(),
             skipped,
             first_skip.unwrap_or(0),
@@ -8441,6 +8541,60 @@ impl WalletLive {
             wl.first_skip = first_skip;
         }
         Ok(wl)
+    }
+
+    /// (fused30) Phase-2 tail walk for [`WalletLive::seed`]: heights
+    /// `from..=tip` resolved through the store's INDEX, not the file's frame
+    /// order — this is how the seed crosses an archive coverage hole. The
+    /// `lookup` returns the chain's body for a height, or None (the hole).
+    /// Rules, in order:
+    /// - a body must continue the anchor (the last applied block's hash);
+    /// - a body that neither chains nor follows a run of missing heights is
+    ///   a stale or raced index row — counted as a skip, NEVER applied;
+    /// - the FIRST body after a run of missing heights re-anchors: the
+    ///   kernel window's own chain begins there, and the hole's heights
+    ///   were already counted as skips.
+    /// Missing heights are counted (first/last skip) so the tier-1.5 pair
+    /// gate still sees the hole's extent on the view.
+    fn seed_tail_by_index(
+        wl: &mut WalletLive,
+        lookup: &dyn Fn(u64) -> Option<(Block, Hash)>,
+        from: u64,
+        tip: u64,
+        anchor: Option<Hash>,
+        skipped: &mut usize,
+        first_skip: &mut Option<u64>,
+        last_skip: &mut u64,
+    ) {
+        let mut anchor = anchor;
+        let mut ran_gap = false;
+        let mut note_skip = |h: u64, skipped: &mut usize, first_skip: &mut Option<u64>, last_skip: &mut u64| {
+            *skipped += 1;
+            if first_skip.is_none() {
+                *first_skip = Some(h);
+            }
+            *last_skip = h;
+        };
+        for h in from..=tip {
+            match lookup(h) {
+                None => {
+                    ran_gap = true;
+                    note_skip(h, skipped, first_skip, last_skip);
+                }
+                Some((block, hash)) => {
+                    let chains = anchor.map(|a| block.prev_hash == a).unwrap_or(true);
+                    if chains || ran_gap {
+                        if h >= wl.base && h <= tip {
+                            wl.apply_block(&block, h);
+                        }
+                        anchor = Some(hash);
+                        ran_gap = false;
+                    } else {
+                        note_skip(h, skipped, first_skip, last_skip);
+                    }
+                }
+            }
+        }
     }
 
     /// Apply one accepted block: remove spent prevouts (all non-coinbase
@@ -15098,37 +15252,100 @@ pub fn main_args(argv: &[String]) -> i32 {
                 "rpc: token file write failed ({e}) — the GUI client will fail auth until it can read it"
             )),
         }
+        // (fused30) IN-PROCESS RPC: hoist the provider Arcs so the SAME
+        // providers serve BOTH the loopback HTTP listener AND the GUI's
+        // in-process client (gui::rpc_client routes through
+        // node_embedded::local_rpc when the node is embedded) — one
+        // dispatcher, one set of facts, no token handoff to race.
+        let tip_prov: Arc<dyn rpc::TipProvider> = Arc::new(LiveTip {
+            st: Arc::clone(&st_shared),
+            started: Instant::now(),
+            last_write: Arc::clone(&last_write_shared),
+            peers: Arc::clone(&peers_shared),
+            mirror: Arc::clone(&tip_mirror),
+            listen_port: cfg.listen_port,
+        });
+        let wallet_prov: Arc<dyn rpc::WalletProvider> = Arc::new(LiveWalletProvider {
+            snap: std::sync::RwLock::new(Arc::new(SnapshotWallet {
+                balances: balances_snap,
+                utxos: utxos_snap,
+                extra: Arc::clone(&wallet_extras),
+                pubkeys: Arc::clone(&wallet_pubkeys),
+                labels: Arc::clone(&wallet_labels),
+            })),
+            snap_sig: std::sync::Mutex::new(None),
+            wl: Arc::clone(&wl_shared),
+            st: Arc::clone(&st_shared),
+            state_dir: cfg.state_dir.clone(),
+            balances_path: cfg.balances_path.clone(),
+            utxos_path: cfg.wallet_utxos_path.clone(),
+            rich_cache: Arc::new(Mutex::new(tri7_core::rpc::RichListCache::new())),
+        });
+        let blocks_prov: Arc<dyn rpc::BlockDataProvider> = Arc::new(StoreAdapter {
+            store: Arc::clone(&store),
+            tip: Arc::clone(&st_shared),
+            mirror: Arc::clone(&tip_mirror),
+            recent: Arc::clone(&recent_shared),
+        });
+        let ops_prov: Arc<dyn rpc::NodeOps> = Arc::new(OpsAdapter {
+            st: Arc::clone(&st_shared),
+            mirror: Arc::clone(&tip_mirror),
+            extras: Arc::clone(&wallet_extras),
+            pubkeys: Arc::clone(&wallet_pubkeys),
+            wl: Arc::clone(&wl_shared),
+            pool: Arc::clone(&pool_shared),
+            stake_st: Arc::clone(&stake_st_shared),
+            announce: Arc::clone(&announce_shared),
+            peers_table: Arc::clone(&peers_table),
+            peer_ctl: Arc::clone(&peer_ctl_shared),
+            seeds: cfg
+                .peers
+                .iter()
+                .map(|t| (t.endpoint(), t.port))
+                .collect(),
+            socks: cfg.socks.clone(),
+            i2p_socks: cfg.i2p_socks.clone(),
+            smsg: smsg_engine.clone(),
+            conf_path: cfg.conf_path.clone(),
+            wallet_path: cfg.wallet_path.clone(),
+            state_dir: cfg.state_dir.clone(),
+            store: Some(Arc::clone(&store)),
+            events: tri7_core::events::live_hub_or_init(),
+        });
+        {
+            // the in-process dispatch: build a Deps over the SAME Arcs the
+            // HTTP surface holds and run the SAME handle_body
+            let tip_d = Arc::clone(&tip_prov);
+            let wallet_d = Arc::clone(&wallet_prov);
+            let blocks_d = Arc::clone(&blocks_prov);
+            let ops_d: Option<Arc<dyn rpc::NodeOps>> = Some(Arc::clone(&ops_prov));
+            set_local_rpc(Box::new(move |method, params| {
+                let deps = rpc::Deps {
+                    tip: tip_d.as_ref(),
+                    wallet: wallet_d.as_ref(),
+                    blocks: blocks_d.as_ref(),
+                    // the GUI's allow list carries no proxy-only verbs; the
+                    // embedded surface is the native one
+                    proxy: None,
+                    ops: ops_d.as_deref(),
+                };
+                let body = serde_json::json!({
+                    "jsonrpc": "1.0", "id": "local", "method": method, "params": params,
+                })
+                .to_string();
+                let (_status, out) = rpc::handle_body(&deps, &body);
+                let v: serde_json::Value = serde_json::from_str(&out)
+                    .map_err(|e| format!("local rpc json: {e}"))?;
+                if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
+                    return Err(format!("rpc error: {e}"));
+                }
+                Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
+            }));
+        }
         let deps = Arc::new(rpc::ServerDeps {
-            tip: Arc::new(LiveTip {
-                st: Arc::clone(&st_shared),
-                started: Instant::now(),
-                last_write: Arc::clone(&last_write_shared),
-                peers: Arc::clone(&peers_shared),
-                mirror: Arc::clone(&tip_mirror),
-                listen_port: cfg.listen_port,
-            }),
-            wallet: Arc::new(LiveWalletProvider {
-                snap: std::sync::RwLock::new(Arc::new(SnapshotWallet {
-                    balances: balances_snap,
-                    utxos: utxos_snap,
-                    extra: Arc::clone(&wallet_extras),
-                    pubkeys: Arc::clone(&wallet_pubkeys),
-                    labels: Arc::clone(&wallet_labels),
-                })),
-                snap_sig: std::sync::Mutex::new(None),
-                wl: Arc::clone(&wl_shared),
-                st: Arc::clone(&st_shared),
-                state_dir: cfg.state_dir.clone(),
-                balances_path: cfg.balances_path.clone(),
-                utxos_path: cfg.wallet_utxos_path.clone(),
-                rich_cache: Arc::new(Mutex::new(tri7_core::rpc::RichListCache::new())),
-            }),
-            blocks: Arc::new(StoreAdapter {
-                store: Arc::clone(&store),
-                tip: Arc::clone(&st_shared),
-                mirror: Arc::clone(&tip_mirror),
-                recent: Arc::clone(&recent_shared),
-            }),
+            tip: tip_prov,
+            wallet: wallet_prov,
+            blocks: blocks_prov,
             proxy: if cfg.no_proxy {
                 None // cutover: legacy daemon retired — proxy-only methods lose service
             } else {
@@ -15140,31 +15357,9 @@ pub fn main_args(argv: &[String]) -> i32 {
                     timeout: Duration::from_secs(cfg.proxy_timeout_secs),
                 }))
             },
-            ops: Some(Arc::new(OpsAdapter {
-                st: Arc::clone(&st_shared),
-                mirror: Arc::clone(&tip_mirror),
-                extras: Arc::clone(&wallet_extras),
-                pubkeys: Arc::clone(&wallet_pubkeys),
-                wl: Arc::clone(&wl_shared),
-                pool: Arc::clone(&pool_shared),
-                stake_st: Arc::clone(&stake_st_shared),
-                announce: Arc::clone(&announce_shared),
-                peers_table: Arc::clone(&peers_table),
-                peer_ctl: Arc::clone(&peer_ctl_shared),
-                seeds: cfg
-                    .peers
-                    .iter()
-                    .map(|t| (t.endpoint(), t.port))
-                    .collect(),
-                socks: cfg.socks.clone(),
-                i2p_socks: cfg.i2p_socks.clone(),
-                smsg: smsg_engine.clone(),
-                conf_path: cfg.conf_path.clone(),
-                wallet_path: cfg.wallet_path.clone(),
-                state_dir: cfg.state_dir.clone(),
-                store: Some(Arc::clone(&store)),
-                events: tri7_core::events::live_hub_or_init(),
-            })),
+            // (fused30) the SAME hoisted Arc the in-process dispatch holds —
+            // one OpsAdapter, two surfaces.
+            ops: Some(ops_prov),
             http: rpc::HttpServerConfig {
                 debug: cfg.rpc_debug,
                 max_body: cfg.rpc_max_body,
@@ -24838,6 +25033,133 @@ addnode=host:notaport
     /// chain-slot facts — the autoheal rebuild fixture. Filler blocks carry
     /// only an empty coinbase (value 0 + empty script → never enters a live
     /// map), so the replay holds exactly ONE owned coin.
+    #[test]
+    fn seed_tail_by_index_crosses_the_archive_coverage_hole() {
+        // (fused30) THE regression test for the GUI zero-balance freeze:
+        // phase 2 of the wallet seed walks [from..=tip] through the store
+        // index and must cross a coverage hole (heights with no body) onto
+        // the kernel window's own chain and apply its coins. The hole is
+        // COUNTED (first/last skip, tier-1.5 gap gate) — never fatal — and
+        // a body that neither chains onto the anchor nor follows a gap is
+        // a stale index row: counted, never applied.
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("seed-tail-gap");
+        let _ = secret;
+        let pubkey = pubkey.to_vec();
+        let script = tri7_core::spend::script_pubkey_p2pk(&pubkey).unwrap();
+        let coin = 7 * tri7_core::consensus::COIN;
+        let mk = |h: u64, prev: Hash, pay: bool| -> Block {
+            let mut b = Block {
+                version: 2,
+                prev_hash: prev,
+                merkle_root: [0u8; 32],
+                time: 1_700_000_000u32 + (h * 600) as u32,
+                bits: 0x2000_ffff,
+                nonce: 7,
+                vtx: vec![tri7_core::legacy::Tx {
+                    version: 1,
+                    time: 0,
+                    vin: vec![tri7_core::legacy::Vin {
+                        prev_hash: [0u8; 32],
+                        prev_n: u32::MAX,
+                        script_sig: vec![0x02],
+                        sequence: u32::MAX,
+                    }],
+                    vout: vec![tri7_core::legacy::Vout {
+                        value: if pay { coin } else { 0 },
+                        script_pubkey: if pay { script.clone() } else { vec![] },
+                    }],
+                    locktime: 0,
+                }],
+                block_sig: vec![],
+            };
+            b.merkle_root = b.merkle_root();
+            b
+        };
+        // the chain h0..=h10 exists; phase 1 delivered h0..=h4 (anchor
+        // hashes[4]); h5..=h7 are the hole; h8..=h10 are the kernel
+        // window's own chain (h8 chains onto the hole's h7, NOT onto h4);
+        // h9 pays the wallet.
+        let mut chain: Vec<Block> = Vec::new();
+        let mut hashes: Vec<Hash> = Vec::new();
+        let mut prev = [0u8; 32];
+        for h in 0..=10u64 {
+            let b = mk(h, prev, h == 9);
+            prev = b.hash();
+            hashes.push(b.hash());
+            chain.push(b);
+        }
+        let lookup = |h: u64| -> Option<(Block, Hash)> {
+            match h {
+                8..=10 => Some((chain[h as usize].clone(), hashes[h as usize])),
+                _ => None, // 5..=7: the coverage hole
+            }
+        };
+        let mut wl = wallet_live_with(&[pubkey.clone()], vec![]);
+        let mut skipped = 0usize;
+        let mut first_skip: Option<u64> = None;
+        let mut last_skip = 0u64;
+        WalletLive::seed_tail_by_index(
+            &mut wl,
+            &lookup,
+            5,
+            10,
+            Some(hashes[4]),
+            &mut skipped,
+            &mut first_skip,
+            &mut last_skip,
+        );
+        assert_eq!(
+            first_skip, Some(5),
+            "the hole's lowest height is the first skip"
+        );
+        assert_eq!(last_skip, 7);
+        assert_eq!(skipped, 3);
+        let ours: i64 = wl
+            .live
+            .values()
+            .filter(|o| wl.owns(o))
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(ours, coin, "the window's h9 coin applied across the hole");
+
+        // A stale/raced index row above the window: it does NOT chain onto
+        // hashes[10] and follows no gap — counted as a skip, its coin NEVER
+        // applied.
+        let stale = mk(11, [0x0Bu8; 32], true); // prev != hashes[10]
+        let stale_hash = stale.hash();
+        let lookup2 = |h: u64| -> Option<(Block, Hash)> {
+            if h == 11 {
+                Some((stale.clone(), stale_hash))
+            } else {
+                lookup(h)
+            }
+        };
+        let mut wl2 = wallet_live_with(&[pubkey], vec![]);
+        let mut skipped2 = 0usize;
+        let mut first_skip2: Option<u64> = None;
+        let mut last_skip2 = 0u64;
+        WalletLive::seed_tail_by_index(
+            &mut wl2,
+            &lookup2,
+            5,
+            11,
+            Some(hashes[4]),
+            &mut skipped2,
+            &mut first_skip2,
+            &mut last_skip2,
+        );
+        assert_eq!(first_skip2, Some(5));
+        assert_eq!(last_skip2, 11, "the stale row itself is the last skip");
+        assert_eq!(skipped2, 4);
+        let ours2: i64 = wl2
+            .live
+            .values()
+            .filter(|o| wl2.owns(o))
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(ours2, coin, "the stale row's coin was not applied");
+    }
+
     fn autoheal_store_with_honest_coin(
         dir: &std::path::Path,
         pubkey: &[u8],

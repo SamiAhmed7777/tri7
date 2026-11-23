@@ -1,0 +1,10 @@
+GRADE=A urn=urn:ump:up33y3736idacm4rblbrfybxjgowyfoaugapp4kg7k5ior2yky3q
+{
+  "blocking": [],
+  "polish": [
+    "first STALE line of a resolver-fault episode still shows the repairwallet remedy (latch only exists after the first rebuild); consider suppressing the repairwallet advice on the absent-class until first rebuild completes",
+    "unresolvable_ticks counter sits after the locked/balance early returns, so locked ticks neither increment nor reset it \u2014 only affects log cadence, harmless",
+    "CLEARED message no longer distinguishes genuine heal from coin-aging-out; the pointer to the AUTOHEAL log is reasonable but a coin-count in the message could disambiguate",
+    "consider a debug assertion or comment noting rebase must only be called from trim (no other callers in evidence, but the invariant is undocumented)"
+  ]
+}

@@ -1,0 +1,5 @@
+== item38 local suite evidence 2026-11-22T14:29:53Z ==
+lib: 885 passed / 0 failed / 1 ignored (was 876/0/1 pre-tick; +4 item-38 tests: selfsend_credits_both_vouts_once_the_post_boot_key_arrives, keystore_refresh_merge_is_additive_and_idempotent, autoheal_rebuild_refreshes_keys_from_the_wallet_file_first, keystore_refresh_skips_unreadable_wallet_files)
+integration: cli_exit 5/0, consensus_wallet 15/0, legacy 24/0, spend_corpus 2/0
+HEAD at fix time: 62dda7343f99a18a57a33a6ce71453b03fe755d7 (actor-lane WIP src/bin/read_wallet.rs + src/gui/node_supervisor.rs left uncommitted, untouched)
+diff: item38.diff (1 file, +529/-9)

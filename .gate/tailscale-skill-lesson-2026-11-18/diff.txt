@@ -1,0 +1,22 @@
+--- a/SKILL.md (tailscale-route-resilience, Pitfalls section addition)
++++ b/SKILL.md
+@@ Pitfalls
+- (existing list unchanged)
++ - Diagnose "some packets pass, most die" BEFORE blaming MTU: size-independent
++   loss (a 1472B DF packet passing while a 1400B dies) is ROUTE loss, not a PMTUD
++   blackhole — probe `ping -M do -s {1200,1400,1472}` and read the pattern.
++   Random loss kills TCP banners ("connection timed out during banner exchange")
++   while small disco pongs survive; check the peer's tailscaled from a THIRD node
++   (its netstack answers SYN instantly even when the lossy path can't carry a
++   stream) to separate "host down" from "route bad".
++ - Tailscale-SSH (server mode on the TARGET) evaluates policy by the TAILNET
++   SOURCE of the TCP connection, not by which client key authenticates: relaying
++   ssh to host X through peer Y fails with "tailnet policy does not permit you
++   to SSH to this node" even when X allows the ORIGINATING node, because the
++   connection arrives from Y. A port-forward through Y has the same source-Y
++   problem. `nc -z` succeeding to :22 only proves the network ACL allows the
++   port — tailscaled's sshserver may still deny the session.
++ - DERP-region dial timeouts in a node's tailscaled log ("derphttp.Client.Send
++   connect to region NN (city): i/o timeout") point at degraded connectivity
++   toward that region's DC range — the same direction the affected peers live in
++   (their home DERP). Cross-check peers in OTHER regions/DCs that still work.
