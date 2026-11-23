@@ -87,6 +87,13 @@ pub enum Step {
     Eof,
 }
 
+impl Step {
+    /// (2026-11-23) small helper for tolerant callers.
+    pub fn is_block(&self) -> bool {
+        matches!(self, Step::Block(..))
+    }
+}
+
 pub struct ArchiveWalker {
     rdr: BlkFileReader,
     height: usize,
@@ -106,6 +113,37 @@ impl ArchiveWalker {
     /// Number of blocks delivered so far (height of the NEXT block).
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    /// (2026-11-23) TOLERANT STEP for callers that treat a StaleBranch as a
+    /// hole instead of a hard stop (the wallet live seed): resync forward to
+    /// the frame that chains onto our tip and DELIVER it — the resync
+    /// consumes the found frame, so the replacement must come back as the
+    /// next Step (a plain "skip" would silently drop the chain's block at
+    /// this height and shift every later height by one). The fork's own
+    /// height stays reserved: the delivered block is the chain's block at
+    /// the SAME height the stale frame occupied. Returns Eof when no
+    /// replacement exists. Parseable non-chaining frames keep their
+    /// StaleBranch semantics for strict callers (the build's coverage
+    /// contract) — this method exists only for callers that opt in.
+    pub fn step_past_stale(&mut self) -> Result<Step, String> {
+        let want = match self.prev.clone() {
+            Some(p) => p,
+            None => [0u8; 32],
+        };
+        match self.rdr.resync_to_chained_frame(&want)? {
+            Some(f2) => {
+                let block = f2
+                    .block()
+                    .map_err(|e| format!("resynced frame parse: {}", e))?;
+                let hash = block.hash();
+                let h = self.height;
+                self.height += 1;
+                self.prev = Some(hash);
+                Ok(Step::Block(h, block, hash))
+            }
+            None => Ok(Step::Eof),
+        }
     }
 
     pub fn step(&mut self) -> Result<Step, String> {

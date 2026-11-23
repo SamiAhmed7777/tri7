@@ -8342,37 +8342,88 @@ impl WalletLive {
             unlock_until: None,
             first_skip: None,
         };
-        // (2026-11-22, fused23) DEBRIS TOLERANCE: force-killed appends left
-        // torn/garbage frames mid-archive (both sami machines, 2026-11-22).
-        // A parse-failing or missing block is SKIPPED and counted — the
-        // debris sits at old heights far from any live wallet coin, and the
-        // alternative was a permanent zero balance (the view never seeded).
-        // The skip summary lands in node.log so the coverage hole is known.
+        // (2026-11-23) SEQUENTIAL SEED: the per-height block_by_height loop
+        // did 2.2M index lookups + positional reads and starved real Windows
+        // disks for 20+ minutes (sami-laptop/sami-pc 2026-11-23, measured),
+        // also starving the RPC and the balances-build on the same disk. The
+        // archive is append-ordered: walk it frame-sequentially through the
+        // ArchiveWalker — the same ~70-100s the balances-build proves on
+        // these exact stores — with the walker's debris resync (torn frames
+        // from force-killed appends) and the tolerant stale skip (a fork
+        // frame is a hole, not a hard stop; the chain's replacement at that
+        // height is found and applied).
+        let path = match store.path.as_ref() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => return Err("wallet live seed: no blocks file path".into()),
+        };
+        let mut walker = crate::replay::ArchiveWalker::open(&path)?;
         let mut skipped = 0usize;
         let mut first_skip: Option<u64> = None;
         let mut last_skip = 0u64;
-        for h in base..=tip {
-            let hit = match store.block_by_height(h) {
-                Ok(Some(b)) => b,
-                Ok(None) => {
+        let t0 = std::time::Instant::now();
+        loop {
+            let step = match walker.step() {
+                Ok(s) => s,
+                Err(e) => {
+                    // a hard frame error is a hole, not a dead wallet
                     skipped += 1;
                     if first_skip.is_none() {
-                        first_skip = Some(h);
+                        first_skip = Some(walker.height() as u64);
                     }
-                    last_skip = h;
-                    continue;
-                }
-                Err(_) => {
-                    skipped += 1;
-                    if first_skip.is_none() {
-                        first_skip = Some(h);
+                    last_skip = walker.height() as u64;
+                    let _ = e;
+                    // the walker cannot step past a hard error; the resync
+                    // path inside step() already handled unparseable frames,
+                    // so this arm is unreachable in practice — but never loop
+                    if !walker.step_past_stale()?.is_block() {
+                        break;
                     }
-                    last_skip = h;
                     continue;
                 }
             };
-            wl.apply_block(&hit.block, h);
+            match step {
+                crate::replay::Step::Block(h, block, _hash) => {
+                    let h = h as u64;
+                    if h < base {
+                        continue; // below the base: the snapshot owns it
+                    }
+                    if h > tip {
+                        break; // the walk is done
+                    }
+                    wl.apply_block(&block, h);
+                }
+                crate::replay::Step::StaleBranch(h) => {
+                    skipped += 1;
+                    if first_skip.is_none() {
+                        first_skip = Some(h as u64);
+                    }
+                    last_skip = h as u64;
+                    // the chain's own block for this height: found and
+                    // delivered as the next step
+                    match walker.step_past_stale()? {
+                        crate::replay::Step::Block(h, block, _hash) => {
+                            let h = h as u64;
+                            if h >= base && h <= tip {
+                                wl.apply_block(&block, h);
+                            }
+                            if h > tip {
+                                break;
+                            }
+                        }
+                        _ => break, // no replacement: the archive ends here
+                    }
+                }
+                crate::replay::Step::Eof => break,
+            }
         }
+        log(&format!(
+            "wallet live seed: sequential walk done in {:.1}s ({} frame skips, first h{}, last h{}{})",
+            t0.elapsed().as_secs_f64(),
+            skipped,
+            first_skip.unwrap_or(0),
+            last_skip,
+            if skipped > 0 { " — archive coverage hole; balances exclude those heights" } else { "" }
+        ));
         if skipped > 0 {
             // (item 39) the hole is now STRUCTURED, not just greppable: the
             // lowest skipped height rides on the view (first_skip) so the
@@ -8380,15 +8431,6 @@ impl WalletLive {
             // the summary goes through the node's log channel so it lands in
             // node.log (alarmable) instead of bare stderr.
             wl.first_skip = first_skip;
-            log(&format!(
-                "wallet live seed: skipped {} debris/gap block(s) (first h{}, last h{}) — \
-                 archive coverage hole; balances exclude those heights; tier 1.5 will \
-                 refuse this view over any snapshot pair covering h{} or above",
-                skipped,
-                first_skip.unwrap_or(base),
-                last_skip,
-                first_skip.unwrap_or(base),
-            ));
         }
         Ok(wl)
     }
