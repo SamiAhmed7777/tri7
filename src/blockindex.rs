@@ -1777,6 +1777,110 @@ impl BlockStore {
         Ok(None)
     }
 
+    /// (item 41) EVERY distinct frame that contains `txid` — the
+    /// all-candidates form of `tx_by_id`. `tx_by_id` returns the FIRST
+    /// candidate and stops; across reorg seams a txid can live in several
+    /// frames (an abandoned-branch frame can sit EARLIER in insertion
+    /// order than the canonical one), so a guard that only sees the first
+    /// hit can miss a canonical occurrence entirely. Duplicate-tx
+    /// guarding must inspect every candidate: main-index frames (insertion
+    /// order, distinct offsets) first, then appendix frames. Each entry
+    /// carries the containing frame's hash and threaded height so the
+    /// caller can decide canonicality per frame.
+    pub fn tx_frames_by_id(&self, txid: &Hash) -> Result<Vec<TxHit>, String> {
+        let inner = self.inner().ok_or("block index not ready")?;
+        let key = key8(txid);
+        let mut out: Vec<TxHit> = Vec::new();
+        let mut seen_off: Option<u64> = None;
+        for e in inner.txs.candidates_by_key(key) {
+            if seen_off == Some(e.off) {
+                continue;
+            }
+            seen_off = Some(e.off);
+            let body = Self::read_frame(&inner, e.off)?;
+            let bhash = header_hash(&body)?;
+            let block_time = if body.len() >= 72 {
+                u32::from_le_bytes(body[68..72].try_into().unwrap())
+            } else {
+                0
+            };
+            let mut found: Option<Tx> = None;
+            walk_tx_ranges(&body, &mut |start, end| {
+                if found.is_some() {
+                    return Ok(());
+                }
+                let id = sha256d(&body[start..end]);
+                if &id == txid {
+                    let mut r = Reader::new(&body[start..end]);
+                    let tx = Tx::read(&mut r)?;
+                    r.expect_done()?;
+                    found = Some(tx);
+                }
+                Ok(())
+            })?;
+            if let Some(tx) = found {
+                let block_height = inner
+                    .blocks
+                    .candidates_by_key(key8(&bhash))
+                    .iter()
+                    .find(|b| b.off == e.off)
+                    .and_then(|b| inner.blocks.height_of_seq(b.seq))
+                    .or_else(|| {
+                        inner
+                            .appendix
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .find(|f| f.off == e.off)
+                            .and_then(|f| f.height)
+                    });
+                out.push(TxHit {
+                    tx,
+                    txid: *txid,
+                    block_hash: bhash,
+                    block_height,
+                    block_time,
+                });
+            }
+        }
+        for f in inner.appendix.read().unwrap().iter() {
+            if !f.tx_keys.contains(&key) {
+                continue;
+            }
+            let body = Self::read_frame(&inner, f.off)?;
+            let bhash = header_hash(&body)?;
+            let block_time = if body.len() >= 72 {
+                u32::from_le_bytes(body[68..72].try_into().unwrap())
+            } else {
+                0
+            };
+            let mut found: Option<Tx> = None;
+            walk_tx_ranges(&body, &mut |start, end| {
+                if found.is_some() {
+                    return Ok(());
+                }
+                let id = sha256d(&body[start..end]);
+                if &id == txid {
+                    let mut r = Reader::new(&body[start..end]);
+                    let tx = Tx::read(&mut r)?;
+                    r.expect_done()?;
+                    found = Some(tx);
+                }
+                Ok(())
+            })?;
+            if let Some(tx) = found {
+                out.push(TxHit {
+                    tx,
+                    txid: *txid,
+                    block_hash: bhash,
+                    block_height: f.height,
+                    block_time,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Height the main height map reached (= highest contiguous threaded
     /// height from the scan), extended by any appendix frames carrying a
     /// height — the "where do disk bodies end" oracle for gap recovery.

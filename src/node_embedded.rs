@@ -4031,6 +4031,11 @@ struct Stats {
     gap_requests: u64,       // getdata(MSG_BLOCK) rounds sent for the gap
     gap_filled: u64,         // bodies recovered from peers and appended
     gap_rollback: bool,      // phantom-tip rollback fired (branch b)
+    // ---- (item 41) live duplicate-tx / double-spend guard ----
+    dup_tx_refused: u64, // live blocks refused: dup txid (in-block/canonical), dup prevout, or records-proven double-spend
+    dup_tx_peer_kept: u64, // refused relayed bodies where the peer was NOT demoted (race-lost duplicate class)
+    dup_tx_spentness_unprovable: u64, // inputs whose spentness this node cannot prove (created below the records horizon / outside the window map)
+    dup_tx_store_unprovable: u64, // store-source probes that could not decide (index not ready / canonicality unprovable)
 }
 
 impl Stats {
@@ -4084,6 +4089,10 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "gap_requests": s.gap_requests,
         "gap_filled": s.gap_filled,
         "gap_rollback": s.gap_rollback,
+        "dup_tx_refused": s.dup_tx_refused,
+        "dup_tx_peer_kept": s.dup_tx_peer_kept,
+        "dup_tx_spentness_unprovable": s.dup_tx_spentness_unprovable,
+        "dup_tx_store_unprovable": s.dup_tx_store_unprovable,
     })
 }
 
@@ -5047,6 +5056,247 @@ struct ValidationOutcome {
     proof: Hash,
 }
 
+/// (item 41) Marker test for the live duplicate-tx guard's refusals — the
+/// broad class (every refusal the guard emits, race or invalid).
+fn is_dup_tx_refusal(e: &str) -> bool {
+    e.contains("DUP-TX-GUARD")
+}
+
+/// (item 41) The BENIGN subclass only: the canonical-txid race refusals —
+/// the window/records sources prove the txid is already mined, which is
+/// exactly what an HONEST relay delivers when a competing block won the
+/// race elsewhere (a legitimate losing candidate; the item-21 recon
+/// discipline). Everything else the guard emits — duplicate prevouts
+/// within one body, records-proven double-spends, deep-history
+/// re-includes — is an intrinsically malformed or malicious BODY, and
+/// those flow to the standard contained peer-drop lane (item 25a), NOT
+/// the peer-kept lane.
+fn is_dup_tx_race_refusal(e: &str) -> bool {
+    e.contains("DUP-TX-GUARD-RACE")
+}
+
+/// (T7-06 / item 41, SECURITY) LIVE duplicate-transaction / double-spend
+/// guard — the security consumer of item 40's producer fix.
+///
+/// DEFECT being closed (found live 2026-11-23, h2217710 + h2217719): the
+/// deployed client's CheckBlock never ran ConnectInputs for a block's
+/// regular txs, and neither did validate_block — no unspentness, no
+/// duplicate-txid check, no in-block/in-chain prevout check. Any staker
+/// could re-credit every output of an already-mined signed tx by including
+/// it in a block it mints: tx 4f43cd16… was mined by BOTH b02af9bc
+/// (h2217710) and eb1d005e (h2217719) — the same 11 inputs spent by two
+/// canonical blocks.
+///
+/// RULE (live only, ctx.live — the same discipline as T7-05: historical
+/// replay and from-zero revalidation keep the documented tolerance, so the
+/// existing h2217719 stays accepted as history; the fork-choice probe,
+/// deferred adoption, and backfill all run live=false and are untouched):
+///   * vtx[0] is EXEMPT — the empty PoS coinbase legitimately repeats
+///     across equal-timestamp blocks (item 43 will tighten that).
+///   * (a) a duplicate txid WITHIN the block (vtx[1..]) → refuse
+///     (DUP-TX-GUARD, invalid-body class).
+///   * (b) a duplicate PREVOUT within the block (two txs, one input) →
+///     refuse (invalid-body class) — ConnectInputs (main.cpp:1980-2067)
+///     parity.
+///   * (c) a txid the canonical chain already holds → refuse. Window and
+///     records sources (the last WINDOW_BLOCKS heights) emit the
+///     DUP-TX-GUARD-RACE marker: a race-lost duplicate is exactly what an
+///     honest relay delivers, so the PEER is kept for that class. The
+///     store source covers OLDER history: EVERY candidate frame is
+///     inspected (tx_frames_by_id — a txid can sit in both a canonical
+///     and an abandoned-branch frame, and first-hit-only lookup can miss
+///     the canonical one), and a frame refuses only when it IS canonical
+///     at its height (window entry hash, the store's height map, or a
+///     future/raced frame decisively non-canonical). A store hit is deep
+///     history, not a minutes-old race — it stays the invalid-body class.
+///   * (d) an input whose prevout the canonical records PROVE already
+///     spent → refuse (invalid-body class). records' spends carry every
+///     non-coinbase input of the last WINDOW_BLOCKS heights (coinstakes
+///     included — record_of), so this closes the TRUE double-spend for
+///     recent history: a DIFFERENT tx re-spending the same inputs, which
+///     the txid rules alone cannot catch. It fires for the coinstake too
+///     (double-stake).
+///
+/// INCOMPLETE MITIGATION, stated plainly (judge round 1, blocker 1):
+/// tri7d keeps NO full unspent set, so this guard does NOT close
+/// deep-history double-spends — a DIFFERENT tx re-spending a prevout
+/// that was created AND spent below the records horizon cannot be
+/// proven either way and the block is ACCEPTED. Duplicate-TXID classes
+/// ARE closed for all history (the store index sees every frame); the
+/// double-spend classes are closed only within the records horizon.
+/// Every unprovable input bumps stats.dup_tx_spentness_unprovable and
+/// every undecided store probe bumps stats.dup_tx_store_unprovable
+/// (exposed via getstats/--status) — the gap is counted, surfaced, and
+/// feeds the item-43+ spentness work. An unready store index (boot
+/// rebuild) degrades the older-history source to the window sources.
+/// Refusals themselves bump stats.dup_tx_refused in validate_block.
+fn item41_dup_tx_guard(
+    st: &ChainState,
+    stats: &mut Stats,
+    block: &Block,
+    h: u64,
+) -> Result<(), String> {
+    let display = tri7_core::p2p::internal_to_display;
+    // records floor as a WINDOW-RELATIVE height (the map stores relative
+    // creation heights): everything the records provably cover.
+    let floor_rel = st
+        .records
+        .first()
+        .map(|r| (r.height - st.base) as usize)
+        .unwrap_or(usize::MAX);
+    let mut seen_txids: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+    let mut seen_prevouts: std::collections::HashSet<(Hash, u32)> =
+        std::collections::HashSet::new();
+    // window sources, built once per block
+    let rec_txids: std::collections::HashSet<String> = st
+        .records
+        .iter()
+        .flat_map(|r| r.outs.iter().map(|o| o.0.clone()))
+        .collect();
+    let rec_spends: std::collections::HashSet<(String, u32)> = st
+        .records
+        .iter()
+        .flat_map(|r| r.spends.iter().map(|s| (s.0.clone(), s.1)))
+        .collect();
+    let map_txids: std::collections::HashSet<Hash> =
+        st.utxo.map.keys().map(|(t, _)| *t).collect();
+    for tx in block.vtx.iter().skip(1) {
+        let txid = tx.hash();
+        let txid_d = display(&txid);
+        // (a) duplicate txid within the block
+        if !seen_txids.insert(txid) {
+            return Err(format!(
+                "h{}: DUP-TX-GUARD: duplicate txid WITHIN the block ({}) — refused",
+                h, txid_d
+            ));
+        }
+        // (c) window/records sources: the txid is already canonical. The
+        // RACE marker: this class is exactly what an honest relay delivers
+        // when a competing block won elsewhere (peer-kept lane).
+        if map_txids.contains(&txid) || rec_txids.contains(&txid_d) {
+            return Err(format!(
+                "h{}: DUP-TX-GUARD-RACE: txid {} is already held by the canonical chain (window map/records) — refused",
+                h, txid_d
+            ));
+        }
+        for vin in &tx.vin {
+            let prev_d = display(&vin.prev_hash);
+            // (b) duplicate prevout within the block — invalid body
+            if !seen_prevouts.insert((vin.prev_hash, vin.prev_n)) {
+                return Err(format!(
+                    "h{}: DUP-TX-GUARD: prevout {}:{} spent twice WITHIN the block, invalid body — refused",
+                    h, prev_d, vin.prev_n
+                ));
+            }
+            // (d) records-proven double-spend (invalid body — the true
+            // double-spend close inside the records horizon)
+            if rec_spends.contains(&(prev_d.clone(), vin.prev_n)) {
+                return Err(format!(
+                    "h{}: DUP-TX-GUARD: DOUBLE-SPEND — prevout {}:{} is already spent by a canonical block inside the records horizon — refused",
+                    h, prev_d, vin.prev_n
+                ));
+            }
+            // INCOMPLETE MITIGATION (judge round 1, blocker 1), counted:
+            // the map entry is CREATION evidence, never unspentness proof
+            // (the map is insert-only — a spent coin STAYS in it, and map
+            // retention is 4600 heights vs the records' 1500). Spentness
+            // is PROVABLE only when the records cover the input's whole
+            // spend-relevant history — i.e. its CREATION height is inside
+            // the records era (m.height >= floor_rel). Because a spend
+            // always FOLLOWS its creation, records covering the creation
+            // also cover every possible spend of it: inside the era,
+            // "absent from rec_spends" is proof of unspent (and a present
+            // spend was already refused by rule (d) above). Below the era
+            // — the stale-output class: an output still in the 4600-height
+            // map whose spend aged out of the 1500-height records tail —
+            // neither direction can be proven, so the input is counted
+            // unprovable and the block is accepted as the documented
+            // partial mitigation (deep-history double-spends are NOT
+            // closed by this guard; see the fn doc and the item-43+ work).
+            let creation_covered_by_records = st
+                .utxo
+                .map
+                .get(&(vin.prev_hash, vin.prev_n))
+                .map(|m| m.height >= floor_rel)
+                .unwrap_or(false);
+            if !creation_covered_by_records {
+                stats.dup_tx_spentness_unprovable += 1;
+                if stats.dup_tx_spentness_unprovable % 10_000 == 1 {
+                    log(&format!(
+                        "h{}: input {}:{} spentness UNPROVABLE (creation below the records horizon / outside the window map — map membership is creation evidence only) — counted, block not refused on it (no full unspent set in tri7d); {} so far",
+                        h,
+                        prev_d,
+                        vin.prev_n,
+                        stats.dup_tx_spentness_unprovable
+                    ));
+                }
+            }
+        }
+    }
+    // (c, store) older history: only txids the window sources do NOT know
+    // reach the store, and EVERY candidate frame is inspected
+    // (tx_frames_by_id) — a txid can sit in both a canonical and an
+    // abandoned-branch frame, and a first-hit-only lookup can miss the
+    // canonical occurrence entirely.
+    if let Some(store) = live_store() {
+        for tx in block.vtx.iter().skip(1) {
+            let txid = tx.hash();
+            let hits = match store.tx_frames_by_id(&txid) {
+                Ok(hits) => hits,
+                Err(_) => {
+                    // index not ready (boot rebuild): the older-history
+                    // source is unavailable — count the gap, the window
+                    // sources above still applied.
+                    stats.dup_tx_store_unprovable += 1;
+                    continue;
+                }
+            };
+            for hit in hits {
+                let Some(bh) = hit.block_height else {
+                    // height unresolvable: undecided — count it
+                    stats.dup_tx_store_unprovable += 1;
+                    continue;
+                };
+                if bh >= h {
+                    continue; // future/raced frame — decisively not canonical
+                }
+                // canonicality at bh: the window entry when we have one,
+                // else the store's own height map (canonical oracle).
+                let canonical = if let Some(e) = st.entry_abs(bh) {
+                    e.hash == hit.block_hash
+                } else {
+                    match store.hash_at_height(bh) {
+                        Ok(Some(want)) => {
+                            let hit_d = display(&hit.block_hash);
+                            // below the window, the store's height map IS
+                            // the canonical oracle: match = canonical frame,
+                            // mismatch = abandoned branch (not a duplicate).
+                            want == hit_d
+                        }
+                        Ok(None) => {
+                            stats.dup_tx_store_unprovable += 1;
+                            false
+                        }
+                        Err(_) => {
+                            stats.dup_tx_store_unprovable += 1;
+                            false
+                        }
+                    }
+                };
+                if canonical {
+                    return Err(format!(
+                        "h{}: DUP-TX-GUARD: txid {} is already held by the canonical chain (store index, h{}) — refused",
+                        h,
+                        display(&txid),
+                        bh
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_block(
     st: &ChainState,
     _rpc: &Rpc, // no external oracle in the tri7-only topology (kept for signature stability)
@@ -5143,6 +5393,19 @@ fn validate_block(
     // 4. merkle root over the received transactions vs the header field
     if block.merkle_root() != block.merkle_root {
         return Err(format!("h{}: merkle root mismatch", h));
+    }
+
+    // 4c. (T7-06 / item 41) LIVE input-level guard — duplicate txid /
+    // double-spend, the security consumer of item 40's producer fix.
+    // Live only: historical replay and from-zero revalidation keep the
+    // documented tolerance (h2217719 stays accepted as history); the
+    // fork-choice probe, deferred adoption, and backfill all run
+    // live=false and never reach this.
+    if ctx.live {
+        if let Err(e) = item41_dup_tx_guard(st, stats, block, h) {
+            stats.dup_tx_refused += 1;
+            return Err(e);
+        }
     }
 
     // 5. timestamps (AcceptBlock rules)
@@ -13224,6 +13487,30 @@ fn handle_message(
                     },
                 ) {
                     Ok(p) => p,
+                    // (item 41) the BENIGN race class ONLY: the canonical-
+                    // txid refusals (DUP-TX-GUARD-RACE) — evidence about
+                    // the BODY, not the peer: a race-lost duplicate is
+                    // exactly what an honest relay delivers (the tx was
+                    // mined elsewhere; this block is a legitimate losing
+                    // candidate — the item-21 recon discipline). Log loud,
+                    // count it, keep the tip AND the peer; terminate the
+                    // fetch — the same bytes can never validate on this
+                    // chain view. Every OTHER guard refusal (in-block dup
+                    // txid/prevout, records-proven double-spend, deep-
+                    // history re-include) is an intrinsically invalid BODY
+                    // and deliberately falls through to the contained
+                    // peer-drop lane below (judge round 1, blocker 2) —
+                    // deliberately invalid bodies DO demote their sender.
+                    Err(e) if is_dup_tx_race_refusal(&e) => {
+                        stats.dup_tx_peer_kept += 1;
+                        log(&format!(
+                            "ITEM41 DUP-TX RACE-REFUSED h{} from {} (peer KEPT — race-lost duplicate class, tip h{} stands): {} — body fetch terminated",
+                            height_abs, peer.label, st.tip_height, e
+                        ));
+                        outstanding.remove(&hash);
+                        body_tries.remove(&hash);
+                        return Ok(());
+                    }
                     // (item 23, r5 judge) a reinjected cached payload is our
                     // own cache artifact — never peer-fatal. The request
                     // STAYS in flight: the hash remains outstanding with a
@@ -28764,6 +29051,770 @@ addnode=host:notaport
         let s = provider.snap_view();
         assert_eq!(s.coverage().unwrap(), (300, h1.clone()), "retry adopts");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    // (item 41) LIVE-DUP-TX-GUARD — live-only input-level validation
+    // ------------------------------------------------------------------
+
+    /// (item 41) solve a PoS block on the item25 fixture carrying `extra`
+    /// regular txs — the same mint shape the item-40 tests use. The
+    /// candidate coins skip the FIXTURE-SPENT ones: the fixture's records
+    /// mark each coin created at rc ≡ 15 (mod 17) (and coin 0) as already
+    /// spent by an earlier fixture block, so staking one of those would
+    /// trip the new (d) records-proven double-spend rule on a
+    /// synthetic-history artifact, not a real violation.
+    fn item41_solve_block(stg: &ChainState, extra: &[Tx]) -> Block {
+        let n = stg.entries.len();
+        let tip_rel = n - 1;
+        let (secret, pubkey_vec) = tri7_core::spend::synthetic_key("item41-staker");
+        let bits = tri7_core::difficulty::get_next_target_required(&stg.rel_index(), true);
+        let rewrite_floor = scan_modifier_chain(&stg).rewrite_start;
+        let mut cands: Vec<tri7_core::stake::StakeCandidate> = Vec::new();
+        for rc in (rewrite_floor + 40)..(tip_rel - 70) {
+            if rc == 0 || rc % 17 == 15 {
+                continue; // fixture-spent coin (see the doc comment)
+            }
+            cands.push(tri7_core::stake::StakeCandidate {
+                txid: tri7_core::legacy::sha256d(&(rc as u64).to_le_bytes()),
+                n: 0,
+                value: 50 * tri7_core::consensus::COIN,
+                script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey_vec).unwrap(),
+                block_height: rc,
+                block_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_offset: 181,
+                secret,
+                pubkey: pubkey_vec.clone(),
+            });
+        }
+        let probe = 1_700_000_000u32 + (tip_rel as u32) * 60 + 7_200;
+        let (plan_res, _) = tri7_core::stake::create_coinstake(
+            &stg.rel_index(),
+            &cands,
+            bits,
+            0,
+            probe,
+            tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
+            60 * tri7_core::consensus::COIN,
+            (tip_rel + 1) as usize,
+        )
+        .expect("search");
+        let plan = plan_res.expect("the fixture's unspent coins must solve on the era-limit target");
+        let prev_entry = stg.entries[tip_rel].clone();
+        let mut block = tri7_core::stake::assemble_pos_block(
+            &prev_entry,
+            prev_entry.time,
+            &plan.tx,
+            extra,
+            bits,
+        )
+        .expect("assemble");
+        tri7_core::stake::sign_block(&mut block, &plan.signer.secret).expect("sign");
+        block
+    }
+
+    fn item41_live_ctx(stg: &ChainState) -> BlockCtx<'_> {
+        let n = stg.entries.len();
+        BlockCtx {
+            height_abs: stg.base + n as u64,
+            header: None,
+            prev_entry: stg.entries[n - 1].clone(),
+            live: true,
+        }
+    }
+
+    /// (item 41, spec tests 1/2/3/4/5/6 + judge-r1 blocker 2) THE LIVE
+    /// SHAPE, replayed exactly: a peer block whose regular tx the canonical
+    /// window already holds (the h2217710 → h2217719 double-include) is
+    /// REFUSED — loud line, PEER KEPT (the benign race-lost class only),
+    /// tip unchanged, the pool keeps the tx — while the SAME bytes with a
+    /// fresh tx pass the full live gate (tests 3/4: honest producer/peer
+    /// unaffected), a repeated empty coinbase vtx[0] alone stays accepted
+    /// (test 5), and the refused block still validates as HISTORY (test 6:
+    /// from-zero replay unchanged, h2217719 tolerated). And the class
+    /// SPLIT (judge round 1, blocker 2): a records-proven DOUBLE-SPEND
+    /// body from a peer is refused AND the peer is DROPPED (contained
+    /// item-25a lane) — deliberately invalid bodies demote their sender.
+    #[test]
+    fn item41_peer_dup_tx_block_refused_peer_kept() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut cfg = gate_test_cfg();
+        let state_dir = std::env::temp_dir().join(format!(
+            "tri7-item41-dup-tx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        cfg.state_dir = state_dir;
+
+        // the REGULAR tx the peer's block will carry: a signed spend of a
+        // prevout our wallet live view holds (the operator self-send shape)
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-sender");
+        let funding_prevout: Hash = tri7_core::legacy::sha256d(b"item41 funding prevout");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding_prevout, 0), 2_000_000);
+        let t_txid = t.hash();
+
+        // our pool holds T and our live view resolves its input
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            wallet_live_with(
+                &[send_pubkey.clone()],
+                vec![(
+                    (funding_prevout, 0),
+                    window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+                )],
+            ),
+        )));
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        {
+            let g = wl.lock().unwrap();
+            let live = g.as_ref().unwrap();
+            pool.accept(&t.serialize(), &LiveUtxoView(&live.live), 1_700_000_200)
+                .expect("the pool must hold the relayed tx");
+        }
+
+        // canonical next block assembled on the healthy fixture, CARRYING T
+        let mut stg = item25_fixture(base, n);
+        let fixture_tip = stg.tip_hash;
+        let tip_rel = n - 1;
+        let block = item41_solve_block(&stg, &[t.clone()]);
+
+        // PHASE A (spec tests 3/4): fresh T — the exact same bytes pass the
+        // full live gate (the honest producer and an honest peer are
+        // unaffected), and the honest-gap counter sees T's input (its
+        // spentness is unprovable below the records horizon).
+        {
+            let mut stats = Stats::default();
+            validate_block(&stg, &rpc, &mut stats, &block, &item41_live_ctx(&stg))
+                .expect("the canonical chain must accept the fresh block carrying T");
+            assert_eq!(stats.dup_tx_refused, 0);
+            assert!(
+                stats.dup_tx_spentness_unprovable >= 1,
+                "T's input is older than the records horizon — the gap must be counted, not hidden"
+            );
+        }
+
+        // PHASE B (spec test 1): the window ALREADY holds T's txid — mutate
+        // the fixture exactly the way h2217710 mined it (records' outs + the
+        // kernel map gain T's outputs) — and drive the PEER path end to end.
+        stg.records[tip_rel].outs.push((
+            tri7_core::p2p::internal_to_display(&t_txid),
+            0,
+            2_000_000,
+            1_700_000_100,
+            100,
+        ));
+        stg.utxo.map.insert(
+            (t_txid, 0),
+            crate::kernel::UtxoMeta {
+                height: tip_rel,
+                tx_offset: 100,
+                tx_time: 1_700_000_100,
+                value: 2_000_000,
+            },
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _holder = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item41-peer".into(),
+            outbound: true,
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+            advertised: None,
+        };
+        let msg = tri7_core::p2p::RawMessage {
+            command: "block".into(),
+            payload: block.serialize(),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+
+        let res = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(res.is_ok(), "the refusal is contained: {:?}", res.err());
+        assert_eq!(
+            stg.tip_height, base + n as u64 - 1,
+            "the refused block must NOT apply — the tip stands"
+        );
+        assert_eq!(stg.tip_hash, fixture_tip, "the tip hash stands");
+        assert!(!peer.dead, "a race-lost duplicate body must NOT demote the peer");
+        assert_eq!(stats.dup_tx_refused, 1, "the refusal is counted");
+        assert_eq!(stats.dup_tx_peer_kept, 1, "the peer-kept arm is counted");
+        assert!(
+            outstanding.is_empty() && body_tries.is_empty(),
+            "the body fetch is terminated (same bytes can never validate)"
+        );
+        assert!(
+            pool.get(&t_txid).is_some(),
+            "the refused block confirms nothing — T stays in the pool"
+        );
+
+        // PHASE B2 (judge round 1, blocker 2 — the class split): a
+        // records-proven DOUBLE-SPEND body (the (d) class, an
+        // intrinsically invalid body, NOT a race) is refused AND the
+        // peer is DROPPED by the contained item-25a lane — deliberately
+        // invalid bodies demote their sender.
+        {
+            let mut stg_d = item25_fixture(base, n);
+            stg_d.records[tip_rel]
+                .spends
+                .push((tri7_core::p2p::internal_to_display(&funding_prevout), 0));
+            let block_d = item41_solve_block(&stg_d, &[t.clone()]);
+
+            let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr2 = listener2.local_addr().unwrap();
+            let _holder2 = std::thread::spawn(move || {
+                let (_s, _) = listener2.accept().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(800));
+            });
+            let sess2 = Session::connect(&format!("127.0.0.1:{}", addr2.port()))
+                .expect("loopback session 2");
+            let mut peer2 = Peer {
+                label: "item41-dblspend-peer".into(),
+                outbound: true,
+                sess: sess2,
+                last_traffic: Instant::now(),
+                connected_at: Instant::now(),
+                buffered: VecDeque::new(),
+                dead: false,
+                transport: Transport::Clearnet,
+                version: 0,
+                subver: "test".into(),
+                start_height: 0,
+                claimed_tip: None,
+                msgs_in: 0,
+                msgs_out: 0,
+                connected_utc: now_iso(),
+                advertised: None,
+            };
+            let msg_d = tri7_core::p2p::RawMessage {
+                command: "block".into(),
+                payload: block_d.serialize(),
+            };
+            let mut outstanding2: HashMap<Hash, u64> = HashMap::new();
+            let mut body_tries2: HashMap<Hash, BodyTries> = HashMap::new();
+            let mut reinject2: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+            let mut pending2: VecDeque<(Hash, u64)> = VecDeque::new();
+            let mut recent2 = RecentBlocks::new();
+            let mut pending_tx_getdata2: HashMap<Hash, (Instant, String)> = HashMap::new();
+            let mut stats2 = Stats::default();
+            let res2 = handle_message(
+                &mut peer2,
+                &mut stg_d,
+                &rpc,
+                &mut stats2,
+                &cfg,
+                msg_d,
+                &mut outstanding2,
+                &mut body_tries2,
+                &mut reinject2,
+                &mut pending2,
+                &store,
+                &mut recent2,
+                &gap,
+                &no_smsg,
+                &mut pool,
+                &wl,
+                &announce,
+                &mut pending_tx_getdata2,
+                &mut recon,
+            );
+            assert!(res2.is_ok(), "contained — the daemon never exits: {:?}", res2.err());
+            assert!(
+                peer2.dead,
+                "an intrinsically invalid double-spend body MUST demote its sender (class split)"
+            );
+            assert_eq!(stg_d.tip_height, base + n as u64 - 1, "tip stands");
+            assert_eq!(stats2.dup_tx_refused, 1, "the refusal is counted");
+            assert_eq!(
+                stats2.dup_tx_peer_kept, 0,
+                "the peer-kept lane is reserved for the race class only"
+            );
+        }
+
+        // PHASE D (spec test 6): the SAME refused bytes, validated as
+        // HISTORY (live=false, from-zero replay) — accepted unchanged.
+        {
+            let mut stats = Stats::default();
+            let ctx = BlockCtx {
+                height_abs: base + n as u64,
+                header: None,
+                prev_entry: stg.entries[tip_rel].clone(),
+                live: false,
+            };
+            validate_block(&stg, &rpc, &mut stats, &block, &ctx)
+                .expect("historical replay of the same bytes stays accepted (h2217719 as history)");
+            assert_eq!(stats.dup_tx_refused, 0, "the guard is live-only");
+        }
+
+        // PHASE C (spec test 5): the empty PoS coinbase vtx[0] legitimately
+        // repeats — put THE COINBASE's own txid into the window and the
+        // block is still accepted (vtx[0] is exempt; item 43 will tighten).
+        {
+            let cb_txid = block.vtx[0].hash();
+            let mut stg2 = item25_fixture(base, n);
+            let tl = n - 1;
+            stg2.records[tl].outs.push((
+                tri7_core::p2p::internal_to_display(&cb_txid),
+                0,
+                2_000_000,
+                1_700_000_100,
+                100,
+            ));
+            stg2.utxo.map.insert(
+                (cb_txid, 0),
+                crate::kernel::UtxoMeta {
+                    height: tl,
+                    tx_offset: 100,
+                    tx_time: 1_700_000_100,
+                    value: 2_000_000,
+                },
+            );
+            let mut stats = Stats::default();
+            validate_block(&stg2, &rpc, &mut stats, &block, &item41_live_ctx(&stg2))
+                .expect("a repeated empty coinbase vtx[0] alone stays accepted");
+            assert_eq!(stats.dup_tx_refused, 0);
+        }
+    }
+
+    /// (item 41, spec test 2) IN-BLOCK duplicates: the same txid twice, and
+    /// two different txs spending ONE prevout — both refused, live only.
+    #[test]
+    fn item41_in_block_duplicate_txid_and_prevout_refused() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let stg = item25_fixture(base, n);
+
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-inblock");
+        let funding: Hash = tri7_core::legacy::sha256d(b"item41 inblock funding");
+        let t1 = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding, 0), 2_000_000);
+        // same input, different outputs → a DIFFERENT txid spending the
+        // SAME prevout (the true in-block double-spend shape)
+        let t2 = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding, 0), 1_500_000);
+        assert_ne!(t1.hash(), t2.hash());
+
+        // (a) duplicate txid WITHIN the block
+        let dup = item41_solve_block(&stg, &[t1.clone(), t1.clone()]);
+        let mut stats = Stats::default();
+        let err = validate_block(&stg, &rpc, &mut stats, &dup, &item41_live_ctx(&stg))
+            .err()
+            .expect("an in-block duplicate txid must be refused");
+        assert!(is_dup_tx_refusal(&err), "marked as a dup-tx refusal: {}", err);
+        assert!(err.contains("WITHIN the block"), "the rule names itself: {}", err);
+        assert_eq!(stats.dup_tx_refused, 1);
+
+        // (b) duplicate PREVOUT within the block (two txs, one input)
+        let spent_twice = item41_solve_block(&stg, &[t1.clone(), t2.clone()]);
+        let mut stats = Stats::default();
+        let err = validate_block(&stg, &rpc, &mut stats, &spent_twice, &item41_live_ctx(&stg))
+            .err()
+            .expect("an in-block duplicate prevout must be refused");
+        assert!(is_dup_tx_refusal(&err), "marked as a dup-tx refusal: {}", err);
+        assert!(err.contains("spent twice WITHIN"), "the rule names itself: {}", err);
+
+        // control: the same bytes as HISTORY — both pass (live-only rule)
+        let ctx = BlockCtx {
+            height_abs: base + n as u64,
+            header: None,
+            prev_entry: stg.entries[n - 1].clone(),
+            live: false,
+        };
+        let mut stats = Stats::default();
+        validate_block(&stg, &rpc, &mut stats, &dup, &ctx)
+            .expect("historical replay of an in-block duplicate stays tolerated (live-only rule)");
+        assert_eq!(stats.dup_tx_refused, 0);
+    }
+
+    /// (item 41, rule (d)) the TRUE double-spend close: a block whose input
+    /// prevout the canonical records PROVE already spent — for a REGULAR tx
+    /// AND for the coinstake (double-stake). A different txid re-spending
+    /// the same inputs is exactly what the txid rules alone cannot catch.
+    #[test]
+    fn item41_records_proven_double_spend_refused() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stg = item25_fixture(base, n);
+        let tip_rel = n - 1;
+
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-dblspend");
+        let funding: Hash = tri7_core::legacy::sha256d(b"item41 dblspend funding");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding, 0), 2_000_000);
+        let block = item41_solve_block(&stg, &[t.clone()]);
+
+        // control: the clean block passes the live gate
+        {
+            let mut stats = Stats::default();
+            validate_block(&stg, &rpc, &mut stats, &block, &item41_live_ctx(&stg))
+                .expect("clean control: the block passes before the mutation");
+        }
+
+        // T's input is provably spent by a canonical window block: the
+        // fixture's records gain the spend (exactly what record_of would
+        // hold if a mined block had spent it).
+        stg.records[tip_rel].spends
+            .push((tri7_core::p2p::internal_to_display(&funding), 0));
+        let mut stats = Stats::default();
+        let err = validate_block(&stg, &rpc, &mut stats, &block, &item41_live_ctx(&stg))
+            .err()
+            .expect("a records-proven double-spend must be refused");
+        assert!(is_dup_tx_refusal(&err), "marked as a dup-tx refusal: {}", err);
+        assert!(err.contains("DOUBLE-SPEND"), "the rule names itself: {}", err);
+
+        // the COINSTAKE rule: the staked coin itself provably spent
+        // (double-stake — the kernel map is insert-only, so resolution
+        // alone never proved unspentness).
+        let stg2 = item25_fixture(base, n);
+        let cs_prev_hash = block.vtx[1].vin[0].prev_hash;
+        let cs_prev_n = block.vtx[1].vin[0].prev_n;
+        let mut stg2 = stg2;
+        stg2.records[tip_rel].spends
+            .push((tri7_core::p2p::internal_to_display(&cs_prev_hash), cs_prev_n));
+        let mut stats = Stats::default();
+        let err = validate_block(&stg2, &rpc, &mut stats, &block, &item41_live_ctx(&stg2))
+            .err()
+            .expect("a records-proven double-STAKE must be refused");
+        assert!(is_dup_tx_refusal(&err), "marked as a dup-tx refusal: {}", err);
+        assert!(err.contains("DOUBLE-SPEND"), "the coinstake rule fires: {}", err);
+    }
+
+    /// (item 41, store source) older history: a txid the window/records no
+    /// longer know is still caught through the store's tx index — but ONLY
+    /// when the containing frame is canonical at its height. A raced /
+    /// abandoned-branch frame is not a duplicate: that allowance is what
+    /// keeps item 40's rollback-requeue legal.
+    #[test]
+    fn item41_store_index_dup_refused_and_raced_frame_allowed() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let stg = item25_fixture(base, n);
+        let h = base + n as u64;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tri7-item41-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blk.dat");
+
+        // the old-history tx the candidate will re-include: signed, real
+        // shape, and stored ONLY in the store's chain (way below the
+        // fixture's window sources — they do not know it).
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-store");
+        let funding: Hash = tri7_core::legacy::sha256d(b"item41 store funding");
+        let old_tx = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding, 0), 2_000_000);
+        let raced_tx = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding, 1), 2_000_000);
+
+        // store chain g → b1(old_tx) → b2 → b3 → b4, plus a RACED child of
+        // b1 (raced_tx) that is NOT canonical at its height.
+        let g = bin_block([0u8; 32], 0x11);
+        let b1 = bin_block(g.hash(), 0x22);
+        let b2 = bin_block(b1.hash(), 0x33);
+        let b3 = bin_block(b2.hash(), 0x44);
+        let b4 = bin_block(b3.hash(), 0x55);
+        let raced = bin_block(b1.hash(), 0x66);
+        assert_ne!(raced.hash(), b2.hash());
+        // re-body b1 and raced with the txs under test (the store indexes
+        // every tx in every frame; structure is not validated there)
+        let rebody = |mut b: Block, txs: Vec<Tx>| -> Block {
+            b.vtx = txs;
+            b.merkle_root = b.merkle_root();
+            b
+        };
+        let b1 = rebody(b1, vec![old_tx.clone()]);
+        let raced = rebody(raced, vec![raced_tx.clone()]);
+        let mut frames = Vec::new();
+        let mut hashes = Vec::new();
+        for b in [&g, &b1, &b2, &b3, &b4] {
+            frames.extend_from_slice(&bin_frame(b));
+            hashes.push(b.hash());
+        }
+        std::fs::write(&path, &frames).unwrap();
+        let store = tri7_core::blockindex::BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 4,
+        }));
+        wait_store_ready(&store);
+        store
+            .append_block(&bin_frame(&raced)[8..], Some(2))
+            .unwrap();
+        // (judge round 1, polish 2) the SAME txid in BOTH a canonical frame
+        // (b1, main index) and a LATER abandoned frame (a re-mined copy on
+        // an abandoned branch, appendix) — a first-hit-only lookup that
+        // happened to see the abandoned occurrence first would wrongly
+        // allow the duplicate. tx_frames_by_id inspects EVERY candidate.
+        let raced2 = rebody(bin_block(b2.hash(), 0x77), vec![old_tx.clone()]);
+        store
+            .append_block(&bin_frame(&raced2)[8..], Some(3))
+            .unwrap();
+        for (i, hsh) in hashes.iter().enumerate() {
+            store.set_chain_slot(i as u64, *hsh);
+        }
+        set_live_store(store.clone());
+
+        // the candidate: empty PoS coinbase + the OLD tx (vtx[1] here is the
+        // regular tx itself — the guard fires at step 4c, before any PoS
+        // shape/kernel requirement is reached)
+        let candidate = |tx: Tx| -> Block {
+            let mut b = Block {
+                version: 2,
+                prev_hash: stg.entries[n - 1].hash,
+                merkle_root: [0u8; 32],
+                time: 1_700_100_000,
+                bits: 0x2000_ffff,
+                nonce: 7,
+                vtx: vec![
+                    Tx {
+                        version: 1,
+                        time: 1_700_000_100,
+                        vin: vec![tri7_core::legacy::Vin {
+                            prev_hash: [0u8; 32],
+                            prev_n: u32::MAX,
+                            script_sig: Vec::new(),
+                            sequence: u32::MAX,
+                        }],
+                        vout: vec![tri7_core::legacy::Vout {
+                            value: 0,
+                            script_pubkey: Vec::new(),
+                        }],
+                        locktime: 0,
+                    },
+                    tx,
+                ],
+                block_sig: vec![],
+            };
+            b.merkle_root = b.merkle_root();
+            b
+        };
+
+        // canonical frame (b1) → REFUSED through the full validate_block
+        // lane (the store source decides it: the window sources miss).
+        let mut stats = Stats::default();
+        let err = validate_block(&stg, &rpc, &mut stats, &candidate(old_tx), &item41_live_ctx(&stg))
+            .err()
+            .expect("an old-history txid the store proves canonical must be refused");
+        assert!(is_dup_tx_refusal(&err), "marked as a dup-tx refusal: {}", err);
+        assert!(err.contains("store index"), "the store source names itself: {}", err);
+        assert_eq!(stats.dup_tx_refused, 1);
+
+        // raced frame (not canonical at h2) → ALLOWED: exactly the tx an
+        // item-40 rollback-requeue re-mines. Judged at the guard level (the
+        // hand-built candidate is not a full PoS block, so the later steps
+        // are out of scope here — item40's tests own the full lane).
+        let mut stats = Stats::default();
+        item41_dup_tx_guard(&stg, &mut stats, &candidate(raced_tx), h)
+            .expect("a raced/abandoned frame's tx is re-mineable, not a duplicate");
+        assert_eq!(stats.dup_tx_refused, 0);
+
+        // cleanup: the serialization lock's next acquirer resets the
+        // global, but do not leave ours dangling either
+        if let Some(cell) = LIVE_STORE.get() {
+            if let Ok(mut slot) = cell.lock() {
+                *slot = None;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (item 41, judge round 1 blocker 1) the INCOMPLETE-MITIGATION
+    /// boundary, as a regression test: a DIFFERENT tx re-spending a
+    /// prevout that was created AND spent below the records horizon
+    /// cannot be proven either way (tri7d keeps no full unspent set), so
+    /// the block is ACCEPTED live and the input is counted in
+    /// dup_tx_spentness_unprovable — never silently. Duplicate-TXID
+    /// classes are closed for all history; deep-history double-spends are
+    /// explicitly out of scope for this guard (see the item41_dup_tx_guard
+    /// doc) and feed the item-43+ spentness work.
+    #[test]
+    fn item41_old_prevout_respend_is_counted_partial_mitigation() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let stg = item25_fixture(base, n);
+
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-oldprev");
+        // an OLD prevout: absent from the window map and from records'
+        // outs/spends — indistinguishable from a coin created and spent
+        // deep below the records horizon
+        let old_prevout: Hash =
+            tri7_core::legacy::sha256d(b"item41 prevout created+spent below horizon");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (old_prevout, 3), 2_000_000);
+        let block = item41_solve_block(&stg, &[t]);
+
+        let mut stats = Stats::default();
+        let res = validate_block(&stg, &rpc, &mut stats, &block, &item41_live_ctx(&stg));
+        assert!(
+            res.is_ok(),
+            "deep-history spentness is unprovable — accepted by the documented partial mitigation: {:?}",
+            res.err()
+        );
+        assert_eq!(stats.dup_tx_refused, 0, "nothing provable, nothing refused");
+        assert!(
+            stats.dup_tx_spentness_unprovable >= 1,
+            "the unprovable input is counted, never hidden"
+        );
+    }
+
+    /// (item 41, judge round 2, the stale-output class) an output that
+    /// REMAINS in the 4600-height insert-only WindowOutputs map while its
+    /// canonical spend has AGED OUT of the 1500-height records tail: map
+    /// membership is CREATION evidence, not unspentness proof. The re-spend
+    /// is accepted only as the documented partial mitigation and the input
+    /// MUST increment dup_tx_spentness_unprovable. Control arm: an input
+    /// CREATED inside the aged records era is fully covered (a spend would
+    /// have been in records — rule (d)) and is NOT counted unprovable.
+    #[test]
+    fn item41_stale_map_output_aged_out_spend_is_counted_unprovable() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stg = item25_fixture(base, n);
+
+        // age the records tail the way the live drain does: keep only the
+        // last K records (the 4600-height map is untouched — insert-only)
+        let keep = 40usize;
+        stg.records.drain(..n - keep);
+        let floor = n - keep; // records now cover rel [floor, n)
+
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item41-stale-map");
+
+        // STALE arm: a coin CREATED way below the aged floor but still in
+        // the map (map retention outlives the records) — a canonical spend
+        // of it would have aged out with the records, so neither direction
+        // is provable.
+        let stale_coin: Hash = tri7_core::legacy::sha256d(b"item41 stale-map coin created early");
+        stg.utxo.map.insert(
+            (stale_coin, 0),
+            crate::kernel::UtxoMeta {
+                height: 5, // created at rel 5: inside the map, below floor
+                tx_offset: 181,
+                tx_time: 1_700_000_000,
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        let t_stale =
+            item40_signed_regular_tx(&send_secret, &send_pubkey, (stale_coin, 0), 2_000_000);
+
+        // CONTROL arm: a coin created INSIDE the aged records era — the
+        // records cover its creation, hence every possible spend of it;
+        // absence from rec_spends is then proof of unspent.
+        let fresh_coin: Hash = tri7_core::legacy::sha256d(b"item41 fresh coin inside aged era");
+        stg.utxo.map.insert(
+            (fresh_coin, 0),
+            crate::kernel::UtxoMeta {
+                height: floor + 5, // inside [floor, n)
+                tx_offset: 181,
+                tx_time: 1_700_000_000,
+                value: 50 * tri7_core::consensus::COIN,
+            },
+        );
+        let t_fresh =
+            item40_signed_regular_tx(&send_secret, &send_pubkey, (fresh_coin, 0), 2_000_000);
+
+        // one block carrying BOTH spends — the stale arm counted, the
+        // fresh arm proven. Counted inputs include the block's own
+        // COINSTAKE input (its stake coin was also created below the
+        // aged floor — honest counting, same class), so the exact-count
+        // assertions are DELTAS over a no-regular-txs baseline block
+        // solved on the same fixture.
+        let baseline = item41_solve_block(&stg, &[]);
+        let mut stats = Stats::default();
+        validate_block(&stg, &rpc, &mut stats, &baseline, &item41_live_ctx(&stg))
+            .expect("baseline block (coinstake only) still validates");
+        let coinstake_unprovable = stats.dup_tx_spentness_unprovable;
+        assert_eq!(
+            coinstake_unprovable, 1,
+            "the solved block's coinstake spends a below-floor fixture coin — exactly one counted input"
+        );
+
+        let block = item41_solve_block(&stg, &[t_stale.clone(), t_fresh]);
+        let mut stats = Stats::default();
+        let res = validate_block(&stg, &rpc, &mut stats, &block, &item41_live_ctx(&stg));
+        assert!(
+            res.is_ok(),
+            "the stale arm is unprovable (accepted per the documented partial mitigation), the fresh arm is proven unspent: {:?}",
+            res.err()
+        );
+        assert_eq!(stats.dup_tx_refused, 0, "no provable violation, no refusal");
+        assert_eq!(
+            stats.dup_tx_spentness_unprovable,
+            coinstake_unprovable + 1,
+            "EXACTLY the stale-map input is counted beyond the coinstake baseline — the aged-out-spend class, never hidden, and the covered-era input is not miscounted"
+        );
+
+        // and the stale arm ALONE (same delta over the baseline)
+        let block_stale = item41_solve_block(&stg, &[t_stale]);
+        let mut stats = Stats::default();
+        validate_block(&stg, &rpc, &mut stats, &block_stale, &item41_live_ctx(&stg))
+            .expect("still the documented partial mitigation");
+        assert_eq!(stats.dup_tx_spentness_unprovable, coinstake_unprovable + 1);
     }
 }
 
