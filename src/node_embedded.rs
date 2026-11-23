@@ -10093,15 +10093,11 @@ fn stake_tick(
     recent.insert(block.hash(), height_abs, &raw);
     wl.apply_block(&block, height_abs);
     addrindex_apply(&block, height_abs);
-    let mut spent: Vec<(Hash, u32)> = Vec::new();
-    for tx in block.vtx.iter().skip(1) {
-        for vin in &tx.vin {
-            if vin.prev_n != u32::MAX {
-                spent.push((vin.prev_hash, vin.prev_n));
-            }
-        }
-    }
-    pool.confirm_spend(&spent);
+    // (item 40) the own mint reconciles through the same helper every
+    // accepted body now uses — the spent-input eviction this loop always
+    // did (block's inputs, coinstake included), PLUS txid eviction of the
+    // txs this block took from the pool: identical semantics on both paths.
+    let _evicted_by_mint = pool.confirm_block(&block);
     let file = stg.to_file();
     write_state_atomic(cfg, &file).map_err(|e| format!("write state: {}", e))?;
     stake_st.last_stake = Some((
@@ -12624,6 +12620,117 @@ fn hex_upper(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02X}", x)).collect()
 }
 
+// (item 40) POOL-PEER-RECONCILE helpers -----------------------------------
+
+/// (item 40) The REGULAR txs of a block — the only things the relay pool
+/// may legitimately hold: skips the coinbase and, for a PoS block, the
+/// coinstake (a block-specific stake signature, never a relay candidate).
+/// Mirrors the classification `WalletLive::apply_block` uses.
+fn block_regular_txs(block: &Block) -> impl Iterator<Item = &Tx> {
+    let is_pos = block.vtx.len() > 1
+        && block.vtx[1].vin.iter().any(|v| v.prev_n != u32::MAX)
+        && block
+            .vtx
+            .first()
+            .and_then(|tx| tx.vout.first())
+            .map(|o| o.value == 0)
+            .unwrap_or(false);
+    let skip = if is_pos { 2 } else { 1 };
+    block.vtx.iter().skip(skip)
+}
+
+/// (item 40) Snapshot the bodies of the branch we are about to abandon
+/// (heights `from_h..=to_h`) BEFORE any rollback runs — after it, the
+/// chain-state entries are gone. Bodies come from the recent cache first
+/// (always current), then the store's hash index (the blk archive is
+/// append-only, so it still serves abandoned bodies).
+fn collect_abandoned_bodies(
+    st: &ChainState,
+    recent: &RecentBlocks,
+    store: &Arc<BlockStore>,
+    from_h: u64,
+    to_h: u64,
+) -> Vec<(u64, Block)> {
+    let mut out = Vec::new();
+    if from_h == 0 || to_h < from_h {
+        return out;
+    }
+    for h in from_h..=to_h {
+        let Some(entry) = st.entry_abs(h) else { continue };
+        let hash = entry.hash;
+        let parsed = recent
+            .get(&hash)
+            .and_then(|(_h, raw)| Block::read(&mut Reader::new(&raw)).ok())
+            .or_else(|| {
+                store
+                    .block_by_hash(&hash)
+                    .ok()
+                    .flatten()
+                    .map(|hit| hit.block)
+            });
+        match parsed {
+            Some(b) => out.push((h, b)),
+            None => log(&format!(
+                "pool reconcile: abandoned h{} body unavailable (recent+store miss) — its txs cannot return to the relay pool",
+                h
+            )),
+        }
+    }
+    out
+}
+
+/// (item 40) Return the REGULAR txs of an abandoned branch to the relay
+/// pool through the normal gate (full validation against the same live
+/// view the relay path uses), so the next staker can re-mine them on the
+/// winning branch — before this, a reorg silently deleted them from the
+/// network's pending set. A tx whose relay horizon is already spent
+/// (TTL measured from its earliest existence proof — the abandoned
+/// block's time) does NOT return: it would only be evicted again. The
+/// COINSTAKE of an abandoned block never returns: it is stake-specific,
+/// not a relay tx. `floor_h` skips bodies still on the chain after a
+/// PARTIAL rollback. Deliberately no orphaned-broadcast resurrection
+/// (item 35 verdict): only txs a consensus branch actually carried come
+/// back, through the same gate a peer relay enters by.
+fn requeue_abandoned_pool_txs(
+    pool: &mut tri7_core::txpool::TxPool,
+    wl: &SharedWalletLive,
+    bodies: &[(u64, Block)],
+    floor_h: u64,
+    now_wall: i64,
+) -> usize {
+    let ttl = pool.ttl_secs();
+    let mut requeued = 0usize;
+    let Ok(guard) = wl.lock() else {
+        return 0; // poisoned view — leave the pool untouched
+    };
+    let Some(live) = guard.as_ref() else {
+        return 0; // no live wallet view → nothing can be validated
+    };
+    let view = LiveUtxoView(&live.live);
+    for (h, b) in bodies {
+        if *h < floor_h {
+            continue; // a partial rollback left this body on the chain
+        }
+        let first_seen = b.time as i64;
+        if now_wall - first_seen > ttl {
+            continue; // horizon already spent — do not resurrect
+        }
+        for tx in block_regular_txs(b) {
+            if pool.accept(&tx.serialize(), &view, first_seen).is_ok() {
+                requeued += 1;
+            }
+        }
+    }
+    drop(guard);
+    if requeued > 0 {
+        log(&format!(
+            "pool reconcile: REORG re-queued {} relay tx(s) from the abandoned branch (accepted by the normal gate)",
+            requeued
+        ));
+    }
+    requeued
+}
+
 fn handle_message(
     peer: &mut Peer,
     st: &mut ChainState,
@@ -12980,12 +13087,45 @@ fn handle_message(
                 // consume_deferred_adoption so the DNS3 replay test drives the
                 // real consumption path; the handler just reacts to the
                 // decision.
+                // (item 40) snapshot the branch we may abandon BEFORE the
+                // consumption runs — the rollback erases the chain entries,
+                // and the bodies (recent cache + store) are what lets those
+                // txs return to the relay pool after the reorg.
+                let pre_adopt_tip = st.tip_height;
+                let abandoned_bodies = pending_adoption_for(&hash, Instant::now())
+                    .map(|p| {
+                        collect_abandoned_bodies(
+                            st,
+                            recent,
+                            store,
+                            p.fork_h + 1,
+                            pre_adopt_tip,
+                        )
+                    })
+                    .unwrap_or_default();
+                let mut stop_after_adopt = false;
                 match consume_deferred_adoption(&mut *st, rpc, stats, &hash, &b) {
                     DeferredAdoption::NotPending => {}
-                    DeferredAdoption::Stop => return Ok(()),
+                    DeferredAdoption::Stop => stop_after_adopt = true,
                     DeferredAdoption::Completed => {
                         links_tip = b.prev_hash == st.tip_hash;
                     }
+                }
+                // (item 40) a rollback during consumption (full adopt OR a
+                // partial failure) abandoned every height above the CURRENT
+                // tip: those regular txs return to the relay pool through
+                // the normal gate so the winner can re-mine them.
+                if st.tip_height < pre_adopt_tip {
+                    requeue_abandoned_pool_txs(
+                        pool,
+                        wl,
+                        &abandoned_bodies,
+                        st.tip_height + 1,
+                        now_secs() as i64,
+                    );
+                }
+                if stop_after_adopt {
+                    return Ok(());
                 }
                 if !links_tip {
                     // (T7-03) A competing body may only cost us our tip once
@@ -12997,6 +13137,20 @@ fn handle_message(
                     let ancestor_h = st
                         .index_of_hash(&b.prev_hash)
                         .map(|i| st.base + i as u64);
+                    // (item 40) snapshot the branch a successful adoption
+                    // would abandon BEFORE the probe runs — after a rollback
+                    // the chain entries are gone.
+                    let pre_rollback_tip = st.tip_height;
+                    let abandoned_fork_bodies = match ancestor_h {
+                        Some(ah) if ah < st.tip_height => collect_abandoned_bodies(
+                            st,
+                            recent,
+                            store,
+                            ah + 1,
+                            pre_rollback_tip,
+                        ),
+                        _ => Vec::new(),
+                    };
                     let mut body_ok = true;
                     if let Some(ah) = ancestor_h {
                         if let Some(prev_entry) = st.entry_abs(ah).cloned() {
@@ -13033,6 +13187,19 @@ fn handle_message(
                             Ok(false) => {}
                             Err(e) => log(&format!("fork choice: rollback failed: {}", e)),
                         }
+                    }
+                    // (item 40) any heights the rollback abandoned (full
+                    // adoption or partial failure) return to the relay pool
+                    // through the normal gate; a refused body changes
+                    // nothing (the guard is false).
+                    if st.tip_height < pre_rollback_tip {
+                        requeue_abandoned_pool_txs(
+                            pool,
+                            wl,
+                            &abandoned_fork_bodies,
+                            st.tip_height + 1,
+                            now_secs() as i64,
+                        );
                     }
                 }
             }
@@ -13243,6 +13410,20 @@ fn handle_message(
                     return Ok(());
                 }
                 addrindex_apply(&b, height_abs);
+                // (item 40) POOL-PEER-RECONCILE: every ACCEPTED body —
+                // minted locally or taken from a peer — reconciles the
+                // relay pool: the txs it confirmed leave, and so does
+                // anything that conflicts with its spends. Before this
+                // only the minting loop reconciled, so a peer-mined tx
+                // stayed claimable here and the next staker re-mined it
+                // (h2217710 → h2217719).
+                let evicted_pool_txs = pool.confirm_block(&b);
+                if evicted_pool_txs > 0 {
+                    log(&format!(
+                        "pool reconcile: h{} confirmed — {} relay-pool tx(s) evicted (mined or conflicting)",
+                        height_abs, evicted_pool_txs
+                    ));
+                }
                 stats.blocks_validated_live += 1;
                 // PEER-HEALTH: only a body that actually advanced the tip is
                 // proof this peer SERVES — tallied and flushed periodically.
@@ -28021,6 +28202,337 @@ addnode=host:notaport
         assert!(res2.is_ok(), "healed re-inject must validate: {:?}", res2.err());
         assert_eq!(stg.tip_height, base + n as u64, "the block must apply");
         assert_eq!(stg.tip_hash, block_hash, "tip must be the relayed block");
+    }
+
+    // ---- (item 40) POOL-PEER-RECONCILE ----
+
+    /// A signed, fee-paying REGULAR relay tx: one input spending `funding`
+    /// at a P2PKH script the sender controls, two outputs back to the
+    /// sender, signature through the production sign path.
+    fn item40_signed_regular_tx(
+        secret: &[u8; 32],
+        pubkey: &[u8],
+        funding: (Hash, u32),
+        value: i64,
+    ) -> Tx {
+        let prev_script = p2pkh_script(pubkey);
+        let mut tx = Tx {
+            version: 1,
+            time: 1_700_000_100,
+            vin: vec![tri7_core::legacy::Vin {
+                prev_hash: funding.0,
+                prev_n: funding.1,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                tri7_core::legacy::Vout {
+                    value: 1_000_000,
+                    script_pubkey: p2pkh_script(pubkey),
+                },
+                tri7_core::legacy::Vout {
+                    value: value - 1_000_000 - 5_000,
+                    script_pubkey: p2pkh_script(pubkey),
+                },
+            ],
+            locktime: 0,
+        };
+        tri7_core::spend::sign_input(&mut tx, 0, &prev_script, secret, pubkey, 0)
+            .expect("item40 sign");
+        tx
+    }
+
+    /// (item 40, test 1) A PEER's block that carries a regular tx our pool
+    /// is holding must reconcile the pool on the peer-acceptance path: the
+    /// confirmed tx leaves the pool, so the next mint (ours) can never
+    /// re-include it into a competing block — the h2217710 → h2217719
+    /// double-include shape. Before the fix only our OWN mint removed spent
+    /// txs from the pool; a peer-mined tx stayed claimable forever.
+    #[test]
+    fn item40_peer_block_acceptance_reconciles_the_pool() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut cfg = gate_test_cfg();
+        let state_dir = std::env::temp_dir().join("tri7-item40-pool-peer-reconcile");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        cfg.state_dir = state_dir.clone();
+
+        // the REGULAR tx the peer's block will carry: a signed spend of a
+        // prevout our wallet live view holds (the operator self-send shape)
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item40-sender");
+        let funding_prevout: Hash = tri7_core::legacy::sha256d(b"item40 funding prevout");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding_prevout, 0), 2_000_000);
+        let t_txid = t.hash();
+
+        // our pool holds T (through the same relay gate a peer tx enters
+        // by) and our live view resolves its input — the DNS3 pre-fix shape
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            wallet_live_with(
+                &[send_pubkey.clone()],
+                vec![(
+                    (funding_prevout, 0),
+                    window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+                )],
+            ),
+        )));
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        {
+            let g = wl.lock().unwrap();
+            let live = g.as_ref().unwrap();
+            pool.accept(&t.serialize(), &LiveUtxoView(&live.live), 1_700_000_200)
+                .expect("the pool must hold the relayed tx");
+        }
+        assert_eq!(pool.len(), 1, "T entered the pool through the relay gate");
+
+        // canonical next block assembled on the healthy fixture, CARRYING T
+        let mut stg = item25_fixture(base, n);
+        let tip_rel = n - 1;
+        let (secret, pubkey_vec) = tri7_core::spend::synthetic_key("item40-staker");
+        let bits = tri7_core::difficulty::get_next_target_required(&stg.rel_index(), true);
+        let rewrite_floor = scan_modifier_chain(&stg).rewrite_start;
+        let mut cands: Vec<tri7_core::stake::StakeCandidate> = Vec::new();
+        for rc in (rewrite_floor + 40)..(tip_rel - 70) {
+            cands.push(tri7_core::stake::StakeCandidate {
+                txid: tri7_core::legacy::sha256d(&(rc as u64).to_le_bytes()),
+                n: 0,
+                value: 50 * tri7_core::consensus::COIN,
+                script_pubkey: tri7_core::spend::script_pubkey_p2pk(&pubkey_vec).unwrap(),
+                block_height: rc,
+                block_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_time: 1_700_000_000u32 + (rc as u32) * 60,
+                tx_offset: 181,
+                secret,
+                pubkey: pubkey_vec.clone(),
+            });
+        }
+        let probe = 1_700_000_000u32 + (tip_rel as u32) * 60 + 7_200;
+        let (plan_res, _) = tri7_core::stake::create_coinstake(
+            &stg.rel_index(),
+            &cands,
+            bits,
+            0,
+            probe,
+            tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
+            60 * tri7_core::consensus::COIN,
+            (tip_rel + 1) as usize,
+        )
+        .expect("search");
+        let plan = plan_res.expect("the pooled coins must solve on the era-limit target");
+        let prev_entry = stg.entries[tip_rel].clone();
+        let mut block = tri7_core::stake::assemble_pos_block(
+            &prev_entry,
+            prev_entry.time,
+            &plan.tx,
+            &[t.clone()],
+            bits,
+        )
+        .expect("assemble");
+        tri7_core::stake::sign_block(&mut block, &plan.signer.secret).expect("sign");
+        let block_hash = block.hash();
+
+        // sanity: the canonical chain accepts the block WITH T through the
+        // full live gate
+        {
+            let mut stats = Stats::default();
+            let ctx = BlockCtx {
+                height_abs: base + n as u64,
+                header: None,
+                prev_entry: stg.entries[tip_rel].clone(),
+                live: true,
+            };
+            validate_block(&stg, &rpc, &mut stats, &block, &ctx)
+                .expect("the canonical chain must accept the block carrying T");
+        }
+
+        // drive the PEER path end to end over a loopback peer
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _holder = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item40-peer".into(),
+            outbound: true,
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+            advertised: None,
+        };
+        let msg = tri7_core::p2p::RawMessage {
+            command: "block".into(),
+            payload: block.serialize(),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+
+        let res = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(res.is_ok(), "the peer block must be accepted: {:?}", res.err());
+        assert_eq!(stg.tip_height, base + n as u64, "the block must apply");
+        assert_eq!(stg.tip_hash, block_hash, "tip must be the relayed block");
+        assert!(!peer.dead, "a healthy peer is never dropped");
+        // THE ITEM-40 BARS: the tx the block confirmed left the pool on the
+        // PEER-acceptance path, and the next mint cannot re-include it
+        assert!(
+            pool.get(&t_txid).is_none(),
+            "the peer-mined tx must leave the pool on acceptance"
+        );
+        assert!(pool.is_empty(), "nothing else lingers in the pool either");
+        assert!(
+            pool.txs_for_block(400_000, 250).is_empty(),
+            "the next mint cannot re-include the confirmed tx"
+        );
+    }
+
+    /// (item 40, test 4) A rollback that abandons a block carrying regular
+    /// txs re-queues them through the normal pool gate (so the winning
+    /// branch can re-mine them); a body past its relay TTL, a body still on
+    /// the chain after a PARTIAL rollback, and the coinstake itself never
+    /// return.
+    #[test]
+    fn item40_rollback_requeues_abandoned_branch_txs() {
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item40-requeue");
+        let funding_prevout: Hash = tri7_core::legacy::sha256d(b"item40 requeue funding");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding_prevout, 0), 2_000_000);
+        let t_txid = t.hash();
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            wallet_live_with(
+                &[send_pubkey.clone()],
+                vec![(
+                    (funding_prevout, 0),
+                    window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+                )],
+            ),
+        )));
+
+        // an abandoned PoS carrier block: empty coinbase + coinstake + txs
+        let carrier = |txs: Vec<Tx>| -> Block {
+            let coinbase = Tx {
+                version: 1,
+                time: 1_700_000_200,
+                vin: vec![tri7_core::legacy::Vin {
+                    prev_hash: [0u8; 32],
+                    prev_n: u32::MAX,
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                }],
+                vout: vec![tri7_core::legacy::Vout { value: 0, script_pubkey: Vec::new() }],
+                locktime: 0,
+            };
+            let coinstake = Tx {
+                version: 1,
+                time: 1_700_000_200,
+                vin: vec![tri7_core::legacy::Vin {
+                    prev_hash: tri7_core::legacy::sha256d(b"item40 staked coin"),
+                    prev_n: 0,
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                }],
+                vout: vec![
+                    tri7_core::legacy::Vout { value: 0, script_pubkey: Vec::new() },
+                    tri7_core::legacy::Vout {
+                        value: 1_500_000,
+                        script_pubkey: p2pkh_script(&send_pubkey),
+                    },
+                ],
+                locktime: 0,
+            };
+            let mut vtx = vec![coinbase, coinstake];
+            vtx.extend(txs);
+            Block {
+                version: 1,
+                prev_hash: [0x11u8; 32],
+                merkle_root: [0u8; 32],
+                time: 1_700_000_200,
+                bits: 0x2000_ffff,
+                nonce: 0,
+                vtx,
+                block_sig: Vec::new(),
+            }
+        };
+
+        let h = 2_210_000u64;
+        let bodies = vec![(h, carrier(vec![t.clone()]))];
+
+        // the rollback abandoned h → T returns through the normal gate and
+        // the winning staker can re-mine it
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        let n = requeue_abandoned_pool_txs(&mut pool, &wl, &bodies, h, 1_700_000_210);
+        assert_eq!(n, 1, "the abandoned branch's regular tx must return to the pool");
+        assert!(pool.get(&t_txid).is_some(), "T is back in the pool");
+        assert_eq!(
+            pool.txs_for_block(400_000, 250).len(),
+            1,
+            "the winning staker can re-mine T"
+        );
+
+        // the relay TTL already spent: no resurrection of long-dead txs
+        let mut pool2 = tri7_core::txpool::TxPool::new(1000, 600);
+        let n2 = requeue_abandoned_pool_txs(&mut pool2, &wl, &bodies, h, 1_700_000_200 + 601);
+        assert_eq!(n2, 0, "a tx past its relay horizon stays dead");
+        assert!(pool2.is_empty());
+
+        // PARTIAL rollback: the body is still on the chain (below the floor)
+        let mut pool3 = tri7_core::txpool::TxPool::new(1000, 600);
+        let n3 = requeue_abandoned_pool_txs(&mut pool3, &wl, &bodies, h + 1, 1_700_000_210);
+        assert_eq!(n3, 0, "a body still on the chain is not re-queued");
+
+        // the COINSTAKE never returns: it is stake-specific, not a relay tx
+        let mut pool4 = tri7_core::txpool::TxPool::new(1000, 600);
+        let coinstake_only = vec![(h, carrier(vec![]))];
+        let n4 = requeue_abandoned_pool_txs(&mut pool4, &wl, &coinstake_only, h, 1_700_000_210);
+        assert_eq!(n4, 0, "the abandoned coinstake must never re-enter the relay pool");
+
+        // no live view → nothing can be validated → fail closed, pool untouched
+        let wl_dead: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut pool5 = tri7_core::txpool::TxPool::new(1000, 600);
+        let n5 = requeue_abandoned_pool_txs(&mut pool5, &wl_dead, &bodies, h, 1_700_000_210);
+        assert_eq!(n5, 0, "with no live view nothing is re-queued (fail closed)");
     }
 
     /// The recompute_stake_kernel parity property: the fact-only helper

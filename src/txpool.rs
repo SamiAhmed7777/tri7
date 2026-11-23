@@ -14,7 +14,7 @@
 //!
 //! The pool is BOUNDED (capacity + TTL) — a relay flood evicts the oldest.
 
-use crate::legacy::{sha256d, Hash, Tx};
+use crate::legacy::{sha256d, Block, Hash, Tx};
 use crate::spend::{solver_type, verify_input, FeeMode, MIN_RELAY_TX_FEE};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -127,8 +127,9 @@ impl TxPool {
     }
 
     /// Drop entries spending any of these prevouts (they're now confirmed —
-    /// the minting loop calls this after accepting a block).
-    pub fn confirm_spend(&mut self, spent: &[(Hash, u32)]) {
+    /// the minting loop calls this after accepting a block). Returns the
+    /// number of pool entries evicted.
+    pub fn confirm_spend(&mut self, spent: &[(Hash, u32)]) -> usize {
         let mut evicted = 0usize;
         let spent_set: HashSet<(Hash, u32)> = spent.iter().copied().collect();
         let dead: Vec<Hash> = self
@@ -145,7 +146,48 @@ impl TxPool {
             self.remove(h);
             evicted += 1;
         }
-        let _ = evicted;
+        evicted
+    }
+
+    /// (item 40) Reconcile the pool against a block this node just ACCEPTED
+    /// — every acceptance point runs this, so the node that MINTED the block
+    /// and the nodes that took the body from a peer behave identically:
+    /// 1. evict every pool entry the block CONFIRMS (same txid): the relay
+    ///    tx got mined, it is no longer pending anywhere;
+    /// 2. evict every pool entry that CONFLICTS with it (spends a prevout
+    ///    the block spends — the block's own coinstake input included).
+    ///    The minting path used to do (2) alone, and the peer path did
+    ///    neither, so a competing spend stayed claimable after the block
+    ///    landed: the pool handed the SAME tx (or a sibling) to the next
+    ///    staker, and a tx already confirmed in h2217710 was re-mined into
+    ///    h2217719.
+    /// Returns the number of entries evicted (0 for the common txs-free
+    /// PoS block — the empty coinbase and the coinstake are skipped).
+    pub fn confirm_block(&mut self, block: &Block) -> usize {
+        let mut evicted = 0usize;
+        for tx in block.vtx.iter().skip(1) {
+            let h = tx.hash();
+            if self.entries.contains_key(&h) {
+                self.remove(&h);
+                evicted += 1;
+            }
+        }
+        let spent: Vec<(Hash, u32)> = block
+            .vtx
+            .iter()
+            .skip(1)
+            .flat_map(|tx| tx.vin.iter())
+            .filter(|vin| vin.prev_n != u32::MAX)
+            .map(|vin| (vin.prev_hash, vin.prev_n))
+            .collect();
+        evicted + self.confirm_spend(&spent)
+    }
+
+    /// The relay horizon for a pending entry (secs) — exposed so the
+    /// reorg re-queue (node_embedded) can honour it: a tx whose horizon
+    /// is already spent does not return to the pool after a rollback.
+    pub fn ttl_secs(&self) -> i64 {
+        self.ttl
     }
 
     /// Full validation + insertion. Returns the report; Err = reject reason
@@ -629,5 +671,121 @@ mod tests {
         assert_eq!(picked.len(), 1);
         let picked = pool.txs_for_block(0, 10);
         assert!(picked.is_empty());
+    }
+
+    // ---- (item 40) POOL-PEER-RECONCILE ----
+
+    /// A minimal accepted-block carrier for the confirm_block tests: an
+    /// empty PoS-style coinbase (skipped by the reconcile) + payload txs.
+    fn carrier_block(txs: Vec<Tx>) -> Block {
+        let coinbase = Tx {
+            version: 1,
+            time: 1_700_000_200,
+            vin: vec![crate::legacy::Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            vout: vec![crate::legacy::Vout {
+                value: 0,
+                script_pubkey: Vec::new(),
+            }],
+            locktime: 0,
+        };
+        let mut vtx = vec![coinbase];
+        vtx.extend(txs);
+        Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            time: 1_700_000_200,
+            bits: 0x2000_ffff,
+            nonce: 0,
+            vtx,
+            block_sig: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn item40_confirm_block_evicts_the_mined_tx_by_txid() {
+        let (view, txid, n, utxo, secret) = funding_utxo();
+        let mut pool = TxPool::default();
+        let funding = (txid, n, utxo, secret);
+        let (raw, tx) = signed_send(&funding, 1_000_000, 5000);
+        pool.accept(&raw, &view, 1_000).unwrap();
+        assert_eq!(pool.len(), 1);
+        // the accepted block carries the very tx we had pending
+        let evicted = pool.confirm_block(&carrier_block(vec![tx.clone()]));
+        assert_eq!(evicted, 1);
+        assert!(pool.is_empty());
+        assert!(pool.get(&tx.hash()).is_none());
+        assert!(pool.txs_for_block(400_000, 250).is_empty());
+    }
+
+    #[test]
+    fn item40_confirm_block_evicts_a_conflicting_spender() {
+        let (view, txid, n, utxo, secret) = funding_utxo();
+        let mut pool = TxPool::default();
+        let funding = (txid, n, utxo, secret);
+        // OUR pool holds one spend of the prevout…
+        let (conflict_raw, conflict_tx) = signed_send(&funding, 900_000, 5000);
+        pool.accept(&conflict_raw, &view, 1_000).unwrap();
+        assert_eq!(pool.len(), 1);
+        // …while the accepted block mines a DIFFERENT spend of it (a
+        // different txid with different outputs — the exact shape that
+        // let a tx confirmed in h2217710 be re-mined into h2217719)
+        let (_mined_raw, mined_tx) = signed_send(&funding, 800_000, 5000);
+        assert_ne!(mined_tx.hash(), conflict_tx.hash());
+        let evicted = pool.confirm_block(&carrier_block(vec![mined_tx]));
+        assert_eq!(evicted, 1);
+        assert!(pool.is_empty());
+        assert!(pool.get(&conflict_tx.hash()).is_none());
+    }
+
+    #[test]
+    fn item40_confirm_block_keeps_a_non_conflicting_child() {
+        let (view, txid, n, utxo, secret) = funding_utxo();
+        let mut pool = TxPool::default();
+        let funding = (txid, n, utxo.clone(), secret);
+        let (raw, tx) = signed_send(&funding, 1_000_000, 5000);
+        pool.accept(&raw, &view, 1_000).unwrap();
+        // a CHILD of the mined tx spends its output — the block CREATED
+        // that prevout, it did not spend it, so the child must stay
+        let parent_txid = tx.hash();
+        let child_funding = (
+            parent_txid,
+            0u32,
+            PoolUtxo {
+                value: 1_000_000,
+                script_pubkey: tx.vout[0].script_pubkey.clone(),
+                height: 101,
+                tx_time: 1_700_000_100,
+            },
+            secret,
+        );
+        let (child_raw, child_tx) = signed_send(&child_funding, 500_000, 2000);
+        let mut map = StdMap::new();
+        map.insert((txid, n), utxo);
+        map.insert((parent_txid, 0), child_funding.2.clone());
+        let child_view = OneUtxo { map };
+        pool.accept(&child_raw, &child_view, 2_000).unwrap();
+        assert_eq!(pool.len(), 2);
+        let evicted = pool.confirm_block(&carrier_block(vec![tx.clone()]));
+        assert_eq!(evicted, 1); // the parent only
+        assert!(pool.get(&parent_txid).is_none());
+        assert!(pool.get(&child_tx.hash()).is_some());
+    }
+
+    #[test]
+    fn item40_confirm_block_txs_free_block_changes_nothing() {
+        let (view, txid, n, utxo, secret) = funding_utxo();
+        let mut pool = TxPool::default();
+        let funding = (txid, n, utxo, secret);
+        let (raw, _) = signed_send(&funding, 1_000_000, 5000);
+        pool.accept(&raw, &view, 1_000).unwrap();
+        let evicted = pool.confirm_block(&carrier_block(vec![]));
+        assert_eq!(evicted, 0);
+        assert_eq!(pool.len(), 1);
     }
 }
