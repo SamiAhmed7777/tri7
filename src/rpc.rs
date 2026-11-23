@@ -1535,7 +1535,7 @@ enum NativeOutcome {
 /// (TRI7-RPC-04) hard cap on one JSON-RPC batch array. Each element is a full
 /// request (some of them O(chain-window) reads), so an unbounded array is a
 /// single-connection CPU amplifier.
-pub const MAX_BATCH_ELEMS: usize = 20;
+pub const MAX_BATCH_ELEMS: usize = 500;
 
 /// Handle one raw request body (single object or batch array).
 /// Returns (http status, response body).
@@ -5313,6 +5313,31 @@ mod tests {
         let (_, out) = handle_body(&d, &json!(at_cap).to_string());
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v.as_array().map(|a| a.len()), Some(MAX_BATCH_ELEMS));
+    }
+
+    /// (2026-11-23) The self-serve lanes (kernel-window backfill pass 2, the
+    /// window maintenance) send 200-element batches; the old cap of 20 made
+    /// the server answer a single -32600 error OBJECT, which the client
+    /// reported as "rpc batch: not an array" — after the port fix this was
+    /// the last blocker to the backfill ever completing. Pin: 200 elements
+    /// must be served as 200 envelopes.
+    #[test]
+    fn batch_of_200_self_serve_size_is_served() {
+        let t = StubTip;
+        let w = StubWallet::default();
+        let b = StubBlocks { ready: true, chain_hash: None };
+        let d = deps(&t, &w, &b, None);
+        let reqs: Vec<Value> = (0..200)
+            .map(|i| json!({"id": i, "method": "getblockcount"}))
+            .collect();
+        let (status, out) = handle_body(&d, &json!(reqs).to_string());
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.as_array().map(|a| a.len()),
+            Some(200),
+            "the self-serve batch size must be an array answer: got {v}"
+        );
     }
 
     /// (TRI7-RPC-04) address-shaped params are length-capped before the O(n²)
