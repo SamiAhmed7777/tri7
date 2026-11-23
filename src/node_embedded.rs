@@ -8365,18 +8365,26 @@ impl WalletLive {
             let step = match walker.step() {
                 Ok(s) => s,
                 Err(e) => {
-                    // a hard frame error is a hole, not a dead wallet
+                    // a hard frame error is a hole, not a dead wallet — and
+                    // the recovery's delivered block MUST be applied (a
+                    // discard here would shift every later height by one)
                     skipped += 1;
                     if first_skip.is_none() {
                         first_skip = Some(walker.height() as u64);
                     }
                     last_skip = walker.height() as u64;
                     let _ = e;
-                    // the walker cannot step past a hard error; the resync
-                    // path inside step() already handled unparseable frames,
-                    // so this arm is unreachable in practice — but never loop
-                    if !walker.step_past_stale()?.is_block() {
-                        break;
+                    match walker.step_past_stale()? {
+                        crate::replay::Step::Block(h, block, _hash) => {
+                            let h = h as u64;
+                            if h >= base && h <= tip {
+                                wl.apply_block(&block, h);
+                            }
+                            if h > tip {
+                                break;
+                            }
+                        }
+                        _ => break, // no replacement found: the archive ends here
                     }
                     continue;
                 }

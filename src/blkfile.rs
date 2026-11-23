@@ -108,7 +108,21 @@ impl BlkFileReader {
                     self.log_torn_tail(last_complete, offset);
                     return Ok(None);
                 }
-                Err(FrameRead::Corrupt(m)) => return Err(m),
+                Err(FrameRead::Corrupt(_m)) => {
+                    // (2026-11-23) MAGIC HUNT: garbage bytes rarely align to a
+                    // frame boundary — advance one byte and retry from there.
+                    // Without this, the resync returned Err at the FIRST
+                    // corrupt header while the reader never advanced, so the
+                    // callers retried the same offset forever (the measured
+                    // stall: both machines' builds and seeds wedged at the
+                    // debris, ~5% CPU, no error, no progress).
+                    self.offset += 1;
+                    use std::io::{Seek, SeekFrom};
+                    if self.inner.seek(SeekFrom::Start(self.offset)).is_err() {
+                        return Err("resync: seek failed during magic hunt".into());
+                    }
+                    continue;
+                }
             };
             if let Ok(b) = frame.block() {
                 if &b.prev_hash == want_prev {
