@@ -116,9 +116,28 @@ impl ArchiveWalker {
                 return Err(format!("frame error at height {}: {}", self.height, e));
             }
         };
-        let block = frame
-            .block()
-            .map_err(|e| format!("parse error at height {}: {}", self.height, e))?;
+        // (2026-11-22) DEBRIS RESYNC: only an UNPARSEABLE frame triggers the
+        // forward scan — a parseable frame that does not chain is a
+        // StaleBranch, and the fork-detection semantics below must keep
+        // firing for it (the coverage contract depends on that distinction).
+        let block = match frame.block() {
+            Ok(b) => b,
+            Err(parse_err) => {
+                let want = self.prev.clone().unwrap_or([0u8; 32]);
+                let resynced = self.rdr.resync_to_chained_frame(&want)?;
+                match resynced {
+                    Some(f2) => {
+                        eprintln!(
+                            "archive: resync past unparseable frame near height {} — resumed at a chained frame",
+                            self.height
+                        );
+                        f2.block()
+                            .map_err(|e| format!("resynced frame parse error: {}", e))?
+                    }
+                    None => return Ok(Step::Eof),
+                }
+            }
+        };
         if self.height == 0 {
             if block.prev_hash != [0u8; 32] {
                 return Err("genesis prev not zero".into());

@@ -85,6 +85,42 @@ impl BlkFileReader {
         self.last_complete
     }
 
+    /// (2026-11-22) RESYNC past mid-file debris: scan forward for a frame
+    /// whose block PARSES and whose prev_hash chains onto `want_prev` — the
+    /// chain-continuity anchor makes debris unspoofable (only the real next
+    /// block of the chain can satisfy it). Bounded to 2,000 frames / 64 MiB.
+    /// Returns Ok(None) at clean EOF or when the bound is exhausted.
+    pub fn resync_to_chained_frame(
+        &mut self,
+        want_prev: &crate::legacy::Hash,
+    ) -> Result<Option<Frame>, String> {
+        const MAX_FRAMES: usize = 2000;
+        const MAX_BYTES: u64 = 64 << 20;
+        let start = self.offset;
+        for _ in 0..MAX_FRAMES {
+            if self.offset.saturating_sub(start) > MAX_BYTES {
+                return Err("resync: 64 MiB without a chained frame".into());
+            }
+            let frame = match self.next_frame_checked() {
+                Ok(Some(f)) => f,
+                Ok(None) => return Ok(None), // clean EOF (incl. tolerant torn tail)
+                Err(FrameRead::TornTail { last_complete, offset }) => {
+                    self.log_torn_tail(last_complete, offset);
+                    return Ok(None);
+                }
+                Err(FrameRead::Corrupt(m)) => return Err(m),
+            };
+            if let Ok(b) = frame.block() {
+                if &b.prev_hash == want_prev {
+                    return Ok(Some(frame));
+                }
+            }
+            // unparseable or non-chaining frame: the reader has already
+            // advanced past it — keep scanning.
+        }
+        Err("resync: frame budget exhausted".into())
+    }
+
     /// Read the next frame; None at clean EOF. A torn final frame is reported
     /// as a clean EOF after one log line (the tolerant shape every existing
     /// caller already handles); mid-file corruption is still an Err. Callers

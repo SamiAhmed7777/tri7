@@ -10810,12 +10810,25 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
             // coins the chain shows, so a spend built from it can never be a
             // double-spend of a coin the replay thinks is gone.
             "getwalletspendable" => {
-                let wl = self.wl.lock().unwrap();
-                let Some(wl) = wl.as_ref() else {
-                    return Err((-1, "wallet live UTXO view not ready yet".into()));
+                // (item 39) clone the address list UNDER the lock, then DROP
+                // it: the SQLite wallet_view below reads the INDEX, not the
+                // view, and holding the view mutex across that read made
+                // every tier-1 money answer block for the WHOLE in-process
+                // rebuild (the repairwallet/AUTOHEAL seed holds the same
+                // mutex ~2min at full history — live DNS2 00:16-00:19Z: a
+                // concurrent getbalance stalled 60s despite the rebuild
+                // flag, because tier 1 blocked here before the gated tiers
+                // were ever reached). Tier 1 is index-derived and
+                // rebuild-independent.
+                let addrs: Vec<String> = {
+                    let wl = self.wl.lock().map_err(|_| {
+                        (-1, "wallet live view mutex poisoned".to_string())
+                    })?;
+                    let Some(wl) = wl.as_ref() else {
+                        return Err((-1, "wallet live UTXO view not ready yet".into()));
+                    };
+                    wl.wallet.keys.iter().map(|k| k.address.clone()).collect()
                 };
-                let addrs: Vec<String> =
-                    wl.wallet.keys.iter().map(|k| k.address.clone()).collect();
                 let path = tri7_core::addrindex::db_path(&self.state_dir);
                 if !path.exists() {
                     return Err((-1, tri7_core::addrindex::NOT_ENABLED.to_string()));
