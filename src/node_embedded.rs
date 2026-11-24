@@ -10652,10 +10652,14 @@ fn stake_tick(
         .into_iter()
         .map(|(_h, tx)| tx)
         .collect();
-    let mut block = tri7_core::stake::assemble_pos_block(&tip_entry, median_time_past, &plan.tx, &extra, n_bits)?;
+    // ITEM 43: the coinbase scriptSig height is the ABSOLUTE next height
+    // (`tip_height + 1`), NOT the window-relative `tip_entry.height + 1`
+    // (a constant 4600 on a full window).
+    let height_abs = tip_height + 1;
+    let mut block =
+        tri7_core::stake::assemble_pos_block(&tip_entry, height_abs, median_time_past, &plan.tx, &extra, n_bits)?;
     tri7_core::stake::sign_block(&mut block, &plan.signer.secret)?;
     // full self-validation through the SAME gate peer blocks pass
-    let height_abs = tip_height + 1;
     let prev_entry = tip_entry;
     let outcome = validate_block(
         stg,
@@ -20148,7 +20152,7 @@ mod tests {
         let plan = plan.expect("mature coin must solve on an easy target");
         let prev = stg.entry_abs(110).unwrap().clone();
         let mut block =
-            assemble_pos_block(&prev, prev.time, &plan.tx, &[], bits).expect("assemble");
+            assemble_pos_block(&prev, 111, prev.time, &plan.tx, &[], bits).expect("assemble");
         sign_block(&mut block, &secret).expect("sign");
         let kernel =
             check_proof_of_stake(&stg.rel_index(), &block, &stg.utxo, bits, 10)
@@ -20284,7 +20288,7 @@ mod tests {
         let plan = plan.expect("a mature deep-window coin must solve on an easy target");
         let prev = stg.entry_abs(4700).unwrap().clone();
         let mut block =
-            assemble_pos_block(&prev, prev.time, &plan.tx, &[], bits).expect("assemble");
+            assemble_pos_block(&prev, 4701, prev.time, &plan.tx, &[], bits).expect("assemble");
         sign_block(&mut block, &secret).expect("sign");
         let kernel =
             check_proof_of_stake(&stg.rel_index(), &block, &stg.utxo, bits, 4700)
@@ -21398,7 +21402,7 @@ mod tests {
             let plan = plan.expect("a mature coin must solve on an easy target");
             let prev = st.entries.last().unwrap().clone();
             let mut block =
-                assemble_pos_block(&prev, prev.time, &plan.tx, &[], bits).expect("assemble");
+                assemble_pos_block(&prev, st.tip_height + 1, prev.time, &plan.tx, &[], bits).expect("assemble");
             sign_block(&mut block, &secret).expect("sign");
             block
         };
@@ -29433,6 +29437,7 @@ addnode=host:notaport
         let prev_entry0 = stg0.entries[tip_rel].clone();
         let mut block = tri7_core::stake::assemble_pos_block(
             &prev_entry0,
+            (tip_rel + 1) as u64,
             prev_entry0.time,
             &plan.tx,
             &[],
@@ -29764,6 +29769,7 @@ addnode=host:notaport
         let prev_entry = stg.entries[tip_rel].clone();
         let mut block = tri7_core::stake::assemble_pos_block(
             &prev_entry,
+            (tip_rel + 1) as u64,
             prev_entry.time,
             &plan.tx,
             &[t.clone()],
@@ -30258,6 +30264,7 @@ addnode=host:notaport
         let prev_entry = stg.entries[tip_rel].clone();
         let mut block = tri7_core::stake::assemble_pos_block(
             &prev_entry,
+            (tip_rel + 1) as u64,
             prev_entry.time,
             &plan.tx,
             extra,

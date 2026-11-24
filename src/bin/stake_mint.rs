@@ -559,8 +559,18 @@ fn main() {
         plan.kernel.coin_day_weight,
         hash_to_display(&plan.kernel.hash_proof_of_stake),
     ));
-    let mut block = assemble_pos_block(&tip_entry, median_time_past, &plan.tx, &[], n_bits)
-        .unwrap_or_else(|e| die(EXIT_CHAIN, &format!("block assembly: {}", e)));
+    // ITEM 43: pass the ABSOLUTE next height explicitly (the replay index is
+    // full-history, so rel == abs here — value unchanged, contract explicit).
+    let next_height_abs = (tip_entry.height + 1) as u64;
+    let mut block = assemble_pos_block(
+        &tip_entry,
+        next_height_abs,
+        median_time_past,
+        &plan.tx,
+        &[],
+        n_bits,
+    )
+    .unwrap_or_else(|e| die(EXIT_CHAIN, &format!("block assembly: {}", e)));
     sign_block(&mut block, &plan.signer.secret)
         .unwrap_or_else(|e| die(EXIT_CHAIN, &format!("block signature: {}", e)));
     let block_hash_display = hash_to_display(&block.hash());

@@ -495,12 +495,18 @@ pub fn create_coinstake(
 // Block assembly — CreateNewBlock PoS template + SignBlock (miner.cpp:96-110,
 // 333-341; main.cpp:3778-3815)
 // ---------------------------------------------------------------------------
-/// Assemble the PoS block around a solved coinstake. `prev` is the tip entry,
-/// `median_time_past` the 11-entry MTP at the tip, `extra_txs` the optional
-/// wallet transactions carried from the template. Returns the UNSIGNED block
-/// (vchBlockSig empty) — call `sign_block` next.
+/// Assemble the PoS block around a solved coinstake. `prev` is the tip entry
+/// (its `height` field is WINDOW-RELATIVE in windowed mode — base+index is
+/// the absolute height), `next_height_abs` the ABSOLUTE height of the block
+/// being built (the reference's `pindexPrev->nHeight + 1`; callers with a
+/// windowed ChainState pass `tip_height + 1`, from-zero/replay callers pass
+/// `prev.height + 1` where relative == absolute), `median_time_past` the
+/// 11-entry MTP at the tip, `extra_txs` the optional wallet transactions
+/// carried from the template. Returns the UNSIGNED block (vchBlockSig empty)
+/// — call `sign_block` next.
 pub fn assemble_pos_block(
     prev: &IndexEntry,
+    next_height_abs: u64,
     median_time_past: u32,
     coinstake: &Tx,
     extra_txs: &[Tx],
@@ -509,8 +515,17 @@ pub fn assemble_pos_block(
     if !tx_is_coin_stake(coinstake) {
         return Err("SignBlock: template tx is not a coinstake".into());
     }
-    let next_height = prev.height + 1;
-    let drift = max_time_drift(next_height); // FutureDrift/PastDrift window
+    // ITEM 43: both height consumers below take the ABSOLUTE height. The
+    // window-relative `prev.height + 1` previously fed both: on a full
+    // 4600-entry window the coinbase scriptSig was the constant 4600 on every
+    // mint (the coinbase txid then depended only on its timestamp, so two
+    // same-timestamp blocks collided the tx-index), and the drift era gate
+    // read the pre-fork 600 s window instead of the live 90 s one —
+    // inconsistent with validate_block, which has always used the absolute
+    // height. Nothing on the acceptance path validates the coinbase height,
+    // and history is NOT rewritten: only blocks minted after this fix carry
+    // absolute-height stamps.
+    let drift = max_time_drift(next_height_abs as usize); // FutureDrift/PastDrift window
 
     // main.cpp:3794-3796 — the coinstake must meet the timestamp protocol.
     let past_limit = std::cmp::max(median_time_past as i64 + 1, prev.time as i64 - drift);
@@ -526,7 +541,7 @@ pub fn assemble_pos_block(
     // coinstake time in SignBlock (main.cpp:3798).
     let script_sig = {
         let mut s = Vec::new();
-        push_script_int64(&mut s, next_height as i64);
+        push_script_int64(&mut s, next_height_abs as i64);
         s // + COINBASE_FLAGS (empty CScript, main.cpp:443)
     };
     let mut coinbase = Tx {
@@ -972,6 +987,7 @@ mod tests {
         let outputs = point_outputs_for(&[coin]);
         let mut block = assemble_pos_block(
             idx.tip().unwrap(),
+            (idx.tip().unwrap().height + 1) as u64,
             median_of_last_11(&idx),
             &plan.tx,
             &[],
@@ -1082,6 +1098,7 @@ mod tests {
         let tip = idx.entries.len() - 1;
         let mut block = assemble_pos_block(
             idx.tip().unwrap(),
+            (tip + 1) as u64,
             median_of_last_11(&idx),
             &plan_p.tx,
             &[],
@@ -1435,6 +1452,7 @@ mod tests {
         let plan = res.expect("solve");
         let mut block = assemble_pos_block(
             idx.tip().unwrap(),
+            (idx.tip().unwrap().height + 1) as u64,
             median_of_last_11(&idx),
             &plan.tx,
             &[],
@@ -1489,6 +1507,7 @@ mod tests {
         plan.tx.time = 1_400_000_000; // below any floor of the synthetic chain
         let err = assemble_pos_block(
             idx.tip().unwrap(),
+            (idx.tip().unwrap().height + 1) as u64,
             median_of_last_11(&idx),
             &plan.tx,
             &[],
@@ -1585,5 +1604,152 @@ mod tests {
         push_script_int64(&mut w, 0x0080_0000); // top bit of the last byte set → sign byte
         assert_eq!(w, expect_min(0x0080_0000));
         assert_eq!(w.last(), Some(&0x00), "sign byte terminates the encoding");
+    }
+
+    /// ITEM 43 helper: decode the coinbase scriptSig's height prefix the way
+    /// a height-from-coinbase reader would (OP_N for 1..16, else
+    /// <len> <minimal LE magnitude>).
+    fn decode_script_int(sig: &[u8]) -> i64 {
+        assert!(!sig.is_empty(), "empty coinbase scriptSig");
+        match sig[0] {
+            0x00 => 0,
+            0x4f => -1,
+            b if (0x51..=0x60).contains(&b) => (b - 0x50) as i64,
+            len => {
+                let len = len as usize;
+                assert_eq!(sig.len(), len + 1, "trailing bytes after the height push");
+                let mut v: i64 = 0;
+                for (i, &b) in sig[1..1 + len].iter().enumerate() {
+                    v |= (b as i64) << (8 * i);
+                }
+                v
+            }
+        }
+    }
+
+    /// ITEM 43 helper: a minimal coinstake-shaped template tx (non-null
+    /// prevout, empty first output, stake output second) — everything
+    /// `assemble_pos_block` needs from the template.
+    fn template_coinstake(time: u32) -> Tx {
+        Tx {
+            version: 1,
+            time,
+            vin: vec![Vin {
+                prev_hash: [0xAB; 32],
+                prev_n: 0,
+                script_sig: vec![0x01, 0x51],
+                sequence: u32::MAX,
+            }],
+            vout: vec![
+                Vout {
+                    value: 0,
+                    script_pubkey: Vec::new(),
+                },
+                Vout {
+                    value: 1_234_567,
+                    script_pubkey: vec![0x51],
+                },
+            ],
+            locktime: 0,
+        }
+    }
+
+    /// ITEM 43: on a windowed chain the tip IndexEntry's `height` field is
+    /// WINDOW-RELATIVE — a full 4600-entry window pins the tip at 4599, so the
+    /// pre-fix coinbase stamp was the constant 4600 on every live mint (live
+    /// evidence: scriptSig '02f811' at h2216464 / h2217000 / h2217971). The
+    /// reference (miner.cpp:96-110) stamps `pindexPrev->nHeight + 1` — the
+    /// ABSOLUTE next height — and gates FutureDrift/PastDrift on it.
+    #[test]
+    fn coinbase_script_sig_stamps_absolute_height_on_a_full_window() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut idx = ReplayIndex::new();
+        let t0 = 1_400_000_400u32;
+        for h in 0..4600usize {
+            let (gen, m) = if h > 0 && h % 5 == 0 {
+                (true, (h / 5) as u64)
+            } else {
+                (true, 0) // genesis
+            };
+            idx.push(synthetic_entry(h, t0 + (h as u32) * 120, gen, m));
+        }
+        let tip = idx.tip().unwrap().clone();
+        assert_eq!(tip.height, 4599, "the window is FULL — rel tip at the cap");
+        let base: u64 = 2_214_000; // fiction: entries[0]'s absolute height
+        let next_abs = base + 4600; // what the reference stamps at this tip
+        let mtp = median_of_last_11(&idx);
+        let cs = template_coinstake(tip.time + 60);
+        let block = assemble_pos_block(&tip, next_abs, mtp, &cs, &[], EASY_BITS)
+            .expect("assemble on a full window");
+        let stamped = decode_script_int(&block.vtx[0].vin[0].script_sig);
+        assert_eq!(
+            stamped, next_abs as i64,
+            "the stamp must be the ABSOLUTE next height"
+        );
+        assert_ne!(stamped, 4600, "the pre-fix window-relative constant");
+        // The drift era gate must ALSO read the absolute height: at
+        // h2,218,600 the live-era FutureDrift/PastDrift window is 90 s, so a
+        // coinstake 300 s below the tip time (which the 600 s pre-fork window
+        // the window-relative height selected used to accept) must be
+        // refused — agreeing with validate_block, which has always gated on
+        // the absolute height.
+        let stale_cs = template_coinstake(tip.time - 300);
+        let err = assemble_pos_block(&tip, next_abs, mtp, &stale_cs, &[], EASY_BITS)
+            .expect_err("the 90 s live-era drift floor must bind");
+        assert!(err.contains("timestamp floor"), "got: {}", err);
+    }
+
+    /// ITEM 43: a PARTIAL window (from-zero sync / early chain): base == 0, so
+    /// the window-relative tip height IS the absolute height — the stamp stays
+    /// tip.height + 1 exactly as the genesis-era chain recorded it.
+    #[test]
+    fn coinbase_script_sig_stamps_next_height_on_a_partial_window() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = synthetic_index(); // 40 entries, base 0, tip rel 39
+        let tip = idx.tip().unwrap().clone();
+        let next_abs = (tip.height + 1) as u64;
+        let mtp = median_of_last_11(&idx);
+        let cs = template_coinstake(tip.time + 60);
+        let block = assemble_pos_block(&tip, next_abs, mtp, &cs, &[], EASY_BITS)
+            .expect("assemble on a partial window");
+        assert_eq!(
+            decode_script_int(&block.vtx[0].vin[0].script_sig),
+            next_abs as i64,
+            "relative == absolute below the window: stamp stays tip.height + 1"
+        );
+    }
+
+    /// ITEM 43: the collision the constant stamp created. Two template blocks
+    /// sharing a coinstake timestamp previously produced IDENTICAL vtx[0]
+    /// (same null prevout, same height constant, empty output) — the coinbase
+    /// txid was unique only through its timestamp, so any two same-timestamp
+    /// blocks collided in the tx-index (5 pairs in 1500 live blocks).
+    /// Absolute-height stamps make the coinbase txid (and the block hash) a
+    /// function of (timestamp, height) again.
+    #[test]
+    fn same_timestamp_coinbase_txids_differ_by_height() {
+        let _g = RESERVE_GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = synthetic_index();
+        let tip = idx.tip().unwrap().clone();
+        let mtp = median_of_last_11(&idx);
+        let cs = template_coinstake(tip.time + 60);
+        let base: u64 = 2_218_600; // live-era height: 90 s drift, floor passes
+        let b1 = assemble_pos_block(&tip, base, mtp, &cs, &[], EASY_BITS).expect("b1");
+        let b2 = assemble_pos_block(&tip, base + 1, mtp, &cs, &[], EASY_BITS).expect("b2");
+        assert_eq!(b1.vtx[0].time, b2.vtx[0].time, "same coinstake timestamp");
+        assert_ne!(
+            b1.vtx[0].vin[0].script_sig, b2.vtx[0].vin[0].script_sig,
+            "the height stamps must differ"
+        );
+        assert_ne!(
+            b1.vtx[0].hash(),
+            b2.vtx[0].hash(),
+            "same-timestamp coinbase txids must differ by height"
+        );
+        assert_ne!(b1.hash(), b2.hash(), "the block hashes differ too");
+        // determinism is preserved: the same inputs still assemble identically
+        let b1_again = assemble_pos_block(&tip, base, mtp, &cs, &[], EASY_BITS)
+            .expect("b1 again");
+        assert_eq!(b1.hash(), b1_again.hash());
     }
 }
