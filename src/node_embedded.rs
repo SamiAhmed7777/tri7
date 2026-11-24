@@ -26936,6 +26936,7 @@ addnode=host:notaport
             now_secs()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _dir = TestDirRm(dir.clone()); // removed on every exit path
         let store = autoheal_store_with_honest_coin(
             &dir,
             &pubkey,
@@ -27038,6 +27039,23 @@ addnode=host:notaport
         assert!(line.contains("run `repairwallet`"), "{line}");
     }
 
+    /// (test hygiene, item 42) Deletes a test's temporary store directory when the
+    /// binding leaves scope — on EVERY path, a failed assertion's unwind included (a
+    /// `remove_dir_all` written at the end of a test body is skipped exactly then).
+    /// Bind it under a real name (`_dir`, not `_`) BEFORE the store binding — first
+    /// element of a returned tuple — so it drops AFTER the store handle: the
+    /// directory is out of use when it is removed, which keeps `remove_dir_all`
+    /// portable beyond Unix. Cleanup failure is printed to stderr, never fatal
+    /// (a panic inside `drop` during an unwind would abort the test binary).
+    struct TestDirRm(std::path::PathBuf);
+    impl Drop for TestDirRm {
+        fn drop(&mut self) {
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                eprintln!("TestDirRm cleanup failed ({}): {e}", self.0.display());
+            }
+        }
+    }
+
     /// (item 42b test fixture) the LIVE duplicate-inclusion shape at the
     /// live heights and times: tx 4f43cd16… was mined in h2217710 AND
     /// h2217719 (block times 1795382768 / 1795383968, tx_time 1795382220);
@@ -27047,12 +27065,15 @@ addnode=host:notaport
     /// at h2217719's facts, and the candidate is the FIRST-WRITE wallet
     /// view (h2217710's facts). The store also holds the canonical block at
     /// h2217711 (servable, WITHOUT the tx) so a claim naming another height
-    /// is answered on the merits. Returns (stg, store, candidate, cache).
+    /// is answered on the merits. Returns (stg, store, candidate, cache,
+    /// directory guard) — the caller binds the guard (`_dir`) so the store
+    /// directory is removed when the test ends, however it ends.
     #[allow(clippy::type_complexity)]
     fn item42_dup_fixture(
         tag: &str,
         body_holds_tx: bool,
     ) -> (
+        TestDirRm,
         ChainState,
         std::sync::Arc<BlockStore>,
         tri7_core::stake::StakeCandidate,
@@ -27137,6 +27158,7 @@ addnode=host:notaport
             now_secs()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let dir_rm = TestDirRm(dir.clone());
         let path = dir.join("blocks.bin");
         let mut frames = bin_frame(&blk_w);
         frames.extend_from_slice(&bin_frame(&blk_next));
@@ -27176,7 +27198,7 @@ addnode=host:notaport
             secret,
             pubkey,
         };
-        (stg, store, cand, std::collections::HashMap::new())
+        (dir_rm, stg, store, cand, std::collections::HashMap::new())
     }
 
     /// (item 42b DUPLICATE-RESOLVER-CLASS) The live 4f43cd16…:1 coin —
@@ -27189,7 +27211,7 @@ addnode=host:notaport
     /// now carries BOTH heights.
     #[test]
     fn item42_duplicate_tx_outpoint_resolves_on_the_chain_facts_live_numbers() {
-        let (stg, store, cand, mut proven) = item42_dup_fixture("item42-dup", true);
+        let (_dir, stg, store, cand, mut proven) = item42_dup_fixture("item42-dup", true);
         let rel_c = (2_217_719 - stg.base) as usize;
         assert_eq!(rel_c, 17, "window-relative height of the chain's creation");
 
@@ -27315,7 +27337,7 @@ addnode=host:notaport
         assert_eq!((r2.len(), stale2.len(), d2[0].fresh), (1, 0, false));
         // … and a CHANGED stored body at the proven height voids it: the
         // block the proof was made against is no longer what the node holds
-        let (_stg_nb, store_nb, _c_nb, _p_nb) = item42_dup_fixture("item42-latebody", false);
+        let (_dir, _stg_nb, store_nb, _c_nb, _p_nb) = item42_dup_fixture("item42-latebody", false);
         let (r, stale, _u, d) = resolve_stake_evidence(
             &stg_late,
             &mut DupEvidence {
@@ -27345,7 +27367,7 @@ addnode=host:notaport
             ),
         ];
         for (tag, tweak) in cases {
-            let (stg_m, store_m, mut c_m, mut p_m) = item42_dup_fixture(tag, true);
+            let (_dir, stg_m, store_m, mut c_m, mut p_m) = item42_dup_fixture(tag, true);
             tweak(&mut c_m);
             let (r, s, _u, d) = resolve_stake_evidence(
                 &stg_m,
@@ -27359,7 +27381,7 @@ addnode=host:notaport
             assert!(p_m.is_empty(), "{tag}: nothing was proven");
         }
         // the store's body at the claimed height is NOT the canonical block
-        let (mut stg_m, store_m, c_m, mut p_m) = item42_dup_fixture("item42-nocanonical", true);
+        let (_dir, mut stg_m, store_m, c_m, mut p_m) = item42_dup_fixture("item42-nocanonical", true);
         stg_m.entries[(2_217_710 - stg_m.base) as usize].hash = [0x77u8; 32];
         let (r, s, _u, d) = resolve_stake_evidence(
             &stg_m,
@@ -27372,7 +27394,7 @@ addnode=host:notaport
         assert_eq!((r.len(), s.len(), d.len()), (0, 1, 0), "a non-canonical body proves nothing");
         assert!(p_m.is_empty());
         // the canonical block at the claimed height does not hold this txid
-        let (stg_n, store_n, c_n, mut p_n) = item42_dup_fixture("item42-nohold", false);
+        let (_dir, stg_n, store_n, c_n, mut p_n) = item42_dup_fixture("item42-nohold", false);
         // the claim describes the canonical block at h2217710…
         let (r, s, _u, d) = resolve_stake_evidence(
             &stg_n,
@@ -27395,7 +27417,7 @@ addnode=host:notaport
     /// every call before the cache is consulted — pinned here too.
     #[test]
     fn item42_cached_proof_does_not_cover_a_changed_wallet_claim() {
-        let (stg, store, cand, mut p) = item42_dup_fixture("item42-wholeclaim", true);
+        let (_dir, stg, store, cand, mut p) = item42_dup_fixture("item42-wholeclaim", true);
         // populate the cache with the live-shaped claim
         let (r, stale, _u, d) = resolve_stake_evidence(
             &stg,
@@ -27484,7 +27506,7 @@ addnode=host:notaport
         // a DIFFERENT wallet-claimed height. The cache entry names the
         // height it was proven against; h2217711 is servable AND canonical
         // and does not hold this txid — so a fresh proof for it fails.
-        let (stg_a, store_a, cand_a, mut p_a) = item42_dup_fixture("item42-otherheight", true);
+        let (_dir, stg_a, store_a, cand_a, mut p_a) = item42_dup_fixture("item42-otherheight", true);
         let (r, stale, _u, _d) = resolve_stake_evidence(
             &stg_a,
             &mut DupEvidence {
@@ -27551,7 +27573,7 @@ addnode=host:notaport
         // accepted after the proven height's CANONICAL block changed — a
         // reorg replaced it. The stored body is still the OLD block, so only
         // the window entry can tell; the hit must revalidate against it.
-        let (mut stg_b, store_b, cand_b, mut p_b) = item42_dup_fixture("item42-reorg", true);
+        let (_dir, mut stg_b, store_b, cand_b, mut p_b) = item42_dup_fixture("item42-reorg", true);
         let (r, stale, _u, _d) = resolve_stake_evidence(
             &stg_b,
             &mut DupEvidence {
@@ -27581,7 +27603,7 @@ addnode=host:notaport
         // … the chain no longer REACHES the proven height (shorter after a
         // reorg; the kernel map's latest creation sits one block lower):
         // nothing is canonical at the proven height — fail closed as well
-        let (mut stg_s, store_s, cand_s, mut p_s) = item42_dup_fixture("item42-short", true);
+        let (_dir, mut stg_s, store_s, cand_s, mut p_s) = item42_dup_fixture("item42-short", true);
         let (r, stale, _u, _d) = resolve_stake_evidence(
             &stg_s,
             &mut DupEvidence {
@@ -27633,7 +27655,7 @@ addnode=host:notaport
     /// genuine episode: the duplicate class never creates one.
     #[test]
     fn item42_autoheal_rearms_after_a_duplicate_inclusion_episode() {
-        let (mut stg, store, cand, mut proven) = item42_dup_fixture("item42-rearm", true);
+        let (_dir, mut stg, store, cand, mut proven) = item42_dup_fixture("item42-rearm", true);
         let mut stake_st = gate_stake_state();
         let (resolved, stale, _unres, recreated) = resolve_stake_evidence(
             &stg,
