@@ -639,8 +639,7 @@ mod tests {
 
     #[test]
     fn encrypted_wallet_roundtrip_and_strict_refusal() {
-        let dir = std::env::temp_dir().join(format!("tri7-enc-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-enc-test");
         let path = synth_wallet(&dir, "roundtrip");
 
         // strict reader accepts the PLAINTEXT store
@@ -674,7 +673,6 @@ mod tests {
         let err = decrypt_wallet(&path, "wrong passphrase").unwrap_err();
         assert!(err.contains("wrong passphrase"), "{err}");
 
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The HD mnemonic must be encrypted under a DOMAIN-SEPARATED IV derived
@@ -682,8 +680,7 @@ mod tests {
     /// and must decrypt back from the mkey row alone.
     #[test]
     fn mnemonic_uses_a_derived_iv_and_round_trips() {
-        let dir = std::env::temp_dir().join(format!("tri7-enc-mnem-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-enc-mnem");
         let path = synth_wallet(&dir, "mnem");
         let mnemonic = "abandon abandon abandon about";
         {
@@ -761,7 +758,6 @@ mod tests {
         assert_eq!(left, 0);
 
         drop(conn);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -774,8 +770,7 @@ mod uncompressed_tests {
 
     #[test]
     fn decrypt_wallet_supports_uncompressed_legacy_keys() {
-        let dir = std::env::temp_dir().join(format!("tri7-enc-unc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-enc-unc");
         let path = dir.join("wallet_unc.dat");
         {
             let conn = Connection::open(&path).unwrap();
@@ -830,6 +825,5 @@ mod uncompressed_tests {
         assert_eq!(keys[0].0.len(), 65, "uncompressed pubkey preserved");
         let err = decrypt_wallet(&path, "wrong").unwrap_err();
         assert!(err.contains("wrong passphrase"), "{err}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

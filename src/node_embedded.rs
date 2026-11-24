@@ -19854,9 +19854,7 @@ mod tests {
     /// dials through exactly this socks endpoint.
     #[test]
     fn conf_socks_key_sets_socks_cli_flag_wins() {
-        let dir = std::env::temp_dir().join(format!("peersocks{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("peersocks");
         let conf = dir.join("triangles.conf");
         std::fs::write(
             &conf,
@@ -19893,7 +19891,6 @@ mod tests {
         std::fs::write(&conf, "rpcuser=u\nrpcpassword=p\nsocks=not-a-socks\n").unwrap();
         let cfg3 = parse_args(&argv);
         assert_eq!(cfg3.socks, ("127.0.0.1".to_string(), 9050u16));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -21031,15 +21028,10 @@ mod tests {
         );
 
         // 4. --status: the offline payload shows the impairment
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-absent-phantom-{}-{}",
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-absent-phantom");
         std::fs::write(dir.join("tipstate.json"), &json).unwrap();
         let mut cfg = gate_test_cfg();
-        cfg.state_dir = dir.clone();
+        cfg.state_dir = dir.path().to_path_buf();
         let status = status_payload(&cfg).expect("status payload");
         assert_eq!(status["staking_impaired"]["absent"], true);
         assert!(
@@ -21074,7 +21066,6 @@ mod tests {
                 .any(|r| r.as_str().unwrap_or("").ends_with("run repairwallet")),
             "--status must not recommend the proven no-op, got: {reasons:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// BLOCKER 2 (round-1 judge): stake_tick returned BEFORE evidence
@@ -21909,15 +21900,7 @@ mod tests {
     /// serves from the shared ancestor: exactly the reply whose judge fires.
     #[test]
     fn stale_locator_body_cannot_anchor_the_serve_past_our_refilled_slot() {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-loc-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-loc");
         let path = dir.join("blk.dat");
         // chain g → b1 → b2 → b3 → b4 threaded by the oracle; raced (also a
         // child of b2) appended at runtime into the appendix at height 3
@@ -22013,7 +21996,6 @@ mod tests {
         let served = collect_headers(&store3, &recent2, &[raced.hash()], &[0u8; 32]);
         assert!(served.is_empty(), "heightless raced frame: no anchor either way");
 
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The r5-judge blocker pin: an empty tip-poll reply fires the
@@ -25155,8 +25137,7 @@ addnode=host:notaport
     /// 494+65 self-dials). Mirrors the file list overlay_addr_me reads.
     #[test]
     fn self_identities_at_reads_the_tor_hostname_files() {
-        let dir = std::env::temp_dir().join(format!("tri7-item34-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-item34");
         let onion = "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion";
         // the DNS2 publish shape: hostname file, NO onion-state.json
         std::fs::write(dir.join("onion_address.txt"), format!("{onion}\n")).unwrap();
@@ -25189,7 +25170,6 @@ addnode=host:notaport
         std::fs::write(dir.join("hidden_service/hostname"), onion).unwrap();
         let ids3 = self_identities_at(&dir);
         assert!(ids3.iter().any(|s| s == onion));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (item 34 r2) ONE SESSION PER DIRECTION PER ENDPOINT: the dedupe keys
@@ -25590,8 +25570,7 @@ addnode=host:notaport
 
     #[test]
     fn conf_stake_flag_resolution_and_persistence() {
-        let dir = std::env::temp_dir().join(format!("tri7-conf-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-conf-test");
         let conf = dir.join("triangles.conf");
         std::fs::write(&conf, "rpcuser=u\nrpcpassword=p\nstake=0\nport=24113\n").unwrap();
         // persist on
@@ -25614,7 +25593,6 @@ addnode=host:notaport
         assert_eq!(stake, Some(true));
         conf_set_flag(&conf, "stake", "0").unwrap();
         assert!(std::fs::read_to_string(&conf).unwrap().contains("stake=0"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -25803,11 +25781,7 @@ addnode=host:notaport
         // global applied live + conf line persisted + the byte-exact v5
         // init error on any un-parseable amount. (This test binary has no
         // other stake-global users, so the process-global set here is safe.)
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-reserve-verb-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-reserve-verb-test");
         let conf = dir.join("triangles.conf");
         std::fs::write(&conf, "stake=1\n").unwrap();
         // set: response shape + live global + persisted conf line
@@ -25836,7 +25810,6 @@ addnode=host:notaport
         );
         // restore the pristine global for any later test
         tri7_core::stake::set_reserve_balance(0);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
 
@@ -26353,6 +26326,7 @@ addnode=host:notaport
     fn autoheal_fixture(
         tag: &str,
     ) -> (
+        crate::testsupport::TestDir,
         ChainState,
         WalletLive,
         (Hash, u32),
@@ -26361,13 +26335,7 @@ addnode=host:notaport
         let (secret, pubkey) = tri7_core::spend::synthetic_key(tag);
         let _ = secret;
         let pubkey = pubkey.to_vec();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-{}-{}-{}",
-            tag,
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir(&format!("tri7-{tag}"));
         let store = autoheal_store_with_honest_coin(
             &dir,
             &pubkey,
@@ -26419,7 +26387,7 @@ addnode=host:notaport
                 coinbase: false,
             },
         );
-        (stg, wl, raced_key, store)
+        (dir, stg, wl, raced_key, store)
     }
 
     #[test]
@@ -26624,6 +26592,7 @@ addnode=host:notaport
     fn item38_fixture(
         tag: &str,
     ) -> (
+        crate::testsupport::TestDir,
         ChainState,
         WalletLive,
         std::sync::Arc<BlockStore>,
@@ -26634,13 +26603,7 @@ addnode=host:notaport
         let (_sec_a, pk_a) = tri7_core::spend::synthetic_key(&format!("{tag}-funded"));
         let (sec_b, pk_b) = tri7_core::spend::synthetic_key(&format!("{tag}-fresh"));
         let pk_a = pk_a.to_vec();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-{}-{}-{}",
-            tag,
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir(&format!("tri7-{tag}"));
         let store = item38_selfsend_store(&dir, &pk_a, &pk_b);
         let mut wl = WalletLive::seed(
             &store,
@@ -26675,7 +26638,7 @@ addnode=host:notaport
         let added = wh.add_key(&sec_b, "imported").unwrap();
         wh.close();
         assert_eq!(added.pubkey, pk_b, "the file holds exactly the fresh key");
-        (stg, wl, store, file, CHANGE_V)
+        (dir, stg, wl, store, file, CHANGE_V)
     }
 
     /// THE INCIDENT REGRESSION (item text bar ii): a self-send whose vout0
@@ -26684,7 +26647,7 @@ addnode=host:notaport
     /// rebuild) AND through the AUTOHEAL/repairwallet rebuild path.
     #[test]
     fn selfsend_credits_both_vouts_once_the_post_boot_key_arrives() {
-        let (_stg, mut wl, store, file, change_v) = item38_fixture("item38-credit");
+        let (_dir, _stg, mut wl, store, file, change_v) = item38_fixture("item38-credit");
         let fresh_v = 100 * tri7_core::consensus::COIN;
         let fresh_k = wl
             .live
@@ -26758,7 +26721,7 @@ addnode=host:notaport
     /// the rebuilt (swapped) view owns the self-send's fresh vout too.
     #[test]
     fn autoheal_rebuild_refreshes_keys_from_the_wallet_file_first() {
-        let (mut stg, mut wl, store, file, change_v) = item38_fixture("item38-autoheal");
+        let (_dir, mut stg, mut wl, store, file, change_v) = item38_fixture("item38-autoheal");
         let fresh_v = 100 * tri7_core::consensus::COIN;
         // the raced phantom: A-owned, wallet block_time contradicts the chain
         // (the autoheal trigger class, the autoheal_fixture shape)
@@ -26832,12 +26795,7 @@ addnode=host:notaport
             "/nonexistent/item38-no-such-wallet.dat"
         )))
         .is_none());
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-item38-enc-{}-{}",
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-item38-enc");
         let file = dir.join("enc.dat");
         let conn = rusqlite::Connection::open(&file).unwrap();
         conn.execute_batch(&format!(
@@ -26857,7 +26815,7 @@ addnode=host:notaport
 
     #[test]
     fn autoheal_rebuild_removes_the_raced_phantom_and_keeps_the_honest_coin() {
-        let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-rebuild");
+        let (_dir, mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-rebuild");
         // detect: the raced coin is the facts-MISMATCH class (absent:false)
         let (cands, _nk, _ul, _ns) = wl.candidates();
         assert_eq!(cands.len(), 2, "honest + raced, both candidates");
@@ -26901,7 +26859,7 @@ addnode=host:notaport
         // the gates, so the in-process heal must too — a LOCKED wallet with
         // a raced live view still ends the tick healed (an unlocked one
         // stakes on the restored coins in the SAME tick)
-        let (mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-locked");
+        let (_dir, mut stg, mut wl, raced_key, store) = autoheal_fixture("autoheal-locked");
         wl.locked = true;
         let cfg = gate_test_cfg();
         let rpc = Rpc::new("127.0.0.1", 1, "", "");
@@ -27083,12 +27041,7 @@ addnode=host:notaport
         let (secret, pubkey) = tri7_core::spend::synthetic_key("resolver-fault");
         let _ = secret;
         let pubkey = pubkey.to_vec();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-item37-{}-{}",
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-item37");
         let store = autoheal_store_with_honest_coin(
             &dir,
             &pubkey,
@@ -27166,13 +27119,7 @@ addnode=host:notaport
         let (secret, pubkey) = tri7_core::spend::synthetic_key("item42-remedy-key");
         let _ = secret;
         let pubkey = pubkey.to_vec();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-item42a-{}-{}",
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let _dir = TestDirRm(dir.clone()); // removed on every exit path
+        let dir = crate::testsupport::test_dir("tri7-item42a"); // removed on every exit path
         let store = autoheal_store_with_honest_coin(
             &dir,
             &pubkey,
@@ -27278,20 +27225,6 @@ addnode=host:notaport
     /// (test hygiene, item 42) Deletes a test's temporary store directory when the
     /// binding leaves scope — on EVERY path, a failed assertion's unwind included (a
     /// `remove_dir_all` written at the end of a test body is skipped exactly then).
-    /// Bind it under a real name (`_dir`, not `_`) BEFORE the store binding — first
-    /// element of a returned tuple — so it drops AFTER the store handle: the
-    /// directory is out of use when it is removed, which keeps `remove_dir_all`
-    /// portable beyond Unix. Cleanup failure is printed to stderr, never fatal
-    /// (a panic inside `drop` during an unwind would abort the test binary).
-    struct TestDirRm(std::path::PathBuf);
-    impl Drop for TestDirRm {
-        fn drop(&mut self) {
-            if let Err(e) = std::fs::remove_dir_all(&self.0) {
-                eprintln!("TestDirRm cleanup failed ({}): {e}", self.0.display());
-            }
-        }
-    }
-
     /// (item 42b test fixture) the LIVE duplicate-inclusion shape at the
     /// live heights and times: tx 4f43cd16… was mined in h2217710 AND
     /// h2217719 (block times 1795382768 / 1795383968, tx_time 1795382220);
@@ -27309,7 +27242,7 @@ addnode=host:notaport
         tag: &str,
         body_holds_tx: bool,
     ) -> (
-        TestDirRm,
+        crate::testsupport::TestDir,
         ChainState,
         std::sync::Arc<BlockStore>,
         tri7_core::stake::StakeCandidate,
@@ -27387,14 +27320,7 @@ addnode=host:notaport
             block_sig: Vec::new(),
         };
         blk_next.merkle_root = blk_next.merkle_root();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-{}-{}-{}",
-            tag,
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir_rm = TestDirRm(dir.clone());
+        let dir = crate::testsupport::test_dir(&format!("tri7-{tag}"));
         let path = dir.join("blocks.bin");
         let mut frames = bin_frame(&blk_w);
         frames.extend_from_slice(&bin_frame(&blk_next));
@@ -27434,7 +27360,7 @@ addnode=host:notaport
             secret,
             pubkey,
         };
-        (dir_rm, stg, store, cand, std::collections::HashMap::new())
+        (dir, stg, store, cand, std::collections::HashMap::new())
     }
 
     /// (item 42b DUPLICATE-RESOLVER-CLASS) The live 4f43cd16…:1 coin —
@@ -28200,15 +28126,7 @@ addnode=host:notaport
     // from-zero walk needs; and a raced body INSIDE the window stays refused.
     #[test]
     fn below_window_stored_body_can_anchor_the_serve_for_fresh_installs() {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-bw-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-bw");
         let path = dir.join("blk.dat");
         // the fleet shape: the full consecutive chain g → h1 → h2 → w3 → w4
         // in the store, and LIVE WINDOW slots threaded only near the tip
@@ -28305,9 +28223,7 @@ addnode=host:notaport
 
     #[test]
     fn genesis_frame_only_store_is_not_usable_state() {
-        let dir = std::env::temp_dir().join(format!("tri7-gns{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-gns");
         let blk = dir.join("blk0001.dat");
         // exactly what a bare machine's first write leaves: the genesis frame
         // (8-byte magic+len header + 200-byte genesis body)
@@ -28331,7 +28247,6 @@ addnode=host:notaport
         std::fs::write(&blk, b"not-a-blockstore-at-all...............").unwrap();
         assert!(!store_has_bodies(&blk));
         assert!(!store_has_bodies(&dir.join("missing.dat")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -28339,9 +28254,7 @@ addnode=host:notaport
         // Every shape below passes a naive "file is bigger than frame 1"
         // check and would have preserved the wedge class; each must read as
         // bare (fail toward progress).
-        let dir = std::env::temp_dir().join(format!("tri7-gns2{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-gns2");
         let blk = dir.join("blk0001.dat");
         let gen = tri7_core::blockindex::encode_frame(&[0u8; 200]);
         let bare = |why: &str| {
@@ -28426,7 +28339,6 @@ addnode=host:notaport
             store_has_bodies(&blk),
             "two valid frames + a partial third body is a real store"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
 
@@ -28555,20 +28467,10 @@ addnode=host:notaport
     // ---- RPC-OPS-WIRING round-2 (Codex judge blockers 1-3 +
     // verb-through-NodeOps coverage) ----
 
-    /// Unique per-test temp state dir (process id + nanos: `cargo test`
-    /// runs suites in parallel and tests can rerun in one process).
-    fn rpcops_state_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "tri7-rpcops-test-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// Unique per-test temp state dir (guarded, item 45 — `test_dir` is
+    /// unique per call, safe under the parallel test runner).
+    fn rpcops_state_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7-rpcops-test-{tag}"))
     }
 
     /// A minimal OpsAdapter over a temp state dir: real (empty) pool/stake/
@@ -28969,11 +28871,12 @@ addnode=host:notaport
     /// never ran, peers stayed empty, seeding died instantly.
     #[test]
     fn bare_machine_without_explicit_peers_still_arms_from_zero() {
-        let conf_path = std::env::temp_dir().join("tri7-bare-machine-test.conf");
+        let _tdir = crate::testsupport::test_dir("tri7-bare-machine");
+        let conf_path = _tdir.join("tri7-bare-machine-test.conf");
         std::fs::write(&conf_path, "rpcuser=t\nrpcpassword=t\n").expect("write temp conf");
         let argv: Vec<String> = vec![
             "--state-dir".to_string(),
-            std::env::temp_dir().join("tri7-bare-machine-state").display().to_string(),
+            _tdir.join("tri7-bare-machine-state").display().to_string(),
             "--conf".to_string(),
             conf_path.to_string_lossy().to_string(),
         ];
@@ -29048,9 +28951,7 @@ addnode=host:notaport
     /// and a user target equal to a seed never duplicates.
     #[test]
     fn parse_args_appends_default_seeds_without_duplicates() {
-        let state = std::env::temp_dir().join(format!("i2pseeds{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&state);
-        std::fs::create_dir_all(&state).unwrap();
+        let state = crate::testsupport::test_dir("i2pseeds");
         // (a) a bare boot (only state dir + a missing conf): the default
         // loopback target PLUS the full seed floor
         let argv = vec![
@@ -29090,7 +28991,6 @@ addnode=host:notaport
             .count();
         assert_eq!(count, 1, "the user's own seed target wins, no dup");
         assert_eq!(cfg2.peers[0].endpoint(), seed_spec);
-        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// MED-4d: overlay_addr_me reads the supervisor-written state files and
@@ -29098,9 +28998,7 @@ addnode=host:notaport
     /// --no-listen follower yields None (call sites keep the placeholder).
     #[test]
     fn overlay_addr_me_carries_i2p_flag_and_gates_on_listen() {
-        let state = std::env::temp_dir().join(format!("i2paddrme{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&state);
-        std::fs::create_dir_all(&state).unwrap();
+        let state = crate::testsupport::test_dir("i2paddrme");
         // no identity → None
         assert!(overlay_addr_me(&state, Some(24113)).is_none());
         // listener off → None even WITH an identity (never advertise an
@@ -29137,7 +29035,6 @@ addnode=host:notaport
         assert!(onion.is_tor_v3);
         assert!(!onion.is_i2p);
         assert_eq!(onion.port, 24113);
-        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// MED-3a: the i2p dial windows are wider than clearnet/tor (tunnel
@@ -29621,9 +29518,8 @@ addnode=host:notaport
         let n = 420usize;
         let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
         let mut cfg = gate_test_cfg();
-        let state_dir = std::env::temp_dir().join("tri7-item25-containment-test");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        cfg.state_dir = state_dir.clone();
+        let state_dir = crate::testsupport::test_dir("tri7-item25-containment-test");
+        cfg.state_dir = state_dir.path().to_path_buf();
 
         // canonical next block assembled on the healthy fixture
         let stg0 = item25_fixture(base, n);
@@ -29933,9 +29829,8 @@ addnode=host:notaport
         let n = 420usize;
         let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
         let mut cfg = gate_test_cfg();
-        let state_dir = std::env::temp_dir().join("tri7-item40-pool-peer-reconcile");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        cfg.state_dir = state_dir.clone();
+        let state_dir = crate::testsupport::test_dir("tri7-item40-pool-peer-reconcile");
+        cfg.state_dir = state_dir.path().to_path_buf();
 
         // the REGULAR tx the peer's block will carry: a signed spend of a
         // prevout our wallet live view holds (the operator self-send shape)
@@ -30376,16 +30271,7 @@ addnode=host:notaport
     /// coverage height and tip hash.
     #[test]
     fn snapshot_pair_follows_the_files_on_disk() {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-item31-reload-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-item31-reload");
         let h1 = "11".repeat(32);
         let h2 = "22".repeat(32);
         let write_pair = |bh: u64, bhash: &str, uh: u64, uhash: &str, row: &str| {
@@ -30415,7 +30301,7 @@ addnode=host:notaport
             snap_sig: std::sync::Mutex::new(None),
             wl: Arc::new(Mutex::new(None)),
             st: Arc::new(Mutex::new(synthetic_chain(0, 10))),
-            state_dir: dir.clone(),
+            state_dir: dir.path().to_path_buf(),
             balances_path: dir.join("balances.json"),
             utxos_path: dir.join("wallet_utxos.json"),
             rich_cache: Arc::new(Mutex::new(crate::rpc::RichListCache::new())),
@@ -30442,7 +30328,6 @@ addnode=host:notaport
         write_pair(300, &h1, 300, &h1, row1);
         let s = provider.snap_view();
         assert_eq!(s.coverage().unwrap(), (300, h1.clone()), "retry adopts");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------------------------
@@ -30536,16 +30421,8 @@ addnode=host:notaport
         let n = 420usize;
         let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
         let mut cfg = gate_test_cfg();
-        let state_dir = std::env::temp_dir().join(format!(
-            "tri7-item41-dup-tx-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&state_dir).unwrap();
-        cfg.state_dir = state_dir;
+        let state_dir = crate::testsupport::test_dir("tri7-item41-dup-tx");
+        cfg.state_dir = state_dir.path().to_path_buf();
 
         // the REGULAR tx the peer's block will carry: a signed spend of a
         // prevout our wallet live view holds (the operator self-send shape)
@@ -30942,15 +30819,7 @@ addnode=host:notaport
         let stg = item25_fixture(base, n);
         let h = base + n as u64;
 
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-item41-store-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-item41-store");
         let path = dir.join("blk.dat");
 
         // the old-history tx the candidate will re-include: signed, real
@@ -31071,7 +30940,6 @@ addnode=host:notaport
                 *slot = None;
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (item 41, judge round 1 blocker 1) the INCOMPLETE-MITIGATION

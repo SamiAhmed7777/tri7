@@ -6674,7 +6674,7 @@ mod tests {
         }
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = {
-            let dir = idx.dir.clone();
+            let dir = idx.dir.path().to_path_buf();
             let stop = stop.clone();
             std::thread::spawn(move || {
                 let mut h = 2u64;
@@ -6780,7 +6780,7 @@ mod tests {
             crate::addrindex::set_complete(&conn, true).expect("set complete");
         }
         // a fresh connection is what a restarted node gets
-        let reopened = TempIndex { dir: idx.dir.clone() };
+        let reopened = idx.reopen();
         let facts = reopened.facts();
         assert_eq!(facts.coverage_height, 2);
         let block2 = test_block(2, vec![0x76, 0xa9], 2_000_000);
@@ -7833,10 +7833,8 @@ mod tests {
     const COV_HASH: &str = "f9031dee5b47c020534ba6c339b46aee7c25a5a14ea9588b4042689796cc6307";
     const COV_WALLET_ADDR: &str = "T9yWe13uxKMJkG1YihqrYv3qVt7HNc9WyY";
 
-    fn cov_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tri7_cov_{}_{}", tag, std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn cov_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7_cov-{tag}"))
     }
 
     fn write_snap(path: &PathBuf, v: &Value) {
@@ -7884,7 +7882,7 @@ mod tests {
     }
 
     /// Write both snapshot files and load them through the REAL loaders.
-    fn load_pair(dir: &PathBuf, bal: &Value, utx: &Value) -> SnapshotWallet {
+    fn load_pair(dir: &std::path::Path, bal: &Value, utx: &Value) -> SnapshotWallet {
         let bp = dir.join("balances.json");
         let up = dir.join("wallet_utxos.json");
         write_snap(&bp, bal);
@@ -8157,23 +8155,23 @@ fn test_block(height: u64, addr_script: Vec<u8>, value: i64) -> crate::legacy::B
 /// exercise the production facts and the production verdict - a stub that
 /// invented "authoritative" would test nothing.
 struct TempIndex {
-    dir: std::path::PathBuf,
+    dir: crate::testsupport::TestDir,
 }
 
 impl TempIndex {
     fn new(tag: &str) -> TempIndex {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-idx-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("index dir");
+        let dir = crate::testsupport::test_dir(&format!("tri7-idx-{tag}"));
         // the production path that creates the schema
         crate::addrindex::begin(&dir).expect("begin index");
         TempIndex { dir }
+    }
+
+    /// A second handle on the same guarded dir (node-restart shape): the
+    /// first guard to drop removes the dir, the second sees NotFound = OK.
+    fn reopen(&self) -> TempIndex {
+        TempIndex {
+            dir: crate::testsupport::TestDir::adopt(self.dir.path().to_path_buf()),
+        }
     }
 
     /// Open the index (the production way - the daemon opens it per call).
@@ -8896,9 +8894,7 @@ fn multisig_address_verbs_store_redeem_scripts_in_the_wallet_file() {
     let _env = ENV_LOCK.lock().unwrap();
 
     // a wallet file with two keys (synthetic secrets — never wallet material)
-    let dir = std::env::temp_dir().join(format!("tri7rpc_ms_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7rpc_ms");
     let path = dir.join("wallet.dat");
     crate::wallet::create_wallet_file(&path).unwrap();
     let synth = |label: &str| -> ([u8; 32], Vec<u8>) {
@@ -9112,9 +9108,7 @@ fn createmultisig_creates_without_touching_the_wallet_file() {
     let keys = [hex_encode(&pk(1)), hex_encode(&pk(2)), hex_encode(&pk(3))];
 
     // a wallet file on disk — createmultisig must leave it untouched
-    let dir = std::env::temp_dir().join(format!("tri7rpc_cms_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7rpc_cms");
     let path = dir.join("wallet.dat");
     crate::wallet::create_wallet_file(&path).unwrap();
     // NOTE: no TRI7_WALLET_PATH mutation here — the createmultisig handler is
@@ -9229,7 +9223,6 @@ fn createmultisig_creates_without_touching_the_wallet_file() {
         "createmultisig must never write the wallet file"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- richlist explorer verb (balances snapshot → ranked top addresses) ----
@@ -9356,8 +9349,7 @@ fn richlist_routes_passively_with_default_count_and_errors() {
 
 #[test]
 fn rich_list_cache_re_reads_when_the_file_changes_and_errors_when_missing() {
-    let dir = std::env::temp_dir().join(format!("tri7_richcache_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7_richcache");
     let p = dir.join("balances.json");
     std::fs::write(
         &p,
@@ -9386,7 +9378,6 @@ fn rich_list_cache_re_reads_when_the_file_changes_and_errors_when_missing() {
     // missing file → operator-actionable error
     let err = cache.get(&dir.join("nope.json")).unwrap_err();
     assert!(err.contains("--balances"), "error must tell the operator how to build one: {err}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------

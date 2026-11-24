@@ -857,12 +857,13 @@ mod tests {
     /// signed material or the signature breaks it.
     #[test]
     fn announcement_verifies_and_rejects_tamper() {
+        let _id = crate::testsupport::test_dir("tri7-onion-identity");
         let (secret, pub_hex) =
-            load_or_create_identity(std::path::Path::new(&std::env::temp_dir())).unwrap_or_else(
-                |e| panic!("identity: {}", e),
-            );
-        // NOTE: temp dir may already carry a key from a previous run — both
-        // paths (create + load) are exercised across runs.
+            load_or_create_identity(_id.path()).unwrap_or_else(|e| panic!("identity: {e}"));
+        // guarded dir (item 45): the load path is now exercised deliberately
+        // in the SAME run instead of relying on a leftover from a previous run.
+        let (_, pub_hex_2) = load_or_create_identity(_id.path()).unwrap();
+        assert_eq!(pub_hex, pub_hex_2, "create then load serves one identity");
         let mut a = RotationAnnouncement {
             identity_pub: pub_hex.clone(),
             old_onion: "oldyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy.onion".into(),
@@ -956,8 +957,7 @@ mod tests {
     /// unreadable cookies are refused rather than sent.
     #[test]
     fn cookie_auth_line_hex_encodes_the_32_byte_cookie() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-cookie-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-onion-cookie");
         let path = dir.join("control.authcookie");
         let bytes: Vec<u8> = (0u8..32).collect();
         std::fs::write(&path, &bytes).unwrap();
@@ -970,7 +970,6 @@ mod tests {
             cookie_auth_line(&path).is_err(),
             "a 16-byte cookie must be refused, not sent"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Round-4 regression: a first run has no previous service, and bootstrap
@@ -1021,8 +1020,7 @@ mod tests {
     /// `<HiddenServiceDir>/hostname` file. Both are READ, never derived.
     #[test]
     fn hostname_file_addresses_are_read_not_derived() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-hostname-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-onion-hostname");
         let path = dir.join("hostname");
         std::fs::write(
             &path,
@@ -1040,7 +1038,6 @@ mod tests {
         let short = dir.join("hostname-short");
         std::fs::write(&short, "abcd.onion\n").unwrap();
         assert!(read_hostname_file(&short).is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// select_rotation_peers/rotation_due agreement with OnionState helpers.
@@ -1115,8 +1112,7 @@ mod tests {
     /// served", never a parse failure.
     #[test]
     fn onion_state_keys_roundtrip_and_old_files_load() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-state-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-onion-state");
         let path = dir.join("onion-state.json");
         let st = OnionState {
             current: "current.onion".into(),
@@ -1145,7 +1141,6 @@ mod tests {
         assert_eq!(legacy.current, "c.onion");
         assert_eq!(legacy.current_key, None);
         assert_eq!(legacy.previous_key, None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// holder_serves: the holder may claim ONLY what it actually serves —
@@ -1380,8 +1375,7 @@ mod tests {
     /// NEW bytes — never the stale first-read line.
     #[test]
     fn cookie_auth_is_rebuilt_per_connection_after_tor_rotates_it() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-reauth-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-onion-reauth");
         let path = dir.join("control.authcookie");
         let first_bytes = [0u8; 32];
         std::fs::write(&path, first_bytes).unwrap();
@@ -1412,7 +1406,6 @@ mod tests {
             second_line,
             format!("AUTHENTICATE {}", hex_encode(&fresh_bytes))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Round-4 defect 3: precedence is explicit --cookie > explicit
@@ -1421,8 +1414,7 @@ mod tests {
     /// runs when nothing explicit was given (injected closures, no real tor).
     #[test]
     fn auth_source_precedence_explicit_cookie_then_password_then_auto_then_bare() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-authsrc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-onion-authsrc");
         let explicit = dir.join("explicit.authcookie");
         std::fs::write(&explicit, [7u8; 32]).unwrap();
         let auto = dir.join("auto.authcookie");
@@ -1449,7 +1441,6 @@ mod tests {
             resolve_auth_source(None, None, || Option::<std::path::PathBuf>::None),
             AuthSource::Bare
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Round-4 defect 3: an unreadable AUTO-discovered cookie falls back to
@@ -1458,7 +1449,7 @@ mod tests {
     /// a hard error. A password source never falls back.
     #[test]
     fn unreadable_auto_cookie_falls_back_to_bare_but_explicit_cookie_is_fatal() {
-        let dir = std::env::temp_dir().join(format!("tri7-onion-fallback-{}", std::process::id()));
+        let dir = crate::testsupport::test_dir("tri7-onion-fallback");
         let gone = dir.join("vanished.authcookie"); // never written
         let src = AuthSource::AutoCookie(gone.clone());
         let (line, warn) = src.auth_line().unwrap();
@@ -1485,6 +1476,5 @@ mod tests {
         let (line, warn) = AuthSource::Password("hunter2".into()).auth_line().unwrap();
         assert_eq!(line, "AUTHENTICATE \"hunter2\"");
         assert_eq!(warn, None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

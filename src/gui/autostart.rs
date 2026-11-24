@@ -288,18 +288,13 @@ mod tests {
         assert!(text.contains("Terminal=false\n"));
         assert!(text.contains("Hidden=false\n"));
         // and the written file reads back as ENABLED
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-autostart-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-autostart-test");
         let path = dir.join("triangles.desktop");
         std::fs::write(&path, &text).unwrap();
         assert!(linux_is_enabled_in(&dir));
         // a Hidden=true line disables it (v5 semantics)
         std::fs::write(&path, text.replace("Hidden=false", "Hidden=true")).unwrap();
         assert!(!linux_is_enabled_in(&dir));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -315,11 +310,7 @@ mod tests {
     fn linux_set_remove_roundtrip_in_a_temp_dir() {
         // exercises the WRITE path headlessly on linux CI; the exe it writes
         // is this test binary — the file content shape is asserted above
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-autostart-roundtrip-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-autostart-roundtrip");
         // write manually with a fixed exe (current_exe in tests is the test
         // runner, which is fine too, but pin it for the assertion)
         let exe = std::path::Path::new("/tmp/tri7_wallet_gui");
@@ -329,7 +320,6 @@ mod tests {
         assert!(!linux_is_enabled_in(&dir));
         // disable-again is idempotent (v5 remove() of a missing file)
         linux_set_enabled_in(&dir, false).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

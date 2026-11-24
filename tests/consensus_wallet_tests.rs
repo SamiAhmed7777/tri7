@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use tri7_core::consensus::*;
 use tri7_core::legacy::{hash9, sha256d, Block, Reader, Tx};
 
+#[path = "../src/testsupport.rs"]
+mod testsupport;
+
 // ---------------------------------------------------------------------------
 // classification
 // ---------------------------------------------------------------------------
@@ -335,8 +338,7 @@ fn decode_address_rejects_foreign_versions() {
 #[test]
 fn wallet_records_parse_order_independently() {
     for keys_first in [true, false] {
-        let dir = std::env::temp_dir().join(format!("tri7-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = testsupport::test_dir("tri7-test");
         let path = dir.join(format!("wallet-{}.dat", keys_first));
         let (pk, sk) = make_wallet_file(&path, keys_first);
         let w = tri7_core::wallet::read_wallet(&path).expect("read");
@@ -352,8 +354,7 @@ fn wallet_records_parse_order_independently() {
 
 #[test]
 fn wallet_rejects_wrong_application_id() {
-    let dir = std::env::temp_dir().join(format!("tri7-bad-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-bad");
     let path = dir.join("bad.dat");
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch("PRAGMA application_id = 999;").unwrap();
@@ -363,8 +364,7 @@ fn wallet_rejects_wrong_application_id() {
 
 #[test]
 fn encrypted_wallet_stops() {
-    let dir = std::env::temp_dir().join(format!("tri7-enc-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-enc");
     let path = dir.join("enc.dat");
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(

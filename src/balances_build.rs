@@ -633,11 +633,8 @@ mod tests {
         f.flush().unwrap();
     }
 
-    fn tmp_dir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tri7-balances-build-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp_dir(name: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7-balances-build-{name}"))
     }
 
     fn run_build(dir: &Path, blocks: &[Block], end_height: usize, allow_stale: bool) -> BalancesBuildReport {

@@ -633,10 +633,8 @@ Vbad2 not-a-timestamp label=nope # addr=TNotARealAddress
         p
     }
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tri7-keytool-{}-{}", tag, std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7-keytool-{tag}"))
     }
 
     #[test]

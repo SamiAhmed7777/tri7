@@ -311,16 +311,13 @@ mod tests {
         f
     }
 
-    fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-blkfile-{}-{}",
-            std::process::id(),
-            name
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// Frame bytes in a fresh `blk.dat`; the directory dies with the guard
+    /// (item 45), so the caller binds it: `let (_dir, p) = tmp(..);`.
+    fn tmp(name: &str, bytes: &[u8]) -> (crate::testsupport::TestDir, std::path::PathBuf) {
+        let dir = crate::testsupport::test_dir(&format!("tri7-blkfile-{name}"));
         let p = dir.join("blk.dat");
         std::fs::write(&p, bytes).unwrap();
-        p
+        (dir, p)
     }
 
     const MAGIC: u32 = 0xD9B4_BEF9;
@@ -329,7 +326,7 @@ mod tests {
     fn clean_archive_reads_all_frames_then_eof() {
         let mut bytes = frame(MAGIC, &[1u8; 40]);
         bytes.extend_from_slice(&frame(MAGIC, &[2u8; 80]));
-        let p = tmp("clean", &bytes);
+        let (_dir, p) = tmp("clean", &bytes);
         let mut r = BlkFileReader::open(&p).unwrap();
         assert_eq!(r.next_frame_checked().unwrap().unwrap().data.len(), 40);
         assert_eq!(r.next_frame_checked().unwrap().unwrap().data.len(), 80);
@@ -345,7 +342,7 @@ mod tests {
         let mut bytes = frame(MAGIC, &[7u8; 40]);
         let complete = bytes.len() as u64;
         bytes.extend_from_slice(&frame(MAGIC, &[8u8; 400])[..100]); // torn
-        let p = tmp("tornbody", &bytes);
+        let (_dir, p) = tmp("tornbody", &bytes);
         let mut r = BlkFileReader::open(&p).unwrap();
         assert_eq!(r.next_frame().unwrap().unwrap().data.len(), 40);
         // tolerant view: clean EOF
@@ -373,7 +370,7 @@ mod tests {
         let mut bytes = frame(MAGIC, &[3u8; 40]);
         let complete = bytes.len() as u64;
         bytes.extend_from_slice(&MAGIC.to_le_bytes()[..3]);
-        let p = tmp("tornhdr", &bytes);
+        let (_dir, p) = tmp("tornhdr", &bytes);
         let mut r = BlkFileReader::open(&p).unwrap();
         assert!(r.next_frame().unwrap().is_some());
         assert!(r.next_frame().unwrap().is_none());
@@ -388,7 +385,7 @@ mod tests {
         bytes.extend_from_slice(&MAGIC.to_le_bytes());
         bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         bytes.extend_from_slice(&frame(MAGIC, &[4u8; 40]));
-        let p = tmp("badlen", &bytes);
+        let (_dir, p) = tmp("badlen", &bytes);
         let mut r = BlkFileReader::open(&p).unwrap();
         assert!(r.next_frame().unwrap().is_some());
         let e = r.next_frame().unwrap_err();
@@ -399,7 +396,7 @@ mod tests {
     /// A zero-length body is corruption, not an EOF.
     #[test]
     fn zero_length_frame_is_an_error() {
-        let p = tmp("zerolen", &frame(MAGIC, &[0u8; 0]));
+        let (_dir, p) = tmp("zerolen", &frame(MAGIC, &[0u8; 0]));
         let mut r = BlkFileReader::open(&p).unwrap();
         assert!(r.next_frame().is_err());
         std::fs::remove_dir_all(p.parent().unwrap()).ok();

@@ -447,15 +447,7 @@ mod tests {
         // wallet file must produce byte-identical addresses to the direct
         // derivation, BEFORE any signing would ever happen.
         let direct = dests();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7_sweep_roundtrip_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7_sweep_roundtrip_test");
         let path = dir.join("wallet.dat");
         let out = crate::wallet::restore_wallet_from_seed(
             &path,
@@ -465,7 +457,6 @@ mod tests {
         )
         .unwrap();
         let restored: Vec<String> = out.keys.iter().map(|k| k.address.clone()).collect();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             restored,
             direct.iter().map(|d| d.address.clone()).collect::<Vec<_>>()

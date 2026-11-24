@@ -48,4 +48,10 @@ pub mod txpool;
 pub mod updater;
 pub mod wallet;
 
+/// Test-only support shared by unit and integration tests (item 45
+/// TEST-TMPDIR-LEAK). Integration tests include the same file by `#[path]`;
+/// the module therefore only uses `std` and must not grow lib dependencies.
+#[cfg(test)]
+mod testsupport;
+
 pub use legacy::{Block, Tx, Vin, Vout};

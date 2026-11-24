@@ -466,19 +466,8 @@ mod tests {
         SweepFlow::new()
     }
 
-    fn test_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "tri7_sweepflow_{}_{}_{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn test_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7_sweepflow-{tag}"))
     }
 
     /// A wallet file with `n` synthetic RANDOM keys (the pre-migration

@@ -1669,8 +1669,7 @@ mod tests {
 
     #[test]
     fn store_roundtrip_buckets_and_pubkeys() {
-        let dir = std::env::temp_dir().join(format!("tri7-smsg-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-smsg-test");
         let store = MessageStore::open(&dir).unwrap();
         let alice = make_key("st-a");
         let bob = make_key("st-b");
@@ -1712,7 +1711,6 @@ mod tests {
                 .unwrap(),
             alice.pubkey
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1768,8 +1766,7 @@ mod tests {
 
     #[test]
     fn outbox_store_roundtrips_the_sealed_keys_column() {
-        let dir = std::env::temp_dir().join(format!("tri7-smsg-ekey-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-smsg-ekey");
         let store = MessageStore::open(&dir).unwrap();
         let alice = make_key("ek-a");
         let bob = make_key("ek-b");
@@ -1810,7 +1807,6 @@ mod tests {
         let in_rows = store.list(FOLDER_INBOX).unwrap();
         assert_eq!(in_rows.len(), 1);
         assert!(in_rows[0].ekey.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

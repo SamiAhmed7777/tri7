@@ -2753,16 +2753,16 @@ mod tests {
 
     #[test]
     fn supervisor_starts_disconnected() {
-        let mut n = EmbeddedNode::new(19199, std::env::temp_dir().join("ns.log"), false);
+        let _log = crate::testsupport::test_dir("nslog");
+        let mut n = EmbeddedNode::new(19199, _log.join("ns.log"), false);
         assert!(!n.running());
         assert_eq!(n.rpc_port, 19199);
     }
 
     #[test]
     fn conf_written_once() {
-        let dir = std::env::temp_dir().join(format!("nsconf{}", std::process::id()));
+        let dir = crate::testsupport::test_dir("nsconf");
         let conf = dir.join("triangles.conf");
-        let _ = std::fs::remove_dir_all(&dir);
         EmbeddedNode::ensure_conf(&conf, 19199);
         assert!(conf.exists());
         let text = std::fs::read_to_string(&conf).unwrap();
@@ -2783,16 +2783,14 @@ mod tests {
             std::fs::read_to_string(&conf).unwrap(),
             "custom=1\nrpcuser=me\nrpcpassword=pw\nserver=1\nrpcport=19199\nrpcbind=10.0.0.5\nrpcallowip=10.0.0.0/24\n"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TRI7-CONF-03: the node parses `stake=` (NOT `staking=`), so the fresh
     /// conf must carry `stake=0` or the default-off intent never reaches it.
     #[test]
     fn fresh_conf_writes_the_key_the_node_actually_parses() {
-        let dir = std::env::temp_dir().join(format!("nsstake{}", std::process::id()));
+        let dir = crate::testsupport::test_dir("nsstake");
         let conf = dir.join("triangles.conf");
-        let _ = std::fs::remove_dir_all(&dir);
         EmbeddedNode::ensure_conf(&conf, 19199);
         let text = std::fs::read_to_string(&conf).unwrap();
         assert!(text.contains("\nstake=0\n"), "stake key written: {text}");
@@ -2805,7 +2803,6 @@ mod tests {
             !dir.join("triangles.conf.tmp").exists(),
             "the atomic writer must not leave a tmp file"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TRI7-CONF-01: the APPEND writers must never treat a read failure as
@@ -2815,8 +2812,7 @@ mod tests {
     /// left EXACTLY as it was.
     #[test]
     fn conf_append_writers_leave_an_unreadable_conf_untouched() {
-        let dir = std::env::temp_dir().join(format!("nsconfread{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("nsconfread");
         // a DIRECTORY at the conf path: read_to_string fails, yet the path is
         // NOT "missing" (NotFound) — the transient-failure shape that used to
         // wipe the credentials
@@ -2832,7 +2828,6 @@ mod tests {
         // ensure_conf must ALSO refuse (not write a fresh identity over it)
         EmbeddedNode::ensure_conf(&conf, 19199);
         assert!(conf.is_dir(), "ensure_conf must not clobber an unreadable conf");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2841,10 +2836,8 @@ mod tests {
         // made the node FAIL(2)-loop on missing rpcuser/rpcpassword forever —
         // the balance total froze. ensure_conf must APPEND the required keys
         // (keeping the legacy lines) instead of write-once trusting existence.
-        let dir = std::env::temp_dir().join(format!("nsmig{}", std::process::id()));
+        let dir = crate::testsupport::test_dir("nsmig");
         let conf = dir.join("triangles.conf");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&conf, "daemon=0\nrpc=1\n").unwrap();
         EmbeddedNode::ensure_conf(&conf, 19199);
         let text = std::fs::read_to_string(&conf).unwrap();
@@ -2864,7 +2857,6 @@ mod tests {
         EmbeddedNode::ensure_conf(&conf, 19199);
         let text2 = std::fs::read_to_string(&conf).unwrap();
         assert_eq!(text, text2, "migration must be one-shot");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2874,10 +2866,8 @@ mod tests {
         // early-return and stay incomplete. An EMPTY-valued required key is
         // repaired IN PLACE (no duplicate lines), and commented lines never
         // count as keys.
-        let dir = std::env::temp_dir().join(format!("nsmig2{}", std::process::id()));
+        let dir = crate::testsupport::test_dir("nsmig2");
         let conf = dir.join("triangles.conf");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             &conf,
             "# operator note\nrpcuser=me\nrpcpassword=secret\nserver=1\nrpcport=19199\nrpcbind=\nrpcallowip=\nstaking=0\n",
@@ -2899,7 +2889,6 @@ mod tests {
         // idempotent
         EmbeddedNode::ensure_conf(&conf, 19199);
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), text);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2917,8 +2906,7 @@ mod tests {
     fn in_process_node_answers_rpc() {
         let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsinproc{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("nsinproc");
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
         // (TRI7-GUI-02) the finished-run restarts here are immediate by
         // design; the production backoff window must not gate the test
@@ -3015,7 +3003,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(n.node_finished.load(Ordering::SeqCst), "run 1 must finish");
-        let _ = std::fs::remove_dir_all(&dir);
 
         // ---- exit followed by a successful restart (judge r1) ----
         // Run 2: a runner that exits IMMEDIATELY. After it finishes, node_finished
@@ -3075,7 +3062,6 @@ mod tests {
             stub_calls.load(Ordering::SeqCst) >= 1,
             "run 2's exit runner was invoked"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3087,9 +3073,7 @@ mod tests {
         // check so the loop skipped forever. Own node, own port, own dir: a
         // crash-loop that exits 0 must hit MAX_RESTARTS, not respawn forever.
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsloop{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("nsloop");
         let wallet = dir.join("wallet.dat");
         std::fs::write(&wallet, b"").unwrap();
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
@@ -3115,7 +3099,6 @@ mod tests {
             !bounded,
             "exit-0 crash-loop must be bounded by MAX_RESTARTS"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (TRI7-RPC-02) an exit driven by the shared shutdown flag (RPC `stop`)
@@ -3125,9 +3108,7 @@ mod tests {
     fn rpc_stop_exit_is_not_counted_against_max_restarts() {
         let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsrpcstop{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("nsrpcstop");
         let wallet = dir.join("wallet.dat");
         std::fs::write(&wallet, b"").unwrap();
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
@@ -3159,7 +3140,6 @@ mod tests {
         // leave the process-global flag clean for the rest of the suite (the
         // last respawn's run is still live and will request again on exit)
         crate::shutdown::reset();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (TRI7-I2P-02) inbound can only be enabled at SPAWN time, so the first
@@ -3169,9 +3149,7 @@ mod tests {
     fn i2p_destination_appearing_mid_run_respawns_once_with_the_listener() {
         let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsi2pin{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("nsi2pin");
         let wallet = dir.join("wallet.dat");
         std::fs::write(&wallet, b"").unwrap();
 
@@ -3270,7 +3248,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         crate::shutdown::reset();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TRI7-GUI-02: the restart delay is 5s * 2^(n-1), capped at 120s.
@@ -3292,9 +3269,7 @@ mod tests {
     fn restart_backoff_blocks_the_respawn_until_it_elapses() {
         let _flag_guard = lock_shutdown_flags();
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsbackoff{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("nsbackoff");
         let wallet = dir.join("wallet.dat");
         std::fs::write(&wallet, b"").unwrap();
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
@@ -3325,7 +3300,6 @@ mod tests {
             2,
             "after the backoff elapses the node is spawned again"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// attach-to-external (rpc_addr configured — fleet mode): a dead RPC port
@@ -3347,8 +3321,7 @@ mod tests {
     #[test]
     fn attach_external_never_starts_in_process() {
         let port = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("nsext{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("nsext");
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), true);
         let runner_calls = Arc::new(AtomicUsize::new(0));
         let rc = Arc::clone(&runner_calls);
@@ -3369,7 +3342,6 @@ mod tests {
             "runner must never be invoked in attach mode"
         );
         assert!(!n.running());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3379,8 +3351,7 @@ mod tests {
         // in_process_node_answers_rpc's OnceLock log path and its tight
         // deadlines; the argv-level fresh wiring is pinned inside that test's
         // run-1 capture instead).
-        let dir = std::env::temp_dir().join(format!("nsfreshstore{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("nsfreshstore");
         std::fs::create_dir_all(dir.join("state")).unwrap();
         // 1. no blk file at all -> fresh
         assert!(
@@ -3409,7 +3380,6 @@ mod tests {
             !is_fresh_store(&dir.join("state")),
             "a store with bodies is not fresh"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -------------------------------------------------------------------
@@ -3581,9 +3551,7 @@ mod tests {
     #[test]
     fn tor_child_alive_with_dead_socks_is_restarted_not_reported() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("tordead{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tordead");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let kills = sup.kills_handle();
@@ -3616,7 +3584,6 @@ mod tests {
             "the respawned child answers the probe: {st:?}"
         );
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (a3) ORPHAN ADOPTION: a healthy surviving tor on the PINNED bundled
@@ -3626,9 +3593,7 @@ mod tests {
     #[test]
     fn tor_adopts_surviving_orphan_on_pinned_port_without_spawning() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("tororph{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tororph");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let pinned = sup.bundled_probe_port;
@@ -3666,7 +3631,6 @@ mod tests {
         );
         assert_eq!(kills.load(Ordering::SeqCst), 0, "adoption kills nothing");
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (a5) NO torrc witness → NO adoption: an unidentified SOCKS speaker on
@@ -3675,9 +3639,7 @@ mod tests {
     #[test]
     fn tor_does_not_adopt_a_pinned_port_resident_without_ownership_witness() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("tororphx{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tororphx");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let pinned = sup.bundled_probe_port;
@@ -3728,7 +3690,6 @@ mod tests {
             "an unidentified pinned-port resident must never be adopted: {st:?}"
         );
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (2026-11-21, sami-pc) TRUST-THE-SPAWN: with the OS table BLIND (the
@@ -3743,9 +3704,7 @@ mod tests {
     #[test]
     fn tor_trust_the_spawn_when_the_resolver_is_blind() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("torblind{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torblind");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let spawns = Arc::new(AtomicUsize::new(0));
@@ -3764,7 +3723,6 @@ mod tests {
         );
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "exactly one spawn");
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// the blind-table claim must NOT extend past our child's death: a DEAD
@@ -3773,9 +3731,7 @@ mod tests {
     #[test]
     fn tor_blind_table_with_a_dead_child_stays_unavailable() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("tordblind{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tordblind");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let pinned = sup.bundled_probe_port;
@@ -3806,7 +3762,6 @@ mod tests {
             "blind attribution + a dead child must never claim a foreign speaker: {st:?}"
         );
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (a6) judge r3 blocker: orphan adoption requires PROCESS-BOUND identity —
@@ -3923,9 +3878,7 @@ mod tests {
     #[test]
     fn torrc_carries_the_pinned_bundled_port_not_a_fresh_free_port() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("torpin{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torpin");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let pinned = sup.bundled_probe_port;
@@ -3948,7 +3901,6 @@ mod tests {
             "torrc must name the pinned bundled port: {torrc}"
         );
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (a) tor-child management state machine: spawn → reuse while alive →
@@ -3956,9 +3908,7 @@ mod tests {
     #[test]
     fn tor_child_spawn_reuse_and_kill_on_drop() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("torlife{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torlife");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, probe);
         let kills = sup.kills_handle();
@@ -4015,15 +3965,13 @@ mod tests {
             2,
             "after kill-on-drop a fresh supervisor spawns its own child"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (b) torrc generation content: client-only, explicit SocksPort,
     /// DataDirectory under the state dir, NO ControlPort.
     #[test]
     fn torrc_minimal_client_only_content() {
-        let dir = std::env::temp_dir().join(format!("torrc{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("torrc");
         let state = dir.join("state");
         let torrc = state.join("torrc");
         let data = state.join("tor");
@@ -4047,7 +3995,6 @@ mod tests {
             !text.to_lowercase().contains("exitrelay") && !text.contains("ORPort"),
             "no relay/exit lines in a client-only torrc: {text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (b2) regression: a Windows backslash path must come out forward-slashed
@@ -4072,8 +4019,7 @@ mod tests {
         );
         // And the written torrc carries the converted form, never the raw
         // display() form (covers write_torrc -> tor_path wiring).
-        let dir = std::env::temp_dir().join(format!("torrcbs{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("torrcbs");
         let state = dir.join("state");
         let torrc = state.join("torrc");
         TorSupervisor::write_torrc(&torrc, &state.join("tor"), 31552).unwrap();
@@ -4086,16 +4032,13 @@ mod tests {
             !quoted_line.contains('\\'),
             "written torrc quoted value must not carry backslashes: {quoted_line}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (c) the conf gains the proxy line + onion seed when tor is live;
     /// idempotent; untouched when tor is down.
     #[test]
     fn conf_gains_socks_and_onion_seed_when_tor_live() {
-        let dir = std::env::temp_dir().join(format!("torconf{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torconf");
         let conf = dir.join("triangles.conf");
         EmbeddedNode::ensure_conf(&conf, 19191);
         EmbeddedNode::ensure_tor_conf_lines(&conf, 31551);
@@ -4134,7 +4077,6 @@ mod tests {
             !std::fs::read_to_string(&base).unwrap().contains("socks="),
             "a conf from a tor-less session must not carry a socks line"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (d) the already-answer probe requires a VALID SOCKS5 greeting: a bare
@@ -4249,9 +4191,7 @@ mod tests {
                 }
             }
         });
-        let dir = std::env::temp_dir().join(format!("torprobe2{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torprobe2");
         fake_bundle_exe(&dir);
         let mut sup = tor_supervisor(&dir, port);
         sup.spawn_override = Some(Arc::new(
@@ -4267,7 +4207,6 @@ mod tests {
         );
         assert_eq!(st.label(), format!("Tor: system ({port})"));
         stop.store(1, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// honest unavailability: no system tor, no bundled tor.exe →
@@ -4275,9 +4214,7 @@ mod tests {
     #[test]
     fn tor_unavailable_reports_honestly_and_does_not_block() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("tornone{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tornone");
         // NO fake bundle here — the dev box (Linux/macOS CI) hits this path
         let mut sup = tor_supervisor(&dir, probe);
         sup.spawn_override = Some(Arc::new(
@@ -4300,7 +4237,6 @@ mod tests {
             },
         ));
         assert_eq!(sup3.ensure(&dir, false), TorStatus::Unavailable);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// EmbeddedNode wiring when tor is LIVE: the tor child spawns BEFORE the
@@ -4313,9 +4249,7 @@ mod tests {
     fn tor_live_node_wiring_socks_argv_and_conf() {
         use std::sync::Mutex;
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("torwire{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("torwire");
         fake_bundle_exe(&dir);
         let mut n = EmbeddedNode::new(free_dead_port(), dir.join("node.log"), false);
         n.tor.system_probe_port = probe;
@@ -4372,7 +4306,6 @@ mod tests {
         // supervisor drop kills the tracked tor child
         drop(n);
         assert_eq!(kills.load(Ordering::SeqCst), 1, "Drop kills the tor child");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -------------------------------------------------------------------
@@ -4487,8 +4420,7 @@ mod tests {
     /// interpolation ever creeps into the generator this test bites.
     #[test]
     fn i2pd_tunnels_conf_never_carries_backslashes() {
-        let real = std::env::temp_dir().join(format!("i2ptunreal{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&real);
+        let real = crate::testsupport::test_dir("i2ptunreal");
         let written = write_i2pd_tunnels_conf(&real, I2P_TUNNEL_TARGET_PORT)
             .expect("tunnels.conf writes");
         let text = std::fs::read_to_string(&written).unwrap();
@@ -4517,7 +4449,6 @@ mod tests {
             written,
             real.join("state").join("i2p").join("data").join("tunnels.conf")
         );
-        let _ = std::fs::remove_dir_all(&real);
     }
 
     /// (b2) i2pd.conf content: the loopback-only listener set (socksproxy/
@@ -4525,8 +4456,7 @@ mod tests {
     /// verification on, and NO filesystem paths anywhere.
     #[test]
     fn i2pd_conf_loopback_only_sections() {
-        let dir = std::env::temp_dir().join(format!("i2pconf{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("i2pconf");
         let conf = dir.join("i2pd.conf");
         write_i2pd_conf(&conf, SYSTEM_I2P_PORT, I2P_SAM_PORT, I2P_WEBCONSOLE_PORT).unwrap();
         let text = std::fs::read_to_string(&conf).unwrap();
@@ -4561,7 +4491,6 @@ mod tests {
             !text.lines().any(|l| l.contains("= /")),
             "no filesystem paths in i2pd.conf: {text}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (c) destination readback from a fixture keys dat (NO live i2pd): the
@@ -4586,8 +4515,7 @@ mod tests {
         assert_eq!(b32_from_destination_keys(&over), None);
 
         // supervisor level: the readback writes the state file + READY line
-        let dir = std::env::temp_dir().join(format!("i2pdest{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("i2pdest");
         std::fs::create_dir_all(dir.join("state").join("i2p").join("data")).unwrap();
         std::fs::write(
             dir.join("state").join("i2p").join("data").join(I2P_DEST_KEYS_FILE),
@@ -4621,7 +4549,6 @@ mod tests {
             before,
             "no duplicate READY line for the same identity"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (d) supervisor status transitions, spawn-less: a dead 4447 probe with
@@ -4631,9 +4558,7 @@ mod tests {
     #[test]
     fn i2p_supervisor_status_transitions_spawn_less() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("i2ptrans{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2ptrans");
         let mut sup = i2p_supervisor(&dir, probe);
         // Some(missing) pins "no binary anywhere" — this dev host HAS a
         // system i2pd, so the production lookup would find it
@@ -4699,7 +4624,6 @@ mod tests {
         );
         assert_eq!(st6.label(), format!("I2P: system ({port})"));
         stop.store(1, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (e2) DATA-TRUST for i2p: a live i2pd child whose socksproxy stopped
@@ -4710,9 +4634,7 @@ mod tests {
     #[test]
     fn i2p_child_alive_with_dead_socks_is_restarted_not_reported() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("i2pdead{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2pdead");
         let mut sup = i2p_supervisor(&dir, probe);
         // the respawn path needs a findable binary (marker file, same shape
         // as the other spawn tests)
@@ -4746,7 +4668,6 @@ mod tests {
             "the respawned i2pd answers the probe: {st:?}"
         );
         drop(sup);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (e) bundled i2pd child management: spawn → Bundled status on the
@@ -4755,9 +4676,7 @@ mod tests {
     #[test]
     fn i2p_bundled_spawn_management_and_destination() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("i2plife{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2plife");
         let mut sup = i2p_supervisor(&dir, probe);
         std::fs::write(dir.join("i2pd-fake"), b"").unwrap(); // exists → used
         sup.exe_override = Some(dir.join("i2pd-fake"));
@@ -4821,7 +4740,6 @@ mod tests {
         // 3. kill-on-Drop
         drop(sup);
         assert_eq!(kills.load(Ordering::SeqCst), 1, "Drop must kill the child");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (e2) THE r2 blocker regression: our OWN live child must survive
@@ -4836,9 +4754,7 @@ mod tests {
     #[test]
     fn i2p_own_child_is_never_reclassified_or_killed_across_ensures() {
         let probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("i2pself{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2pself");
         let mut sup = i2p_supervisor(&dir, probe);
         std::fs::write(dir.join("i2pd-fake"), b"").unwrap();
         sup.exe_override = Some(dir.join("i2pd-fake"));
@@ -4893,7 +4809,6 @@ mod tests {
         // Drop kills exactly once (the only lifecycle kill)
         drop(sup);
         assert_eq!(kills.load(Ordering::SeqCst), 1, "Drop must kill the child");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (e3) the r2 System-adoption honesty regression: adopting a FOREIGN
@@ -4903,8 +4818,7 @@ mod tests {
     /// removed and no destination is exposed.
     #[test]
     fn i2p_system_adoption_never_claims_a_stale_wallet_destination() {
-        let dir = std::env::temp_dir().join(format!("i2padopt{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("i2padopt");
         std::fs::create_dir_all(dir.join("state").join("i2p").join("data")).unwrap();
         // stale wallet identity from a previous session (child long gone)
         std::fs::write(
@@ -4959,7 +4873,6 @@ mod tests {
             "the stale state file must be removed on foreign adoption"
         );
         stop.store(1, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (TRI7-I2P-01) a WALLET-OWNED orphan must be adopted as OURS, not
@@ -4970,8 +4883,7 @@ mod tests {
     /// deletion used to stop advertising a tunnel that was live all along.
     #[test]
     fn i2p_wallet_owned_orphan_is_adopted_not_foreign() {
-        let dir = std::env::temp_dir().join(format!("i2pown{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("i2pown");
         std::fs::create_dir_all(dir.join("state").join("i2p").join("data")).unwrap();
         // OUR generated tunnel config (ownership witness #2) + our identity
         write_i2pd_tunnels_conf(&dir, I2P_TUNNEL_TARGET_PORT).unwrap();
@@ -5032,7 +4944,6 @@ mod tests {
             "the destination state file must NOT be deleted for a wallet-owned orphan"
         );
         stop.store(1, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (f) the spawn ARGUMENTS, extracted pure (judge r1: the executable is
@@ -5097,9 +5008,7 @@ mod tests {
     /// idempotent; i2pd-down sessions leave no dead line.
     #[test]
     fn conf_gains_i2p_seed_addnode_when_live() {
-        let dir = std::env::temp_dir().join(format!("i2pseed{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2pseed");
         let conf = dir.join("triangles.conf");
         EmbeddedNode::ensure_conf(&conf, 19191);
         EmbeddedNode::ensure_i2p_conf_lines(&conf);
@@ -5124,7 +5033,6 @@ mod tests {
             !std::fs::read_to_string(&base).unwrap().contains("addnode="),
             "no phantom seed lines without live transports"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (h) full EmbeddedNode wiring when i2p is LIVE: the i2pd child spawns
@@ -5137,9 +5045,7 @@ mod tests {
     fn i2p_live_node_wiring_i2psocks_argv_and_seed() {
         use std::sync::Mutex;
         let tor_probe = free_dead_port();
-        let dir = std::env::temp_dir().join(format!("i2pwire{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("i2pwire");
         fake_bundle_exe(&dir); // tor payload marker
         let mut n = EmbeddedNode::new(free_dead_port(), dir.join("node.log"), false);
         n.tor.system_probe_port = tor_probe;
@@ -5197,6 +5103,5 @@ mod tests {
         );
         // supervisor drop kills the tracked i2pd child
         drop(n);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

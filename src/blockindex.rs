@@ -2440,18 +2440,8 @@ mod tests {
         crate::legacy::sha256d(&t.serialize())
     }
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "tri7-bidx-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7-bidx-{tag}"))
     }
 
     /// Build the synthetic chain: genesis(200B) → b1 → {b2 stale, b2 live} → b3.

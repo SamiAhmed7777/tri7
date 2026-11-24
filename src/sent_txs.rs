@@ -155,11 +155,8 @@ pub fn record(path: &Path, txid: &str, hex: &str) -> Result<usize, String> {
 mod tests {
     use super::*;
 
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tri7senttx_{}_{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn tmp(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7senttx-{tag}"))
     }
 
     #[test]

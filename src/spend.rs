@@ -2736,16 +2736,14 @@ mod tests {
         redeem: &[u8],
         keys: &[([u8; 32], Vec<u8>)],
     ) -> crate::multisig::ScriptBook {
-        let dir = std::env::temp_dir().join(format!("tri7spend_{}_{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // guarded dir (item 45): drops after the last handle close
+        let dir = crate::testsupport::test_dir(&format!("tri7spend-{tag}"));
         let path = dir.join("wallet.dat");
         crate::wallet::create_wallet_file(&path).unwrap();
         let mut wh = crate::wallet::WalletHandle::open_readwrite(&path).unwrap();
         wh.put_redeem_script(redeem).unwrap();
         wh.close();
         let w = crate::wallet::read_wallet(&path).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         crate::multisig::ScriptBook::from_wallet(&w, keys)
     }
 

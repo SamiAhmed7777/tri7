@@ -236,9 +236,7 @@ mod tests {
 
     #[test]
     fn create_flow_full_state_machine() {
-        let dir = std::env::temp_dir().join(format!("tri7seedflow_create_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7seedflow_create");
         let mut f = SeedFlow::new(dir.join("wallet.dat").display().to_string());
         assert_eq!(f.step, SeedFlowStep::Menu);
 
@@ -285,9 +283,7 @@ mod tests {
 
     #[test]
     fn restore_flow_whitespace_insensitive_with_passphrase() {
-        let dir = std::env::temp_dir().join(format!("tri7seedflow_restore_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7seedflow_restore");
         let mut f = SeedFlow::new(dir.join("wallet.dat").display().to_string());
         f.begin_restore();
         assert_eq!(f.step, SeedFlowStep::RestoreInput);
@@ -323,9 +319,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_to_overwrite_a_seeded_wallet() {
-        let dir = std::env::temp_dir().join(format!("tri7seedflow_dup_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7seedflow_dup");
         let path = dir.join("wallet.dat");
         crate::wallet::restore_wallet_from_seed(&path, MN12, "", 1).unwrap();
 

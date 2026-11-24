@@ -78,6 +78,10 @@ use std::path::{Path, PathBuf};
 use tri7_core::legacy::hash9;
 use tri7_core::p2p::{display_to_internal, internal_to_display};
 
+#[cfg(test)]
+#[path = "../testsupport.rs"]
+mod testsupport;
+
 const FRAME_MAGIC: u32 = 0x0522_3570;
 const FRAME_HDR: usize = 8;
 const HEADER_LEN: usize = 80;
@@ -847,14 +851,8 @@ mod tests {
         std::fs::write(path, js).unwrap();
     }
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "store_canon_test_{name}_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(name: &str) -> testsupport::TestDir {
+        testsupport::test_dir(&format!("store_canon_test-{name}"))
     }
 
     #[test]

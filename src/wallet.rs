@@ -2336,11 +2336,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn test_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tri7wallet_rw_{}_{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn test_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7wallet_rw-{tag}"))
     }
 
     fn synth_key(label: &str) -> ([u8; 32], Vec<u8>) {
@@ -2958,15 +2955,8 @@ mod tests {
 
     // ---- legacy keypool (`pool` rows) — parity item KEYPOOLREFILL --------
 
-    fn kp_seed_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "tri7wallet_kp_{}_{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn kp_seed_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7wallet_kp-{tag}"))
     }
     const KP_MN12: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -3307,15 +3297,8 @@ mod seed_tests {
         path
     }
 
-    fn seed_test_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "tri7wallet_seed_{}_{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn seed_test_dir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7wallet_seed-{tag}"))
     }
 
     /// The canonical Trezor test phrase (12 words) and the official 24-word

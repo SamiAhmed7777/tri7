@@ -698,8 +698,12 @@ impl UpdateState {
         st
     }
 
-    /// Test/programmatic constructor (no persistence).
-    pub fn in_memory() -> UpdateState {
+    /// Test/programmatic constructor (no persistence). The work dir is a
+    /// GUARDED per-call dir (item 45) — bind it: `let (st, _wd) = in_memory()`.
+    #[cfg(test)]
+    pub fn in_memory() -> (UpdateState, crate::testsupport::TestDir) {
+        let work_dir = crate::testsupport::test_dir("tri7-update-test");
+        (
         UpdateState {
             phase: UpdatePhase::Idle,
             release: None,
@@ -710,10 +714,12 @@ impl UpdateState {
             check_manual: false,
             downloaded: None,
             persist_path: None,
-            work_dir: std::env::temp_dir().join("tri7-update-test"),
+            work_dir: work_dir.path().to_path_buf(),
             windows_install_root: None,
             flavor_override: None,
-        }
+        },
+        work_dir,
+        )
     }
 
     /// Flavor for THIS install (override wins; else detect from the exe).
@@ -1759,7 +1765,7 @@ mod tests {
 
     #[test]
     fn state_machine_idle_to_available_on_newer_release() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         assert_eq!(st.phase, UpdatePhase::Idle);
         assert!(st.needs_check());
         st.request_check().unwrap();
@@ -1771,7 +1777,7 @@ mod tests {
 
     #[test]
     fn state_machine_up_to_date_and_equal_version() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         let mut same = newer_release();
         same.version = v("7.0.0");
         st.request_check().unwrap();
@@ -1781,7 +1787,7 @@ mod tests {
 
     #[test]
     fn state_machine_skips_persist_and_stays_quiet() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
         assert_eq!(st.phase, UpdatePhase::Available);
@@ -1803,10 +1809,10 @@ mod tests {
 
     #[test]
     fn state_machine_download_and_install_flow() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         st.flavor_override = Some(UpdateFlavor::WindowsInstaller);
-        let payload = std::env::temp_dir()
-            .join(format!("tri7-payload-{}.exe", std::process::id()));
+        let _pdir = crate::testsupport::test_dir("tri7-payload");
+        let payload = _pdir.join("payload.exe");
         std::fs::write(&payload, b"payload").unwrap();
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
@@ -1844,12 +1850,11 @@ mod tests {
         let plan = st.request_install(false).unwrap();
         assert_eq!(st.phase, UpdatePhase::InstallPending);
         assert!(plan.describe.contains("/S"));
-        let _ = std::fs::remove_file(&payload);
     }
 
     #[test]
     fn state_machine_failure_and_retry_paths() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         // MANUAL check failure → error banner (Failed)
         st.request_check_manual().unwrap();
         st.handle_event(UpdateEvent::Checked(Err("network down".into())));
@@ -1873,7 +1878,7 @@ mod tests {
 
     #[test]
     fn background_check_failure_stays_quiet() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         // AUTO path (startup/6h): network failure → quiet Idle, NO banner
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Err("github unreachable".into())));
@@ -1884,7 +1889,7 @@ mod tests {
 
     #[test]
     fn state_machine_dismiss_available_comes_back_next_check() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
         st.dismiss();
@@ -1896,7 +1901,7 @@ mod tests {
 
     #[test]
     fn state_machine_double_request_refused() {
-        let mut st = UpdateState::in_memory();
+        let (mut st, _st) = UpdateState::in_memory();
         st.request_check().unwrap();
         assert!(st.request_check().is_err()); // inflight
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
@@ -1906,8 +1911,7 @@ mod tests {
 
     #[test]
     fn persist_roundtrip_preserves_skip() {
-        let dir = std::env::temp_dir().join(format!("tri7-upd-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-upd-test");
         let mut st = UpdateState::new(&dir);
         st.request_check().unwrap();
         st.handle_event(UpdateEvent::Checked(Ok(newer_release())));
@@ -1915,7 +1919,6 @@ mod tests {
         st.save_persist();
         let st2 = UpdateState::new(&dir);
         assert_eq!(st2.skipped_version(), Some(&v("7.0.4")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- install plan builders ----
@@ -2108,8 +2111,8 @@ mod tests {
 
     #[test]
     fn restore_previous_plan_requires_a_backup() {
-        let exe = std::env::temp_dir().join(format!("tri7-no-exe-{}.bin", std::process::id()));
-        let _ = std::fs::remove_file(&exe);
+        let _edir = crate::testsupport::test_dir("tri7-no-exe");
+        let exe = _edir.join("no-exe.bin");
         assert!(restore_previous_plan(&exe).is_err());
         std::fs::write(&exe, b"old").unwrap();
         std::fs::write(backup_path_for(&exe), b"new").unwrap();
@@ -2122,14 +2125,12 @@ mod tests {
         } else {
             assert!(plan.windows_script.is_some());
         }
-        let _ = std::fs::remove_file(&exe);
         let _ = std::fs::remove_file(backup_path_for(&exe));
     }
 
     #[test]
     fn tarball_extraction_enforces_floor_and_magic_and_lands_the_binary() {
-        let dir = std::env::temp_dir().join(format!("tri7-tar-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-tar-test");
         // a >1MiB executable-magic payload (the size floor applies to the EXTRACTED
         // bytes; zeros compress to almost nothing in the .tar.gz; magic must
         // match THIS platform's sanity gate: ELF on linux, Mach-O LE on macOS)
@@ -2183,7 +2184,6 @@ mod tests {
         b3.append_data(&mut h3, "tri7_wallet_gui", small.as_slice()).unwrap();
         b3.into_inner().unwrap().finish().unwrap();
         assert!(extract_tarball_payload(&tar3, &dir).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -2231,8 +2231,9 @@ mod live {
         let setup = pick_asset(&rel, UpdateFlavor::WindowsInstaller)
             .expect("win64 setup asset present")
             .clone();
+        let _dstdir = crate::testsupport::test_dir("tri7-asset");
         let (dest, flavor, pinned) = (
-            std::env::temp_dir().join(&setup.name),
+            _dstdir.join(&setup.name),
             UpdateFlavor::WindowsInstaller,
             extract_digest_from_body(&rel.body, &setup.name),
         );

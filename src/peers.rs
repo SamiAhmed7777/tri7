@@ -647,21 +647,18 @@ mod tests {
     const KEY_B: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn tmp_path(tag: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "tri7-peers-test-{}-{}.json",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&p);
-        p
+    /// The store file lives inside a guard directory (item 45) — bind it:
+    /// `let (_dir, path) = tmp_path(..);` — so both die with the binding.
+    fn tmp_path(tag: &str) -> (crate::testsupport::TestDir, std::path::PathBuf) {
+        let d = crate::testsupport::test_dir(&format!("tri7-peers-test-{tag}"));
+        let p = d.join("peers.json");
+        (d, p)
     }
 
     /// A5: save/load round-trip preserves every field.
     #[test]
     fn peer_store_roundtrips() {
-        let path = tmp_path("roundtrip");
+        let (_dir, path) = tmp_path("roundtrip");
         let mut store = PeerStore::default();
         store.set_self(&["myonion.onion".to_string(), KEY_A.to_string()]);
         store.upsert(KEY_B, 24113, 1, "addr", 1000);
@@ -724,7 +721,7 @@ mod tests {
     /// abort, never partial data.
     #[test]
     fn corrupt_file_gives_empty_store_and_log() {
-        let path = tmp_path("corrupt");
+        let (_dir, path) = tmp_path("corrupt");
         std::fs::write(&path, "{ not json !!!").unwrap();
         let store = PeerStore::load(&path);
         assert!(store.is_empty());
@@ -742,7 +739,7 @@ mod tests {
     /// per window instead of one per message.
     #[test]
     fn coalesced_save_writes_once_per_window_and_flushes_pending() {
-        let path = tmp_path("coalesce");
+        let (_dir, path) = tmp_path("coalesce");
         let mut store = PeerStore::default();
         store.upsert(KEY_A, 24113, 1, "addr", 1000);
         assert!(
@@ -917,7 +914,7 @@ mod tests {
         assert!(plan.iter().all(|(h, _)| h != &host_a), "A never dials itself");
 
         // and B survives a store save/load (discovery persists restarts)
-        let path = tmp_path("e2e-discovery");
+        let (_dir, path) = tmp_path("e2e-discovery");
         store_a.save(&path).unwrap();
         let reloaded = PeerStore::load(&path);
         assert!(
@@ -952,7 +949,7 @@ mod tests {
             "the peer that SERVES must lead: {order:?}"
         );
         // served counters persist
-        let path = tmp_path("peer-health");
+        let (_dir, path) = tmp_path("peer-health");
         store.save(&path).unwrap();
         let loaded = PeerStore::load(&path);
         let e = loaded.peers().iter().find(|e| e.host == server).unwrap();

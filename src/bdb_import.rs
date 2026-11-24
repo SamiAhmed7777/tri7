@@ -1037,15 +1037,7 @@ mod tests {
             eprintln!("SKIP: db5.3_load unavailable — encrypted BDB fixture cannot be built here");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-bdbenc-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-bdbenc");
 
         // 1. an encrypted SQLite wallet made by the SOURCE's own writer
         let sql = dir.join("src.sqlite");
@@ -1094,7 +1086,6 @@ mod tests {
             crate::wallet_encrypt::decrypt_wallet(&dest, "wrong-passphrase").is_err(),
             "a wrong passphrase must not open the imported wallet"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Every (key, value) row of a wallet container, verbatim. Unlike
@@ -1169,8 +1160,7 @@ mod tests {
 
     #[test]
     fn bdb_magic_is_detected_and_sqlite_is_not() {
-        let dir = std::env::temp_dir().join(format!("tri7-bdbmagic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-bdbmagic");
         let sqlite = dir.join("s.dat");
         create_wallet_file(&sqlite).unwrap();
         assert!(!is_bdb_wallet(&sqlite));
@@ -1183,7 +1173,6 @@ mod tests {
         let bdb = dir.join("b.dat");
         std::fs::write(&bdb, &meta).unwrap();
         assert!(is_bdb_wallet(&bdb));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The legacy `script` section (redeem scripts) rides the import: a BDB
@@ -1206,15 +1195,7 @@ mod tests {
             eprintln!("SKIP: db5.3_load unavailable — script-section fixture cannot be built here");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-bdbscript-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-bdbscript");
 
         // one plaintext key + one legacy `script` row (raw-20 scriptID key,
         // CS+script value — the exact CWalletDB::WriteCScript shape)
@@ -1273,6 +1254,5 @@ mod tests {
         let mut wh = WalletHandle::open_readwrite(&dest).unwrap();
         assert_eq!(wh.list_redeem_scripts().unwrap().len(), 1);
         wh.close();
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

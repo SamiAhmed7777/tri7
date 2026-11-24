@@ -1074,8 +1074,7 @@ mod tests {
     fn backward_scan_pages_and_caches_with_injected_fetcher() {
         // synthetic explorer over a canned endpoint: 5 blocks, the address
         // receives in block tip and tip-2, spends in tip-3
-        let dir = std::env::temp_dir().join(format!("tri7gui_explorer_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _dir = crate::testsupport::test_dir("tri7gui_explorer");
         let (_, pk) = crate::spend::synthetic_key("scan/target");
         let addr = crate::wallet::pubkey_to_address(&pk);
         let script = crate::spend::script_pubkey_p2pkh(&pk);
@@ -1264,7 +1263,6 @@ mod tests {
         assert_eq!(recv_total, 2_000_000);
         let spend_hit = av.history.iter().find(|h| !h.received).unwrap();
         assert_eq!(spend_hit.height, 3);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

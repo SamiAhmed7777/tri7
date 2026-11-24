@@ -27,11 +27,7 @@ use std::collections::HashSet;
 /// install must never read as a successful install-and-restart.
 #[test]
 fn install_failed_marker_is_surfaced_once_and_cleared() {
-    let dir = std::env::temp_dir().join(format!(
-        "tri7gui_ifm_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::testsupport::test_dir("tri7gui_ifm");
     std::fs::create_dir_all(dir.join("update")).unwrap();
     std::fs::write(dir.join("update").join("install-failed.marker"), "rc=2").unwrap();
     let cfg = UiConfig {
@@ -67,12 +63,12 @@ fn install_failed_marker_is_surfaced_once_and_cleared() {
             .any(|l| l.contains("install FAILED")),
         "no repeat alarm without a marker"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn options_state_with_unreachable_node(tag: &str) -> (crate::gui::app_state::AppState, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("tri7gui_opts_{}_{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn options_state_with_unreachable_node(
+    tag: &str,
+) -> (crate::gui::app_state::AppState, crate::testsupport::TestDir) {
+    let dir = crate::testsupport::test_dir(&format!("tri7gui_opts-{tag}"));
     let cfg = UiConfig {
         profile_dir: dir.display().to_string(),
         rpc_addr: Some("127.0.0.1:1".into()),
@@ -130,7 +126,6 @@ fn the_window_tab_choices_persist_and_survive_a_reload() {
         crate::gui::app_state::CloseDecision::Quit,
         "with both off the window really closes"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// GUI-POLISH 2026-11-09: the Options reserve field is a REAL amount — an
@@ -173,7 +168,7 @@ fn reserve_field_validates_before_persisting_and_persists() {
 /// the close handler checks first.
 #[test]
 fn a_tray_exit_request_is_not_swallowed_by_the_keep_running_behaviour() {
-    let (mut st, dir) = options_state_with_unreachable_node("forcequit");
+    let (mut st, _dir) = options_state_with_unreachable_node("forcequit");
     // the keep-running behaviour is ON, so a plain close would minimize
     st.options.minimize_on_close = true;
     st.options.tray_on_close = true;
@@ -191,7 +186,6 @@ fn a_tray_exit_request_is_not_swallowed_by_the_keep_running_behaviour() {
     st.force_quit = false;
     assert!(was_set, "the request was seen");
     assert!(!st.force_quit, "and consumed, so it does not linger");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The tray icon must EXIST before the window is hidden into it. When the
@@ -224,12 +218,11 @@ fn a_missing_tray_falls_back_to_the_taskbar_instead_of_hiding() {
         crate::gui::app_state::CloseDecision::Minimize,
         "the fallback is the taskbar, so the wallet keeps running"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn options_apply_persists_even_when_the_node_fee_push_fails() {
-    let (mut st, dir) = options_state_with_unreachable_node("persist");
+    let (mut st, _dir) = options_state_with_unreachable_node("persist");
     st.options.pay_fee = "0.000200".into();
     st.options.minimize_on_close = true;
     // the node is unreachable -> the fee push fails -> the OLD code returned
@@ -248,7 +241,6 @@ fn options_apply_persists_even_when_the_node_fee_push_fails() {
         st.options_fee_notice.is_some(),
         "the node-side fee failure must be surfaced as a notice"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A loopback stand-in for the node that ACCEPTS settxfee and answers with the
@@ -354,7 +346,7 @@ fn accepting_fee_node() -> (
 
 #[test]
 fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
-    let (mut st, dir) = options_state_with_unreachable_node("stale");
+    let (mut st, _dir) = options_state_with_unreachable_node("stale");
     // first apply: the node is unreachable -> the notice appears
     st.save_options_action().expect("apply");
     assert!(st.options_fee_notice.is_some(), "notice after the failed push");
@@ -407,14 +399,13 @@ fn options_fee_notice_is_cleared_by_a_later_successful_apply() {
         "a successful reserve push must not leave a notice, got: {:?}",
         st.options_reserve_notice
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn saved_fee_is_pushed_when_the_node_appears() {
     // The fee saved while the node was down must reach the node once it is
     // reachable (the operator's fee must not stay local-only forever).
-    let (mut st, dir) = options_state_with_unreachable_node("startup");
+    let (mut st, _dir) = options_state_with_unreachable_node("startup");
     st.options.pay_fee = "0.000300".into();
     st.save_options_action().expect("apply");
     assert!(st.options_fee_notice.is_some(), "no node -> notice");
@@ -431,14 +422,13 @@ fn saved_fee_is_pushed_when_the_node_appears() {
     );
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = server.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
     // after a successful push the "pushed" flag must not freeze a NEW fee
     // value that fails - the new value stays eligible for the automatic retry.
-    let (mut st, dir) = options_state_with_unreachable_node("retry");
+    let (mut st, _dir) = options_state_with_unreachable_node("retry");
     let (addr, stop, _seen, server) = accepting_fee_node();
     st.cfg.rpc_addr = Some(addr.clone());
 
@@ -471,7 +461,6 @@ fn a_changed_fee_that_fails_is_retried_when_the_node_returns() {
     assert!(st.options_fee_notice.is_none(), "the notice clears");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = server.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -479,7 +468,7 @@ fn the_fee_notice_survives_the_ok_path_for_the_overview_banner() {
     // The OK button closes the Options dialog when the apply SUCCEEDED. The
     // fee push may still have failed - the operator must be told afterwards,
     // so the notice has to survive in the state the Overview banner reads.
-    let (mut st, dir) = options_state_with_unreachable_node("okpath");
+    let (mut st, _dir) = options_state_with_unreachable_node("okpath");
     st.options.pay_fee = "0.000250".into();
     // the apply succeeds (the options are persisted) ...
     st.save_options_action().expect("the apply succeeds");
@@ -491,7 +480,6 @@ fn the_fee_notice_survives_the_ok_path_for_the_overview_banner() {
     // the banner shows it and the user can dismiss it
     st.options_fee_notice = None;
     assert!(st.options_fee_notice.is_none(), "the banner can dismiss it");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -501,7 +489,7 @@ fn close_behaviour_flags_cover_every_combination() {
     // REAL decision helper the X button uses (AppState::close_decision), not
     // a restatement of the boolean expression.
     use crate::gui::app_state::CloseDecision;
-    let (mut st, dir) = options_state_with_unreachable_node("close");
+    let (mut st, _dir) = options_state_with_unreachable_node("close");
     // (minimize, tray, a tray exists, expected)
     for (minimize, tray, has_tray, expected) in [
         (true, false, false, CloseDecision::Minimize),
@@ -530,7 +518,6 @@ fn close_behaviour_flags_cover_every_combination() {
     let d = OptionsState::default();
     assert!(d.minimize_on_close, "minimize_on_close must default to true");
     assert!(!d.tray_on_close, "tray_on_close must default to false");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1146,8 +1133,7 @@ fn wallet_owned_script(label: &str) -> (Vec<u8>, [u8; 21]) {
 
 #[test]
 fn reconcile_tail_applies_spends_and_wallet_additions() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_reconcile_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7gui_reconcile");
     let archive = dir.join("blk0001.dat");
 
     let (script_a, payload_a) = wallet_owned_script("rec/a");
@@ -1303,7 +1289,6 @@ fn reconcile_tail_applies_spends_and_wallet_additions() {
         snapshot_height as u64 + 2,
     );
     assert!(bad.is_err(), "broken chain link must be refused");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,8 +1297,7 @@ fn reconcile_tail_applies_spends_and_wallet_additions() {
 
 #[test]
 fn load_tipstate_parses_and_reports_tip_fields() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_tip_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7gui_tip");
     let path = dir.join("tipstate.json");
     let hash = crate::legacy::hash_to_display(&[0xabu8; 32]);
     std::fs::write(
@@ -1334,13 +1318,11 @@ fn load_tipstate_parses_and_reports_tip_fields() {
     assert_eq!(tip.tip_bits, 0x2000ffff);
     assert_eq!(tip.tip_modifier, 0);
     assert!(tip.tip_pos);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn stake_status_parses_dryrun_and_counts_mature_weight() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_stake_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7gui_stake");
     let dry = dir.join("stake_dryrun.json");
     std::fs::write(
         &dry,
@@ -1387,7 +1369,6 @@ fn stake_status_parses_dryrun_and_counts_mature_weight() {
     assert!(st.modifier_generated);
     assert_eq!(st.mature_weight_sats, 12_010_466);
     assert_eq!(st.stakeable_coins, 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1660,7 +1641,6 @@ fn the_status_bar_transport_chip_follows_the_onion_option_and_persists() {
     let st2 = crate::gui::app_state::AppState::new(cfg);
     assert!(!st2.options.show_onion_address, "the preference persists");
     assert!(!st2.transport_chip_visible());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// AUDIT row 18: the "Detach databases" row was permanently disabled
@@ -1716,7 +1696,7 @@ fn legacy_identity_is_carried_over_exactly() {
 
 #[test]
 fn derivation_falls_back_to_snapshot_without_index() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_derive_{}", std::process::id()));
+    let dir = crate::testsupport::test_dir("tri7gui_derive");
     std::fs::create_dir_all(dir.join("state")).unwrap();
     let (script, payload) = wallet_owned_script("derive/w");
     let dump = format!(
@@ -1770,12 +1750,11 @@ fn derivation_falls_back_to_snapshot_without_index() {
     );
     assert_eq!(derived.coverage_height, 2_201_090);
     assert_eq!(derived.balances.total_sats, 5_000_000);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn keystore_side_files_persist_new_addresses() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_keystore_{}", std::process::id()));
+    let dir = crate::testsupport::test_dir("tri7gui_keystore");
     let cfg = UiConfig {
         wallet_path: "/nonexistent".into(),
         wallet_path_explicit: false,
@@ -1824,7 +1803,6 @@ fn keystore_side_files_persist_new_addresses() {
         ..UiConfig::default()
     });
     assert!(st4.delete_ab_entry_action(&addr).is_ok());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1898,11 +1876,9 @@ fn synth_wallet_file(dir: &std::path::Path, name: &str) -> PathBuf {
     path
 }
 
-fn gui_test_dir(tag: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("tri7gui_rw_{}_{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// Guarded per-call dir (item 45): every caller binding outlives the test.
+fn gui_test_dir(tag: &str) -> crate::testsupport::TestDir {
+    crate::testsupport::test_dir(&format!("tri7gui_rw-{tag}"))
 }
 
 #[test]
@@ -1969,7 +1945,6 @@ fn new_address_writes_into_wallet_dat_and_survives_restart() {
         .names
         .contains(&(addr.clone(), "cold-storage".to_string())));
     assert!(st2.keystore.is_empty(), "nothing leaked into the keystore");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2023,7 +1998,6 @@ fn wallet_label_edit_writes_name_row_when_writable() {
         .addressbook
         .iter()
         .any(|e| e.address == other && e.label == "book-only"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2057,7 +2031,6 @@ fn locked_wallet_falls_back_to_keystore() {
     let w = crate::wallet::read_wallet(&wallet).unwrap();
     assert_eq!(w.keys.len(), 1);
     drop(blocker);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2093,7 +2066,6 @@ fn appstate_starts_with_quiet_updater() {
     );
     assert!(st.updater_banner_line().is_none());
     assert!(st.updater_rx.is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2137,7 +2109,6 @@ fn updater_banner_line_pins_the_offered_jump() {
     );
     // and the banner stops offering the jump once the download has started
     assert!(st.updater_banner_line().is_some());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2216,7 +2187,6 @@ fn updater_install_gate_refuses_busy_and_flushes_wallet_rw() {
             "a spawned install must arm pending_exit so the GUI exits"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2240,7 +2210,6 @@ fn updater_skip_persists_across_appstate_rebuild() {
         st2.updater.skipped_version(),
         Some(&crate::updater::Version::parse("7.0.9").unwrap())
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2250,7 +2219,6 @@ fn updater_options_line_reports_state() {
     let line = st.updater_options_line();
     assert!(line.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))), "{line}");
     assert!(line.contains("never"), "{line}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2394,7 +2362,6 @@ fn seed_migration_entry_guards_refuse_before_any_value_moves() {
 
     // sanity: the phrase the happy-path test will use is valid
     assert!(crate::seed::check_mnemonic(MN12));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2495,7 +2462,6 @@ fn seed_migration_full_path_prepare_broadcast_marker() {
     // re-entry is now refused
     let err = st.begin_seed_migration_action().unwrap_err();
     assert!(err.contains("seedmigrated"), "{}", err);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2566,7 +2532,6 @@ fn seed_migration_broadcast_failure_keeps_the_signed_plan_for_retry() {
     assert_eq!(f.step, crate::gui::sweep_flow::SweepStep::PlanReview);
     assert_eq!(f.plan.as_ref().unwrap().tx_hex, hex_before);
     assert!(!crate::wallet::seed_migration_done(&dir.join("wallet.dat")).unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 
@@ -2826,8 +2791,7 @@ fn probe_row_plan_samples_then_the_dump_covers_the_rest_exactly_once() {
 #[test]
 fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
     use crate::history::{save_cache, HistoryCache, HistoryRec};
-    let dir = std::env::temp_dir().join(format!("tri7-merged-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7-merged");
     let wallet = dir.join("wallet.dat");
     let rec = |txid: &str, value: i64, coinstake: bool, net: i64, addr: &str| HistoryRec {
         txid: txid.into(),
@@ -2912,7 +2876,6 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
         .collect();
     assert_eq!(recv_rows.len(), 1, "live recv deduped against history");
     assert!(merged.iter().any(|r| r.txid_display().starts_with(&"cc".repeat(8))));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 2026-11-09 judge blocker (lane-stake-net round 1) — the LIVE-ONLY duplicate
@@ -2924,10 +2887,8 @@ fn merged_rows_collapse_coinstake_txs_and_dedupe_live_coins() {
 #[test]
 fn merged_rows_collapse_live_only_stake_tx_outputs_to_one_row() {
     let mut cfg = gs::UiConfig::default();
-    cfg.wallet_path = std::path::Path::new(&std::env::temp_dir())
-        .join(format!("tri7-liveonly-{}", std::process::id()))
-        .display()
-        .to_string();
+    let _liveonly = crate::testsupport::test_dir("tri7gui-liveonly");
+    cfg.wallet_path = _liveonly.join("wallet.dat").display().to_string();
     let mut st = crate::gui::app_state::AppState::new(cfg);
     let hex_to_internal = |s: &str| -> [u8; 32] {
         let mut out = [0u8; 32];
@@ -3042,8 +3003,7 @@ fn tx_row_view_net_unknown_stake_keeps_fallback_and_names_the_principal() {
 #[test]
 fn merged_rows_use_the_session_stake_net_cache_for_pre_field_and_live_rows() {
     use crate::history::{save_cache, HistoryCache, HistoryRec};
-    let dir = std::env::temp_dir().join(format!("tri7-merged-cache-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7-merged-cache");
     let wallet = dir.join("wallet.dat");
     let mk_row = |txid: String, value: i64, coinstake: bool| HistoryRec {
         txid,
@@ -3135,7 +3095,6 @@ fn merged_rows_use_the_session_stake_net_cache_for_pre_field_and_live_rows() {
         .find(|r| r.txid_display().starts_with(&"ff".repeat(8)))
         .expect("uncached live stake present");
     assert_eq!(unknown.stake_net, None);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 2026-11-09 incident — the live half end-to-end: against a stand-in daemon
@@ -3256,8 +3215,7 @@ fn refresh_resolves_live_stake_nets_from_the_daemon_tx_index() {
         }
     });
 
-    let dir = std::env::temp_dir().join(format!("tri7-live-net-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7-live-net");
     let cfg = gs::UiConfig {
         wallet_path: dir.join("wallet.dat").display().to_string(),
         rpc_addr: Some(format!("127.0.0.1:{port}")),
@@ -3304,14 +3262,12 @@ fn refresh_resolves_live_stake_nets_from_the_daemon_tx_index() {
 
     stop.store(true, Ordering::Relaxed);
     let _ = handle.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn remembered_wallet_roundtrip_and_first_open_logic() {
     use crate::gui::app_state::{remember_last_wallet, remembered_wallet_path};
-    let dir = std::env::temp_dir().join(format!("tri7gui_remember_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::testsupport::test_dir("tri7gui_remember");
     // nothing remembered yet -> first open generates a wallet
     assert_eq!(remembered_wallet_path(dir.to_str().unwrap()), None);
     // after a successful open the path is remembered
@@ -3323,7 +3279,6 @@ fn remembered_wallet_roundtrip_and_first_open_logic() {
     // a remembered path whose file no longer exists -> first-open generate
     let remembered = remembered_wallet_path(dir.to_str().unwrap()).unwrap();
     assert!(!std::path::Path::new(&remembered).exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Explicit --wallet beats the persisted last-wallet session (Sami
@@ -3337,9 +3292,7 @@ fn remembered_wallet_roundtrip_and_first_open_logic() {
 #[test]
 fn cli_wallet_flag_beats_remembered_wallet() {
     use crate::gui::app_state::{resolve_first_run_target, FirstRunTarget};
-    let dir = std::env::temp_dir().join(format!("tri7gui_cliwallet_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7gui_cliwallet");
     let remembered_path = dir.join("roaming\\wallet.dat");
     std::fs::create_dir_all(remembered_path.parent().unwrap()).unwrap();
     std::fs::write(&remembered_path, b"x").unwrap();
@@ -3381,7 +3334,6 @@ fn cli_wallet_flag_beats_remembered_wallet() {
         FirstRunTarget::Target => {}
         other => panic!("default auto-open must survive, got {:?}", other),
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The Transactions date order must flip newest<->oldest cleanly: the sort
@@ -3420,16 +3372,10 @@ mod passphrase_dialog {
     use crate::gui::app_state::{AppState, PassphraseDialog, PassphraseMode};
     use crate::gui::state::UiConfig;
 
-    fn state() -> AppState {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-ppdlg-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// (state, guarded dir) — bind the guard first: `let (_dir, mut st) = state();`
+    /// (item 45: the dir must outlive the AppState that may write into it).
+    fn state() -> (AppState, crate::testsupport::TestDir) {
+        let dir = crate::testsupport::test_dir("tri7-ppdlg");
         let cfg = UiConfig {
             wallet_path: dir.join("wallet.dat").display().to_string(),
             state_dir: dir.display().to_string(),
@@ -3439,7 +3385,7 @@ mod passphrase_dialog {
             profile_dir: dir.join("profile").display().to_string(),
             ..Default::default()
         };
-        AppState::new(cfg)
+        (AppState::new(cfg), dir)
     }
 
     fn with(state: &mut AppState, d: PassphraseDialog) -> PassphraseDialog {
@@ -3449,7 +3395,7 @@ mod passphrase_dialog {
 
     #[test]
     fn encrypt_requires_matching_new_passphrase() {
-        let mut st = state();
+        let (_dir, mut st) = state();
         let mut d = with(&mut st, PassphraseDialog::new(PassphraseMode::Encrypt));
         d.new_pass = "hunter22hunter".into();
         d.confirm = "hunter22hunteR".into();
@@ -3466,7 +3412,7 @@ mod passphrase_dialog {
 
     #[test]
     fn encrypt_refuses_short_passphrase() {
-        let mut st = state();
+        let (_dir, mut st) = state();
         let mut d = PassphraseDialog::new(PassphraseMode::Encrypt);
         d.new_pass = "short".into();
         d.confirm = "short".into();
@@ -3476,7 +3422,7 @@ mod passphrase_dialog {
 
     #[test]
     fn change_needs_both_old_and_new() {
-        let mut st = state();
+        let (_dir, mut st) = state();
         let mut d = PassphraseDialog::new(PassphraseMode::Change);
         d.new_pass = "newpassphrase1".into();
         d.confirm = "newpassphrase1".into();
@@ -3496,7 +3442,7 @@ mod passphrase_dialog {
         // The judge caught the old rule applying the 8-char NEW-passphrase
         // check to Unlock (where new_pass is always empty): both users could
         // never unlock at all. This test pins the corrected rule.
-        let mut st = state();
+        let (_dir, mut st) = state();
         let mut d = PassphraseDialog::new(PassphraseMode::Unlock);
         d.old_pass = "abc".into(); // deliberately SHORT — must be accepted
         d.unlock_secs = "600".into();
@@ -3512,7 +3458,7 @@ mod passphrase_dialog {
 
     #[test]
     fn decrypt_needs_only_the_current_passphrase() {
-        let mut st = state();
+        let (_dir, mut st) = state();
         let mut d = PassphraseDialog::new(PassphraseMode::Decrypt);
         d.old_pass = "abc".into(); // short again: Decrypt sets no new passphrase
         st.dialogs.passphrase = Some(d);
@@ -3523,7 +3469,7 @@ mod passphrase_dialog {
 
     #[test]
     fn no_dialog_pending_is_an_error_not_a_silent_noop() {
-        let st = state();
+        let (_dir, st) = state();
         assert!(st.passphrase_request().is_err());
     }
 }
@@ -3548,7 +3494,7 @@ fn p2sh_script(redeem: &[u8]) -> Vec<u8> {
 /// — the exact-equality fee guard included (no "fee mismatch").
 #[test]
 fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
-    let dir = std::env::temp_dir().join(format!("tri7gui_p2sh_{}", std::process::id()));
+    let dir = crate::testsupport::test_dir("tri7gui_p2sh");
     std::fs::create_dir_all(dir.join("state")).unwrap();
 
     // the wallet: created on disk with the redeem script stored (the way the
@@ -3700,7 +3646,6 @@ fn derived_utxos_watch_stored_redeem_scripts_and_a_p2sh_send_builds() {
         "round3: GUI P2SH send estimate = {} bytes, real = {} bytes, fee = {} sats",
         est, build.n_bytes, build.fee_sats
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -4242,7 +4187,7 @@ fn i18n_language_survives_options_json_save_load() {
     // AppState over a temp profile dir; save_options_action writes
     // options.json; a fresh AppState over the same profile dir reads it back
     // (the same workflow the Apply button drives)
-    let (mut st, dir) = options_state_with_unreachable_node("i18n-lang");
+    let (mut st, _dir) = options_state_with_unreachable_node("i18n-lang");
     assert_eq!(
         st.options.language,
         crate::gui::app_state::i18n::Language::English
@@ -4275,7 +4220,6 @@ fn i18n_language_survives_options_json_save_load() {
         crate::gui::app_state::i18n::Language::English,
         "a pre-i18n options.json must load as English"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// SOURCE-LEVEL wiring check (judge blocker, lane-i18n round 1): the
@@ -4424,8 +4368,7 @@ fn balance_card_labels_coverage_when_daemon_reports_partial() {
 
     // the AppState seam the card reads: partial facts + reachable daemon →
     // the label; unreachable daemon → no label (the local split governs).
-    let dir = std::env::temp_dir().join(format!("tri7gui_cov_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::testsupport::test_dir("tri7gui_cov");
     let cfg = UiConfig {
         profile_dir: dir.display().to_string(),
         rpc_addr: Some("127.0.0.1:1".into()),
@@ -4450,7 +4393,6 @@ fn balance_card_labels_coverage_when_daemon_reports_partial() {
         None,
         "no reachable daemon → no daemon label"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// GUI ATOMICITY (judge round-1 blocker, 2026-11-11): the card's NUMBER and
@@ -4629,9 +4571,7 @@ fn balance_card_number_and_label_come_from_one_getwalletinfo_payload() {
         }
     });
 
-    let dir =
-        std::env::temp_dir().join(format!("tri7gui_atomic_{}_{}", std::process::id(), port));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = crate::testsupport::test_dir("tri7gui-atomic");
     let cfg = crate::gui::state::UiConfig {
         profile_dir: dir.display().to_string(),
         rpc_addr: Some(format!("127.0.0.1:{port}")),
@@ -4672,7 +4612,6 @@ fn balance_card_number_and_label_come_from_one_getwalletinfo_payload() {
         Some((GB_TRI * 1_000_000.0).round() as i64),
         "the later getbalance snapshot is recorded for the watcher"
     );
-    let _ = std::fs::remove_dir_all(&dir);
     shutdown.store(true, Ordering::SeqCst);
     let _ = server.join();
 }
@@ -4778,12 +4717,7 @@ fn header_word_is_bigger_and_icon_size_is_unchanged() {
 /// key map and a live derive.
 #[test]
 fn encrypted_wallet_load_prompt_retry_and_unlock() {
-    let dir = std::env::temp_dir().join(format!(
-        "tri7gui_enc_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testsupport::test_dir("tri7gui_enc");
     let wpath = dir.join("wallet.dat");
     // minimal legacy-format store with one plaintext key
     {
@@ -4869,7 +4803,6 @@ fn encrypted_wallet_load_prompt_retry_and_unlock() {
         !st.keystore.iter().any(|e| e.address == addr),
         "decrypted secret leaked into the persistable keystore"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -5115,7 +5048,6 @@ fn seed_flow_first_run_voice_is_opt_in() {
 fn first_run_welcome_flag_defaults_off() {
     // constructed through the same fixture every other GUI state test uses:
     // an app that already knows its wallet must never show the welcome menu.
-    let (st, dir) = options_state_with_unreachable_node("first-run-flag");
+    let (st, _dir) = options_state_with_unreachable_node("first-run-flag");
     assert!(!st.first_run_welcome);
-    let _ = std::fs::remove_dir_all(&dir);
 }

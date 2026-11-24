@@ -704,11 +704,8 @@ pub fn eof_stamp(
 mod tests {
     use super::*;
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("tri7addrindex-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tmpdir(tag: &str) -> crate::testsupport::TestDir {
+        crate::testsupport::test_dir(&format!("tri7addrindex-{tag}"))
     }
 
     /// p2pkh script for a 20-byte payload (OP_DUP OP_HASH160 20 <h> OP_EQUALVERIFY OP_CHECKSIG)

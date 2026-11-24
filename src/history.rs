@@ -685,8 +685,7 @@ mod tests {
 
     #[test]
     fn cache_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("tri7-hist-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-hist");
         let c = HistoryCache {
             scanned_height: 42,
             scanned_offset: 1234,
@@ -712,7 +711,6 @@ mod tests {
         assert_eq!(back.scanned_height, 42);
         assert_eq!(back.rows.len(), 1);
         assert_eq!(back.rows[0].value_sats, 500);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// transactionrecord.cpp stake decomposition: the row's rendered amount
@@ -1217,8 +1215,7 @@ mod tests {
             block_sig: Vec::new(),
         };
 
-        let dir = std::env::temp_dir().join(format!("tri7-backfill-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-backfill");
         let dat = dir.join("blk0001.dat");
         let mut f = std::fs::File::create(&dat).unwrap();
         for b in [&cb_block, &stake_block1] {
@@ -1318,7 +1315,6 @@ mod tests {
         save_cache(&dir, &cache).unwrap();
         let back = load_cache(&dir).unwrap();
         assert_eq!(back.rows[1].stake_net, Some(39_590));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The empty-scan guard (seen live on sami-pc): a genesis-started scan
@@ -1327,8 +1323,7 @@ mod tests {
     /// must refuse to write an empty scanned_height == 0 cache over rows.
     #[test]
     fn save_cache_refuses_empty_scan_over_a_non_empty_file() {
-        let dir = std::env::temp_dir().join(format!("tri7-guard-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testsupport::test_dir("tri7-guard");
         let real = HistoryCache {
             scanned_height: 2_205_300,
             scanned_offset: 999,
@@ -1354,7 +1349,6 @@ mod tests {
         save_cache(&dir, &HistoryCache::default()).unwrap();
         let after = std::fs::read_to_string(cache_path(&dir)).unwrap();
         assert_eq!(before, after, "empty scan must not replace real history");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// minimal non-coinbase filler for vtx[0] of test blocks (produces no

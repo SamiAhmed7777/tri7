@@ -5,6 +5,9 @@
 use secp256k1::Secp256k1;
 use std::process::Command;
 
+#[path = "../src/testsupport.rs"]
+mod testsupport;
+
 // Synthetic blk-file frames aren't used for linkage-sensitive tests (block
 // hashes can't be faked without Hash9 over real headers), so the CLI tests
 // below carve real frames out of the live archive when present and SKIP
@@ -13,8 +16,7 @@ use std::process::Command;
 #[test]
 fn verify_sigs_zero_coverage_fails() {
     let bin = env!("CARGO_BIN_EXE_verify_sigs");
-    let dir = std::env::temp_dir().join(format!("tri7-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-cli");
     let path = dir.join("tiny.dat");
     // archive with a single genesis-like block; start_height above it
     let mut data = Vec::new();
@@ -39,8 +41,7 @@ fn verify_sigs_zero_coverage_fails() {
 #[test]
 fn verify_sigs_eof_before_end_fails() {
     let bin = env!("CARGO_BIN_EXE_verify_sigs");
-    let dir = std::env::temp_dir().join(format!("tri7-eof-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-eof");
     let path = dir.join("short.dat");
     let raw = std::fs::read("/root/.triangles/blk0001.dat");
     if raw.is_err() {
@@ -140,8 +141,7 @@ fn synth_wallet(
 #[test]
 fn read_wallet_ok_when_complete() {
     let bin = env!("CARGO_BIN_EXE_read_wallet");
-    let dir = std::env::temp_dir().join(format!("tri7-wok-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-wok");
     let path = dir.join("ok.dat");
     synth_wallet(&path, true, true);
     let out = Command::new(bin).arg(&path).output().unwrap();
@@ -152,8 +152,7 @@ fn read_wallet_ok_when_complete() {
 #[test]
 fn read_wallet_fails_without_bestblock() {
     let bin = env!("CARGO_BIN_EXE_read_wallet");
-    let dir = std::env::temp_dir().join(format!("tri7-wnb-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-wnb");
     let path = dir.join("nobest.dat");
     synth_wallet(&path, true, false);
     let out = Command::new(bin).arg(&path).output().unwrap();
@@ -164,8 +163,7 @@ fn read_wallet_fails_without_bestblock() {
 #[test]
 fn read_wallet_fails_without_defaultkey() {
     let bin = env!("CARGO_BIN_EXE_read_wallet");
-    let dir = std::env::temp_dir().join(format!("tri7-wnd-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = testsupport::test_dir("tri7-wnd");
     let path = dir.join("nodef.dat");
     synth_wallet(&path, false, true);
     let out = Command::new(bin).arg(&path).output().unwrap();

@@ -18,6 +18,10 @@ use tri7_core::addrindex;
 use tri7_core::blockindex::BlockStore;
 use tri7_core::legacy::{Block, Reader};
 
+#[cfg(test)]
+#[path = "../testsupport.rs"]
+mod testsupport;
+
 const MAGIC: u32 = 0x0522_3570;
 
 /// Fail-closed quarantine: remove the index db (and its WAL/SHM), verifying
@@ -73,8 +77,7 @@ mod tests {
     /// WAL and SHM all gone from the directory.
     #[test]
     fn quarantine_removes_the_db_so_consumers_see_no_index() {
-        let dir = std::env::temp_dir().join(format!("tri7-quarantine-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = testsupport::test_dir("tri7-quarantine");
         let db = dir.join("addressindex.db");
         std::fs::write(&db, b"not-a-real-db-but-nonempty").unwrap();
         std::fs::write(dir.join("addressindex.db-wal"), b"wal").unwrap();
@@ -91,7 +94,6 @@ mod tests {
         // a test running as root (root bypasses directory write-bits), so the
         // fail-closed final check (nothing non-empty survives) is the tested
         // guarantee.
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -1487,14 +1487,11 @@ mod tests {
         out
     }
 
-    fn engine(tag: &str, keys: Vec<SmsgKey>) -> Arc<SmsgEngine> {
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-smsgnet-test-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        SmsgEngine::open(&dir, keys).unwrap()
+    /// (engine, guarded dir) — callers bind the guard FIRST so it drops
+    /// after the engine: `let (e, _e) = engine(..);` (item 45).
+    fn engine(tag: &str, keys: Vec<SmsgKey>) -> (Arc<SmsgEngine>, crate::testsupport::TestDir) {
+        let dir = crate::testsupport::test_dir(&format!("tri7-smsgnet-test-{tag}"));
+        (SmsgEngine::open(&dir, keys).unwrap(), dir)
     }
 
     fn wire_ab(keys: &TestKeys, text: &str, ts: i64) -> Vec<u8> {
@@ -1536,7 +1533,7 @@ mod tests {
     #[test]
     fn ping_pong_enables_peer_then_inventory_flows() {
         let k = make_keys();
-        let a = engine("pingpong-a", vec![k.a.clone()]);
+        let (a, _a) = engine("pingpong-a", vec![k.a.clone()]);
         let now = now_i64();
         // store a message locally so A has a non-empty bucket
         a.send_local(&k.a.address, &k.b.address, "hello", now).unwrap_err(); // no pubkey known yet — but store... must fail
@@ -1564,8 +1561,8 @@ mod tests {
     #[test]
     fn full_roundtrip_a_to_b_over_engine_pair() {
         let k = make_keys();
-        let a = engine("rt-a", vec![k.a.clone()]);
-        let b = engine("rt-b", vec![k.b.clone()]);
+        let (a, _a) = engine("rt-a", vec![k.a.clone()]);
+        let (b, _b) = engine("rt-b", vec![k.b.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
 
@@ -1629,7 +1626,7 @@ mod tests {
         // judge round that read the identical if/else display branch as a
         // wrong-mapping bug.
         let k = make_keys();
-        let a = engine("ob-a", vec![k.a.clone()]);
+        let (a, _a) = engine("ob-a", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local(&k.a.address, &k.b.address, "to myself via outbox", now)
@@ -1651,8 +1648,8 @@ mod tests {
         // encrypt -> store -> decrypt as receiver AND as sender: both views
         // of the same wire must yield the same plaintext and from.
         let k = make_keys();
-        let a = engine("obrt-a", vec![k.a.clone()]);
-        let b = engine("obrt-b", vec![k.b.clone()]);
+        let (a, _a) = engine("obrt-a", vec![k.a.clone()]);
+        let (b, _b) = engine("obrt-b", vec![k.b.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local(&k.a.address, &k.b.address, "both sides agree", now)
@@ -1686,11 +1683,7 @@ mod tests {
         // the seal is unusable and the row shows the honest placeholder —
         // never a crash, never a fake plaintext.
         let k = make_keys();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-smsgnet-test-obph-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-smsgnet-test-obph");
         let a = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
@@ -1712,7 +1705,6 @@ mod tests {
         // single-row open reports the honest failure too
         let key_hex = rows[0]["key"].as_str().unwrap().to_string();
         assert!(a2.read_msg(FOLDER_OUTBOX, &key_hex).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1720,7 +1712,7 @@ mod tests {
         // Anonymous sends carry no sending key (addr_outbox "anon"), so no
         // seal is written and the listing keeps the placeholders.
         let k = make_keys();
-        let a = engine("obanon", vec![k.a.clone()]);
+        let (a, _a) = engine("obanon", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local_anon(&k.b.address, "ghost", now).unwrap();
@@ -1739,8 +1731,8 @@ mod tests {
     #[test]
     fn reply_path_b_to_a_uses_learned_pubkey() {
         let k = make_keys();
-        let a = engine("rp-a", vec![k.a.clone()]);
-        let b = engine("rp-b", vec![k.b.clone()]);
+        let (a, _a) = engine("rp-a", vec![k.a.clone()]);
+        let (b, _b) = engine("rp-b", vec![k.b.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local(&k.a.address, &k.b.address, "first", now).unwrap();
@@ -1770,7 +1762,7 @@ mod tests {
     #[test]
     fn bad_pow_and_duplicates_dropped_but_peer_stays() {
         let k = make_keys();
-        let b = engine("pow-b", vec![k.b.clone()]);
+        let (b, _b) = engine("pow-b", vec![k.b.clone()]);
         let now = now_i64();
         let mut wire = wire_ab(&k, "valid", now);
         // corrupt the MAC → invalid PoW/checksum
@@ -1786,7 +1778,7 @@ mod tests {
         // anonymous compose (SMSG_ANON_VERSION payload shape) decrypts with
         // any owned key and delivers without a sender address
         let k = make_keys();
-        let b = engine("anon-b", vec![k.b.clone()]);
+        let (b, _b) = engine("anon-b", vec![k.b.clone()]);
         let now = now_i64();
         let wire = crate::smsg::smsg_encrypt(None, &k.b.pubkey_bytes(), "anon hello", now).unwrap();
         let m = crate::smsg::SecureMessage::from_wire(&wire).unwrap();
@@ -1806,7 +1798,7 @@ mod tests {
         // (smessage.cpp:3851-3864): [250][4 unused][len u32][data] — no
         // sender hash160, no signature.
         let k = make_keys();
-        let a = engine("anon-send-a", vec![k.a.clone()]);
+        let (a, _a) = engine("anon-send-a", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
 
@@ -1861,7 +1853,7 @@ mod tests {
         let k = make_keys();
         let c = key_for([13u8; 32], "");
         let d = key_for([17u8; 32], ""); // valid address, NOT owned by the engine
-        let a = engine("bcast-a", vec![k.a.clone()]);
+        let (a, _a) = engine("bcast-a", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.add_address(&c.address, &c.pubkey_bytes()).unwrap();
@@ -1917,7 +1909,7 @@ mod tests {
     #[test]
     fn want_serves_only_bucket_tokens_and_caps_bunch() {
         let k = make_keys();
-        let a = engine("want-a", vec![k.a.clone()]);
+        let (a, _a) = engine("want-a", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         for i in 0..3 {
@@ -1944,7 +1936,7 @@ mod tests {
     #[test]
     fn bucket_lock_blocks_have_then_releases_on_tick() {
         let k = make_keys();
-        let b = engine("lock-b", vec![k.b.clone()]);
+        let (b, _b) = engine("lock-b", vec![k.b.clone()]);
         let now = now_i64();
         let wire = wire_ab(&k, "locked", now);
         // b doesn't have the message yet — a smsgHave should want it
@@ -1969,8 +1961,8 @@ mod tests {
     fn lz4_large_message_roundtrip_over_wire() {
         // >128B plaintexts take the LZ4 path — full engine roundtrip
         let k = make_keys();
-        let a = engine("lz-a", vec![k.a.clone()]);
-        let b = engine("lz-b", vec![k.b.clone()]);
+        let (a, _a) = engine("lz-a", vec![k.a.clone()]);
+        let (b, _b) = engine("lz-b", vec![k.b.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         let text = "x".repeat(2000) + " tail with entropy 1234567890";
@@ -1986,7 +1978,7 @@ mod tests {
     #[test]
     fn purge_drops_expired_and_keeps_fresh() {
         let k = make_keys();
-        let a = engine("purge-a", vec![k.a.clone()]);
+        let (a, _a) = engine("purge-a", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local(&k.a.address, &k.b.address, "old", now - SMSG_RETENTION - 100).unwrap();
@@ -2001,7 +1993,7 @@ mod tests {
     #[test]
     fn smsg_disable_and_ignore_paths() {
         let k = make_keys();
-        let a = engine("dis-a", vec![k.a.clone()]);
+        let (a, _a) = engine("dis-a", vec![k.a.clone()]);
         let now = now_i64();
         // complete first contact so the peer exists with last_seen set
         assert_eq!(a.send_data_tick("p", now).unwrap().command, "smsgPing");
@@ -2020,7 +2012,7 @@ mod tests {
         // deliver (legacy SecureMsgDecrypt verifies the recovered sender)
         let k = make_keys();
         let forger = key_for([31u8; 32], "x");
-        let b = engine("forge-b", vec![k.b.clone()]);
+        let (b, _b) = engine("forge-b", vec![k.b.clone()]);
         let now = now_i64();
         // encrypt a payload FROM forger's key but to b (valid MAC — b is the
         // recipient) — decrypt recovers the real sender == claimed, so this
@@ -2036,7 +2028,7 @@ mod tests {
     #[test]
     fn add_address_rejects_mismatched_pubkey() {
         let k = make_keys();
-        let a = engine("add-a", vec![k.a.clone()]);
+        let (a, _a) = engine("add-a", vec![k.a.clone()]);
         assert!(a.add_address(&k.b.address, &k.a.pubkey_bytes()).is_err());
         assert!(a.add_address(&k.b.address, &k.b.pubkey_bytes()).is_ok());
         assert!(a.add_address(&k.b.address, &[1u8; 30]).is_err());
@@ -2047,7 +2039,7 @@ mod tests {
     #[test]
     fn disable_stops_data_and_notifies_each_enabled_peer_once() {
         let k = make_keys();
-        let a = engine("togg-a", vec![k.a.clone(), k.b.clone()]);
+        let (a, _a) = engine("togg-a", vec![k.a.clone(), k.b.clone()]);
         let now = now_i64();
         // handshake peer p1 to "enabled" via the ping/pong dance
         a.send_data_tick("p1", now); // first contact → ping
@@ -2081,7 +2073,7 @@ mod tests {
     #[test]
     fn enable_rebuilds_buckets_and_rehandshakes_peers() {
         let k = make_keys();
-        let a = engine("togg-b", vec![k.a.clone(), k.b.clone()]);
+        let (a, _a) = engine("togg-b", vec![k.a.clone(), k.b.clone()]);
         let now = now_i64();
         a.send_data_tick("p1", now);
         a.handle("p1", "smsgPong", &enc_vch(&[]), now);
@@ -2104,11 +2096,7 @@ mod tests {
     #[test]
     fn options_roundtrip_through_the_store() {
         let k = make_keys();
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-smsgopt-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::test_dir("tri7-smsgopt-test");
         let a = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
         // legacy defaults: both true
         assert_eq!(a.options(), SecMsgOptions::default());
@@ -2125,7 +2113,6 @@ mod tests {
         let info = b.localinfo_json();
         assert_eq!(info["enabled"], serde_json::json!(true));
         assert_eq!(info["options"]["newAddressRecv"], serde_json::json!(false));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2147,7 +2134,7 @@ mod tests {
     #[test]
     fn scan_buckets_redelivers_relay_messages_to_inbox() {
         let k = make_keys();
-        let a = engine("scanb", vec![k.a.clone(), k.b.clone()]);
+        let (a, _a) = engine("scanb", vec![k.a.clone(), k.b.clone()]);
         let now = now_i64();
         // a local send lands in outbox + relay but NOT the inbox
         a.send_local(&k.a.address, &k.b.address, "rescan me", now).unwrap();
@@ -2167,7 +2154,7 @@ mod tests {
     #[test]
     fn learn_pubkey_validates_and_dedupes() {
         let k = make_keys();
-        let a = engine("learnpk", vec![k.a.clone()]);
+        let (a, _a) = engine("learnpk", vec![k.a.clone()]);
         let now = now_i64();
         let (added, dup) = a.learn_pubkey(&k.b.pubkey_bytes(), now).unwrap();
         assert!(added && !dup);
@@ -2188,7 +2175,7 @@ mod tests {
     #[test]
     fn addkey_then_getpubkey_roundtrip_on_temp_store() {
         let k = make_keys();
-        let a = engine("akgk", vec![k.a.clone()]);
+        let (a, dir) = engine("akgk", vec![k.a.clone()]);
         // wallet-owned address: the "address in wallet" path, base58 key
         let local = a.get_public_key_json(&k.a.address);
         assert_eq!(local["result"], "Success.");
@@ -2211,22 +2198,24 @@ mod tests {
         assert_eq!(dup["result"], "Public key not added to db.");
         assert_eq!(dup["reason"], "address is already in db.");
         // the import is persistent: a fresh engine over the same store dir
-        // still resolves B via the "peer address in DB" path
-        let dir = std::env::temp_dir().join(format!(
-            "tri7-smsgnet-test-akgk-{}",
-            std::process::id()
-        ));
+        // still resolves B via the "peer address in DB" path — the guard
+        // hands out the SAME dir the first engine wrote into (item 45: the
+        // old code reopened it by re-deriving its name, which collided only
+        // by accident of pid-tagged naming)
         let a2 = SmsgEngine::open(&dir, vec![k.a.clone()]).unwrap();
         let got2 = a2.get_public_key_json(&k.b.address);
         assert_eq!(got2["result"], "Success.");
         assert_eq!(got2["peer address in DB"], k.b.address);
         assert_eq!(got2["compressed public key"].as_str().unwrap(), b58);
+        // close the engines before the guard removes the store dir
+        drop(a2);
+        drop(a);
     }
 
     #[test]
     fn addkey_legacy_reason_codes_and_getpubkey_failures() {
         let k = make_keys();
-        let a = engine("akrc", vec![k.a.clone()]);
+        let (a, _a) = engine("akrc", vec![k.a.clone()]);
         let b58 = crate::address::base58(&k.b.pubkey_bytes());
         // rv 5: address is invalid
         let r = a.add_key_json("not-an-address", &b58);
@@ -2262,7 +2251,7 @@ mod tests {
     #[test]
     fn buckets_stats_shape_matches_legacy_and_dump_clears() {
         let k = make_keys();
-        let a = engine("bksh", vec![k.a.clone()]);
+        let (a, _a) = engine("bksh", vec![k.a.clone()]);
         let now = now_i64();
         a.add_address(&k.b.address, &k.b.pubkey_bytes()).unwrap();
         a.send_local(&k.a.address, &k.b.address, "one", now).unwrap();

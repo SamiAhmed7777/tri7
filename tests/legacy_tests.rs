@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use tri7_core::blkfile::{BlkFileReader, FrameRead};
 use tri7_core::legacy::{hash9, hash_to_display, sha256d, Block, Hash, Reader, Tx, Vin, Vout};
 
+#[path = "../src/testsupport.rs"]
+mod testsupport;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -72,11 +75,13 @@ fn block_with_txs(vtx: Vec<Tx>) -> Block {
     }
 }
 
-/// Write bytes to a unique temp file and return its path.
-fn write_tmp(name: &str, bytes: &[u8]) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("tri7-legacy-test-{}-{}", std::process::id(), name));
+/// Write bytes into a fresh per-call guarded dir (item 45) and return
+/// (guard, file path) — callers bind the guard: `let (_d, p) = write_tmp(..);`.
+fn write_tmp(name: &str, bytes: &[u8]) -> (testsupport::TestDir, PathBuf) {
+    let d = testsupport::test_dir(&format!("tri7-legacy-test-{name}"));
+    let p = d.join(name);
     std::fs::write(&p, bytes).unwrap();
-    p
+    (d, p)
 }
 
 fn frame_bytes(magic: u32, body: &[u8]) -> Vec<u8> {
@@ -362,13 +367,12 @@ const CHAIN_MAGIC: u32 = 0x05223570;
 #[test]
 fn frame_le_magic_and_length() {
     let body = vec![0xaau8; 200];
-    let p = write_tmp("le", &frame_bytes(CHAIN_MAGIC, &body));
+    let (_p, p) = write_tmp("le", &frame_bytes(CHAIN_MAGIC, &body));
     let mut r = BlkFileReader::open(&p).unwrap();
     let f = r.next_frame().unwrap().expect("one frame");
     assert_eq!(f.magic, CHAIN_MAGIC); // bytes on disk: 70 35 22 05
     assert_eq!(f.data, body);
     assert!(r.next_frame().unwrap().is_none());
-    std::fs::remove_file(&p).ok();
 }
 
 #[test]
@@ -379,22 +383,20 @@ fn frame_zero_padding_tolerance() {
     bytes.extend_from_slice(&[0u8; 16]); // aligned interstitial padding
     bytes.extend_from_slice(&frame_bytes(CHAIN_MAGIC, &body2));
     bytes.extend_from_slice(&[0u8; 12]); // trailing padding, not 8-byte aligned
-    let p = write_tmp("pad", &bytes);
+    let (_p, p) = write_tmp("pad", &bytes);
     let mut r = BlkFileReader::open(&p).unwrap();
     let f1 = r.next_frame().unwrap().expect("frame 1");
     assert_eq!(f1.data, body1);
     let f2 = r.next_frame().unwrap().expect("frame 2");
     assert_eq!(f2.data, body2);
     assert!(r.next_frame().unwrap().is_none());
-    std::fs::remove_file(&p).ok();
 }
 
 #[test]
 fn frame_rejects_zero_length() {
-    let p = write_tmp("zerolen", &frame_bytes(CHAIN_MAGIC, &[]));
+    let (_p, p) = write_tmp("zerolen", &frame_bytes(CHAIN_MAGIC, &[]));
     let mut r = BlkFileReader::open(&p).unwrap();
     assert!(r.next_frame().is_err());
-    std::fs::remove_file(&p).ok();
 }
 
 #[test]
@@ -402,10 +404,9 @@ fn frame_rejects_oversized_length() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&CHAIN_MAGIC.to_le_bytes());
     bytes.extend_from_slice(&((8u32 << 20) + 1).to_le_bytes());
-    let p = write_tmp("biglen", &bytes);
+    let (_p, p) = write_tmp("biglen", &bytes);
     let mut r = BlkFileReader::open(&p).unwrap();
     assert!(r.next_frame().is_err());
-    std::fs::remove_file(&p).ok();
 }
 
 /// A plausible length prefix whose body is cut short at EOF is a TORN TAIL,
@@ -419,7 +420,7 @@ fn frame_truncated_body_is_a_torn_tail() {
     bytes.extend_from_slice(&CHAIN_MAGIC.to_le_bytes());
     bytes.extend_from_slice(&100u32.to_le_bytes());
     bytes.extend_from_slice(&[0x55; 20]); // body cut short
-    let p = write_tmp("trunc", &bytes);
+    let (_p, p) = write_tmp("trunc", &bytes);
     let mut r = BlkFileReader::open(&p).unwrap();
     // tolerant view: clean EOF, archive served up to the last whole frame
     assert!(r.next_frame().unwrap().is_none());
@@ -436,23 +437,20 @@ fn frame_truncated_body_is_a_torn_tail() {
         }
         other => panic!("expected a torn tail, got {:?}", other),
     }
-    std::fs::remove_file(&p).ok();
 }
 
 #[test]
 fn frame_clean_eof_at_start() {
-    let p = write_tmp("empty", &[]);
+    let (_p, p) = write_tmp("empty", &[]);
     let mut r = BlkFileReader::open(&p).unwrap();
     assert!(r.next_frame().unwrap().is_none());
-    std::fs::remove_file(&p).ok();
 }
 
 #[test]
 fn frame_magic_matches_chain_constant() {
     // The live chain's network magic, little-endian on disk.
-    let p = write_tmp("magic", &frame_bytes(CHAIN_MAGIC, &[0x00]));
+    let (_p, p) = write_tmp("magic", &frame_bytes(CHAIN_MAGIC, &[0x00]));
     let mut r = BlkFileReader::open(&p).unwrap();
     let f = r.next_frame().unwrap().expect("one frame");
     assert_eq!(f.magic, 0x05223570);
-    std::fs::remove_file(&p).ok();
 }
