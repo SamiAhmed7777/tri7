@@ -16158,6 +16158,14 @@ pub fn main_args(argv: &[String]) -> i32 {
                 Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
             }));
         }
+        // (item 44c) The legacy proxy is wired to THIS node's own rpc
+        // host/port — the port the legacy daemon used to own. Without
+        // --no-proxy it is a self-loop: every proxy-only method answers
+        // "connection reset by peer" (DNS3 sat like that after the
+        // cutover). Say so at startup, loudly.
+        if let Some(w) = legacy_proxy_self_warning(cfg.no_proxy, &cfg.rpc_host, cfg.rpc_port) {
+            log(&w);
+        }
         let deps = Arc::new(rpc::ServerDeps {
             tip: tip_prov,
             wallet: wallet_prov,
@@ -19190,9 +19198,38 @@ fn finish(cfg: &Config, st: &ChainState, stats: &Stats, rpc: &Rpc, code: i32, no
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
+/// (item 44) The legacy proxy is wired to THIS node's own RPC host/port, so
+/// unless cutover mode (`--no-proxy`) is set it points straight back at this
+/// process: the legacy daemon's port is this node's port now. Returns the
+/// startup warning for that misconfiguration, None when the proxy is off.
+pub(crate) fn legacy_proxy_self_warning(no_proxy: bool, host: &str, port: u16) -> Option<String> {
+    if no_proxy {
+        return None;
+    }
+    Some(format!(
+        "[rpc] WARNING: legacy proxy points at {host}:{port} — this node's OWN RPC listener. \
+         Proxy-only methods and proxy fallbacks cannot work through it (observed: \
+         'connection reset by peer'). Start with --no-proxy (cutover mode) to serve native \
+         errors instead."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (item 44c) DNS3-style self-proxy: a node started without --no-proxy
+    /// is warned at startup, by name and port; cutover mode stays silent.
+    #[test]
+    fn legacy_proxy_self_warning_names_the_self_loop_and_stays_silent_in_cutover_mode() {
+        let w = legacy_proxy_self_warning(false, "127.0.0.1", 19112)
+            .expect("a non-cutover node is a self-loop by construction");
+        assert!(w.contains("127.0.0.1:19112"), "names its own listener: {w}");
+        assert!(w.contains("OWN RPC listener"), "{w}");
+        assert!(w.contains("--no-proxy"), "says how to fix it: {w}");
+        assert!(w.starts_with("[rpc] WARNING"), "{w}");
+        assert_eq!(legacy_proxy_self_warning(true, "127.0.0.1", 19112), None);
+    }
 
     // ---- the whole wallet's unspent set ----
 

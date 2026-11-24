@@ -268,6 +268,10 @@ pub struct IndexBuild {
     /// at the window tip hash — heights are authoritative only then
     pub heights_ok: bool,
     pub skipped_frames: usize,
+    /// (item 44) frames that changed hands when the window re-threaded a fork:
+    /// canonical side-branch frames given a height + stranded first-arrival
+    /// frames that lost one.
+    pub fork_adopted: usize,
     /// Offset of the file's torn tail: the scan stopped on a SHORT final frame
     /// (a power cut between the amortized fsyncs) and every frame before this
     /// offset is indexed. None = the file ends on a frame boundary. The store
@@ -275,6 +279,90 @@ pub struct IndexBuild {
     /// appending after those bytes would leave a valid frame behind garbage,
     /// which every later scan reads as MID-FILE corruption (a hard error).
     pub torn_tail: Option<u64>,
+}
+
+/// A frame the thread refused, linked to its parent (item 44 fork-aware
+/// threading): enough to walk a lineage back to the thread once the window
+/// proves it canonical.
+#[derive(Clone, Copy)]
+struct SideFrame {
+    parent: Hash,
+    off: u64,
+    seq: u32,
+}
+
+/// Refused frames by block hash. Small by nature: a store holds one stale
+/// frame per reorg plus the canonical frames a fork stranded.
+type SideFrames = std::collections::HashMap<Hash, SideFrame>;
+
+/// The authoritative window continues from `prev` — the parent of an oracle
+/// frame the thread did NOT reach — so the lineage below `prev` IS the
+/// canonical chain, whatever order the file stored it in. The lineage is
+/// walked back through the refused frames until it meets a frame the thread
+/// already heights; those frames take the heights leading up to `oracle_h`,
+/// and every frame already holding one of those heights (the abandoned
+/// first-arrival branch) gives its height up. Returns how many frames changed
+/// hands (0 = nothing to do).
+///
+/// Parent links only: a stale sibling stored between a canonical parent and
+/// its canonical child (a staker's own orphaned block) can never derail the
+/// walk, and the walk cannot cycle (a block's parent hash is fixed). LIMIT: a
+/// canonical body that was never stored cuts the walk — nothing below it can
+/// be PROVEN canonical (no hash link), so frames stranded below it stay
+/// height-less until gap recovery stores the body and a rebuild runs.
+fn adopt_lineage(
+    sides: &SideFrames,
+    prev: &Hash,
+    oracle_h: u64,
+    thread_h: u64,
+    seq: u32,
+    height_off: &mut Vec<u64>,
+    heights_by_seq: &mut [u32],
+    skipped: &mut usize,
+) -> usize {
+    let mut lineage: Vec<SideFrame> = Vec::new();
+    let mut cur = *prev;
+    while let Some(f) = sides.get(&cur).copied() {
+        match heights_by_seq.get(f.seq as usize) {
+            Some(h) if *h != HEIGHT_UNSET => break, // back on the thread
+            _ => {}
+        }
+        lineage.push(f);
+        cur = f.parent;
+    }
+    let Some(first) = oracle_h.checked_sub(lineage.len() as u64) else {
+        return 0;
+    };
+    let mut moved = 0usize;
+    // The lineage takes [first ..= oracle_h - 1] and NOTHING above. When the
+    // thread already runs PAST the oracle frame — a child stored before its
+    // parent (DNS2 h2218631/32) — the frames at heights >= oracle_h are the
+    // canonical chain ABOVE this late frame, not an abandoned branch below
+    // it; clearing up to thread_h there wiped the child and left a hole.
+    if let Some(last) = oracle_h.checked_sub(1).map(|l| l.min(thread_h)) {
+        if last >= first {
+            // Whole-range scan, no early exit: duplicate frames can move the
+            // thread's height backwards, so heights are NOT monotonic along
+            // the file and a "stop below the band" shortcut would leave
+            // stale slots.
+            for slot in height_off.iter_mut().take(last as usize + 1).skip(first as usize) {
+                *slot = HEIGHT_GAP;
+            }
+            for h in heights_by_seq.iter_mut().take(seq as usize) {
+                if *h != HEIGHT_UNSET && (*h as u64) >= first && (*h as u64) <= last {
+                    *h = HEIGHT_UNSET;
+                    moved += 1;
+                }
+            }
+            *skipped += moved;
+        }
+    }
+    for (i, f) in lineage.iter().enumerate() {
+        heights_by_seq[f.seq as usize] = (oracle_h - 1 - i as u64) as u32;
+        push_height_off(height_off, oracle_h - 1 - i as u64, f.off);
+    }
+    *skipped -= lineage.len();
+    moved + lineage.len()
 }
 
 /// Scan the blocks file sequentially, building all three indexes.
@@ -298,6 +386,11 @@ pub fn build_index(
     let mut last_accepted: Option<Hash> = None;
     let mut skipped = 0usize;
     let mut tx_count = 0usize;
+    // (item 44) refused frames awaiting an oracle verdict (by block hash, each
+    // linked to its parent), and how many frames have changed hands so far
+    // (reported to the operator).
+    let mut sides = SideFrames::new();
+    let mut fork_adopted = 0usize;
     // Torn tail: a short final frame is a LOST TAIL, not corruption.
     // append_block fsyncs every 256 frames, so a power cut leaves exactly this
     // shape, and the old code failed the WHOLE index build on it — the node
@@ -396,8 +489,39 @@ pub fn build_index(
             // with the tipstate is stronger evidence than file order.
             let by_oracle = oracle_map.as_ref().and_then(|m| m.get(&hash).copied());
             if let Some(hx) = by_oracle {
-                last_accepted = Some(hash);
-                height = hx; // continue threading from this height
+                // (item 44) When the thread does NOT reach this oracle frame —
+                // a fork put the first-stored (losing) child on the thread and
+                // stranded it — the side branch that leads into the oracle
+                // frame is the canonical lineage: it takes the heights and
+                // the stranded frames lose theirs. Below the window base the
+                // build had no other way to tell the two children of one
+                // parent apart (DNS2: 5515 canonical frames height-less, the
+                // loser answering getblockhash at its height, and the hole
+                // growing at every rebuild as the window base moved up).
+                let reaches = body.len() >= 36
+                    && body[4..36] == last_accepted.as_ref().unwrap()[..]
+                    && hx == height + 1;
+                if !reaches {
+                    let parent: Hash = body[4..36].try_into().unwrap();
+                    fork_adopted += adopt_lineage(
+                        &sides,
+                        &parent,
+                        hx,
+                        height,
+                        seq,
+                        &mut height_off,
+                        &mut heights_by_seq,
+                        &mut skipped,
+                    );
+                }
+                // Continue threading from this height — unless the thread
+                // already runs PAST it (the child reached the file before its
+                // parent): the higher frame stays the frontier and the late
+                // frame has only claimed its own slot.
+                if hx >= height {
+                    last_accepted = Some(hash);
+                    height = hx;
+                }
                 push_height_off(&mut height_off, hx, off);
                 heights_by_seq.push(hx as u32);
                 blocks.push(BlockEntry {
@@ -450,6 +574,12 @@ pub fn build_index(
         } else {
             skipped += 1;
             heights_by_seq.push(HEIGHT_UNSET);
+            // refused by the thread: maybe the canonical branch's first block
+            // (stored after the fork's loser) — keep it until the window says
+            if last_accepted.is_some() && body.len() >= 36 {
+                let parent: Hash = body[4..36].try_into().unwrap();
+                sides.insert(hash, SideFrame { parent, off, seq });
+            }
         }
         blocks.push(BlockEntry {
             key: key8(&hash),
@@ -530,6 +660,7 @@ pub fn build_index(
         txs_indexed: tx_count,
         heights_ok,
         skipped_frames: skipped,
+        fork_adopted,
         torn_tail,
     })
 }
@@ -574,7 +705,11 @@ const CACHE_MAGIC_TX: u32 = 0x5452_4954; // TRIT
 /// file that ends mid-frame must TELL the store where the tear is; without it
 /// the next append wrote a valid frame behind a half-written one and every
 /// later scan saw mid-file corruption.
-const CACHE_VERSION: u32 = 4;
+/// v5: fork-aware threading. A v4 map can carry a fork hole (the losing child
+/// holding a height, the canonical frames below the window base height-less)
+/// and a cache written from such a map would keep serving it after the fix —
+/// force one rebuild.
+const CACHE_VERSION: u32 = 5;
 const BLOCKS_HEAD_LEN: usize = 57;
 const TX_HEAD_LEN: usize = 32;
 
@@ -774,6 +909,7 @@ pub fn load_caches(
         txs_indexed: n_tx,
         heights_ok: c_heights_ok,
         skipped_frames: 0,
+        fork_adopted: 0,
         torn_tail: if c_torn == u64::MAX { None } else { Some(c_torn) },
     }))
 }
@@ -1043,6 +1179,28 @@ impl BlockStore {
                 *tip = Some(height);
             }
         }
+        drop(tip);
+        // (item 44) ...and the abandoned branch's APPENDIX claims go with its
+        // slots. An accepted-at-the-time block keeps its frame, but once the
+        // live window slides past its height the appendix is the only thing
+        // left answering getblockhash(h) — with the abandoned block.
+        if let Some(inner) = self.inner() {
+            let mut retired = 0usize;
+            {
+                let mut a = inner.appendix.write().unwrap();
+                for f in a.iter_mut() {
+                    if f.height.map_or(false, |h| h > height) {
+                        f.height = None;
+                        retired += 1;
+                    }
+                }
+            }
+            if retired > 0 {
+                eprintln!(
+                    "[blockidx] rollback: retired {retired} appendix height claim(s) above h{height}"
+                );
+            }
+        }
     }
 
     /// Window slide: drop slots BELOW `height` (history below the window
@@ -1176,15 +1334,21 @@ impl BlockStore {
                             .write(true)
                             .open(self.path.as_ref().unwrap())
                             .is_ok();
+                        let fork_note = if b.fork_adopted > 0 {
+                            format!(", fork re-threaded {} frames", b.fork_adopted)
+                        } else {
+                            String::new()
+                        };
                         eprintln!(
                             "[blockidx] ready: {} frames, {} txs, heights_ok={}, \
-                             threaded_tip={:?}, writable={}, built in {}s",
+                             threaded_tip={:?}, writable={}, built in {}s{}",
                             b.frames,
                             b.txs_indexed,
                             b.heights_ok,
                             b.blocks.tip_height(),
                             writable,
-                            started.elapsed().as_secs()
+                            started.elapsed().as_secs(),
+                            fork_note
                         );
                         let inner = StoreInner {
                             blocks: b.blocks,
@@ -1376,6 +1540,20 @@ impl BlockStore {
         Ok(Some(body))
     }
 
+    /// (item 44) A height in the map is a CLAIM; the active chain is the
+    /// chain-slot overlay. Inside the overlay's span a block is on the active
+    /// chain iff it IS the slot's block at its height — a block a reorg
+    /// replaced there keeps its frame but must not keep a height (and with
+    /// it positive confirmations). Above the overlay, and where the sliding
+    /// window has already dropped the slot, the map's answer stands.
+    fn on_active_chain(&self, height: Option<u64>, hash: &Hash) -> Option<u64> {
+        let h = height?;
+        match self.chain_slots.read().unwrap().get(&h) {
+            Some(chain_hash) if chain_hash != hash => None,
+            _ => Some(h),
+        }
+    }
+
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
         for e in inner.blocks.candidates_by_key(key8(hash)) {
@@ -1385,7 +1563,7 @@ impl BlockStore {
                 continue; // truncated-key collision — keep scanning candidates
             }
             let block = Self::parse_frame(&body)?;
-            let height = inner.blocks.height_of_seq(e.seq);
+            let height = self.on_active_chain(inner.blocks.height_of_seq(e.seq), &h);
             return Ok(Some(BlockHit {
                 block,
                 hash: h,
@@ -1409,7 +1587,8 @@ impl BlockStore {
                     let h = header_hash(&body)?;
                     if &h == hash {
                         let block = Self::parse_frame(&body)?;
-                        let height = f.height.or(inner.blocks.height_of_seq(f.seq));
+                        let height =
+                            self.on_active_chain(f.height.or(inner.blocks.height_of_seq(f.seq)), &h);
                         return Ok(Some(BlockHit {
                             block,
                             hash: h,
@@ -1930,7 +2109,12 @@ impl BlockStore {
         self.flush_pending(&inner);
         let hash = header_hash(body)?;
         if self.block_by_hash(&hash)?.is_some() {
-            return Ok(hash); // already on disk — nothing to do
+            // already on disk. Its height CLAIM though follows the chain: a
+            // frame a rollback de-heighted that is accepted again must claim
+            // its height again — append is the accept path's only chance to
+            // say so.
+            self.restate_appendix_height(&inner, &hash, height);
+            return Ok(hash); // already on disk — nothing new to store
         }
         if !inner.writable.load(Ordering::SeqCst) {
             return Err(
@@ -2027,6 +2211,29 @@ impl BlockStore {
         Ok(hash)
     }
 
+    /// (item 44) Append is the accept path's only chance to state a block's
+    /// height, and a rollback retires the claims of the abandoned branch.
+    /// Re-accepting a frame already on disk must therefore re-state its
+    /// claim, or a canonical height would go unserved once the live window
+    /// slides past it. Frames in the main map are untouched (their heights
+    /// come from the build).
+    fn restate_appendix_height(&self, inner: &Arc<StoreInner>, hash: &Hash, height: Option<u64>) {
+        let Some(h) = height else { return };
+        let akey = key8(hash);
+        let idx = inner.appendix_by_key.read().unwrap().get(&akey).copied();
+        let Some(idx) = idx else { return };
+        let mut a = inner.appendix.write().unwrap();
+        let Some(f) = a.get_mut(idx) else { return };
+        if f.height == Some(h) {
+            return;
+        }
+        // the key is truncated: only a frame whose FULL hash matches is ours
+        match Self::read_frame(inner, f.off).and_then(|b| header_hash(&b)) {
+            Ok(fh) if fh == *hash => f.height = Some(h),
+            _ => {}
+        }
+    }
+
     /// Drain bodies buffered during the index build into the now-ready store
     /// (FIFO — same append path as direct appends, dedup via block_by_hash).
     fn flush_pending(&self, inner: &Arc<StoreInner>) {
@@ -2052,7 +2259,12 @@ impl BlockStore {
     ) -> Result<Hash, String> {
         let hash = header_hash(body)?;
         if self.block_by_hash(&hash)?.is_some() {
-            return Ok(hash); // already on disk — nothing to do
+            // already on disk. Its height CLAIM though follows the chain: a
+            // frame a rollback de-heighted that is accepted again must claim
+            // its height again — append is the accept path's only chance to
+            // say so.
+            self.restate_appendix_height(&inner, &hash, height);
+            return Ok(hash); // already on disk — nothing new to store
         }
         if !inner.writable.load(Ordering::SeqCst) {
             return Err(
@@ -3024,5 +3236,517 @@ mod tests {
         assert_eq!(hit.hash, hashes[3]);
         assert_eq!(store3.threaded_tip(), Some(3));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- item 44: fork-aware threading below the window base ---------------
+
+    /// `g(0) → b1(1) → {loser, winner} → winner's children`. Both children of
+    /// the forked parent and the winner's children are stored BEFORE the
+    /// window's first frame (the window is the caller's choice). Returns
+    /// (frames bytes, per-height hashes of the canonical chain, loser's hash,
+    /// (winner frame offset, loser frame offset)).
+    /// `loser_first` = the abandoned child reached the file first (DNS2's
+    /// shape); otherwise the loser is a late stale single at the end.
+    /// `stale_siblings` = orphaned blocks on the canonical parent, stored
+    /// BEFORE the canonical child (a staker's own block between two stakes).
+    fn forked_chain(
+        loser_first: bool,
+        n_after_fork: usize,
+        stale_siblings: usize,
+    ) -> (Vec<u8>, Vec<Hash>, Hash, (u64, u64)) {
+        let mut frames = Vec::new();
+        let mut canon: Vec<Hash> = Vec::new();
+        let g = block([0u8; 32], vec![coin_tx(vec![0x51u8; 54], 50, vec![])]);
+        assert_eq!(frame_bytes(&g).len(), 8 + 200, "genesis frame must be 208 B");
+        let mut prev = header_hash_ok(&frame_bytes(&g));
+        frames.extend_from_slice(&frame_bytes(&g));
+        canon.push(prev);
+        let b1 = block(prev, vec![coin_tx(vec![], 0, vec![]), coin_tx(vec![], 1_000, vec![0x76])]);
+        frames.extend_from_slice(&frame_bytes(&b1));
+        prev = header_hash_ok(&frame_bytes(&b1));
+        canon.push(prev);
+        let fork_parent = prev;
+        let loser = block(fork_parent, vec![coin_tx(vec![0xaa], 9_999_999, vec![])]);
+        let loser_hash = header_hash_ok(&frame_bytes(&loser));
+        let loser_frame = frame_bytes(&loser);
+        let mut loser_off = frames.len() as u64;
+        if loser_first {
+            frames.extend_from_slice(&loser_frame);
+        }
+        let winner = block(fork_parent, vec![coin_tx(vec![0xbb], 8_888_888, vec![])]);
+        let winner_off = frames.len() as u64;
+        frames.extend_from_slice(&frame_bytes(&winner));
+        prev = header_hash_ok(&frame_bytes(&winner));
+        canon.push(prev);
+        for i in 0..n_after_fork {
+            if i < stale_siblings {
+                let s = block(prev, vec![coin_tx(vec![0xe0 + i as u8], 5_555_555, vec![])]);
+                frames.extend_from_slice(&frame_bytes(&s));
+            }
+            let b = block(
+                prev,
+                vec![coin_tx(vec![0xc0 + i as u8], 7_777_777 - i as i64 * 7, vec![])],
+            );
+            frames.extend_from_slice(&frame_bytes(&b));
+            prev = header_hash_ok(&frame_bytes(&b));
+            canon.push(prev);
+        }
+        if !loser_first {
+            loser_off = frames.len() as u64;
+            frames.extend_from_slice(&loser_frame);
+        }
+        (frames, canon, loser_hash, (winner_off, loser_off))
+    }
+
+    /// The DNS2 shape, end to end: loser stored first, fork below the window
+    /// base. The old build let the loser keep h2 and left the winner and its
+    /// pre-window children height-less (a hole up to the window base, serving
+    /// the loser on getblockhash(2) and nothing on 3..base).
+    #[test]
+    fn fork_below_window_base_adopts_canonical_branch_and_frees_loser_height() {
+        let (frames, canon, loser_hash, (winner_off, loser_off)) = forked_chain(true, 4, 0);
+        let dir = tmpdir("fork44a");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        // window = the last two canonical frames (h5, h6)
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let unset = HEIGHT_UNSET;
+
+        let build = build_index(&path, Some(&oracle), &|_| {}).unwrap();
+        assert!(build.heights_ok);
+        assert_eq!(build.frames, 8);
+        // the winner + its 2 pre-window children re-threaded, the loser de-heighted
+        assert_eq!(build.fork_adopted, 4);
+        assert_eq!(build.skipped_frames, 1, "only the loser is height-less");
+        assert_eq!(build.blocks.heights_by_seq, vec![0, 1, unset, 2, 3, 4, 5, 6]);
+        assert_eq!(build.blocks.height_off.len(), 7, "no hole: every height 0..=6 has a frame");
+        // h2 → the WINNER's frame, not the loser's
+        assert_eq!(build.blocks.offset_by_height(2), Some(winner_off));
+        assert_ne!(winner_off, loser_off);
+        assert_eq!(build.blocks.tip_height(), Some(6));
+
+        // the same through the store's public surface (what the RPC reads) …
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle.clone()));
+        wait_ready(&store);
+        assert_eq!(
+            store.block_by_height(2).unwrap().expect("h2 served").hash,
+            canon[2],
+            "getblock(2) = the canonical block"
+        );
+        assert_eq!(
+            store.hash_at_height(2).unwrap(),
+            Some(internal_to_display(&canon[2])),
+            "getblockhash(2) = the canonical block"
+        );
+        let loser = store.block_by_hash(&loser_hash).unwrap().expect("loser is stored");
+        assert_eq!(loser.off, loser_off);
+        assert_eq!(loser.height, None, "getblock(loser) reports no active height");
+        assert_eq!(
+            store.block_by_height(2).unwrap().unwrap().off,
+            winner_off,
+            "the height map points at the winner's frame"
+        );
+        assert_eq!(store.threaded_tip(), Some(6));
+        for h in 0..=6 {
+            assert!(store.frame_offset(h).is_some(), "h{h} has a frame");
+        }
+        // … and again after a restart from the saved cache (the hole must not
+        // come back from disk)
+        let store2 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store2.spawn_build(Some(oracle));
+        wait_ready(&store2);
+        assert_eq!(store2.block_by_height(2).unwrap().unwrap().hash, canon[2]);
+        assert_eq!(store2.block_by_hash(&loser_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Winner stored first: the thread reaches the window untouched and the
+    /// late loser is an inert stale single.
+    #[test]
+    fn fork_winner_first_in_file_threads_unchanged_and_side_branch_is_inert() {
+        let (frames, canon, loser_hash, (winner_off, _)) = forked_chain(false, 4, 0);
+        let dir = tmpdir("fork44b");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let unset = HEIGHT_UNSET;
+        let build = build_index(&path, Some(&oracle), &|_| {}).unwrap();
+        assert!(build.heights_ok);
+        assert_eq!(build.fork_adopted, 0, "the thread reached the window: nothing to re-thread");
+        assert_eq!(build.skipped_frames, 1);
+        assert_eq!(build.blocks.heights_by_seq, vec![0, 1, 2, 3, 4, 5, 6, unset]);
+        assert_eq!(build.blocks.height_off.len(), 7);
+        assert_eq!(build.blocks.offset_by_height(2), Some(winner_off));
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        assert_eq!(store.block_by_height(2).unwrap().unwrap().hash, canon[2]);
+        assert_eq!(store.block_by_hash(&loser_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Fork straddling the window base: the winner (below the base) changes
+    /// hands, the loser loses its height, the frames inside the window are the
+    /// oracle's as before.
+    #[test]
+    fn fork_across_window_base_rethreads_only_below_the_window() {
+        let (frames, canon, loser_hash, (winner_off, loser_off)) = forked_chain(true, 2, 0);
+        let dir = tmpdir("fork44c");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        // window base = h3 = the winner's first child
+        let oracle = BuildOracle {
+            base: 3,
+            hashes: vec![canon[3], canon[4]],
+            tip: 4,
+        };
+        let unset = HEIGHT_UNSET;
+        let build = build_index(&path, Some(&oracle), &|_| {}).unwrap();
+        assert!(build.heights_ok);
+        assert_eq!(build.fork_adopted, 2, "winner adopted + loser de-heighted");
+        assert_eq!(build.skipped_frames, 1);
+        assert_eq!(build.blocks.heights_by_seq, vec![0, 1, unset, 2, 3, 4]);
+        assert_eq!(build.blocks.height_off.len(), 5);
+        assert_eq!(build.blocks.offset_by_height(2), Some(winner_off));
+        assert_ne!(winner_off, loser_off);
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        assert_eq!(store.block_by_height(2).unwrap().unwrap().hash, canon[2]);
+        assert_eq!(
+            store.hash_at_height(2).unwrap(),
+            Some(internal_to_display(&canon[2]))
+        );
+        assert_eq!(store.block_by_hash(&loser_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The real DNS2 shape: the node is the heavy staker, so its own orphaned
+    /// blocks sit BETWEEN the canonical frames of the stranded run. The walk
+    /// follows parent links only, so they neither derail it nor gain a height.
+    #[test]
+    fn fork_with_stale_siblings_between_canonical_frames_still_rethreads() {
+        let (frames, canon, loser_hash, (winner_off, _)) = forked_chain(true, 4, 2);
+        let dir = tmpdir("fork44d");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let unset = HEIGHT_UNSET;
+        let build = build_index(&path, Some(&oracle), &|_| {}).unwrap();
+        assert!(build.heights_ok);
+        assert_eq!(build.frames, 10);
+        // winner + 2 pre-window children re-threaded, the loser de-heighted
+        assert_eq!(build.fork_adopted, 4);
+        assert_eq!(build.skipped_frames, 3, "the loser + the 2 stale singles");
+        // seq: 0 g, 1 b1, 2 loser, 3 winner, 4 stale, 5 child, 6 stale, 7..9 children
+        assert_eq!(build.blocks.heights_by_seq, vec![0, 1, unset, 2, unset, 3, unset, 4, 5, 6]);
+        assert_eq!(build.blocks.height_off.len(), 7, "no hole: every height 0..=6 has a frame");
+        assert_eq!(build.blocks.offset_by_height(2), Some(winner_off));
+        assert_eq!(build.blocks.tip_height(), Some(6));
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        for h in 2..=6 {
+            assert_eq!(store.block_by_height(h).unwrap().unwrap().hash, canon[h as usize], "h{h}");
+        }
+        assert_eq!(store.block_by_hash(&loser_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A canonical CHILD stored before its PARENT — and inside the window.
+    /// DNS2's real store on 2026-11-24: `2a0651f0` (h2218632) sits one frame
+    /// AHEAD of its parent `aefca3c0` (h2218631). The oracle threads the
+    /// child; when the late parent follows, the first `adopt_lineage` cleared
+    /// the band up to the thread's height — i.e. the canonical CHILD — and
+    /// nothing refilled it: a fresh single-height hole per out-of-order store,
+    /// invisible while the overlay window still covered that height.
+    #[test]
+    fn child_stored_before_its_parent_keeps_both_heights() {
+        // canonical chain g, c1..=c9 (hashes and bodies first, file order below)
+        let g = block([0u8; 32], vec![coin_tx(vec![0x51u8; 54], 50, vec![])]);
+        let mut canon = vec![header_hash_ok(&frame_bytes(&g))];
+        let mut bodies = vec![g];
+        for h in 1..=9u32 {
+            let b = block(
+                *canon.last().unwrap(),
+                vec![coin_tx(vec![], 0, vec![]), coin_tx(vec![0x10 + h as u8], 1_000 * h as i64, vec![0x76])],
+            );
+            canon.push(header_hash_ok(&frame_bytes(&b)));
+            bodies.push(b);
+        }
+        let loser = block(canon[4], vec![coin_tx(vec![0xaa], 9_999_999, vec![])]);
+        let loser_hash = header_hash_ok(&frame_bytes(&loser));
+        let dir = tmpdir("lateparent44");
+        let path = dir.join("blk.dat");
+        let mut frames = Vec::new();
+        // file order: g c1 c2 c3 c4 | loser (child of c4) | c5 c6 | c8 BEFORE c7 | c9
+        for b in &bodies[..=4] {
+            frames.extend_from_slice(&frame_bytes(b));
+        }
+        frames.extend_from_slice(&frame_bytes(&loser));
+        for i in [5usize, 6, 8, 7, 9] {
+            frames.extend_from_slice(&frame_bytes(&bodies[i]));
+        }
+        std::fs::write(&path, &frames).unwrap();
+        // the window covers c3..=c8, so c7/c8 are both oracle frames; c9 is an
+        // append PAST the tip — it can only chain by parent-rule if the thread
+        // frontier stayed on c8 when the late parent claimed h7.
+        let oracle = BuildOracle {
+            base: 3,
+            hashes: canon[3..=8].to_vec(),
+            tip: 8,
+        };
+        let unset = HEIGHT_UNSET;
+        let build = build_index(&path, Some(&oracle), &|_| {}).unwrap();
+        assert!(build.heights_ok);
+        assert_eq!(build.frames, 11);
+        assert_eq!(build.skipped_frames, 1, "only the loser is height-less");
+        // seq: 0 g, 1..4 c1..c4, 5 loser, 6 c5, 7 c6, 8 c8, 9 c7, 10 c9
+        assert_eq!(
+            build.blocks.heights_by_seq,
+            vec![0, 1, 2, 3, 4, unset, 5, 6, 8, 7, 9]
+        );
+        assert_eq!(build.blocks.height_off.len(), 10, "every height 0..=9 has a frame");
+        assert_eq!(build.blocks.tip_height(), Some(9));
+        for h in 0..=9u64 {
+            assert!(
+                build.blocks.offset_by_height(h).is_some(),
+                "h{h} must have a frame"
+            );
+        }
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        for h in 0..=9 {
+            assert_eq!(store.block_by_height(h).unwrap().unwrap().hash, canon[h as usize], "h{h}");
+        }
+        // the RPC read path (getblock <hash>): BOTH sides of the inversion
+        assert_eq!(store.block_by_hash(&canon[7]).unwrap().unwrap().height, Some(7));
+        assert_eq!(store.block_by_hash(&canon[8]).unwrap().unwrap().height, Some(8));
+        assert_eq!(store.block_by_hash(&loser_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Miss below the window: a canonical body that was never stored leaves
+    /// that ONE height unservable — nothing above it shifts, the lineage above
+    /// it still threads. LIMIT (documented, not a goal): below the missing
+    /// body the walk has no hash link to follow, so frames stranded there stay
+    /// height-less until gap recovery stores the body and the next rebuild
+    /// runs (see `adopt_lineage`).
+    #[test]
+    fn missing_canonical_body_below_the_window_is_a_miss_not_a_shift() {
+        let (frames, canon, loser_hash, _) = forked_chain(true, 4, 0);
+        // cut the canonical frame at h3 out of the file; file order otherwise
+        // kept: g b1 loser | winner [h3 missing] c4 c5 c6
+        let mut kept = Vec::new();
+        let mut cut_len = 0usize;
+        let mut r = &frames[..];
+        while r.len() >= 8 {
+            let len = u32::from_le_bytes(r[4..8].try_into().unwrap()) as usize;
+            let frame = &r[..8 + len];
+            if header_hash_ok(frame) == canon[3] {
+                cut_len = frame.len();
+            } else {
+                kept.extend_from_slice(frame);
+            }
+            r = &r[8 + len..];
+        }
+        assert!(cut_len > 0, "the h3 frame was found and cut");
+        let dir = tmpdir("miss44");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &kept).unwrap();
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        // h3 is a Miss — never a neighbour's body
+        assert!(store.block_by_height(3).unwrap().is_none(), "h3: Miss");
+        assert!(store.hash_at_height(3).unwrap().is_none(), "h3: getblockhash Miss");
+        // above the hole: the canonical blocks at their own heights
+        for h in 4..=6 {
+            assert_eq!(store.block_by_height(h).unwrap().unwrap().hash, canon[h as usize], "h{h}");
+        }
+        // below the missing body: the documented limit — the first-arrival
+        // loser still holds its claim there in THIS build
+        assert_eq!(store.block_by_height(2).unwrap().unwrap().hash, loser_hash, "(limit) h2");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (item 44b) The map's height is only a claim: once the active chain's
+    /// overlay holds ANOTHER block at that height, the replaced block must
+    /// report no height (and so no positive confirmations) — by hash.
+    #[test]
+    fn block_by_hash_reports_no_height_once_the_chain_overlay_replaces_it() {
+        let (frames, canon, _, _) = forked_chain(false, 4, 0);
+        let dir = tmpdir("overlay44");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        // before the overlay disagrees, the map's claim stands
+        assert_eq!(store.block_by_hash(&canon[2]).unwrap().unwrap().height, Some(2));
+        // a reorg at h2: the chain now holds another block there
+        let other = block(canon[1], vec![coin_tx(vec![0x9d], 4_242_424, vec![])]);
+        let other_hash = header_hash_ok(&frame_bytes(&other));
+        assert_ne!(other_hash, canon[2]);
+        for h in 0..=3 {
+            store.set_chain_slot(h, if h == 2 { other_hash } else { canon[h as usize] });
+        }
+        assert_eq!(
+            store.block_by_hash(&canon[2]).unwrap().unwrap().height,
+            None,
+            "replaced block: no height"
+        );
+        // its parent (h1, still the chain's block) keeps its height
+        assert_eq!(store.block_by_hash(&canon[1]).unwrap().unwrap().height, Some(1));
+        // the window slid on past h2: that slot is gone → nothing left to
+        // disprove the map, and its claim stands again
+        store.drop_chain_slots_below(3);
+        assert_eq!(store.block_by_hash(&canon[2]).unwrap().unwrap().height, Some(2));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (item 44, runtime variant) An appendix height is a CLAIM made at
+    /// accept time. A rollback retires the abandoned branch's claims, so that
+    /// — once the live window has slid past the height and the appendix is
+    /// the only thing answering — getblockhash(h) names the ADOPTED block,
+    /// never the abandoned one. Re-accepting an already-stored block re-states
+    /// its claim.
+    #[test]
+    fn rollback_retires_abandoned_appendix_claims_and_reaccept_restates_them() {
+        let (frames, canon, _, _) = forked_chain(false, 4, 0);
+        let dir = tmpdir("rollback44");
+        let path = dir.join("blk.dat");
+        std::fs::write(&path, &frames).unwrap();
+        let oracle = BuildOracle {
+            base: 5,
+            hashes: vec![canon[5], canon[6]],
+            tip: 6,
+        };
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(oracle));
+        wait_ready(&store);
+        for (h, c) in canon.iter().enumerate() {
+            store.set_chain_slot(h as u64, *c);
+        }
+        let disp = |h: &Hash| internal_to_display(h);
+        // two children of the tip: `first` is accepted at h7, then replaced
+        let first = block(canon[6], vec![coin_tx(vec![0xa1], 4_242_424, vec![])]);
+        let second = block(canon[6], vec![coin_tx(vec![0xa2], 4_242_424, vec![])]);
+        let first_hash = header_hash_ok(&frame_bytes(&first));
+        let second_hash = header_hash_ok(&frame_bytes(&second));
+        assert_ne!(first_hash, second_hash);
+        store.append_block(&frame_bytes(&first)[8..], Some(7)).unwrap();
+        store.set_chain_slot(7, first_hash);
+        assert_eq!(store.hash_at_height(7).unwrap(), Some(disp(&first_hash)));
+
+        // reorg: roll back to the branch point (h6) — h7 serves nothing
+        store.drop_chain_slots_above(6);
+        assert_eq!(store.hash_at_height(7).unwrap(), None, "rolled back: h7 is nobody's");
+        // the adopted child lands
+        store.append_block(&frame_bytes(&second)[8..], Some(7)).unwrap();
+        store.set_chain_slot(7, second_hash);
+        // the live window slides past h7: the overlay is gone and the
+        // appendix is all that is left — it must name the adopted block
+        store.drop_chain_slots_below(8);
+        assert_eq!(store.chain_slots_len(), 0);
+        assert_eq!(
+            store.hash_at_height(7).unwrap(),
+            Some(disp(&second_hash)),
+            "adopted block"
+        );
+        assert_eq!(
+            store.block_by_hash(&first_hash).unwrap().unwrap().height,
+            None,
+            "abandoned block: no height"
+        );
+
+        // ...and the abandoned block adopted AGAIN later re-states its claim
+        store.drop_chain_slots_above(6);
+        store.append_block(&frame_bytes(&first)[8..], Some(7)).unwrap();
+        store.set_chain_slot(7, first_hash);
+        store.drop_chain_slots_below(8);
+        assert_eq!(store.hash_at_height(7).unwrap(), Some(disp(&first_hash)), "re-accepted");
+        assert_eq!(store.block_by_hash(&second_hash).unwrap().unwrap().height, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The lineage walk itself: parent links only (a stale sibling stored
+    /// before the canonical child is ignored), heights handed over top-down,
+    /// the first-arrival branch stranded, and a repeated call is a no-op.
+    #[test]
+    fn lineage_walk_ignores_stale_siblings_and_strands_the_first_arrival() {
+        let mk = |n: u8| [n; 32];
+        // file: g(0) b1(1) L(2) | S(3, child of b1) W(4, child of b1) W1(5, child of W)
+        let mut sides = SideFrames::new();
+        sides.insert(mk(20), SideFrame { parent: mk(1), off: 200, seq: 3 }); // S
+        sides.insert(mk(21), SideFrame { parent: mk(1), off: 300, seq: 4 }); // W
+        sides.insert(mk(22), SideFrame { parent: mk(21), off: 400, seq: 5 }); // W1
+        let mut height_off = vec![10u64, 11, 12]; // g, b1, L on the thread
+        height_off.resize(16, HEIGHT_GAP);
+        let mut heights = vec![HEIGHT_UNSET; 256];
+        heights[0] = 0;
+        heights[1] = 1;
+        heights[2] = 2;
+        let mut skipped = 3usize; // S, W, W1 refused
+        // oracle frame at h4 continues from W1 (h3) → W (h2): L (h2) is stranded
+        let moved = adopt_lineage(
+            &sides,
+            &mk(22),
+            4,
+            2,
+            6,
+            &mut height_off,
+            &mut heights,
+            &mut skipped,
+        );
+        assert_eq!(moved, 3, "W + W1 adopted, L stranded");
+        assert_eq!(heights[4], 2, "W takes h2");
+        assert_eq!(heights[5], 3, "W1 takes h3");
+        assert_eq!(heights[2], HEIGHT_UNSET, "L stranded");
+        assert_eq!(heights[3], HEIGHT_UNSET, "stale sibling S stays height-less");
+        assert_eq!(heights[1], 1, "the thread below the fork is untouched");
+        assert_eq!(&height_off[..5], &[10, 11, 300, 400, HEIGHT_GAP]);
+        assert_eq!(skipped, 2, "3 refused + 1 stranded - 2 adopted");
+        // again (e.g. a later duplicate of the oracle frame): nothing left to do
+        let again = adopt_lineage(
+            &sides,
+            &mk(22),
+            4,
+            2,
+            9,
+            &mut height_off,
+            &mut heights,
+            &mut skipped,
+        );
+        assert_eq!(again, 0);
+        assert_eq!(skipped, 2);
+        assert_eq!(&height_off[..5], &[10, 11, 300, 400, HEIGHT_GAP]);
     }
 }
