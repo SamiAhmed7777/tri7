@@ -8830,11 +8830,17 @@ impl WalletLive {
     /// `lookup` returns the chain's body for a height, or None (the hole).
     /// Rules, in order:
     /// - a body must continue the anchor (the last applied block's hash);
-    /// - a body that neither chains nor follows a run of missing heights is
-    ///   a stale or raced index row — counted as a skip, NEVER applied;
-    /// - the FIRST body after a run of missing heights re-anchors: the
+    /// - a body that follows a run of missing heights re-anchors: the
     ///   kernel window's own chain begins there, and the hole's heights
-    ///   were already counted as skips.
+    ///   were already counted as skips;
+    /// - a body that does neither but whose prev IS the index's body at
+    ///   h-1 re-anchors too (item 44 deploy r2): the phase-1 file-order
+    ///   anchor threaded the fork's loser, and the index's own linkage is
+    ///   the truth — the complete canonical index removed the hole the
+    ///   ran_gap re-anchor depended on, so this path is what restores the
+    ///   post-fork tail (a genuinely raced/orphan row still fails it);
+    /// - any other body is a stale or raced index row — counted as a
+    ///   skip, NEVER applied.
     /// Missing heights are counted (first/last skip) so the tier-1.5 pair
     /// gate still sees the hole's extent on the view.
     fn seed_tail_by_index(
@@ -8871,7 +8877,43 @@ impl WalletLive {
                         anchor = Some(hash);
                         ran_gap = false;
                     } else {
-                        note_skip(h, skipped, first_skip, last_skip);
+                        // (item 44 deploy r2, 2026-11-24) STALE-ANCHOR
+                        // RE-ANCHOR: a body that follows no gap and does
+                        // not chain onto the phase-1 anchor is NOT
+                        // automatically a raced row. Phase 1 threads the
+                        // archive in FILE ORDER (first-writer-wins): at a
+                        // fork it delivers the loser and — the loser
+                        // being a dead side branch — step_past_stale
+                        // finds no successor and the walk ends Eof with
+                        // the LOSER as the anchor. Pre-item-44 the tail
+                        // above the fork was an index coverage hole, so
+                        // the None lookups here set ran_gap and the first
+                        // body after the gap re-anchored the view. The
+                        // item-44 index is complete and canonical: lookup
+                        // never returns None, ran_gap never fires, and
+                        // every canonical body above the fork would be
+                        // counted as a stale row — starving the wallet
+                        // live view of all post-fork outputs (the live
+                        // DNS2 staking stall). The index's own linkage is
+                        // the truth: when the body's prev IS the index's
+                        // body at h-1, the file-order anchor is the stale
+                        // artifact — apply the body and re-anchor onto
+                        // the index chain. A genuinely raced row (its
+                        // prev points anywhere else) still fails this
+                        // check and stays a counted skip, never applied.
+                        let index_parent_ok = h > 0
+                            && lookup(h - 1)
+                                .map(|(_, ph)| ph == block.prev_hash)
+                                .unwrap_or(false);
+                        if index_parent_ok {
+                            if h >= wl.base && h <= tip {
+                                wl.apply_block(&block, h);
+                            }
+                            anchor = Some(hash);
+                            ran_gap = false;
+                        } else {
+                            note_skip(h, skipped, first_skip, last_skip);
+                        }
                     }
                 }
             }
@@ -26080,6 +26122,159 @@ addnode=host:notaport
             .map(|o| o.value)
             .sum();
         assert_eq!(ours2, coin, "the stale row's coin was not applied");
+    }
+
+    /// (item 44 deploy r2, 2026-11-24) THE regression test for the DNS2
+    /// staking stall: phase 1's file-order walk threaded the fork's LOSER
+    /// (first-writer-wins; the loser is a dead side branch, so
+    /// step_past_stale found no successor and the walk ended Eof with
+    /// the LOSER as the phase-2 anchor). Pre-item-44 the tail above the
+    /// fork was a coverage HOLE in the index: None lookups set ran_gap
+    /// and the first body after the gap re-anchored the view — staking
+    /// worked. The item-44 index is COMPLETE and canonical: lookup never
+    /// returns None, ran_gap never fires, and every canonical body above
+    /// the fork failed the chains test against the loser anchor — the
+    /// whole tail was counted as "stale rows", the wallet live view lost
+    /// every post-fork output, and the sole heavy staker had zero
+    /// stakable candidates (the live chain stalled at h2219000, zero
+    /// mints for 50+ minutes). Phase 2 must re-anchor onto the index's
+    /// own linkage: when a body that follows no gap does not chain onto
+    /// the file-order anchor but its prev IS the index's body at h-1,
+    /// the anchor is the stale artifact — apply the body and follow the
+    /// index chain from there.
+    #[test]
+    fn seed_tail_by_index_reanchors_past_a_file_order_fork_anchor() {
+        let (secret, pubkey) = tri7_core::spend::synthetic_key("seed-tail-fork");
+        let _ = secret;
+        let pubkey = pubkey.to_vec();
+        let script = tri7_core::spend::script_pubkey_p2pk(&pubkey).unwrap();
+        let coin = 9 * tri7_core::consensus::COIN;
+        let mk = |h: u64, prev: Hash, pay: bool| -> Block {
+            let mut b = Block {
+                version: 2,
+                prev_hash: prev,
+                merkle_root: [0u8; 32],
+                time: 1_700_000_000u32 + (h * 600) as u32,
+                bits: 0x2000_ffff,
+                nonce: 7,
+                vtx: vec![tri7_core::legacy::Tx {
+                    version: 1,
+                    time: 0,
+                    vin: vec![tri7_core::legacy::Vin {
+                        prev_hash: [0u8; 32],
+                        prev_n: u32::MAX,
+                        script_sig: vec![0x03],
+                        sequence: u32::MAX,
+                    }],
+                    vout: vec![tri7_core::legacy::Vout {
+                        value: if pay { coin } else { 0 },
+                        script_pubkey: if pay { script.clone() } else { vec![] },
+                    }],
+                    locktime: 0,
+                }],
+                block_sig: vec![],
+            };
+            b.merkle_root = b.merkle_root();
+            b
+        };
+        // canonical chain h0..=h10; the wallet's coin at h9 (post-fork).
+        let mut chain: Vec<Block> = Vec::new();
+        let mut hashes: Vec<Hash> = Vec::new();
+        let mut prev = [0u8; 32];
+        for h in 0..=10u64 {
+            let b = mk(h, prev, h == 9);
+            prev = b.hash();
+            hashes.push(b.hash());
+            chain.push(b);
+        }
+        // the fork's LOSER at h5: same prev as the canonical h5, a
+        // different merkle (its own coinstake reward — pay=true makes
+        // the bytes diverge), and it pays the wallet so an accidental
+        // application would double the view.
+        let loser = mk(5, hashes[4], true);
+        assert_ne!(loser.hash(), hashes[5], "the loser is a real fork frame");
+        // the COMPLETE canonical index (item 44's shape): every height
+        // from 0..=10 has its body — lookup never returns None above
+        // the fork, so ran_gap can never fire.
+        let lookup = |h: u64| -> Option<(Block, Hash)> {
+            chain
+                .get(h as usize)
+                .map(|b| (b.clone(), hashes[h as usize]))
+        };
+        // phase 1 delivered h0..=h4 then the LOSER at h5, and the walk
+        // ended Eof (nothing in the file chains onto the loser). Phase 2
+        // starts at h6 with the loser as the anchor.
+        let mut wl = wallet_live_with(&[pubkey.clone()], vec![]);
+        let mut skipped = 0usize;
+        let mut first_skip: Option<u64> = None;
+        let mut last_skip = 0u64;
+        WalletLive::seed_tail_by_index(
+            &mut wl,
+            &lookup,
+            6,
+            10,
+            Some(loser.hash()),
+            &mut skipped,
+            &mut first_skip,
+            &mut last_skip,
+        );
+        assert_eq!(
+            first_skip, None,
+            "the complete canonical index is not a hole — nothing is skipped"
+        );
+        assert_eq!(last_skip, 0);
+        assert_eq!(skipped, 0);
+        let ours: i64 = wl
+            .live
+            .values()
+            .filter(|o| wl.owns(o))
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(
+            ours, coin,
+            "the post-fork tail applied — the staker's coins are back in the view"
+        );
+
+        // The raced-row guard must still hold: an orphan row at h11
+        // whose prev is NOT the index's h10 body follows no gap and
+        // fails both the anchor test AND the index-linkage test —
+        // counted as a skip, its coin never applied.
+        let stale = mk(11, [0x0Bu8; 32], true); // prev != hashes[10]
+        let stale_hash = stale.hash();
+        let lookup2 = |h: u64| -> Option<(Block, Hash)> {
+            if h == 11 {
+                Some((stale.clone(), stale_hash))
+            } else {
+                lookup(h)
+            }
+        };
+        let mut wl2 = wallet_live_with(&[pubkey], vec![]);
+        let mut skipped2 = 0usize;
+        let mut first_skip2: Option<u64> = None;
+        let mut last_skip2 = 0u64;
+        WalletLive::seed_tail_by_index(
+            &mut wl2,
+            &lookup2,
+            6,
+            11,
+            Some(loser.hash()),
+            &mut skipped2,
+            &mut first_skip2,
+            &mut last_skip2,
+        );
+        assert_eq!(first_skip2, Some(11), "only the orphan row is a skip");
+        assert_eq!(last_skip2, 11);
+        assert_eq!(skipped2, 1);
+        let ours2: i64 = wl2
+            .live
+            .values()
+            .filter(|o| wl2.owns(o))
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(
+            ours2, coin,
+            "the orphan's coin was not applied — index-linkage re-anchoring kept the guard"
+        );
     }
 
     fn autoheal_store_with_honest_coin(
