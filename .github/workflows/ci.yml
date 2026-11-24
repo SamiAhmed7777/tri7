@@ -4,22 +4,43 @@ on:
   push:
     branches: [master, main]
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   linux-tests:
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build (headless, no gui feature)
         run: cargo build --release --bins
       - name: Run all tests
         run: cargo test --release
-      - name: Selfcheck (headless wallet roundtrip)
+      # Informational BY DESIGN, documented: a full selfcheck needs a wallet +
+      # archive that CI does not provision; this smoke run exercises arg
+      # parsing only and may no-op if the binary is absent. Non-blocking.
+      - name: Selfcheck (informational smoke — not a gate)
         run: |
           timeout 60 ./target/release/tri7_wallet_gui --selfcheck --help 2>/dev/null || true
-          # selfcheck needs a wallet + archive; on CI it validates arg parsing + state machine paths
-      - name: rustfmt
+      # Informational BY DESIGN, documented: the tree is not yet fmt-clean
+      # (build.rs has an outstanding violation), so gating on fmt would red
+      # every build until a fmt pass lands. Deliberately non-blocking.
+      - name: rustfmt (informational — not a gate)
         run: cargo fmt -- --check || true
 
   # Auto-updater release-asset job: packages the Linux GUI wallet into the
@@ -28,9 +49,13 @@ jobs:
   # pinning (src/updater.rs).
   linux-gui-tarball:
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build GUI wallet (egui — links only base libs, GL is dlopen'd)
         run: cargo build --release --features gui --bin tri7_wallet_gui
       - name: Package tarball + SHA256SUMS
@@ -46,7 +71,7 @@ jobs:
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
           echo "SHA256:"; cat SHA256SUMS
         id: pkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.pkg.outputs.asset }}
           path: |
@@ -55,9 +80,13 @@ jobs:
 
   windows-build:
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Auto-updater version metadata: every artifact below is named from the
       # SINGLE source (Cargo.toml) so the in-app updater can match assets
       # (src/updater.rs resolves CryptographicTriangles-<ver>-*).
@@ -142,7 +171,7 @@ jobs:
           Write-Host "i2pd.exe sha256:" (Get-FileHash deploy\windows\i2pd-bundle\i2pd.exe -Algorithm SHA256).Hash
       - name: Run tests
         run: cargo test --release --lib
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tri7-windows
           path: |
@@ -201,11 +230,11 @@ jobs:
           }
           $lines | Set-Content SHA256SUMS
           Get-Content SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-setup.exe
           path: deploy/windows/CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-setup.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CryptographicTriangles-${{ steps.ver.outputs.version }}-win64-portable-and-digests
           path: |
@@ -214,9 +243,13 @@ jobs:
 
   macos-build:
     runs-on: macos-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build GUI wallet
         run: cargo build --release --features gui --bin tri7_wallet_gui
       - name: Run lib tests
@@ -233,7 +266,7 @@ jobs:
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
           echo "SHA256:"; cat SHA256SUMS
         id: pkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.pkg.outputs.asset }}
           path: |
