@@ -1,0 +1,36 @@
+driver started 2026-11-25T09:17:26Z on vmi3080415; new binary /root/tri7/target/release/follow_tip sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d; harness sha256 f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba; check sha256 6049e94892397989108cd40d92479509ebab83c6b441caf857c569936a751de2
+scp binary exit=0
+scp scripts exit=0
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d  /tmp/item48-deploy/follow_tip.new
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item48-deploy/tri7d_swap_verify_rollback.sh
+6049e94892397989108cd40d92479509ebab83c6b441caf857c569936a751de2  /tmp/item48-deploy/balances_chain_ordered.py
+
+### [1] negative test on the node: the check against the OLD binary that is still running (must reject)
+the build replayed in file (pre-item-48 log line, no order field) order — this binary predates the fix: coverage h2208246 tip 203294d2c9458343…
+negative check_exit=1 (1 expected)
+
+### [2] forced-rollback rehearsal on the real target (real swap + restart, forced rejection, previous binary back)
+{"outcome":"rolled-back","running_sha256":"922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d","unit_state":"active","rehearsal":"1","unit":"tri7d","reason":"rehearsal: rejection forced after the swap","old_sha256":"922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d","new_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","restart_epoch":"1795598270","bin":"/opt/tri7/bin/follow_tip","rollback_binary":"/opt/tri7/bin/follow_tip.prev-item","check":""}
+rehearsal exit=0
+host=appt arch=x86_64 at=2026-11-25T09:21:44Z
+unit: active since Wed 2026-11-25 09:21:36 UTC NRestarts=0
+running exe: /opt/tri7/bin/follow_tip sha256 922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d
+memory: rss_mb=8 MemoryMax=3221225472 MemorySwapMax=infinity
+
+### [3] the real deploy on DNS3
+{"outcome":"rolled-back","running_sha256":"922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d","unit_state":"active","rehearsal":"0","unit":"tri7d","reason":"check rejected (exit 1)","old_sha256":"922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d","new_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","restart_epoch":"1795598507","bin":"/opt/tri7/bin/follow_tip","rollback_binary":"/opt/tri7/bin/follow_tip.prev-item","check":"coverage h2219460 is short of the chased tip h2219462"}
+deploy exit=1
+
+### [4] readback
+host=appt arch=x86_64 at=2026-11-25T09:27:29Z
+unit: active since Wed 2026-11-25 09:27:21 UTC NRestarts=0
+running exe: /opt/tri7/bin/follow_tip sha256 922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d
+memory: rss_mb=7 MemoryMax=3221225472 MemorySwapMax=infinity
+## balances-build lifecycle lines since the current process started (verbatim)
+## staking / RPC readiness lines of the current process (first 6 matching)
+## snapshot file
+mtime 2026-11-25T09:25:44Z {'height': 2219460, 'replay_target_height': 2219462, 'covered_tip_hash': 'e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22'} total_balance_sats 226993061570 live_utxos 18020 wallet_balance_sats 101643309
+## RPC (loopback, if the node keeps its credentials in /etc/tri7/triangles.conf)
+RPC probe skipped: URLError <urlopen error [Errno 111] Connection refused>
+## staged files left: -rwxr-xr-x root 7539576 follow_tip;-rwxr-xr-x root 7449808 follow_tip.bak-01a4e079;-rwxr-xr-x root 7233088 follow_tip.bak-1794741092;-rwxr-xr-x root 7527344 follow_tip.bak-1b48fc22;-rwxr-xr-x root 7414792 follow_tip.bak-1d8f568c;-rwxr-xr-x root 7234224 follow_tip.bak-27779bd2;-rwxr-xr-x root 7445832 follow_tip.bak-37d43258;-rwxr-xr-x root 7476056 follow_tip.bak-702b0517;-rwxr-xr-x root 7430008 follow_tip.bak-77bd7bda;-rwxr-xr-x root 6985808 follow_tip.bak-816de5fc;-rwxr-xr-x root 7493768 follow_tip.bak-83cfe73a;-rwxr-xr-x root 6765272 follow_tip.bak-871dbf3;-rwxr-xr-x root 7480064 follow_tip.bak-87755353;-rwxr-xr-x root 7056248 follow_tip.bak-8a0c9f86;-rwxr-xr-x root 7539000 follow_tip.bak-91222c24;-rwxr-xr-x root 7527344 follow_tip.bak-96c47105;-rwxr-xr-x root 7514128 follow_tip.bak-9f73fc6e;-rwxr-xr-x root 7066984 follow_tip.bak-a5386462;-rwxr-xr-x root 6716104 follow_tip.bak-b0e9684;-rwxr-xr-x root 7251400 follow_tip.bak-b1e4f559;-rwxr-xr-x root 6551424 follow_tip.bak-b5351f9;-rwxr-xr-x root 7233552 follow_tip.bak-b7149dd5;-rwxr-xr-x root 7205136 follow_tip.bak-cf4ba9c-pre;-rwxr-xr-x root 6885072 follow_tip.bak-d022f195;-rwxr-xr-x root 6831408 follow_tip.bak-d48cf4b;-rwxr-xr-x root 6980712 follow_tip.bak-d709c2b9;-rwxr-xr-x root 7451824 follow_tip.bak-e5975e59-item38;-rwxr-xr-x root 7202392 follow_tip.bak-e601c2eb;-rwxr-xr-x root 6890776 follow_tip.bak-f168710;-rwxr-xr-x root 7238568 follow_tip.bak-f2e3d3aa;-rwxr-xr-x root 7221168 follow_tip.bak-fdaaaa9b;-rwxr-xr-x root 7445832 follow_tip.bak-interim-37d43258;-rwxr-xr-x root 7119656 follow_tip.bak-item23;-rwxr-xr-x root 7303944 follow_tip.bak9;-rwxr-xr-x root 7453272 follow_tip.item35-e562eb9b-staledrop;-rwxr-xr-x root 7480064 follow_tip.new-item39;-rwxr-xr-x root 7493768 follow_tip.new-item40;-rwxr-xr-x root 7527344 follow_tip.new-item42;-rwxr-xr-x root 7527344 follow_tip.new-item43;-rwxr-xr-x root 7539576 follow_tip.new-item44; balances_chain_ordered.py follow_tip.new tri7d_swap_verify_rollback.sh 
+driver finished 2026-11-25T09:27:29Z

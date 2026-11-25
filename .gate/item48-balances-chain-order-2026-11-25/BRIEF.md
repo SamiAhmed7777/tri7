@@ -33,8 +33,9 @@ Files (worktree names carry a numeric prefix, e.g. `2_item48.diff`):
 | `ev_battery.txt` | `cargo check --all-targets`, `cargo test --lib`, release build — final sources |
 | `ev_tests_balances_build.txt` | the balances_build tests inside that test run |
 | `ev_check_selftest_r2.txt` | the acceptance check's 15-case selftest + its live negative test (round-2 version) |
-| `ev_harness_rehearsal_r3.txt` | the deploy harness, every branch, incl. T9 boot-refusing binary and T10 failing restart command (three runs of the failure pair) |
-| `ev_harness_rehearsal_r4.txt` | the deploy harness on its FINAL bytes, every branch, incl. T9 boot-refusing binary and T10 failing restart command |
+| `ev_check_selftest_r5.txt` | the acceptance check's 19-case selftest on the FINAL bytes (round-5 version) |
+| `ev_deploy_dns3.txt` | the live DNS3 canary attempt: rejected and rolled back cleanly — and the journal that taught the live-tip semantic |
+| `ev_harness_rehearsal_r4.txt` | the deploy harness on its round-4 FINAL bytes, every branch, incl. T9 boot-refusing binary and T10 failing restart command |
 | `judge_round1.log`, `r1_verdict.json` | round-1 verdict (D) and its two blocking issues, both fixed |
 | `r2_verdict.json`, `r3_verdict.json` | round 2 (B) and round 3 (A) verdicts and their polish items |
 | `source_sha256.txt` | sha256 of the six files being committed |
@@ -119,18 +120,21 @@ The repo's rule (triangles-modernization skill) is that a Windows cross build mu
 
 ## 5. The acceptance check (`deploy/checks/balances_chain_ordered.py`)
 
-Reads the journal of the unit's **current** main process and the snapshot file. Verdict of the first build that
-**finished**, after a failed attempt whose retry is still running is *pending*, not a rejection (the scheduler retries, and
-the harness deadline is what turns a chain of failures into a rollback). Accepts when the finished build replayed in
-**index order** and `coverage h ≥ the tip it chased` (the chain may advance while the walk runs), and the snapshot file
-agrees with the journal line exactly: `height` = the last block applied, `covered_tip_hash` = its hash,
-`replay_target_height` = **the tip the build was chasing** (the start line's second height) — the snapshot's own semantics,
-pinned in `src/balances_build.rs`. Rejects a finished build in file order, capped short, or a disagreeing snapshot.
-`--selftest`: 15 cases (`ev_check_selftest_r2.txt`), including the chain-advanced-mid-walk acceptance, the
-wrong-`replay_target_height` rejection, and the failed-then-retried acceptance. Live negative test on DNS2 with the old
-binary: **rejected** (a finished build, in file order). Limitation, stated in the file: a node whose snapshot is already
-fresh builds nothing after a restart, and the check stays pending. All three nodes are >10k blocks stale, so each builds
-on its first boot.
+Reads the journal of the unit's **current** main process and the snapshot file. Verdict of the **last** build that
+**finished** (a build that landed short of the tip is superseded by its own retry, which starts from the new snapshot).
+A failed attempt whose retry is still running, and a walk that capped where the store's bodies end, are *pending*, not
+rejections (the scheduler retries; the harness deadline is what turns a chain of failures into a rollback). Accepts when
+the finished build replayed in **index order** and `coverage h ≥ the tip it chased` (the chain may advance while the walk
+runs), and the snapshot file agrees with the journal line exactly: `height` = the last block applied,
+`covered_tip_hash` = its hash, `replay_target_height` = **the tip the build was chasing** (the start line's second
+height) — the snapshot's own semantics, pinned in `src/balances_build.rs`. Rejects a finished build in file order, one
+that landed short of the tip **with no retry scheduled**, or a disagreeing snapshot. `--selftest`: 21 cases
+(`ev_check_selftest_r5.txt`), including the chain-advanced-mid-walk acceptance, the wrong-`replay_target_height`
+rejection, the failed-then-retried acceptance, the two live-DNS3 shapes from §11, and the two mismatched-retry
+rejections (a different build's retry line must not mark the judged build pending). Live negative test on DNS2 with
+the old binary: **rejected** (a finished build, in file order). Limitation, stated in the file: a node whose snapshot is
+already fresh builds nothing after a restart, and the check stays pending. All three nodes are >10k blocks stale, so
+each builds on its first boot.
 
 ## 6. The deploy harness (`deploy/tri7d_swap_verify_rollback.sh`) — exercised before any fleet use
 
@@ -204,8 +208,30 @@ Both polish items were applied too (the `<bin>.prev-item` save is now labeled as
 a selftest case for a failed-then-retried build was added — it is judged on the retry, a design decision now stated in
 the check's docstring).
 
-## 10. Answer
+## 11. The live DNS3 canary: rejected-and-rolled-back cleanly, and the journal taught one more semantic
 
-Grade this round against the two decisions in §0. The replay fix and its evidence (rehearsals, tests, cross-check) are
-unchanged since round 1; what changed is the deploy machinery, now rehearsed on its failure branches. Block on what would
-make the commit or the deploy unsafe or wrong; anything that is wording, log formatting or evidence packaging is polish.
+The canary ran the full chain: negative check on the old binary (rejected, as designed) → forced-rollback rehearsal on
+the real target (previous binary back, unit active) → the real deploy. The new binary's **first index-ordered build
+finished in 103.9 s** — coverage h2219460, up from the file-order snapshot's h2208246 — but 2 blocks short of the chased
+tip h2219462, because on a live node the block store's **bodies lag the moving tip** (`chain-ordered walk stopped at
+h2219461 — the chain store holds nothing at h2219461 although its chain continues above it`). The node itself logged
+`coverage h2219460 short of the chased tip h2219462 — retrying in 60s` and began its incremental retry from the NEW
+snapshot 60 s later (`start (snapshot h2219460, chain tip h2219464)`, `ev_deploy_dns3.txt`). The canary was rolled back
+before that retry could write its own done line, so the live transcript shows the retry **scheduled and started**, not
+its completion; the converged-retry shape is covered synthetically in the selftest, and the re-deploy's own acceptance
+(the check returning exit 0) is what will demonstrate it live. The check of round 4 classified that healthy intermediate
+state as a **rejection** — safe, but wrong. **Fixed:** a finished build short of the tip is *pending* when the node's own
+retry line answers **that build** — the line carries the build's coverage and chased heights, and the association is
+height-matched (a retry line with other heights, or seen before the judged done line, belongs to a different build and
+does not count, covered by two selftests); a newer build's start line resets the verdict to "the build is running".
+The verdict is taken from the **last** finished build, so the converged retry is what gets accepted. Reject only when
+short coverage comes with **no retry scheduled for that build**. 21 selftest cases including the live shapes verbatim
+(`ev_check_selftest_r5.txt`). The harness is unchanged: it already polls pending verdicts; its deadline remains the
+backstop that turns a non-converging chain into a rollback.
+
+## 12. Answer
+
+Grade this round against the two decisions in §0. What changed since round 4 (grade A) is exactly one file,
+`deploy/checks/balances_chain_ordered.py` (plus this brief and its evidence): the live-DNS3 semantic of §11. The
+replay fix, the harness, the binaries and all their evidence are byte-identical to round 4. Block on what would
+make the commit or the deploy unsafe or wrong; wording and evidence packaging are polish.
