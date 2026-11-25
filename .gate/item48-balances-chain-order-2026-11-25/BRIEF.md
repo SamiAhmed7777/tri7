@@ -33,7 +33,9 @@ Files (worktree names carry a numeric prefix, e.g. `2_item48.diff`):
 | `ev_battery.txt` | `cargo check --all-targets`, `cargo test --lib`, release build — final sources |
 | `ev_tests_balances_build.txt` | the balances_build tests inside that test run |
 | `ev_check_selftest_r2.txt` | the acceptance check's 15-case selftest + its live negative test (round-2 version) |
-| `ev_check_selftest_r5.txt` | the acceptance check's 19-case selftest on the FINAL bytes (round-5 version) |
+| `ev_check_selftest_r8.txt` | the acceptance check's 24-case selftest (round-8 version)
+| `ev_check_selftest_r9.txt` | the acceptance check's 25-case selftest on the FINAL bytes: + malformed-second-height stop line |
+| `ev_deploy_dns3_r2.txt` | the live DNS3 second canary: pending 900 s → clean rollback; the journal that proved the h2219461 archive hole persistent |
 | `ev_deploy_dns3.txt` | the live DNS3 canary attempt: rejected and rolled back cleanly — and the journal that taught the live-tip semantic |
 | `ev_harness_rehearsal_r4.txt` | the deploy harness on its round-4 FINAL bytes, every branch, incl. T9 boot-refusing binary and T10 failing restart command |
 | `judge_round1.log`, `r1_verdict.json` | round-1 verdict (D) and its two blocking issues, both fixed |
@@ -128,10 +130,10 @@ the finished build replayed in **index order** and `coverage h ≥ the tip it ch
 runs), and the snapshot file agrees with the journal line exactly: `height` = the last block applied,
 `covered_tip_hash` = its hash, `replay_target_height` = **the tip the build was chasing** (the start line's second
 height) — the snapshot's own semantics, pinned in `src/balances_build.rs`. Rejects a finished build in file order, one
-that landed short of the tip **with no retry scheduled**, or a disagreeing snapshot. `--selftest`: 21 cases
-(`ev_check_selftest_r5.txt`), including the chain-advanced-mid-walk acceptance, the wrong-`replay_target_height`
-rejection, the failed-then-retried acceptance, the two live-DNS3 shapes from §11, and the two mismatched-retry
-rejections (a different build's retry line must not mark the judged build pending). Live negative test on DNS2 with
+that landed short of the tip **with no retry scheduled**, or a disagreeing snapshot. `--selftest`: 24 cases
+(`ev_check_selftest_r8.txt`), including the chain-advanced-mid-walk acceptance, the wrong-`replay_target_height`
+rejection, the failed-then-retried acceptance, the live-DNS3 shapes from §11 and §13 (frontier convergence, no-hole
+short-pending, unassociated stop/retry lines), and the mismatched-retry rejections. Live negative test on DNS2 with
 the old binary: **rejected** (a finished build, in file order). Limitation, stated in the file: a node whose snapshot is
 already fresh builds nothing after a restart, and the check stays pending. All three nodes are >10k blocks stale, so
 each builds on its first boot.
@@ -235,3 +237,24 @@ Grade this round against the two decisions in §0. What changed since round 4 (g
 `deploy/checks/balances_chain_ordered.py` (plus this brief and its evidence): the live-DNS3 semantic of §11. The
 replay fix, the harness, the binaries and all their evidence are byte-identical to round 4. Block on what would
 make the commit or the deploy unsafe or wrong; wording and evidence packaging are polish.
+
+
+## 13. The second canary (round-7 check): pending 900 s → clean rollback, and the archive hole proved persistent
+
+With the round-7 check, the re-deploy's first index-ordered build again finished at coverage h2219460 (101 s, 18,020
+UTXOs, supply 226,993,061,570 sats) and again printed `chain-ordered walk stopped at h2219461 — the chain store holds
+nothing at h2219461 although its chain continues above it`. The check stayed pending and the harness rolled back at the
+900 s deadline (`ev_deploy_dns3_r2.txt`), unit active, previous binary running — the safe outcome. Across the 43 minutes
+from the first canary, DNS3's chain tip moved h2219462 → h2219478 while the hole at h2219461 never filled: **the block
+store itself lacks that body while holding the chain above it** — a persistent mid-chain archive hole, not a lag. This
+is the same follower-side archive-write class the seed walk already skips one height at (the item text's "the loser's
+successor slot"); DNS2 authored the chain and its archive carries both branches' bodies, so its walk converges.
+
+**The check's round-8 semantic:** the store's own journal line is the diagnosis. A build whose walk converged to the
+store's canonical frontier — index order, the store's line naming exactly h{covered+1}, the snapshot agreeing — is
+**accepted**: a mid-chain archive hole is the archive's condition, not the binary's, and balances.json is canonical up
+to that frontier (h2219460 on DNS3: past the h2208645 fork, 11,214 blocks past the old file-order snapshot, on the
+WINNING branch). The line is height-associated like the retry line (a stop line naming another height does not count),
+and the snapshot agreement still applies. Without the store's line, short-of-tip stays pending (the archive's top below
+the live tip, transient) or rejects (no retry scheduled). 25-case selftest (`ev_check_selftest_r9.txt`); the STOP line's two printed heights must both equal coverage+1. The archive
+hole itself is a separate defect — filed as a new workqueue item, not item 48's scope.

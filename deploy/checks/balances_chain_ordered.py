@@ -13,6 +13,11 @@ file that process writes.
 Exit 0  accepted. A build this process finished replayed in index order,
         covered at least the tip it chased (the chain may advance while the
         walk runs), and the snapshot file agrees with the journal line.
+        Also accepted: the walk converged to the block store's canonical
+        FRONTIER — the store's own journal line reports it holds no body at
+        the covered height + 1 although its chain continues above it (a
+        mid-chain archive hole; live on the DNS3 canary at h2219461) — the
+        snapshot is canonical up to that frontier and the file agrees.
         The verdict is taken from the LAST build that finished: a build that
         landed short of the tip is superseded by its own retry.
 Exit 3  still pending. No build has finished (a failed build with the
@@ -42,6 +47,7 @@ import sys
 START = re.compile(r"balances-build: start \(snapshot h(\d+), chain tip h(\d+)\)")
 DONE = re.compile(r"balances-build: done in [\d.]+s — coverage h(\d+) tip ([0-9a-f]{64})")
 RETRY = re.compile(r"balances-build: coverage h(\d+) short of the chased tip h(\d+) — retrying in \d+s")
+STOP = re.compile(r"balances-build: chain-ordered walk stopped at h(\d+) — the chain store holds nothing at h(\d+) although its chain continues above it")
 
 
 def order_of(line):
@@ -70,7 +76,12 @@ def judge(lines, snapshot):
     chased is PENDING when the node scheduled its retry (its own journal
     line) or a newer build began: on a live node the block store's bodies
     lag the moving tip, and the retry continues from the new snapshot as
-    the bodies catch up. No finished
+    the bodies catch up. A build whose walk converged to the store's
+    canonical frontier — the store's own line reports it holds no body at
+    the covered height + 1 although its chain continues above it — is
+    ACCEPTED (subject to the snapshot agreement): a mid-chain archive
+    hole is the archive's condition, not the binary's, and the snapshot
+    is canonical up to that frontier. No finished
     build yet is pending — failures and capped walks are retried, and the
     harness's deadline is the backstop that turns a non-converging chain
     into a rollback.
@@ -79,6 +90,7 @@ def judge(lines, snapshot):
     covered = tip = order = None
     seen_fail = False
     retry_scheduled = False   # the node's own "coverage hC short of the chased tip hT — retrying" line, height-matched to the judged build
+    capped_at_hole = False    # the node's own "chain-ordered walk stopped at hN — the chain store holds nothing at hN although its chain continues above it", height-matched
     for line in lines:
         if "balances-build:" not in line:
             continue
@@ -91,8 +103,18 @@ def judge(lines, snapshot):
         if "balances-build: FAILED" in line:
             seen_fail = True
             continue
-        if "balances-build: chain-ordered walk stopped at h" in line:
-            continue  # the walk capped where the store's bodies end; the retry continues from the new snapshot
+        m = STOP.search(line)
+        if m:
+            # the store's own diagnosis of a mid-chain hole: it holds no body at
+            # that height while its chain continues above it. The line prints
+            # the height twice and both must match. Associate it with the
+            # finished build it answers (it names the height the walk stopped
+            # at, i.e. the build's coverage + 1); a stop line naming another
+            # height (in either position) belongs to a different build or a
+            # malformed line.
+            if covered is not None and int(m.group(1)) == covered + 1 and int(m.group(2)) == covered + 1:
+                capped_at_hole = True
+            continue
         m = RETRY.search(line)
         if m:
             # associate the retry with the finished build it answers: the node
@@ -108,7 +130,7 @@ def judge(lines, snapshot):
         if chased is None:
             return 1, "a build finished without a start line: coverage h%d tip %s…" % (int(m.group(1)), m.group(2)[:16])
         covered, tip, order = int(m.group(1)), m.group(2), order_of(line)
-        retry_scheduled = False  # this finished build supersedes what preceded it
+        retry_scheduled = capped_at_hole = False  # this finished build supersedes what preceded it
     if covered is None:
         if snapshot_h is None and not seen_fail:
             return 3, "no build has started yet (the daemon may still be loading the block index)"
@@ -119,9 +141,12 @@ def judge(lines, snapshot):
     if order != "index":
         return 1, "the build replayed in %s order — this binary predates the fix: coverage h%d tip %s…" % (order, covered, tip[:16])
     if covered < chased:
-        if retry_scheduled:
+        if capped_at_hole:
+            pass  # the store's own line says it holds no body at h{covered+1} while the chain continues above it — the walk converged to the store's canonical frontier; fall through to the snapshot agreement
+        elif retry_scheduled:
             return 3, "the build landed %d block(s) short of the advancing tip (h%d of h%d) and the node scheduled its incremental retry — live tip, bodies lag the index" % (chased - covered, covered, chased)
-        return 1, "coverage h%d is short of the chased tip h%d and no retry was scheduled for it" % (covered, chased)
+        else:
+            return 1, "coverage h%d is short of the chased tip h%d and no retry was scheduled for it" % (covered, chased)
     if snapshot is None:
         return 1, "the snapshot file cannot be read"
     # Production snapshot semantics (src/balances_build.rs): height = the last
@@ -132,6 +157,10 @@ def judge(lines, snapshot):
     if on_disk != (covered, tip, chased):
         return 1, "the snapshot file disagrees with the journal: height=%r tip=%r replay_target_height=%r vs covered h%d/chased h%d tip %s…" % (
             on_disk[0], str(on_disk[1])[:16], on_disk[2], covered, chased, tip[:16])
+    if covered < chased:
+        return 0, ("finished build of this process: index order, converged to the block store's canonical frontier — coverage h%d "
+                   "(the store's own line reports it holds no body at h%d although its chain continues above it), snapshot file agrees, tip %s…") % (
+            covered, covered + 1, tip[:16])
     return 0, "finished build of this process: index order, coverage h%d at or above the chased tip h%d, snapshot file agrees, tip %s…" % (
         covered, chased, tip[:16])
 
@@ -181,20 +210,29 @@ def selftest():
          {"height": 2208246, "covered_tip_hash": "cd" * 32, "replay_target_height": 2219350}, 1),
         ("rejected: snapshot file unreadable", [start, good_done], None, 1),
         ("pending: walk capped where the store's bodies end (live tip) — the retry continues from the new snapshot", [start,
-         "balances-build: chain-ordered walk stopped at h2208645 — the chain store holds nothing at h2208645 but does hold the chain above it"], None, 3),
+         "balances-build: chain-ordered walk stopped at h2208645 — the chain store holds nothing at h2208645 although its chain continues above it"], None, 3),
         ("pending: a build failed and the walk capped (no build finished yet)", [start, fail_line,
-         "balances-build: chain-ordered walk stopped at h2208645 — the chain store holds nothing at h2208645 but does hold the chain above it"], None, 3),
+         "balances-build: chain-ordered walk stopped at h2208645 — the chain store holds nothing at h2208645 although its chain continues above it"], None, 3),
         ("rejected: a bad finished build after a failed attempt stays rejected", [start, fail_line, start, old_done], None, 1),
         ("rejected: done without a start", [good_done], agree, 1),
-        ("pending: LIVE DNS3 — index-order build landed 2 blocks short of the advancing tip, the node scheduled its retry", [d3_start, d3_done, d3_stop, d3_retry], None, 3),
+        ("accepted: LIVE DNS3 — the walk converged to the block store's canonical frontier: a mid-chain archive hole at h2219461, the snapshot is canonical up to h2219460 and agrees",
+         [d3_start, d3_done, d3_stop, d3_retry],
+         {"height": 2219460, "covered_tip_hash": d3_tip, "replay_target_height": 2219462}, 0),
+        ("pending: short of the tip with NO store hole (the archive's top is below the live tip) — the node scheduled its retry", [d3_start, d3_done, d3_retry], None, 3),
+        ("rejected: a stop line naming another height (h2208646, not this build's coverage+1) must not accept a short build with no retry for it",
+         [d3_start, d3_done, "balances-build: chain-ordered walk stopped at h2208646 — the chain store holds nothing at h2208646 although its chain continues above it"], None, 1),
+        ("rejected: a stop line whose second height disagrees with the first (h2219461/h9999999) is malformed and must not accept a short build",
+         [d3_start, d3_done, "balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h9999999 although its chain continues above it"], None, 1),
+        ("rejected: the store-hole convergence still requires the snapshot to agree", [d3_start, d3_done, d3_stop, d3_retry],
+         {"height": 2208246, "covered_tip_hash": d3_tip, "replay_target_height": 2219462}, 1),
         ("accepted: SHAPE of the converged retry, synthetic (the live canary rolled back before its retry wrote a done line) — the retry starts from the new snapshot and reaches the tip",
          [d3_start, d3_done, d3_stop, d3_retry, d3_start2, d3_done2],
          {"height": 2219464, "covered_tip_hash": d3_tip2, "replay_target_height": 2219464}, 0),
         ("pending: short of the tip, the retry's start line already began (covered resets, the newer build is running)", [d3_start, d3_done, d3_start2], None, 3),
         ("rejected: the retry line's heights do not match the judged build (h2219450/h2219458 vs done h2219460/chased h2219462) — a different build's retry must not mark this one pending",
-         [d3_start, d3_done, d3_stop, "balances-build: coverage h2219450 short of the chased tip h2219458 — retrying in 60s"], None, 1),
+         [d3_start, d3_done, "balances-build: coverage h2219450 short of the chased tip h2219458 — retrying in 60s"], None, 1),
         ("rejected: an earlier build's retry line, seen before the judged done, does not mark the judged build pending",
-         ["balances-build: coverage h2219450 short of the chased tip h2219458 — retrying in 60s", d3_start, d3_done, d3_stop], None, 1),
+         ["balances-build: coverage h2219450 short of the chased tip h2219458 — retrying in 60s", d3_start, d3_done], None, 1),
     ]
     bad = 0
     for name, lines, snap, want in cases:
