@@ -1,0 +1,9 @@
+ubuntu-4gb-hel1-1
+2026-11-25T11:48:21Z
+MainPID=3380967
+NRestarts=0
+ExecMainStartTimestamp=Wed 2026-11-25 10:36:44 UTC
+ActiveState=active
+c2648337a27f34b868e8ab4373812eff51608f3273476bf02a1fc4d015b86d0f  -
+ls: cannot access '/etc/tri7/': No such file or directory
+lrwxrwxrwx 1 root root 28 2026-11-07 06:43:55.307020221 +0000 /var/lib/tri7/blk0001.dat -> /root/.triangles/blk0001.dat

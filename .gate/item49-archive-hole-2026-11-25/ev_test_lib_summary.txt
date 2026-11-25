@@ -1,0 +1,18 @@
+# cargo test --lib (full suite) — finished 2026-11-25T12:54:55Z — uncommitted item 49 worktree on ae29c1a
+# full transcript: ev_test_lib_full.txt (same dir); this file keeps the header, the 7 new tests and the summary
+# cargo test --lib (full suite) — 2026-11-25T12:52:31Z
+# worktree: ae29c1a + uncommitted item 49 changes in src/blockindex.rs, src/node_embedded.rs
+# cmd: cargo test --lib
+2011 |             };
+test blockindex::tests::buffered_body_lands_when_the_build_lands_without_a_further_append ... ok
+test blockindex::tests::pending_journal_keeps_the_verified_prefix_and_cuts_the_rest ... ok
+test blockindex::tests::pending_journal_with_nothing_verifiable_is_removed_on_open ... ok
+test blockindex::tests::pending_journal_survives_a_kill_and_the_next_open_lands_the_bodies ... ok
+test node_embedded::tests::archive_audit_finds_the_interior_hole_and_writes_a_cached_body ... ok
+test node_embedded::tests::archive_audit_never_writes_a_cached_body_that_is_not_the_chain_s ... ok
+test node_embedded::tests::archive_audit_paces_the_sweep_and_wraps_to_the_top ... ok
+test node_embedded::tests::gap_find_missing_satisfied_by_recent_cache ... ok
+test node_embedded::tests::gap_find_missing_targets_the_lowest_absent_tail_body ... ok
+test result: ok. 944 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 141.25s
+EXIT-STATUS=0
+# finished 2026-11-25T12:54:55Z

@@ -1,0 +1,2 @@
+probe at 2026-11-25T11:48:20Z host=vmi3080415
+-rw-rw---- 1 tri7 tri7 1936 Nov 24 16:50 /etc/tri7/triangles.conf

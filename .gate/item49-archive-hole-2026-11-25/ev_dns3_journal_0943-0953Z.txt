@@ -1,0 +1,404 @@
+2026-11-25T09:43:18+00:00 appt follow_tip[2745633]: [2026-11-25T09:43:18Z] empty tip-poll reply (streak trigger) while out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 claims h2219470 (we are h2219470) — requesting window-locator reconciliation
+2026-11-25T09:43:46+00:00 appt systemd[1]: Stopping tri7d.service - tri7 daemon (from-zero synced node)...
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: State 'stop-sigterm' timed out. Killing.
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: Killing process 2745633 (follow_tip) with signal SIGKILL.
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: Failed to kill control group /system.slice/tri7d.service, ignoring: Invalid argument
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T09:45:16+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:45:16+00:00 appt systemd[1]: tri7d.service: Consumed 8min 27.392s CPU time, 853.5M memory peak, 152.1M memory swap peak.
+2026-11-25T09:45:16+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:45:16+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:16Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T09:45:16+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:16Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219470 services 1
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] loading tipstate.json …
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214871
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215071
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215271
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215471
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215671
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215871
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216071
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216271
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216471
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216671
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216871
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217071
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217271
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217471
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217671
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217871
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214871; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:45:19+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:19Z] item25: modifier chain audit clean (4509 generated heights compared, replay floor rel 89, 32 samples) [boot]
+2026-11-25T09:45:22+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:22Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219470 services 1
+2026-11-25T09:45:22+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:22Z] state: tip h2219470 0ab32b2413c39118326ebfba6a144e4720d52306bda5352648b53e4943321a6b · daemon getblockcount -1
+2026-11-25T09:45:22+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:22Z] chain slots: seeded 4600 window entries from base h2214871 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T09:45:22+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:22Z] backfill: requesting headers from h2216470 (locator f9d2f6a29530e14457e6f0b49c01d9fd754faa36d3e4b4702abceb8065636cd3)
+2026-11-25T09:45:30+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:30Z] backfill: validated 3000 headers linking h2216471 → h2219470 (hash9 + linkage, daemon-served)
+2026-11-25T09:45:30+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:30Z] backfill: requesting 100 full blocks
+2026-11-25T09:45:32+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:32Z] h2216471: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T09:45:32+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:32Z] backfill: 10 blocks fully validated so far
+2026-11-25T09:45:32+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:32Z] backfill: 20 blocks fully validated so far
+2026-11-25T09:45:33+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:33Z] backfill: 30 blocks fully validated so far
+2026-11-25T09:45:33+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:33Z] backfill: 40 blocks fully validated so far
+2026-11-25T09:45:33+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:33Z] backfill: 50 blocks fully validated so far
+2026-11-25T09:45:34+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:34Z] backfill: 60 blocks fully validated so far
+2026-11-25T09:45:34+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:34Z] backfill: 70 blocks fully validated so far
+2026-11-25T09:45:35+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:35Z] backfill: 80 blocks fully validated so far
+2026-11-25T09:45:36+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:36Z] backfill: 90 blocks fully validated so far
+2026-11-25T09:45:36+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:36Z] backfill: 100 blocks fully validated so far
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] backfill: 100 blocks fully validated (kernel enforced 46 / seeded 0)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] smsg: engine live with 10 wallet key(s) — store /var/lib/tri7/smsg
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: rpc: balances snapshot loaded from /var/lib/tri7/balances.json (h2208246, 10 wallet addrs, wallet 100000000 sats, 44403 received-addrs)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: rpc: wallet UTXO snapshot loaded from /var/lib/tri7/wallet_utxos.json (h2208246, 1 UTXOs, 100000000 sats)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] rpc: block index build started (background thread, cache-first)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] keypool: census 0 entries (oldest epoch n/a)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] keypool: top-up maintainer running (target 100, check every 900s)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] p2p: inbound listener on 0.0.0.0:24113 (getdata/getheaders/push-block)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:45:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:37Z] serving degraded (store building, 0 frames) — getheaders from out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 cannot be answered from the index yet
+2026-11-25T09:45:52+00:00 appt follow_tip[2750996]: [2026-11-25T09:45:52Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:46:01+00:00 appt systemd[1]: Stopping tri7d.service - tri7 daemon (from-zero synced node)...
+2026-11-25T09:46:07+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:07Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:46:14+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:14Z] h2219471: no external checksum oracle for this block — adopting locally computed 4a8d3008
+2026-11-25T09:46:14+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:14Z] TIP ADVANCE → h2219471 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e (kernel enforced) via out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112
+2026-11-25T09:46:14+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:14Z] relay: announced h2219471 to 1 peer(s) (inv)
+2026-11-25T09:46:23+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:23Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2214872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2214872 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215072 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215272 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215472 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215672 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2215872 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216072 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216272 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216472 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216672 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2216872 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217072 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217272 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217472 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217672 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: h2217872 refused by fold (hash/parse gate)
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214872; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:46:37+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:37Z] kernel-window backfill retry #1: floor 4599 → 4600
+2026-11-25T09:46:38+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:38Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:46:48+00:00 appt follow_tip[2750996]: [blockidx] ready: 2220024 frames, 4518945 txs, heights_ok=true, threaded_tip=Some(2219470), writable=true, built in 71s, fork re-threaded 6596 frames
+2026-11-25T09:46:52+00:00 appt follow_tip[2750996]: [blockidx] STALE SLOT h2219471: height map/appendix serves nothing but the live chain slot is 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e — serving the chain's body
+2026-11-25T09:46:52+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:52Z] wallet-seed: store's newest body is h2219470 (tip h2219471) - seeding up to there; newer coins arrive as bodies land
+2026-11-25T09:46:53+00:00 appt follow_tip[2750996]: [2026-11-25T09:46:53Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:47:07+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:07Z] balances-build: the loaded snapshot covers h2208246 but its replay chased h2219469 — retrying
+2026-11-25T09:47:07+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:07Z] balances-build: start (snapshot h2208246, chain tip h2219471) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T09:47:08+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:08Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:47:12+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:12Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T09:47:17+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:17Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T09:47:21+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:21Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T09:47:23+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:23Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:47:26+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:26Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T09:47:30+00:00 appt follow_tip[2750996]: [2026-11-25T09:47:30Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: State 'stop-sigterm' timed out. Killing.
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: Killing process 2750996 (follow_tip) with signal SIGKILL.
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: Failed to kill control group /system.slice/tri7d.service, ignoring: Invalid argument
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T09:47:31+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:47:31+00:00 appt systemd[1]: tri7d.service: Consumed 2min 17.757s CPU time.
+2026-11-25T09:47:31+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:47:31+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:31Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T09:47:31+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:31Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219471 services 1
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] loading tipstate.json …
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214872
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215072
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215272
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215472
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215672
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215872
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216072
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216272
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216472
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216672
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216872
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217072
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217272
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217472
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217672
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217872
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214872; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] item25: MODIFIER CHAIN DIVERGENCE DETECTED [boot]: replay first mismatch at rel none (abs hn/a), 1 sample mismatch(es): h2218113: kernel recompute disagrees with the stored proof (1 eligible input(s), none reproduced)
+2026-11-25T09:47:33+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:33Z] item25: RE-SEED FAILED VERIFICATION (0 replay mismatches, 1 sample mismatches after rewrite) — window left rewritten-and-loud, contained posture kept, NO exit
+2026-11-25T09:47:35+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:35Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219471 services 1
+2026-11-25T09:47:35+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:35Z] state: tip h2219471 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e · daemon getblockcount -1
+2026-11-25T09:47:35+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:35Z] chain slots: seeded 4600 window entries from base h2214872 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T09:47:35+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:35Z] backfill: requesting headers from h2216471 (locator 1984c1cef080b157dce9e8463f5f0bab2cebc7850581395a0ab14a1fb934b2ae)
+2026-11-25T09:47:39+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:39Z] backfill: validated 3000 headers linking h2216472 → h2219471 (hash9 + linkage, daemon-served)
+2026-11-25T09:47:39+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:39Z] backfill: requesting 100 full blocks
+2026-11-25T09:47:40+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:40Z] h2216472: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T09:47:40+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:40Z] backfill: 10 blocks fully validated so far
+2026-11-25T09:47:40+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:40Z] backfill: 20 blocks fully validated so far
+2026-11-25T09:47:41+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:41Z] backfill: 30 blocks fully validated so far
+2026-11-25T09:47:41+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:41Z] backfill: 40 blocks fully validated so far
+2026-11-25T09:47:41+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:41Z] backfill: 50 blocks fully validated so far
+2026-11-25T09:47:42+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:42Z] backfill: 60 blocks fully validated so far
+2026-11-25T09:47:42+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:42Z] backfill: 70 blocks fully validated so far
+2026-11-25T09:47:43+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:43Z] backfill: 80 blocks fully validated so far
+2026-11-25T09:47:43+00:00 appt systemd[1]: Stopping tri7d.service - tri7 daemon (from-zero synced node)...
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] backfill: 90 blocks fully validated so far
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] backfill: 100 blocks fully validated so far
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] backfill: 100 blocks fully validated (kernel enforced 45 / seeded 0)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] smsg: engine live with 10 wallet key(s) — store /var/lib/tri7/smsg
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] balances-build: the loaded snapshot covers h2208246 but its replay chased h2219469 — retrying
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] balances-build: start (snapshot h2208246, chain tip h2219471) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: rpc: balances snapshot loaded from /var/lib/tri7/balances.json (h2208246, 10 wallet addrs, wallet 100000000 sats, 44403 received-addrs)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: rpc: wallet UTXO snapshot loaded from /var/lib/tri7/wallet_utxos.json (h2208246, 1 UTXOs, 100000000 sats)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] rpc: block index build started (background thread, cache-first)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] keypool: census 0 entries (oldest epoch n/a)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] keypool: top-up maintainer running (target 100, check every 900s)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+2026-11-25T09:47:44+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:44Z] p2p: inbound listener on 0.0.0.0:24113 (getdata/getheaders/push-block)
+2026-11-25T09:47:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:45Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:47:49+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:49Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T09:47:51+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:51Z] serving degraded (store building, 100000 frames) — getheaders from out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 cannot be answered from the index yet
+2026-11-25T09:47:53+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:53Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T09:47:56+00:00 appt follow_tip[2751737]: [2026-11-25T09:47:56Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T09:48:00+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:00Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:48:00+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:00Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T09:48:04+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:04Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T09:48:08+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:08Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T09:48:12+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:12Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T09:48:15+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:15Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:48:16+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:16Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T09:48:20+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:20Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T09:48:24+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:24Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T09:48:27+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:27Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T09:48:30+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:30Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:48:31+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:31Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T09:48:34+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:34Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T09:48:38+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:38Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T09:48:42+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:42Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2214872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2214872 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215072 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215272 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215472 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215672 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2215872 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216072 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216272 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216472 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216672 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2216872 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217072 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217072 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217272 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217272 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217472 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217472 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217672 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217672 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217872 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: h2217872 refused by fold (hash/parse gate)
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214872; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] kernel-window backfill retry #1: floor 4600 → 4600
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T09:48:45+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:45Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:48:47+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:47Z] h2219472: no external checksum oracle for this block — adopting locally computed c5e1ae22
+2026-11-25T09:48:47+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:47Z] TIP ADVANCE → h2219472 b51410962a9e008a978a6e827c5f76da160c2153fac698e085672edfc434188b (kernel enforced) via out:gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113
+2026-11-25T09:48:47+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:47Z] relay: announced h2219472 to 1 peer(s) (inv)
+2026-11-25T09:48:49+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:49Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T09:48:52+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:52Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T09:48:56+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:56Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T09:49:00+00:00 appt follow_tip[2751737]: [2026-11-25T09:48:59Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T09:49:00+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:00Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:49:01+00:00 appt follow_tip[2751737]: [blockidx] ready: 2220024 frames, 4518945 txs, heights_ok=true, threaded_tip=Some(2219470), writable=true, built in 76s, fork re-threaded 6597 frames
+2026-11-25T09:49:03+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:03Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T09:49:04+00:00 appt follow_tip[2751737]: [blockidx] STALE SLOT h2219472: height map/appendix serves nothing but the live chain slot is b51410962a9e008a978a6e827c5f76da160c2153fac698e085672edfc434188b — serving the chain's body
+2026-11-25T09:49:04+00:00 appt follow_tip[2751737]: [blockidx] STALE SLOT h2219471: height map/appendix serves nothing but the live chain slot is 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e — serving the chain's body
+2026-11-25T09:49:04+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:04Z] wallet-seed: store's newest body is h2219470 (tip h2219472) - seeding up to there; newer coins arrive as bodies land
+2026-11-25T09:49:07+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:07Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T09:49:10+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:10Z] balances-build: done in 85.5s — coverage h2208246 tip 203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8 · supply 226841559503 sats · 18047 live UTXOs · wallet 10 keys 100000000 sats → /var/lib/tri7/balances.json
+2026-11-25T09:49:10+00:00 appt follow_tip[2751737]: [2026-11-25T09:49:10Z] balances-build: coverage h2208246 short of the chased tip h2219471 — retrying in 60s
+2026-11-25T09:49:13+00:00 appt systemd[1]: tri7d.service: State 'stop-sigterm' timed out. Killing.
+2026-11-25T09:49:13+00:00 appt systemd[1]: tri7d.service: Killing process 2751737 (follow_tip) with signal SIGKILL.
+2026-11-25T09:49:13+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T09:49:13+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T09:49:13+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:49:13+00:00 appt systemd[1]: tri7d.service: Consumed 2min 51.221s CPU time, 10.3M memory peak, 0B memory swap peak.
+2026-11-25T09:49:13+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T09:49:13+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:13Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T09:49:13+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:13Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219472 services 1
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] loading tipstate.json …
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214873
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215073
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215273
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215473
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215673
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215873
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216073
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216273
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216473
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216673
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216873
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217073
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217273
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217473
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217673
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217873
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214873; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:49:15+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:15Z] item25: modifier chain audit clean (4511 generated heights compared, replay floor rel 89, 32 samples) [boot]
+2026-11-25T09:49:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:16Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219472 services 1
+2026-11-25T09:49:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:16Z] state: tip h2219472 b51410962a9e008a978a6e827c5f76da160c2153fac698e085672edfc434188b · daemon getblockcount -1
+2026-11-25T09:49:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:16Z] chain slots: seeded 4600 window entries from base h2214873 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T09:49:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:16Z] backfill: requesting headers from h2216472 (locator 94221f0565db47789e27cfbf53a8c80860736cad36a1994316281e8eafeb350d)
+2026-11-25T09:49:23+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:23Z] backfill: validated 3000 headers linking h2216473 → h2219472 (hash9 + linkage, daemon-served)
+2026-11-25T09:49:23+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:23Z] backfill: requesting 100 full blocks
+2026-11-25T09:49:25+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:25Z] h2216473: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T09:49:25+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:25Z] backfill: 10 blocks fully validated so far
+2026-11-25T09:49:25+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:25Z] backfill: 20 blocks fully validated so far
+2026-11-25T09:49:25+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:25Z] backfill: 30 blocks fully validated so far
+2026-11-25T09:49:26+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:26Z] backfill: 40 blocks fully validated so far
+2026-11-25T09:49:26+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:26Z] backfill: 50 blocks fully validated so far
+2026-11-25T09:49:27+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:27Z] backfill: 60 blocks fully validated so far
+2026-11-25T09:49:27+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:27Z] backfill: 70 blocks fully validated so far
+2026-11-25T09:49:28+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:28Z] backfill: 80 blocks fully validated so far
+2026-11-25T09:49:29+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:29Z] backfill: 90 blocks fully validated so far
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] backfill: 100 blocks fully validated so far
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] backfill: 100 blocks fully validated (kernel enforced 44 / seeded 0)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] smsg: engine live with 10 wallet key(s) — store /var/lib/tri7/smsg
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: rpc: balances snapshot loaded from /var/lib/tri7/balances.json (h2208246, 10 wallet addrs, wallet 100000000 sats, 44403 received-addrs)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: rpc: wallet UTXO snapshot loaded from /var/lib/tri7/wallet_utxos.json (h2208246, 1 UTXOs, 100000000 sats)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] rpc: block index build started (background thread, cache-first)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] keypool: census 0 entries (oldest epoch n/a)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] keypool: top-up maintainer running (target 100, check every 900s)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] p2p: inbound listener on 0.0.0.0:24113 (getdata/getheaders/push-block)
+2026-11-25T09:49:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:30Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:49:43+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:43Z] serving degraded (store building, 400000 frames) — getheaders from out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 cannot be answered from the index yet
+2026-11-25T09:49:45+00:00 appt follow_tip[2752271]: [2026-11-25T09:49:45Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:50:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:00Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:50:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:16Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:50:17+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:17Z] h2219473: no external checksum oracle for this block — adopting locally computed 2a2edeef
+2026-11-25T09:50:17+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:17Z] TIP ADVANCE → h2219473 66aee22eee25824969bc45f2f27571b4a27b242af35c9680eb0313dcbdc07305 (kernel enforced) via out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112
+2026-11-25T09:50:17+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:17Z] relay: announced h2219473 to 1 peer(s) (inv)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2214874 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2214874 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215074 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215074 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215274 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215274 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215474 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215474 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215674 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215674 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215874 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2215874 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216074 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216074 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216274 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216274 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216474 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216474 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216674 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216674 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216874 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2216874 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217074 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217074 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217274 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217274 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217474 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217474 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217674 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217674 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217874 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: h2217874 refused by fold (hash/parse gate)
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214874; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T09:50:30+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:30Z] kernel-window backfill retry #1: floor 4599 → 4600
+2026-11-25T09:50:31+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:31Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:50:36+00:00 appt follow_tip[2752271]: [blockidx] ready: 2220024 frames, 4518945 txs, heights_ok=true, threaded_tip=Some(2219470), writable=true, built in 66s, fork re-threaded 6598 frames
+2026-11-25T09:50:40+00:00 appt follow_tip[2752271]: [blockidx] STALE SLOT h2219473: height map/appendix serves nothing but the live chain slot is 66aee22eee25824969bc45f2f27571b4a27b242af35c9680eb0313dcbdc07305 — serving the chain's body
+2026-11-25T09:50:40+00:00 appt follow_tip[2752271]: [blockidx] STALE SLOT h2219472: height map/appendix serves nothing but the live chain slot is b51410962a9e008a978a6e827c5f76da160c2153fac698e085672edfc434188b — serving the chain's body
+2026-11-25T09:50:40+00:00 appt follow_tip[2752271]: [blockidx] STALE SLOT h2219471: height map/appendix serves nothing but the live chain slot is 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e — serving the chain's body
+2026-11-25T09:50:40+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:40Z] wallet-seed: store's newest body is h2219470 (tip h2219473) - seeding up to there; newer coins arrive as bodies land
+2026-11-25T09:50:46+00:00 appt follow_tip[2752271]: [2026-11-25T09:50:46Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:51:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:00Z] balances-build: the loaded snapshot covers h2208246 but its replay chased h2219471 — retrying
+2026-11-25T09:51:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:00Z] balances-build: start (snapshot h2208246, chain tip h2219473) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T09:51:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:00Z] GAP RECOVERY: tail body missing h2219471 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e — requesting getdata(MSG_BLOCK) from every peer (rollback to h2219470 after 20 unresolved ticks)
+2026-11-25T09:51:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:00Z] gap: getdata for h2219471 sent to 1 peer(s), unfilled ticks 1/20
+2026-11-25T09:51:01+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:01Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:51:02+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:02Z] GAP RECOVERY: body for h2219471 8d0d53bd233444e25fcbb2c68c0f06142243c243a2bf470dd2a9010f7fbce32e appended to the store from out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — tail complete
+2026-11-25T09:51:05+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:05Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T09:51:11+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:11Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T09:51:17+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:17Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:51:17+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:17Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T09:51:22+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:22Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T09:51:26+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:26Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T09:51:31+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:31Z] kernel-window backfill: 3100 block(s) folded (store 3100, rpc 0) in 341.140913ms — kernel coverage spans the full staking window (floor 0)
+2026-11-25T09:51:31+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:31Z] kernel-window backfill retry #2: floor 4600 → 0
+2026-11-25T09:51:31+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:31Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T09:51:32+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:32Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:51:33+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:33Z] empty tip-poll reply (streak trigger) while out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 claims h2219473 (we are h2219473) — requesting window-locator reconciliation
+2026-11-25T09:51:37+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:37Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T09:51:42+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:42Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T09:51:46+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:46Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T09:51:47+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:47Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:51:51+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:51Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T09:51:53+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:53Z] h2219474: no external checksum oracle for this block — adopting locally computed 5110eb72
+2026-11-25T09:51:53+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:53Z] TIP ADVANCE → h2219474 73df5bb4d4a9a543a2f64ed90688b2dbbcc02083423014573ae3b9a35919f083 (kernel enforced) via out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112
+2026-11-25T09:51:53+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:53Z] relay: announced h2219474 to 1 peer(s) (inv)
+2026-11-25T09:51:55+00:00 appt follow_tip[2752271]: [2026-11-25T09:51:55Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T09:52:00+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:00Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T09:52:02+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:02Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T09:52:05+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:05Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T09:52:06+00:00 appt follow_tip[2752271]: [blockidx] STALE SLOT h2219461: height map/appendix serves nothing but the live chain slot is 7b6a7917a9e7c705800a9523e6c74555c0e6d78b1f435345838e1bae4801b183 — serving the chain's body
+2026-11-25T09:52:06+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:06Z] wallet live seed: sequential walk + index window done in 85.8s (4 skipped height(s), first h2208247, last h2219461 — archive coverage hole; balances exclude those heights)
+2026-11-25T09:52:06+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:06Z] wallet live view ready: window h0..h2219470 — 6 outputs (6 owned) balance 101643309 sats
+2026-11-25T09:52:09+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:09Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T09:52:13+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:13Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T09:52:16+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:16Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T09:52:20+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:20Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T09:52:24+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:24Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T09:52:28+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:28Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T09:52:31+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:31Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T09:52:35+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:35Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T09:52:38+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:38Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T09:52:41+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:41Z] balances-build: done in 101.1s — coverage h2219460 tip e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22 · supply 226993061570 sats · 18020 live UTXOs · wallet 10 keys 101643309 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T09:52:41+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:41Z] balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h2219461 although its chain continues above it
+2026-11-25T09:52:41+00:00 appt follow_tip[2752271]: [2026-11-25T09:52:41Z] balances-build: coverage h2219460 short of the chased tip h2219473 — retrying in 60s
+2026-11-25T09:53:03+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:03Z] empty tip-poll reply (streak trigger) while out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 claims h2219474 (we are h2219474) — requesting window-locator reconciliation
+2026-11-25T09:53:41+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:41Z] balances-build: start (snapshot h2219460, chain tip h2219474) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T09:53:45+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:45Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T09:53:48+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:48Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T09:53:52+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:52Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T09:53:55+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:55Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T09:53:59+00:00 appt follow_tip[2752271]: [2026-11-25T09:53:59Z] balances-build: ... 500000 blocks, 8812 live UTXOs

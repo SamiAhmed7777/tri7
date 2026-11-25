@@ -1,0 +1,21 @@
+probe at 2026-11-25T11:40:48Z
+appt
+2026-11-25T11:40:52Z
+MainPID=2763423
+NRestarts=0
+ExecMainStartTimestamp=Wed 2026-11-25 10:26:30 UTC
+ActiveState=active
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d  /opt/tri7/bin/follow_tip
+-rw-r--r-- 1 tri7 tri7   2145136 2026-11-25 11:40:24.927691113 +0000 /var/lib/tri7/balances.json
+-rw-r--r-- 1 tri7 tri7 988333967 2026-11-25 11:39:21.349681015 +0000 /var/lib/tri7/blk0001.dat
+-rw------- 1 tri7 tri7   2944267 2026-11-25 11:40:47.492049276 +0000 /var/lib/tri7/tipstate.json
+{"method": "getblockcount", "params": [], "result": 2219526, "error": null}
+{"method": "getbestblockhash", "params": [], "result": "fe2299ba57b0503a8b14dd0d44a6efb74f67f5262a68b39f517ce8e0e31ab644", "error": null}
+{"method": "getblockhash", "params": [2219459], "result": "b412c9a9c2a53ee30cd37fbe6b8940b6c1680d38956e33e66599d457c2f47871", "error": null}
+{"method": "getblockhash", "params": [2219460], "result": "e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22", "error": null}
+{"method": "getblockhash", "params": [2219461], "result": "7b6a7917a9e7c705800a9523e6c74555c0e6d78b1f435345838e1bae4801b183", "error": null}
+{"method": "getblockhash", "params": [2219462], "result": "a851377c0d903767715a31731851ecddfdb6be15f52682a6ab00728e2d6e6c8c", "error": null}
+{"method": "getblock", "params": [2219460, 1], "result": {"bits": "1f031637", "confirmations": 67, "difficulty": 4.943200480540485e-06, "entropybit": 0, "flags": "proof-of-stake", "hash": "e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22", "height": 2219460, "merkleroot": "e8721883ca023c159fd526ba5db8a1264a1fe46cc911139e05405083837ee29b", "modifier": "955b1b57da1faf26", "modifierchecksum": "97777a37", "nextblockhash": "7b6a7917a9e7c705800a9523e6c74555c0e6d78b1f435345838e1bae4801b183", "nonce": 0, "previousblockhash": "b412c9a9c2a53ee30cd37fbe6b8940b6c1680d38956e33e66599d457c2f47871", "proofhash": "00016b383769d98f2324a3695b9d89434d7acc24faa65d17ef5e41c13e6423a8", "size": 444, "time": 1795598328, "tx": ["c78e5f36c11b6a977c236d80211c3affe32dd3e69f37aafb29c39a1c9f0b194d", "d7a56e6d904db221dee8102512d1e176700dd296320f17b3a30178583a49936e"], "version": 1}, "error": null}
+{"method": "getblock", "params": [2219461, 1], "result": null, "error": {"code": -5, "message": "Block not found"}}
+{"method": "getblock", "params": [2219462, 1], "result": {"bits": "1f0326c2", "confirmations": 65, "difficulty": 4.841837704986867e-06, "entropybit": 0, "flags": "proof-of-stake", "hash": "a851377c0d903767715a31731851ecddfdb6be15f52682a6ab00728e2d6e6c8c", "height": 2219462, "merkleroot": "7e40a67f4874ec58245d0eb9fcaadd49c2263985adf105b6897a5721a4638d1a", "modifier": "9668d0d6fbc3f971", "modifierchecksum": "81ac523f", "nextblockhash": "cf8785905c4ceba8854259dbdc7792af09212cfb12c22632d9aa92389170f9ef", "nonce": 0, "previousblockhash": "7b6a7917a9e7c705800a9523e6c74555c0e6d78b1f435345838e1bae4801b183", "proofhash": "000833ca245e9f06fe30189454f2b9a8295eed391fa32729e669743595e0b92b", "size": 401, "time": 1795598616, "tx": ["98210fe240acdcad0bbb5317d89f618049c8bbe57edff3fe023e383e94c2a538", "00c0fff08b3249cfe7f69b4e7d6b91e1765b4facdab17b95713763add6b2c9da"], "version": 1}, "error": null}
+{"method": "getblockchaininfo", "params": [], "result": {"bestblockhash": "fe2299ba57b0503a8b14dd0d44a6efb74f67f5262a68b39f517ce8e0e31ab644", "blocks": 2219526, "chain": "main", "chain_trust_note": "legacy chaintrust/blocks fields are full-index state tri7 does not build", "difficulty": {"proof-of-stake": 2.599070925077876e-06, "proof-of-work": 4.6565423739069247e-10, "proof-of-work_note": "next-required-target over the tri7 window (legacy walks the full index for PoW blocks)"}, "moneysupply": 226993.06157, "moneysupply_coverage_height": 2219526, "moneysupply_sats": 226993061570, "verificationprogress": 1.0}, "error": null}

@@ -974,6 +974,16 @@ pub struct BlockStore {
     /// 30µs each), so a restart-time rebuild buffer made appends crawl at
     /// ~11 blk/s and degrade linearly (measured live on DNS3).
     pending_keys: std::sync::Mutex<std::collections::HashSet<Hash>>,
+    /// (item 49) `<blocks file>.pending` — the crash journal of `pending`:
+    /// every buffered body is written here and fsynced before `append_block`
+    /// returns, and read back on the next open. The buffer used to be RAM
+    /// only, so a process killed between "accepted during the build" and "the
+    /// next append flushed it" lost the body and left a permanent archive
+    /// hole under a chain that continued above it (DNS3, 2026-11-25: every
+    /// `systemctl stop` of tri7d runs to the 90 s stop timeout and is
+    /// SIGKILLed — h2219461, h2219472, h2219489, h2219490). None when the
+    /// store has no file (in-memory stores).
+    journal_path: Option<PathBuf>,
     /// Chain-slot overlay: height → the block hash the LIVE chain holds at
     /// that height (see `set_chain_slot`). Height lookups prefer this over
     /// the frozen build-time height map and the first-arrival appendix scan:
@@ -1136,8 +1146,122 @@ fn log_resync(from: u64, to: u64) {
     }
 }
 
+/// (item 49) Crash journal for bodies buffered while the index builds:
+/// `<blocks file>.pending`. One record per body, appended and fsynced before
+/// `append_block` returns:
+/// `[u32 LE magic][u32 LE body_len][u64 LE height | NONE][32-byte header hash][body]`.
+/// Deleted once every buffered body is in the blocks file.
+const PENDING_JOURNAL_MAGIC: u32 = 0x334A_4250; // "PBJ3"
+const PENDING_JOURNAL_NO_HEIGHT: u64 = u64::MAX;
+const PENDING_JOURNAL_HEAD: usize = 4 + 4 + 8 + 32;
+
+fn pending_journal_path(blocks: &Path) -> PathBuf {
+    let mut s = blocks.as_os_str().to_os_string();
+    s.push(".pending");
+    PathBuf::from(s)
+}
+
+fn pending_journal_encode(body: &[u8], height: Option<u64>, hash: &Hash) -> Vec<u8> {
+    let mut r = Vec::with_capacity(PENDING_JOURNAL_HEAD + body.len());
+    r.extend_from_slice(&PENDING_JOURNAL_MAGIC.to_le_bytes());
+    r.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    r.extend_from_slice(&height.unwrap_or(PENDING_JOURNAL_NO_HEIGHT).to_le_bytes());
+    r.extend_from_slice(hash);
+    r.extend_from_slice(body);
+    r
+}
+
+/// Decode the complete, hash-verified prefix of a journal. The first record
+/// that is torn (a kill mid-write), has a foreign magic, an impossible
+/// length, or a body whose header hash is not the recorded one ends the scan;
+/// `valid_len` is the offset where the file must be cut.
+fn pending_journal_decode(buf: &[u8]) -> (Vec<(Vec<u8>, Option<u64>)>, usize) {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while buf.len() - pos >= PENDING_JOURNAL_HEAD {
+        if buf[pos..pos + 4] != PENDING_JOURNAL_MAGIC.to_le_bytes() {
+            break;
+        }
+        let len = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        if len == 0 || len > MAX_FRAME {
+            break;
+        }
+        let end = PENDING_JOURNAL_HEAD + len + pos;
+        if end > buf.len() {
+            break;
+        }
+        let height = u64::from_le_bytes(buf[pos + 8..pos + 16].try_into().unwrap());
+        let hash: Hash = buf[pos + 16..pos + 48].try_into().unwrap();
+        let body = &buf[pos + PENDING_JOURNAL_HEAD..end];
+        if header_hash(body).map(|h| h != hash).unwrap_or(true) {
+            break;
+        }
+        out.push((
+            body.to_vec(),
+            if height == PENDING_JOURNAL_NO_HEIGHT {
+                None
+            } else {
+                Some(height)
+            },
+        ));
+        pos = end;
+    }
+    (out, pos)
+}
+
 impl BlockStore {
     pub fn new(path: Option<PathBuf>, cache_dir: Option<PathBuf>) -> Arc<BlockStore> {
+        let journal_path = path.as_ref().map(|p| pending_journal_path(p));
+        // (item 49) take back what a killed predecessor journaled, BEFORE any
+        // consumer can buffer a body — the dedupe set already holds those
+        // hashes. They land in the blocks file when the index is ready.
+        let (mut pending, mut pending_keys) = (Vec::new(), std::collections::HashSet::new());
+        if let Some(jp) = &journal_path {
+            match std::fs::read(jp) {
+                Ok(buf) => {
+                    let (records, valid_len) = pending_journal_decode(&buf);
+                    let torn = buf.len() - valid_len;
+                    if torn > 0 {
+                        eprintln!(
+                            "[blockidx] pending journal {}: torn or corrupt tail of {} byte(s) after {} complete record(s) — cut",
+                            jp.display(),
+                            torn,
+                            records.len()
+                        );
+                        match std::fs::OpenOptions::new().write(true).open(jp) {
+                            Ok(f) => {
+                                if let Err(e) = f.set_len(valid_len as u64) {
+                                    eprintln!("[blockidx] pending journal {}: cut failed: {}", jp.display(), e);
+                                }
+                            }
+                            Err(e) => eprintln!("[blockidx] pending journal {}: reopen failed: {}", jp.display(), e),
+                        }
+                    }
+                    for (body, height) in records {
+                        if let Ok(h) = header_hash(&body) {
+                            if pending_keys.insert(h) {
+                                pending.push((body, height));
+                            }
+                        }
+                    }
+                    if pending.is_empty() {
+                        // nothing recoverable: the file must not outlive its records
+                        let _ = std::fs::remove_file(jp);
+                    } else {
+                        eprintln!(
+                            "[blockidx] pending journal: {} body/bodies recovered from a killed predecessor — they land in the blocks file when the index is ready",
+                            pending.len()
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!(
+                    "[blockidx] pending journal {}: unreadable ({}); its bodies cannot be recovered",
+                    jp.display(),
+                    e
+                ),
+            }
+        }
         Arc::new(BlockStore {
             path,
             cache_dir,
@@ -1145,8 +1269,9 @@ impl BlockStore {
             progress_frames: AtomicU64::new(0),
             started: Instant::now(),
             failure: RwLock::new(None),
-            pending: std::sync::Mutex::new(Vec::new()),
-            pending_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
+            pending: std::sync::Mutex::new(pending),
+            pending_keys: std::sync::Mutex::new(pending_keys),
+            journal_path,
             chain_slots: std::sync::RwLock::new(std::collections::HashMap::new()),
             chain_tip: std::sync::Mutex::new(None),
             stale_slot_hits: std::sync::atomic::AtomicU64::new(0),
@@ -1350,7 +1475,7 @@ impl BlockStore {
                             started.elapsed().as_secs(),
                             fork_note
                         );
-                        let inner = StoreInner {
+                        let inner = Arc::new(StoreInner {
                             blocks: b.blocks,
                             txs: b.txs,
                             heights_ok: b.heights_ok,
@@ -1364,8 +1489,17 @@ impl BlockStore {
                             writable: std::sync::atomic::AtomicBool::new(writable),
                             torn_tail: std::sync::Mutex::new(b.torn_tail),
                             append_lock: std::sync::Mutex::new(()),
-                        };
-                        *self.state.write().unwrap() = Some(Arc::new(inner));
+                        });
+                        // (item 49) land the buffered/journaled bodies BEFORE
+                        // the store publishes Ready, and once more right after
+                        // (a body an accept buffered while it still saw
+                        // "building"). Until this the drain ran only on the
+                        // NEXT append — which a node at the chain tip may not
+                        // see for minutes — so a restart in between lost the
+                        // tail of the journal all over again.
+                        self.flush_pending(&inner);
+                        *self.state.write().unwrap() = Some(Arc::clone(&inner));
+                        self.flush_pending(&inner);
                     }
                     Err(e) => {
                         *self.failure.write().unwrap() = Some(e);
@@ -1556,8 +1690,20 @@ impl BlockStore {
 
     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
         let inner = self.inner().ok_or("block index not ready")?;
+        self.block_by_hash_in(&inner, hash)
+    }
+
+    /// `block_by_hash` against an explicit store. (item 49) The drain of the
+    /// bodies buffered during the build runs against the freshly built store
+    /// BEFORE it is published; through `self.inner()` (still None there) every
+    /// body would have read "not on disk" and the lookup itself errored.
+    fn block_by_hash_in(
+        &self,
+        inner: &Arc<StoreInner>,
+        hash: &Hash,
+    ) -> Result<Option<BlockHit>, String> {
         for e in inner.blocks.candidates_by_key(key8(hash)) {
-            let body = Self::read_frame(&inner, e.off)?;
+            let body = Self::read_frame(inner, e.off)?;
             let h = header_hash(&body)?;
             if &h != hash {
                 continue; // truncated-key collision — keep scanning candidates
@@ -1583,7 +1729,7 @@ impl BlockStore {
             if idx < a.len() {
                 let f = a[idx].clone();
                 if f.key == key {
-                    let body = Self::read_frame(&inner, f.off)?;
+                    let body = Self::read_frame(inner, f.off)?;
                     let h = header_hash(&body)?;
                     if &h == hash {
                         let block = Self::parse_frame(&body)?;
@@ -1604,7 +1750,7 @@ impl BlockStore {
             if f.key != key8(hash) {
                 continue;
             }
-            let body = Self::read_frame(&inner, f.off)?;
+            let body = Self::read_frame(inner, f.off)?;
             let h = header_hash(&body)?;
             if &h != hash {
                 continue;
@@ -2090,10 +2236,11 @@ impl BlockStore {
         let inner = match self.inner() {
             Some(i) => i,
             None => {
-                // Index still building: buffer the body, flush on ready. The
-                // frame is durable in RAM only until then — same assumption
-                // the recent-blocks cache makes — but NOTHING is lost to the
-                // disk store once the build lands.
+                // Index still building: buffer the body and journal it
+                // (item 49, `<blocks file>.pending`), flush on ready. Until
+                // item 49 the frame lived in RAM only until the build landed,
+                // and a kill in between left a permanent archive hole under a
+                // chain that kept growing.
                 let hash = header_hash(body)?;
                 let mut p = self.pending.lock().unwrap();
                 let mut keys = self.pending_keys.lock().unwrap();
@@ -2101,6 +2248,10 @@ impl BlockStore {
                     return Ok(hash); // already buffered
                 }
                 p.push((body.to_vec(), height));
+                // (item 49) the frame is in RAM only until the build lands —
+                // journal it now, under the buffer lock, so a kill in between
+                // leaves a record the next open recovers instead of a hole.
+                self.pending_journal_append(body, height, &hash);
                 return Ok(hash);
             }
         };
@@ -2236,17 +2387,83 @@ impl BlockStore {
 
     /// Drain bodies buffered during the index build into the now-ready store
     /// (FIFO — same append path as direct appends, dedup via block_by_hash).
+    /// (item 49) Also called the moment the build lands (see `build`). Every
+    /// body is tried; one that cannot be written is dropped with its height
+    /// in the log — the follow loop's archive audit (item 49) re-fetches it
+    /// from a peer. The WHOLE drain holds the buffer lock, so an accept that
+    /// still saw "building" cannot journal a body into a file this drain is
+    /// about to delete: it waits, then buffers into a fresh journal.
     fn flush_pending(&self, inner: &Arc<StoreInner>) {
-        let drained: Vec<(Vec<u8>, Option<u64>)> = {
-            let mut p = self.pending.lock().unwrap();
-            let mut keys = self.pending_keys.lock().unwrap();
-            keys.clear();
-            std::mem::take(&mut *p)
-        };
-        for (body, height) in drained {
-            if let Err(e) = self.append_ready(&inner, &body, height) {
-                eprintln!("[blockidx] pending append flush failed: {}", e);
+        let mut p = self.pending.lock().unwrap();
+        if p.is_empty() {
+            return;
+        }
+        let mut keys = self.pending_keys.lock().unwrap();
+        if inner.writable.load(Ordering::SeqCst) {
+            let mut failed = 0usize;
+            for (body, height) in p.iter() {
+                if let Err(e) = self.append_ready(inner, body, *height) {
+                    failed += 1;
+                    eprintln!(
+                        "[blockidx] pending append flush failed (h{:?}): {}",
+                        height, e
+                    );
+                }
             }
+            if failed > 0 {
+                eprintln!(
+                    "[blockidx] pending flush: {} of {} buffered body/bodies could not be written — the archive audit re-fetches them",
+                    failed,
+                    p.len()
+                );
+            }
+        } else {
+            eprintln!(
+                "[blockidx] pending flush: {} buffered body/bodies discarded — the blocks file is not writable",
+                p.len()
+            );
+        }
+        p.clear();
+        keys.clear();
+        self.pending_journal_remove();
+    }
+
+    /// (item 49) Append one record to the crash journal and fsync it. A write
+    /// failure leaves the body buffered in RAM only and says so — it never
+    /// fails the accept.
+    fn pending_journal_append(&self, body: &[u8], height: Option<u64>, hash: &Hash) {
+        let Some(jp) = &self.journal_path else { return };
+        let rec = pending_journal_encode(body, height, hash);
+        let wrote = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(jp)
+            .and_then(|mut f| {
+                f.write_all(&rec)?;
+                f.sync_all()
+            });
+        if let Err(e) = wrote {
+            eprintln!(
+                "[blockidx] pending journal {} write failed: {} — this body is buffered in RAM only until the index is ready",
+                jp.display(),
+                e
+            );
+        }
+    }
+
+    /// (item 49) The journal mirrors the buffer exactly: removed once the
+    /// buffer is empty (every body is in the blocks file or was dropped with
+    /// a log line).
+    fn pending_journal_remove(&self) {
+        let Some(jp) = &self.journal_path else { return };
+        match std::fs::remove_file(jp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!(
+                "[blockidx] pending journal {}: remove failed: {} (its records are already in the blocks file; the next open drops them as duplicates)",
+                jp.display(),
+                e
+            ),
         }
     }
 
@@ -2258,7 +2475,8 @@ impl BlockStore {
         height: Option<u64>,
     ) -> Result<Hash, String> {
         let hash = header_hash(body)?;
-        if self.block_by_hash(&hash)?.is_some() {
+        // dedupe against THIS store (the drain may run before it is published)
+        if self.block_by_hash_in(inner, &hash)?.is_some() {
             // already on disk. Its height CLAIM though follows the chain: a
             // frame a rollback de-heighted that is accepted again must claim
             // its height again — append is the accept path's only chance to
@@ -3738,5 +3956,178 @@ mod tests {
         assert_eq!(again, 0);
         assert_eq!(skipped, 2);
         assert_eq!(&height_off[..5], &[10, 11, 300, 400, HEIGHT_GAP]);
+    }
+
+    // ---- item 49: crash journal for bodies buffered during the build ----
+
+    /// A blocks file holding the first `kept` blocks of a g→b1→b2→b3 chain.
+    /// Returns (dir, path, raw body of every block, hash of every block).
+    fn journal_fixture(
+        kept: usize,
+        tag: &str,
+    ) -> (crate::testsupport::TestDir, PathBuf, Vec<Vec<u8>>, Vec<Hash>) {
+        let dir = tmpdir(tag);
+        let path = dir.join("blk.dat");
+        let g = block([0xAA; 32], vec![coin_tx(vec![0x11], 5_000_000, vec![])]);
+        let b1 = block(g.hash(), vec![coin_tx(vec![0x22], 5_000_000, vec![])]);
+        let b2 = block(b1.hash(), vec![coin_tx(vec![0x33], 5_000_000, vec![])]);
+        let b3 = block(b2.hash(), vec![coin_tx(vec![0x44], 5_000_000, vec![])]);
+        let mut frames = Vec::new();
+        let mut bodies = Vec::new();
+        let mut hashes = Vec::new();
+        for (i, b) in [&g, &b1, &b2, &b3].iter().enumerate() {
+            let f = frame_bytes(b);
+            if i < kept {
+                frames.extend_from_slice(&f);
+            }
+            bodies.push(f[8..].to_vec());
+            hashes.push(b.hash());
+        }
+        std::fs::write(&path, &frames).unwrap();
+        (dir, path, bodies, hashes)
+    }
+
+    /// A process killed between accepting bodies and the index landing must
+    /// not lose them (DNS3, 2026-11-25: every stop ran to the 90 s timeout
+    /// and was SIGKILLed — h2219461, h2219472, h2219489, h2219490 never
+    /// reached the file). Each accepted body is journaled + fsynced, and the
+    /// NEXT open takes the records back before anything can buffer.
+    #[test]
+    fn pending_journal_survives_a_kill_and_the_next_open_lands_the_bodies() {
+        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-kill");
+        let journal = pending_journal_path(&path);
+        // process 1: the index never lands (no build is spawned), two bodies
+        // are accepted into the buffer, then the process is killed
+        {
+            let s1 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+            assert!(!journal.exists());
+            assert_eq!(s1.append_block(&bodies[2], Some(2)).unwrap(), hashes[2]);
+            // a duplicate accept is a no-op in the journal too
+            s1.append_block(&bodies[2], Some(2)).unwrap();
+            s1.append_block(&bodies[3], Some(3)).unwrap();
+            // the journal mirrors the buffer exactly: two records
+            let raw = std::fs::read(&journal).unwrap();
+            let expect: Vec<u8> = [
+                pending_journal_encode(&bodies[2], Some(2), &hashes[2]),
+                pending_journal_encode(&bodies[3], Some(3), &hashes[3]),
+            ]
+            .concat();
+            assert_eq!(raw, expect);
+        } // drop(s1) = the kill: no drain, no cleanup
+        assert!(journal.exists(), "the journal outlives the process");
+
+        // process 2: takes both records back the moment it opens
+        let s2 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        assert_eq!(s2.pending.lock().unwrap().len(), 2);
+        assert_eq!(s2.pending_keys.lock().unwrap().len(), 2);
+        assert!(s2.block_by_hash(&hashes[2]).is_err(), "still building");
+        s2.spawn_build(None);
+        wait_ready(&s2);
+        // no further append anywhere: the drain ran with the build
+        assert!(
+            s2.block_by_hash(&hashes[2]).unwrap().is_some(),
+            "journaled body 1 must be in the store the moment it is Ready"
+        );
+        assert!(s2.block_by_hash(&hashes[3]).unwrap().is_some());
+        assert!(s2.pending.lock().unwrap().is_empty());
+        assert!(
+            !journal.exists(),
+            "deleted once every buffered body is in the blocks file"
+        );
+
+        // restart proof: a full re-scan serves them from the file itself, and
+        // no journal reappears when there is nothing to recover. The oracle
+        // is what gives each frame its height, exactly as the live node's
+        // tipstate does.
+        let s3 = BlockStore::new(Some(path.clone()), Some(dir.join("idx3")));
+        s3.spawn_build(Some(BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: 3,
+        }));
+        wait_ready(&s3);
+        assert_eq!(
+            s3.block_by_height(3).unwrap().map(|h| h.hash),
+            Some(hashes[3])
+        );
+        assert!(!journal.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The drain used to run only on the NEXT append after Ready — which a
+    /// node sitting at the chain tip may not see for minutes. A body buffered
+    /// during the build must be on disk as soon as the store is Ready.
+    #[test]
+    fn buffered_body_lands_when_the_build_lands_without_a_further_append() {
+        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-drain");
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        assert_eq!(store.append_block(&bodies[2], Some(2)).unwrap(), hashes[2]);
+        store.append_block(&bodies[3], None).unwrap();
+        store.spawn_build(None);
+        wait_ready(&store);
+        assert!(store.block_by_hash(&hashes[2]).unwrap().is_some());
+        assert!(store.block_by_hash(&hashes[3]).unwrap().is_some());
+        assert!(store.pending.lock().unwrap().is_empty());
+        assert!(!pending_journal_path(&path).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A kill mid-write leaves a torn last record; a corrupt record's body
+    /// disagrees with the hash it was written with. Recovery keeps the
+    /// complete, hash-verified prefix, cuts everything after it, and replays
+    /// nothing it cannot verify.
+    #[test]
+    fn pending_journal_keeps_the_verified_prefix_and_cuts_the_rest() {
+        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-torn");
+        let journal = pending_journal_path(&path);
+        let good = pending_journal_encode(&bodies[2], Some(2), &hashes[2]);
+        let mut corrupt = pending_journal_encode(&bodies[3], Some(3), &hashes[3]);
+        corrupt[PENDING_JOURNAL_HEAD + 40] ^= 0x01; // the body no longer hashes to its record
+        let torn = pending_journal_encode(&bodies[3], Some(3), &hashes[3]);
+        let mut raw = good.clone();
+        raw.extend_from_slice(&corrupt);
+        raw.extend_from_slice(&torn[..torn.len() - 5]);
+        std::fs::write(&journal, &raw).unwrap();
+
+        let (records, valid_len) = pending_journal_decode(&raw);
+        assert_eq!(records.len(), 1);
+        assert_eq!(valid_len, good.len(), "the cut is at the end of the verified prefix");
+        assert_eq!(records[0], (bodies[2].clone(), Some(2)));
+
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        assert_eq!(
+            std::fs::metadata(&journal).unwrap().len(),
+            good.len() as u64,
+            "the corrupt tail is cut on open"
+        );
+        assert_eq!(store.pending.lock().unwrap().len(), 1);
+        store.spawn_build(None);
+        wait_ready(&store);
+        assert!(store.block_by_hash(&hashes[2]).unwrap().is_some());
+        assert!(
+            store.block_by_hash(&hashes[3]).unwrap().is_none(),
+            "a record that fails verification is never replayed"
+        );
+        assert!(!journal.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A journal with nothing verifiable in it must not outlive the open
+    /// that found it: left behind, it would be re-read (and re-logged) at
+    /// every start.
+    #[test]
+    fn pending_journal_with_nothing_verifiable_is_removed_on_open() {
+        let (dir, path, bodies, hashes) = journal_fixture(4, "pj-empty");
+        let journal = pending_journal_path(&path);
+        std::fs::write(&journal, b"PBJ-not-a-record").unwrap();
+        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
+        assert!(store.pending.lock().unwrap().is_empty());
+        assert!(!journal.exists());
+        // and the store is untouched: all four frames serve
+        store.spawn_build(None);
+        wait_ready(&store);
+        assert!(store.block_by_hash(&hashes[3]).unwrap().is_some());
+        assert_eq!(bodies.len(), 4);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

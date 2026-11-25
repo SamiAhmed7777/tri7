@@ -844,6 +844,15 @@ const RECENT_CAP: usize = 4000;
 /// follow loop can still repair before the rollback branch would fire.
 const GAP_TAIL_MAX: u64 = 32; // walk at most this many heights below the tip
 const GAP_ROLLBACK_TICKS: u32 = 20; // consecutive unresolved ticks (30s each)
+/// (item 49) ARCHIVE AUDIT. The tail walk only sees the last `GAP_TAIL_MAX`
+/// heights. A body lost below that band was never requested again: DNS3
+/// carried a hole at h2219461 for 3+ hours while its chain grew 70 blocks
+/// above it. The audit sweeps the rest of the window, newest first, at most
+/// this many heights per tick.
+const GAP_AUDIT_PER_TICK: u64 = 1024;
+/// (item 49) an interior hole no peer has served for this many ticks stops
+/// holding the sweep up (it is requested again on every later pass)
+const GAP_INTERIOR_TICKS: u32 = 20;
 
 #[derive(Default)]
 struct GapState {
@@ -857,6 +866,33 @@ struct GapState {
     filled_from: Option<String>,
     /// set when the rollback branch fired (height rolled back to)
     rolled_back_to: Option<u64>,
+    /// (item 49) the outstanding hole is an INTERIOR one, below the tail
+    /// walk's band: the chain continues above it, so it must never take the
+    /// phantom-tip rollback branch
+    interior: bool,
+    /// (item 49) archive-audit cursor: where the sweep in progress resumes
+    /// (None = at the top, just under the tail band). Heights go newest first.
+    audit_at: Option<u64>,
+    /// (item 49) completed sweeps of the window below the tail band
+    audit_sweeps: u32,
+    /// (item 49) holes found by the sweep in progress
+    audit_found: u32,
+    /// (item 49) heights of interior holes already reported once (bounded);
+    /// a re-find is served quietly instead of being logged as new
+    audit_seen: Vec<u64>,
+}
+
+/// (item 49) What one pass of the archive audit did.
+#[derive(Default)]
+struct AuditPass {
+    /// the LOWEST height of this pass whose body is nowhere local
+    hole: Option<(u64, Hash)>,
+    /// heights examined
+    checked: u64,
+    /// cached-but-unwritten bodies appended to the store
+    repaired: u32,
+    /// the pass ran down to the window base: it covered the whole range
+    wrapped: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2453,8 +2489,7 @@ fn gap_find_missing(
     threaded_tip: Option<u64>,
 ) -> Option<(u64, Hash)> {
     let tip = stg.tip_height;
-    let from_thread = threaded_tip.map_or(tip.saturating_sub(GAP_TAIL_MAX), |t| t + 1);
-    let lower = from_thread.max(tip.saturating_sub(GAP_TAIL_MAX));
+    let lower = gap_tail_lower(stg, threaded_tip);
     for h in lower..=tip {
         let Some(e) = stg.entry_abs(h) else { continue };
         let hash = e.hash;
@@ -2465,6 +2500,134 @@ fn gap_find_missing(
         return Some((h, hash));
     }
     None
+}
+
+/// First height the tail walk (`gap_find_missing`) owns; everything below it
+/// is the archive audit's range.
+fn gap_tail_lower(stg: &ChainState, threaded_tip: Option<u64>) -> u64 {
+    let from_thread =
+        threaded_tip.map_or(stg.tip_height.saturating_sub(GAP_TAIL_MAX), |t| t + 1);
+    from_thread.max(stg.tip_height.saturating_sub(GAP_TAIL_MAX))
+}
+
+/// (item 49) A canonical height whose body is not in the store may still be
+/// in the recent cache: the block handler caches raw bytes BEFORE validation
+/// and with height 0 for any body that does not extend the tip (a peer
+/// pushing an old block), and nothing then appends it — DNS3 held h2219489
+/// and h2219490 exactly that way. Append it now, but only after the same
+/// hash + link + merkle check a peer-served gap fill passes: the cache is
+/// unvalidated. `Ok(true)` = written; `Ok(false)` = nothing is cached under
+/// this hash; `Err` = the cached bytes are not this slot's block (never
+/// written).
+fn gap_append_cached(
+    stg: &ChainState,
+    store: &Arc<BlockStore>,
+    recent: &RecentBlocks,
+    h: u64,
+    hash: &Hash,
+) -> Result<bool, String> {
+    let Some((_, payload)) = recent.get(hash) else {
+        return Ok(false);
+    };
+    let mut r = Reader::new(payload);
+    let b = Block::read(&mut r).map_err(|e| format!("cached body parse: {}", e))?;
+    r.expect_done()
+        .map_err(|e| format!("cached body trailing bytes: {}", e))?;
+    gap_fill_valid(&b, h, hash, stg)?;
+    store.append_block(payload, Some(h))?;
+    Ok(true)
+}
+
+/// (item 49) Append every TAIL-band body that is cached but not on disk (see
+/// `gap_append_cached`). Runs each tick BEFORE the tail walk: a body the
+/// recent cache was masking from `gap_find_missing` is in the store the same
+/// tick. Returns how many were written.
+fn gap_repair_cached_tail(
+    stg: &ChainState,
+    store: &Arc<BlockStore>,
+    recent: &RecentBlocks,
+    threaded_tip: Option<u64>,
+) -> u32 {
+    let lower = gap_tail_lower(stg, threaded_tip);
+    let mut repaired = 0u32;
+    for h in lower..=stg.tip_height {
+        let Some(e) = stg.entry_abs(h) else { continue };
+        let on_disk = store
+            .block_by_hash(&e.hash)
+            .map(|v| v.is_some())
+            .unwrap_or(false);
+        if on_disk {
+            continue;
+        }
+        // Err = the cached bytes are not this slot's block: the tail walk
+        // right after requests the real one from a peer
+        if gap_append_cached(stg, store, recent, h, &e.hash).unwrap_or(false) {
+            repaired += 1;
+            log(&format!(
+                "archive audit: h{} {} was cached but not in the store — appended",
+                h,
+                tri7_core::p2p::internal_to_display(&e.hash)
+            ));
+        }
+    }
+    repaired
+}
+
+/// (item 49) One pass of the ARCHIVE AUDIT: the window BELOW the tail walk's
+/// band, newest first from `cursor`, at most `budget` heights. A canonical
+/// height whose body is neither on disk nor validly cached is a hole; the
+/// pass reports the lowest one it saw (the sweep continues past it and
+/// re-finds it on every later pass until a peer serves it). A cached body
+/// that passes `gap_append_cached` is written on the spot and counted.
+///
+/// `below` is the tail band's first height (exclusive top of this range);
+/// the pass runs down to the window base and then wraps (`wrapped`), with
+/// the cursor back at the top.
+fn gap_audit_interior(
+    stg: &ChainState,
+    store: &Arc<BlockStore>,
+    recent: &RecentBlocks,
+    below: u64,
+    cursor: &mut Option<u64>,
+    budget: u64,
+) -> AuditPass {
+    let mut pass = AuditPass::default();
+    let base = stg.base;
+    // newest first: the next height examined is `next - 1`
+    let mut next = cursor.map_or(below, |c| c).min(below).max(base + 1);
+    loop {
+        if next <= base || pass.checked >= budget {
+            break;
+        }
+        let h = next - 1;
+        pass.checked += 1;
+        if let Some(e) = stg.entry_abs(h) {
+            let on_disk = store
+                .block_by_hash(&e.hash)
+                .map(|v| v.is_some())
+                .unwrap_or(false);
+            if !on_disk {
+                match gap_append_cached(stg, store, recent, h, &e.hash) {
+                    Ok(true) => {
+                        pass.repaired += 1;
+                        log(&format!(
+                            "archive audit: h{} {} was cached but not in the store — appended",
+                            h,
+                            tri7_core::p2p::internal_to_display(&e.hash)
+                        ));
+                    }
+                    _ => pass.hole = Some((h, e.hash)),
+                }
+            }
+        }
+        next = h;
+        if h == base {
+            pass.wrapped = true;
+            break;
+        }
+    }
+    *cursor = if pass.wrapped { None } else { Some(next) };
+    pass
 }
 
 /// Roll tipstate back one height (branch b): the phantom tip's body exists on
@@ -13692,18 +13855,33 @@ fn handle_message(
                                         recent.insert(hash, gh, &msg.payload);
                                         stats.gap_filled += 1;
                                         let mut g = gap.lock().unwrap();
+                                        let interior = g.interior;
                                         g.filled_from = Some(peer.label.clone());
                                         g.missing = None;
                                         g.since = None;
                                         g.ticks_failed = 0;
-                                        log(&format!(
-                                            "GAP RECOVERY: body for h{} {} appended to the store from {} — tail complete",
-                                            gh,
-                                            tri7_core::p2p::internal_to_display(&hash),
-                                            peer.label
-                                        ));
+                                        g.interior = false;
+                                        g.audit_seen.retain(|x| *x != gh);
+                                        // the tail line's text is unchanged:
+                                        // deploy checks match on it
+                                        let line = if interior {
+                                            format!(
+                                                "GAP RECOVERY: interior archive hole filled — body for h{} {} appended to the store from {}",
+                                                gh,
+                                                tri7_core::p2p::internal_to_display(&hash),
+                                                peer.label
+                                            )
+                                        } else {
+                                            format!(
+                                                "GAP RECOVERY: body for h{} {} appended to the store from {} — tail complete",
+                                                gh,
+                                                tri7_core::p2p::internal_to_display(&hash),
+                                                peer.label
+                                            )
+                                        };
+                                        log(&line);
                                         write_gap_marker(cfg, serde_json::json!({
-                                            "branch": "recovered_from_peer",
+                                            "branch": if interior { "interior_hole_filled_from_peer" } else { "recovered_from_peer" },
                                             "height": gh,
                                             "hash": tri7_core::p2p::internal_to_display(&hash),
                                             "from_peer": peer.label,
@@ -16559,35 +16737,127 @@ pub fn main_args(argv: &[String]) -> i32 {
             // would report every body as "missing" and spam getdata)
             if matches!(store.status(), StoreStatus::Ready { .. }) {
                 let threaded = store.threaded_tip();
+                // (item 49) The rollback branch below takes the chain lock
+                // with the gap lock held (gap → st), so the audit reads the
+                // gap state BEFORE the chain lock is taken, never under it.
+                let (busy, cursor) = {
+                    let g = gap_shared.lock().unwrap();
+                    (
+                        g.missing.is_some()
+                            && !(g.interior && g.ticks_failed > GAP_INTERIOR_TICKS),
+                        g.audit_at,
+                    )
+                };
+                let mut interior = false;
+                let mut audited: Option<(AuditPass, Option<u64>, u64, u64)> = None;
                 let found = {
                     let stg = st_shared.lock().unwrap();
-                    gap_find_missing(&stg, &store, &recent_shared.lock().unwrap(), threaded)
+                    let recent = recent_shared.lock().unwrap();
+                    // a tail body the recent cache holds but the store does
+                    // not is written before the walk can be masked by it
+                    gap_repair_cached_tail(&stg, &store, &recent, threaded);
+                    match gap_find_missing(&stg, &store, &recent, threaded) {
+                        tail @ Some(_) => tail,
+                        // an outstanding hole owns the tick: its fill is awaited
+                        None if busy => None,
+                        None => {
+                            let top = gap_tail_lower(&stg, threaded);
+                            let mut c = cursor;
+                            let pass = gap_audit_interior(
+                                &stg,
+                                &store,
+                                &recent,
+                                top,
+                                &mut c,
+                                GAP_AUDIT_PER_TICK,
+                            );
+                            let hole = pass.hole;
+                            interior = hole.is_some();
+                            audited = Some((pass, c, stg.base, top));
+                            hole
+                        }
+                    }
                 };
                 let mut gap = gap_shared.lock().unwrap();
+                if let Some((pass, cursor, base, top)) = audited {
+                    gap.audit_at = cursor;
+                    gap.audit_found += pass.hole.map_or(0, |_| 1);
+                    if pass.wrapped {
+                        gap.audit_sweeps += 1;
+                        // said on the first two passes, on every pass that
+                        // found something, and then every 64th: this line is
+                        // the operator's evidence that the archive is whole
+                        if gap.audit_sweeps <= 2
+                            || gap.audit_found > 0
+                            || gap.audit_sweeps % 64 == 0
+                        {
+                            log(&format!(
+                                "archive audit: sweep {} covered h{}..h{} below the tail band \
+                                 — {} hole(s) found, {} cached body/bodies written to the store{}",
+                                gap.audit_sweeps,
+                                base,
+                                top.saturating_sub(1),
+                                gap.audit_found,
+                                pass.repaired,
+                                if gap.audit_found == 0 {
+                                    " — no body missing below the tail band"
+                                } else {
+                                    ""
+                                }
+                            ));
+                        }
+                        gap.audit_found = 0;
+                    }
+                }
                 match found {
                     None => {
                         if gap.missing.is_some() {
-                            log("gap recovery: window tail complete — no missing bodies");
+                            log(if gap.interior {
+                                "gap recovery: interior archive hole resolved — no missing bodies"
+                            } else {
+                                "gap recovery: window tail complete — no missing bodies"
+                            });
                         }
                         gap.missing = None;
                         gap.since = None;
                         gap.ticks_failed = 0;
+                        gap.interior = false;
                     }
                     Some((h, hash)) => {
                         stats.gap_ticks += 1;
                         if gap.missing != Some((h, hash)) {
-                            log(&format!(
-                                "GAP RECOVERY: tail body missing h{} {} — requesting \
-                                 getdata(MSG_BLOCK) from every peer (rollback to h{} after \
-                                 {} unresolved ticks)",
-                                h,
-                                tri7_core::p2p::internal_to_display(&hash),
-                                h.saturating_sub(1),
-                                GAP_ROLLBACK_TICKS
-                            ));
+                            // a re-found interior hole is served quietly: it
+                            // was reported when it was first seen
+                            let again = interior && gap.audit_seen.contains(&h);
+                            if !again {
+                                if interior {
+                                    log(&format!(
+                                        "GAP RECOVERY: interior archive hole h{} {} — the chain \
+                                         continues above it; requesting getdata(MSG_BLOCK) from \
+                                         every peer",
+                                        h,
+                                        tri7_core::p2p::internal_to_display(&hash)
+                                    ));
+                                    gap.audit_seen.push(h);
+                                    if gap.audit_seen.len() > 64 {
+                                        gap.audit_seen.remove(0);
+                                    }
+                                } else {
+                                    log(&format!(
+                                        "GAP RECOVERY: tail body missing h{} {} — requesting \
+                                         getdata(MSG_BLOCK) from every peer (rollback to h{} after \
+                                         {} unresolved ticks)",
+                                        h,
+                                        tri7_core::p2p::internal_to_display(&hash),
+                                        h.saturating_sub(1),
+                                        GAP_ROLLBACK_TICKS
+                                    ));
+                                }
+                                gap.since = Some(Instant::now());
+                                gap.ticks_failed = 0;
+                            }
                             gap.missing = Some((h, hash));
-                            gap.since = Some(Instant::now());
-                            gap.ticks_failed = 0;
+                            gap.interior = interior;
                         }
                         let body =
                             tri7_core::p2p::build_getdata(&[(tri7_core::p2p::MSG_BLOCK, hash)]);
@@ -16610,16 +16880,28 @@ pub fn main_args(argv: &[String]) -> i32 {
                         }
                         stats.gap_requests += 1;
                         gap.ticks_failed += 1;
-                        log(&format!(
-                            "gap: getdata for h{} sent to {} peer(s), unfilled ticks {}/{}",
-                            h, sent, gap.ticks_failed, GAP_ROLLBACK_TICKS
-                        ));
+                        if !gap.interior {
+                            log(&format!(
+                                "gap: getdata for h{} sent to {} peer(s), unfilled ticks {}/{}",
+                                h, sent, gap.ticks_failed, GAP_ROLLBACK_TICKS
+                            ));
+                        } else if gap.ticks_failed <= GAP_INTERIOR_TICKS
+                            || gap.ticks_failed % 120 == 0
+                        {
+                            log(&format!(
+                                "gap: getdata for h{} (interior archive hole) sent to {} peer(s), \
+                                 unfilled ticks {} — the audit sweep resumes at {}",
+                                h, sent, gap.ticks_failed, GAP_INTERIOR_TICKS
+                            ));
+                        }
                         // ---- branch (b): the phantom tip ------------------
                         // only when the missing body IS the tip, the store
                         // threads exactly one below it, and the gap outlived
-                        // every peer's chance to serve it
+                        // every peer's chance to serve it. An interior hole
+                        // is never the tip: the chain continues above it.
                         let tip_now = st_shared.lock().unwrap().tip_height;
-                        if h == tip_now
+                        if !gap.interior
+                            && h == tip_now
                             && gap.ticks_failed >= GAP_ROLLBACK_TICKS
                             && threaded == Some(tip_now - 1)
                         {
@@ -21289,6 +21571,161 @@ mod tests {
         let h = stg.entry_abs(105).unwrap().hash;
         recent.insert(h, 105, b"pretend-body");
         assert_eq!(gap_find_missing(&stg, &store, &recent, Some(104)), None);
+    }
+
+    // ---- item 49: the archive audit below the tail band --------------------
+
+    /// A ready store built from `n` chained blocks with the bodies at
+    /// `absent` left out of the file, plus a chain window whose entries ARE
+    /// those blocks (real hashes and links). Returns (dir, store, window,
+    /// blocks). The dir must outlive the store: its drop deletes the file.
+    fn audited_store(
+        tag: &str,
+        n: u64,
+        absent: &[u64],
+    ) -> (
+        crate::testsupport::TestDir,
+        Arc<BlockStore>,
+        ChainState,
+        Vec<Block>,
+    ) {
+        let dir = crate::testsupport::test_dir(tag);
+        let path = dir.join("blk.dat");
+        let mut blocks = Vec::new();
+        let mut frames = Vec::new();
+        let mut hashes = Vec::new();
+        let mut prev = [0u8; 32];
+        for i in 0..n {
+            let b = bin_block(prev, 0x11 + i as u8);
+            prev = b.hash();
+            if !absent.contains(&i) {
+                frames.extend_from_slice(&bin_frame(&b));
+            }
+            hashes.push(b.hash());
+            blocks.push(b);
+        }
+        std::fs::write(&path, &frames).unwrap();
+        let store = tri7_core::blockindex::BlockStore::new(Some(path), Some(dir.join("idx")));
+        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
+            base: 0,
+            hashes: hashes.clone(),
+            tip: n - 1,
+        }));
+        wait_store_ready(&store);
+        let mut stg = synthetic_chain(0, n - 1);
+        for (i, b) in blocks.iter().enumerate() {
+            stg.entries[i].hash = b.hash();
+            stg.entries[i].prev_hash = b.prev_hash;
+        }
+        stg.tip_hash = hashes[n as usize - 1];
+        (dir, store, stg, blocks)
+    }
+
+    /// The DNS3 shape (2026-11-25): the chain kept growing above bodies that
+    /// never reached the file. Below the tail band the audit must (a) WRITE a
+    /// body the recent cache holds but never appended — the block handler
+    /// caches raw bytes before validation, with height 0, for any body that
+    /// does not extend the tip — and (b) report a height whose body is
+    /// nowhere local, the lowest first.
+    #[test]
+    fn archive_audit_finds_the_interior_hole_and_writes_a_cached_body() {
+        // 10 blocks; the bodies of h2, h5 and h8 never reached the file
+        let (_dir, store, stg, blocks) = audited_store("tri7-audit", 10, &[2, 5, 8]);
+        assert!(store.block_by_hash(&blocks[2].hash()).unwrap().is_none());
+        let mut recent = RecentBlocks::new();
+        recent.insert(blocks[5].hash(), 0, &bin_frame(&blocks[5])[8..]);
+        recent.insert(blocks[8].hash(), 0, &bin_frame(&blocks[8])[8..]);
+
+        // pass 1 over h0..h6 (the tail band is h7..h9): h5 is written from
+        // the cache, h2 is nowhere and is reported
+        let mut cursor = None;
+        let pass = gap_audit_interior(&stg, &store, &recent, 7, &mut cursor, 1024);
+        assert_eq!(
+            pass.hole,
+            Some((2, blocks[2].hash())),
+            "the lowest height whose body is nowhere local"
+        );
+        assert_eq!(pass.repaired, 1, "a valid cached body is written, not requested");
+        assert_eq!(pass.checked, 7);
+        assert!(pass.wrapped, "the pass ran down to the window base");
+        assert!(cursor.is_none(), "…and the next sweep starts at the top again");
+        let hit = store
+            .block_by_hash(&blocks[5].hash())
+            .unwrap()
+            .expect("h5 is on disk now");
+        assert_eq!(hit.hash, blocks[5].hash());
+
+        // pass 2: h5 is on disk; only h2 is still a hole
+        let pass = gap_audit_interior(&stg, &store, &recent, 7, &mut cursor, 1024);
+        assert_eq!(pass.hole.map(|(h, _)| h), Some(2));
+        assert_eq!(pass.repaired, 0);
+
+        // the tail band: the recent cache MASKS h8 from the tail walk, and
+        // nothing else ever appended it
+        assert_eq!(gap_find_missing(&stg, &store, &recent, Some(6)), None);
+        assert!(store.block_by_hash(&blocks[8].hash()).unwrap().is_none());
+        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, Some(6)), 1);
+        assert!(store.block_by_hash(&blocks[8].hash()).unwrap().is_some());
+        // nothing left to write
+        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, Some(6)), 0);
+    }
+
+    /// The sweep is paced (a bounded number of heights per tick), resumes
+    /// where it stopped, and wraps to the top once it reaches the window
+    /// base — so the whole range below the tail band is covered.
+    #[test]
+    fn archive_audit_paces_the_sweep_and_wraps_to_the_top() {
+        // holes at h4 and h0 tell exactly which heights each pass examined
+        let (_dir, store, stg, blocks) = audited_store("tri7-audit-pace", 10, &[4, 0]);
+        let recent = RecentBlocks::new();
+        let mut cursor = None;
+        // four passes of at most three, newest first: h9..h7 | h6..h4 | h3..h1 | h0
+        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
+        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(7), false));
+        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
+        assert_eq!(
+            (pass.checked, pass.hole.map(|(h, _)| h), cursor, pass.wrapped),
+            (3, Some(4), Some(4), false)
+        );
+        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
+        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(1), false));
+        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
+        assert_eq!(
+            (pass.checked, pass.hole.map(|(h, _)| h), cursor, pass.wrapped),
+            (1, Some(0), None, true)
+        );
+        // the sweep wrote nothing and reported every height: only the two
+        // absent bodies are missing
+        for (i, b) in blocks.iter().enumerate() {
+            let on_disk = store.block_by_hash(&b.hash()).unwrap().is_some();
+            assert_eq!(on_disk, i != 4 && i != 0, "h{i}");
+        }
+        // the next sweep starts over at the top
+        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
+        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(7), false));
+    }
+
+    /// The recent cache is UNVALIDATED. A body cached under a missing
+    /// height's hash that is not that height's block (a stale-branch sibling,
+    /// a mis-keyed entry) must be treated as a hole, never written.
+    #[test]
+    fn archive_audit_never_writes_a_cached_body_that_is_not_the_chain_s() {
+        let (_dir, store, stg, blocks) = audited_store("tri7-audit-stale", 10, &[5]);
+        // a sibling of h5: same parent, different body
+        let stale = bin_block(blocks[4].hash(), 0xEE);
+        assert_ne!(stale.hash(), blocks[5].hash());
+        let mut recent = RecentBlocks::new();
+        recent.insert(blocks[5].hash(), 5, &bin_frame(&stale)[8..]);
+
+        assert_eq!(gap_find_missing(&stg, &store, &recent, None), None, "the tail walk is masked by the cache");
+        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, None), 0);
+        let mut cursor = None;
+        // the audit's range is everything below h6: h5 is its first height
+        let pass = gap_audit_interior(&stg, &store, &recent, 6, &mut cursor, 1024);
+        assert_eq!(pass.hole.map(|(h, _)| h), Some(5), "reported as a hole");
+        assert_eq!(pass.repaired, 0);
+        assert!(store.block_by_hash(&blocks[5].hash()).unwrap().is_none());
+        assert!(store.block_by_hash(&stale.hash()).unwrap().is_none(), "the stale body itself is never written");
     }
 
     // ---- LIVE-STORE TEST SERIALIZATION (lock + reset) ----

@@ -1,0 +1,1111 @@
+diff --git a/src/blockindex.rs b/src/blockindex.rs
+index 1190601..eaa1864 100644
+--- a/src/blockindex.rs
++++ b/src/blockindex.rs
+@@ -974,6 +974,16 @@ pub struct BlockStore {
+     /// 30µs each), so a restart-time rebuild buffer made appends crawl at
+     /// ~11 blk/s and degrade linearly (measured live on DNS3).
+     pending_keys: std::sync::Mutex<std::collections::HashSet<Hash>>,
++    /// (item 49) `<blocks file>.pending` — the crash journal of `pending`:
++    /// every buffered body is written here and fsynced before `append_block`
++    /// returns, and read back on the next open. The buffer used to be RAM
++    /// only, so a process killed between "accepted during the build" and "the
++    /// next append flushed it" lost the body and left a permanent archive
++    /// hole under a chain that continued above it (DNS3, 2026-11-25: every
++    /// `systemctl stop` of tri7d runs to the 90 s stop timeout and is
++    /// SIGKILLed — h2219461, h2219472, h2219489, h2219490). None when the
++    /// store has no file (in-memory stores).
++    journal_path: Option<PathBuf>,
+     /// Chain-slot overlay: height → the block hash the LIVE chain holds at
+     /// that height (see `set_chain_slot`). Height lookups prefer this over
+     /// the frozen build-time height map and the first-arrival appendix scan:
+@@ -1136,8 +1146,122 @@ fn log_resync(from: u64, to: u64) {
+     }
+ }
+ 
++/// (item 49) Crash journal for bodies buffered while the index builds:
++/// `<blocks file>.pending`. One record per body, appended and fsynced before
++/// `append_block` returns:
++/// `[u32 LE magic][u32 LE body_len][u64 LE height | NONE][32-byte header hash][body]`.
++/// Deleted once every buffered body is in the blocks file.
++const PENDING_JOURNAL_MAGIC: u32 = 0x334A_4250; // "PBJ3"
++const PENDING_JOURNAL_NO_HEIGHT: u64 = u64::MAX;
++const PENDING_JOURNAL_HEAD: usize = 4 + 4 + 8 + 32;
++
++fn pending_journal_path(blocks: &Path) -> PathBuf {
++    let mut s = blocks.as_os_str().to_os_string();
++    s.push(".pending");
++    PathBuf::from(s)
++}
++
++fn pending_journal_encode(body: &[u8], height: Option<u64>, hash: &Hash) -> Vec<u8> {
++    let mut r = Vec::with_capacity(PENDING_JOURNAL_HEAD + body.len());
++    r.extend_from_slice(&PENDING_JOURNAL_MAGIC.to_le_bytes());
++    r.extend_from_slice(&(body.len() as u32).to_le_bytes());
++    r.extend_from_slice(&height.unwrap_or(PENDING_JOURNAL_NO_HEIGHT).to_le_bytes());
++    r.extend_from_slice(hash);
++    r.extend_from_slice(body);
++    r
++}
++
++/// Decode the complete, hash-verified prefix of a journal. The first record
++/// that is torn (a kill mid-write), has a foreign magic, an impossible
++/// length, or a body whose header hash is not the recorded one ends the scan;
++/// `valid_len` is the offset where the file must be cut.
++fn pending_journal_decode(buf: &[u8]) -> (Vec<(Vec<u8>, Option<u64>)>, usize) {
++    let mut out = Vec::new();
++    let mut pos = 0usize;
++    while buf.len() - pos >= PENDING_JOURNAL_HEAD {
++        if buf[pos..pos + 4] != PENDING_JOURNAL_MAGIC.to_le_bytes() {
++            break;
++        }
++        let len = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().unwrap()) as usize;
++        if len == 0 || len > MAX_FRAME {
++            break;
++        }
++        let end = PENDING_JOURNAL_HEAD + len + pos;
++        if end > buf.len() {
++            break;
++        }
++        let height = u64::from_le_bytes(buf[pos + 8..pos + 16].try_into().unwrap());
++        let hash: Hash = buf[pos + 16..pos + 48].try_into().unwrap();
++        let body = &buf[pos + PENDING_JOURNAL_HEAD..end];
++        if header_hash(body).map(|h| h != hash).unwrap_or(true) {
++            break;
++        }
++        out.push((
++            body.to_vec(),
++            if height == PENDING_JOURNAL_NO_HEIGHT {
++                None
++            } else {
++                Some(height)
++            },
++        ));
++        pos = end;
++    }
++    (out, pos)
++}
++
+ impl BlockStore {
+     pub fn new(path: Option<PathBuf>, cache_dir: Option<PathBuf>) -> Arc<BlockStore> {
++        let journal_path = path.as_ref().map(|p| pending_journal_path(p));
++        // (item 49) take back what a killed predecessor journaled, BEFORE any
++        // consumer can buffer a body — the dedupe set already holds those
++        // hashes. They land in the blocks file when the index is ready.
++        let (mut pending, mut pending_keys) = (Vec::new(), std::collections::HashSet::new());
++        if let Some(jp) = &journal_path {
++            match std::fs::read(jp) {
++                Ok(buf) => {
++                    let (records, valid_len) = pending_journal_decode(&buf);
++                    let torn = buf.len() - valid_len;
++                    if torn > 0 {
++                        eprintln!(
++                            "[blockidx] pending journal {}: torn or corrupt tail of {} byte(s) after {} complete record(s) — cut",
++                            jp.display(),
++                            torn,
++                            records.len()
++                        );
++                        match std::fs::OpenOptions::new().write(true).open(jp) {
++                            Ok(f) => {
++                                if let Err(e) = f.set_len(valid_len as u64) {
++                                    eprintln!("[blockidx] pending journal {}: cut failed: {}", jp.display(), e);
++                                }
++                            }
++                            Err(e) => eprintln!("[blockidx] pending journal {}: reopen failed: {}", jp.display(), e),
++                        }
++                    }
++                    for (body, height) in records {
++                        if let Ok(h) = header_hash(&body) {
++                            if pending_keys.insert(h) {
++                                pending.push((body, height));
++                            }
++                        }
++                    }
++                    if pending.is_empty() {
++                        // nothing recoverable: the file must not outlive its records
++                        let _ = std::fs::remove_file(jp);
++                    } else {
++                        eprintln!(
++                            "[blockidx] pending journal: {} body/bodies recovered from a killed predecessor — they land in the blocks file when the index is ready",
++                            pending.len()
++                        );
++                    }
++                }
++                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
++                Err(e) => eprintln!(
++                    "[blockidx] pending journal {}: unreadable ({}); its bodies cannot be recovered",
++                    jp.display(),
++                    e
++                ),
++            }
++        }
+         Arc::new(BlockStore {
+             path,
+             cache_dir,
+@@ -1145,8 +1269,9 @@ impl BlockStore {
+             progress_frames: AtomicU64::new(0),
+             started: Instant::now(),
+             failure: RwLock::new(None),
+-            pending: std::sync::Mutex::new(Vec::new()),
+-            pending_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
++            pending: std::sync::Mutex::new(pending),
++            pending_keys: std::sync::Mutex::new(pending_keys),
++            journal_path,
+             chain_slots: std::sync::RwLock::new(std::collections::HashMap::new()),
+             chain_tip: std::sync::Mutex::new(None),
+             stale_slot_hits: std::sync::atomic::AtomicU64::new(0),
+@@ -1350,7 +1475,7 @@ impl BlockStore {
+                             started.elapsed().as_secs(),
+                             fork_note
+                         );
+-                        let inner = StoreInner {
++                        let inner = Arc::new(StoreInner {
+                             blocks: b.blocks,
+                             txs: b.txs,
+                             heights_ok: b.heights_ok,
+@@ -1364,8 +1489,17 @@ impl BlockStore {
+                             writable: std::sync::atomic::AtomicBool::new(writable),
+                             torn_tail: std::sync::Mutex::new(b.torn_tail),
+                             append_lock: std::sync::Mutex::new(()),
+-                        };
+-                        *self.state.write().unwrap() = Some(Arc::new(inner));
++                        });
++                        // (item 49) land the buffered/journaled bodies BEFORE
++                        // the store publishes Ready, and once more right after
++                        // (a body an accept buffered while it still saw
++                        // "building"). Until this the drain ran only on the
++                        // NEXT append — which a node at the chain tip may not
++                        // see for minutes — so a restart in between lost the
++                        // tail of the journal all over again.
++                        self.flush_pending(&inner);
++                        *self.state.write().unwrap() = Some(Arc::clone(&inner));
++                        self.flush_pending(&inner);
+                     }
+                     Err(e) => {
+                         *self.failure.write().unwrap() = Some(e);
+@@ -1556,8 +1690,20 @@ impl BlockStore {
+ 
+     pub fn block_by_hash(&self, hash: &Hash) -> Result<Option<BlockHit>, String> {
+         let inner = self.inner().ok_or("block index not ready")?;
++        self.block_by_hash_in(&inner, hash)
++    }
++
++    /// `block_by_hash` against an explicit store. (item 49) The drain of the
++    /// bodies buffered during the build runs against the freshly built store
++    /// BEFORE it is published; through `self.inner()` (still None there) every
++    /// body would have read "not on disk" and the lookup itself errored.
++    fn block_by_hash_in(
++        &self,
++        inner: &Arc<StoreInner>,
++        hash: &Hash,
++    ) -> Result<Option<BlockHit>, String> {
+         for e in inner.blocks.candidates_by_key(key8(hash)) {
+-            let body = Self::read_frame(&inner, e.off)?;
++            let body = Self::read_frame(inner, e.off)?;
+             let h = header_hash(&body)?;
+             if &h != hash {
+                 continue; // truncated-key collision — keep scanning candidates
+@@ -1583,7 +1729,7 @@ impl BlockStore {
+             if idx < a.len() {
+                 let f = a[idx].clone();
+                 if f.key == key {
+-                    let body = Self::read_frame(&inner, f.off)?;
++                    let body = Self::read_frame(inner, f.off)?;
+                     let h = header_hash(&body)?;
+                     if &h == hash {
+                         let block = Self::parse_frame(&body)?;
+@@ -1604,7 +1750,7 @@ impl BlockStore {
+             if f.key != key8(hash) {
+                 continue;
+             }
+-            let body = Self::read_frame(&inner, f.off)?;
++            let body = Self::read_frame(inner, f.off)?;
+             let h = header_hash(&body)?;
+             if &h != hash {
+                 continue;
+@@ -2090,10 +2236,11 @@ impl BlockStore {
+         let inner = match self.inner() {
+             Some(i) => i,
+             None => {
+-                // Index still building: buffer the body, flush on ready. The
+-                // frame is durable in RAM only until then — same assumption
+-                // the recent-blocks cache makes — but NOTHING is lost to the
+-                // disk store once the build lands.
++                // Index still building: buffer the body and journal it
++                // (item 49, `<blocks file>.pending`), flush on ready. Until
++                // item 49 the frame lived in RAM only until the build landed,
++                // and a kill in between left a permanent archive hole under a
++                // chain that kept growing.
+                 let hash = header_hash(body)?;
+                 let mut p = self.pending.lock().unwrap();
+                 let mut keys = self.pending_keys.lock().unwrap();
+@@ -2101,6 +2248,10 @@ impl BlockStore {
+                     return Ok(hash); // already buffered
+                 }
+                 p.push((body.to_vec(), height));
++                // (item 49) the frame is in RAM only until the build lands —
++                // journal it now, under the buffer lock, so a kill in between
++                // leaves a record the next open recovers instead of a hole.
++                self.pending_journal_append(body, height, &hash);
+                 return Ok(hash);
+             }
+         };
+@@ -2236,17 +2387,83 @@ impl BlockStore {
+ 
+     /// Drain bodies buffered during the index build into the now-ready store
+     /// (FIFO — same append path as direct appends, dedup via block_by_hash).
++    /// (item 49) Also called the moment the build lands (see `build`). Every
++    /// body is tried; one that cannot be written is dropped with its height
++    /// in the log — the follow loop's archive audit (item 49) re-fetches it
++    /// from a peer. The WHOLE drain holds the buffer lock, so an accept that
++    /// still saw "building" cannot journal a body into a file this drain is
++    /// about to delete: it waits, then buffers into a fresh journal.
+     fn flush_pending(&self, inner: &Arc<StoreInner>) {
+-        let drained: Vec<(Vec<u8>, Option<u64>)> = {
+-            let mut p = self.pending.lock().unwrap();
+-            let mut keys = self.pending_keys.lock().unwrap();
+-            keys.clear();
+-            std::mem::take(&mut *p)
+-        };
+-        for (body, height) in drained {
+-            if let Err(e) = self.append_ready(&inner, &body, height) {
+-                eprintln!("[blockidx] pending append flush failed: {}", e);
++        let mut p = self.pending.lock().unwrap();
++        if p.is_empty() {
++            return;
++        }
++        let mut keys = self.pending_keys.lock().unwrap();
++        if inner.writable.load(Ordering::SeqCst) {
++            let mut failed = 0usize;
++            for (body, height) in p.iter() {
++                if let Err(e) = self.append_ready(inner, body, *height) {
++                    failed += 1;
++                    eprintln!(
++                        "[blockidx] pending append flush failed (h{:?}): {}",
++                        height, e
++                    );
++                }
++            }
++            if failed > 0 {
++                eprintln!(
++                    "[blockidx] pending flush: {} of {} buffered body/bodies could not be written — the archive audit re-fetches them",
++                    failed,
++                    p.len()
++                );
+             }
++        } else {
++            eprintln!(
++                "[blockidx] pending flush: {} buffered body/bodies discarded — the blocks file is not writable",
++                p.len()
++            );
++        }
++        p.clear();
++        keys.clear();
++        self.pending_journal_remove();
++    }
++
++    /// (item 49) Append one record to the crash journal and fsync it. A write
++    /// failure leaves the body buffered in RAM only and says so — it never
++    /// fails the accept.
++    fn pending_journal_append(&self, body: &[u8], height: Option<u64>, hash: &Hash) {
++        let Some(jp) = &self.journal_path else { return };
++        let rec = pending_journal_encode(body, height, hash);
++        let wrote = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(jp)
++            .and_then(|mut f| {
++                f.write_all(&rec)?;
++                f.sync_all()
++            });
++        if let Err(e) = wrote {
++            eprintln!(
++                "[blockidx] pending journal {} write failed: {} — this body is buffered in RAM only until the index is ready",
++                jp.display(),
++                e
++            );
++        }
++    }
++
++    /// (item 49) The journal mirrors the buffer exactly: removed once the
++    /// buffer is empty (every body is in the blocks file or was dropped with
++    /// a log line).
++    fn pending_journal_remove(&self) {
++        let Some(jp) = &self.journal_path else { return };
++        match std::fs::remove_file(jp) {
++            Ok(()) => {}
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
++            Err(e) => eprintln!(
++                "[blockidx] pending journal {}: remove failed: {} (its records are already in the blocks file; the next open drops them as duplicates)",
++                jp.display(),
++                e
++            ),
+         }
+     }
+ 
+@@ -2258,7 +2475,8 @@ impl BlockStore {
+         height: Option<u64>,
+     ) -> Result<Hash, String> {
+         let hash = header_hash(body)?;
+-        if self.block_by_hash(&hash)?.is_some() {
++        // dedupe against THIS store (the drain may run before it is published)
++        if self.block_by_hash_in(inner, &hash)?.is_some() {
+             // already on disk. Its height CLAIM though follows the chain: a
+             // frame a rollback de-heighted that is accepted again must claim
+             // its height again — append is the accept path's only chance to
+@@ -3739,4 +3957,177 @@ mod tests {
+         assert_eq!(skipped, 2);
+         assert_eq!(&height_off[..5], &[10, 11, 300, 400, HEIGHT_GAP]);
+     }
++
++    // ---- item 49: crash journal for bodies buffered during the build ----
++
++    /// A blocks file holding the first `kept` blocks of a g→b1→b2→b3 chain.
++    /// Returns (dir, path, raw body of every block, hash of every block).
++    fn journal_fixture(
++        kept: usize,
++        tag: &str,
++    ) -> (crate::testsupport::TestDir, PathBuf, Vec<Vec<u8>>, Vec<Hash>) {
++        let dir = tmpdir(tag);
++        let path = dir.join("blk.dat");
++        let g = block([0xAA; 32], vec![coin_tx(vec![0x11], 5_000_000, vec![])]);
++        let b1 = block(g.hash(), vec![coin_tx(vec![0x22], 5_000_000, vec![])]);
++        let b2 = block(b1.hash(), vec![coin_tx(vec![0x33], 5_000_000, vec![])]);
++        let b3 = block(b2.hash(), vec![coin_tx(vec![0x44], 5_000_000, vec![])]);
++        let mut frames = Vec::new();
++        let mut bodies = Vec::new();
++        let mut hashes = Vec::new();
++        for (i, b) in [&g, &b1, &b2, &b3].iter().enumerate() {
++            let f = frame_bytes(b);
++            if i < kept {
++                frames.extend_from_slice(&f);
++            }
++            bodies.push(f[8..].to_vec());
++            hashes.push(b.hash());
++        }
++        std::fs::write(&path, &frames).unwrap();
++        (dir, path, bodies, hashes)
++    }
++
++    /// A process killed between accepting bodies and the index landing must
++    /// not lose them (DNS3, 2026-11-25: every stop ran to the 90 s timeout
++    /// and was SIGKILLed — h2219461, h2219472, h2219489, h2219490 never
++    /// reached the file). Each accepted body is journaled + fsynced, and the
++    /// NEXT open takes the records back before anything can buffer.
++    #[test]
++    fn pending_journal_survives_a_kill_and_the_next_open_lands_the_bodies() {
++        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-kill");
++        let journal = pending_journal_path(&path);
++        // process 1: the index never lands (no build is spawned), two bodies
++        // are accepted into the buffer, then the process is killed
++        {
++            let s1 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++            assert!(!journal.exists());
++            assert_eq!(s1.append_block(&bodies[2], Some(2)).unwrap(), hashes[2]);
++            // a duplicate accept is a no-op in the journal too
++            s1.append_block(&bodies[2], Some(2)).unwrap();
++            s1.append_block(&bodies[3], Some(3)).unwrap();
++            // the journal mirrors the buffer exactly: two records
++            let raw = std::fs::read(&journal).unwrap();
++            let expect: Vec<u8> = [
++                pending_journal_encode(&bodies[2], Some(2), &hashes[2]),
++                pending_journal_encode(&bodies[3], Some(3), &hashes[3]),
++            ]
++            .concat();
++            assert_eq!(raw, expect);
++        } // drop(s1) = the kill: no drain, no cleanup
++        assert!(journal.exists(), "the journal outlives the process");
++
++        // process 2: takes both records back the moment it opens
++        let s2 = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++        assert_eq!(s2.pending.lock().unwrap().len(), 2);
++        assert_eq!(s2.pending_keys.lock().unwrap().len(), 2);
++        assert!(s2.block_by_hash(&hashes[2]).is_err(), "still building");
++        s2.spawn_build(None);
++        wait_ready(&s2);
++        // no further append anywhere: the drain ran with the build
++        assert!(
++            s2.block_by_hash(&hashes[2]).unwrap().is_some(),
++            "journaled body 1 must be in the store the moment it is Ready"
++        );
++        assert!(s2.block_by_hash(&hashes[3]).unwrap().is_some());
++        assert!(s2.pending.lock().unwrap().is_empty());
++        assert!(
++            !journal.exists(),
++            "deleted once every buffered body is in the blocks file"
++        );
++
++        // restart proof: a full re-scan serves them from the file itself, and
++        // no journal reappears when there is nothing to recover. The oracle
++        // is what gives each frame its height, exactly as the live node's
++        // tipstate does.
++        let s3 = BlockStore::new(Some(path.clone()), Some(dir.join("idx3")));
++        s3.spawn_build(Some(BuildOracle {
++            base: 0,
++            hashes: hashes.clone(),
++            tip: 3,
++        }));
++        wait_ready(&s3);
++        assert_eq!(
++            s3.block_by_height(3).unwrap().map(|h| h.hash),
++            Some(hashes[3])
++        );
++        assert!(!journal.exists());
++        std::fs::remove_dir_all(&dir).ok();
++    }
++
++    /// The drain used to run only on the NEXT append after Ready — which a
++    /// node sitting at the chain tip may not see for minutes. A body buffered
++    /// during the build must be on disk as soon as the store is Ready.
++    #[test]
++    fn buffered_body_lands_when_the_build_lands_without_a_further_append() {
++        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-drain");
++        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++        assert_eq!(store.append_block(&bodies[2], Some(2)).unwrap(), hashes[2]);
++        store.append_block(&bodies[3], None).unwrap();
++        store.spawn_build(None);
++        wait_ready(&store);
++        assert!(store.block_by_hash(&hashes[2]).unwrap().is_some());
++        assert!(store.block_by_hash(&hashes[3]).unwrap().is_some());
++        assert!(store.pending.lock().unwrap().is_empty());
++        assert!(!pending_journal_path(&path).exists());
++        std::fs::remove_dir_all(&dir).ok();
++    }
++
++    /// A kill mid-write leaves a torn last record; a corrupt record's body
++    /// disagrees with the hash it was written with. Recovery keeps the
++    /// complete, hash-verified prefix, cuts everything after it, and replays
++    /// nothing it cannot verify.
++    #[test]
++    fn pending_journal_keeps_the_verified_prefix_and_cuts_the_rest() {
++        let (dir, path, bodies, hashes) = journal_fixture(2, "pj-torn");
++        let journal = pending_journal_path(&path);
++        let good = pending_journal_encode(&bodies[2], Some(2), &hashes[2]);
++        let mut corrupt = pending_journal_encode(&bodies[3], Some(3), &hashes[3]);
++        corrupt[PENDING_JOURNAL_HEAD + 40] ^= 0x01; // the body no longer hashes to its record
++        let torn = pending_journal_encode(&bodies[3], Some(3), &hashes[3]);
++        let mut raw = good.clone();
++        raw.extend_from_slice(&corrupt);
++        raw.extend_from_slice(&torn[..torn.len() - 5]);
++        std::fs::write(&journal, &raw).unwrap();
++
++        let (records, valid_len) = pending_journal_decode(&raw);
++        assert_eq!(records.len(), 1);
++        assert_eq!(valid_len, good.len(), "the cut is at the end of the verified prefix");
++        assert_eq!(records[0], (bodies[2].clone(), Some(2)));
++
++        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++        assert_eq!(
++            std::fs::metadata(&journal).unwrap().len(),
++            good.len() as u64,
++            "the corrupt tail is cut on open"
++        );
++        assert_eq!(store.pending.lock().unwrap().len(), 1);
++        store.spawn_build(None);
++        wait_ready(&store);
++        assert!(store.block_by_hash(&hashes[2]).unwrap().is_some());
++        assert!(
++            store.block_by_hash(&hashes[3]).unwrap().is_none(),
++            "a record that fails verification is never replayed"
++        );
++        assert!(!journal.exists());
++        std::fs::remove_dir_all(&dir).ok();
++    }
++
++    /// A journal with nothing verifiable in it must not outlive the open
++    /// that found it: left behind, it would be re-read (and re-logged) at
++    /// every start.
++    #[test]
++    fn pending_journal_with_nothing_verifiable_is_removed_on_open() {
++        let (dir, path, bodies, hashes) = journal_fixture(4, "pj-empty");
++        let journal = pending_journal_path(&path);
++        std::fs::write(&journal, b"PBJ-not-a-record").unwrap();
++        let store = BlockStore::new(Some(path.clone()), Some(dir.join("idx")));
++        assert!(store.pending.lock().unwrap().is_empty());
++        assert!(!journal.exists());
++        // and the store is untouched: all four frames serve
++        store.spawn_build(None);
++        wait_ready(&store);
++        assert!(store.block_by_hash(&hashes[3]).unwrap().is_some());
++        assert_eq!(bodies.len(), 4);
++        std::fs::remove_dir_all(&dir).ok();
++    }
+ }
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index e0bd1b1..d6f5d1e 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -844,6 +844,15 @@ const RECENT_CAP: usize = 4000;
+ /// follow loop can still repair before the rollback branch would fire.
+ const GAP_TAIL_MAX: u64 = 32; // walk at most this many heights below the tip
+ const GAP_ROLLBACK_TICKS: u32 = 20; // consecutive unresolved ticks (30s each)
++/// (item 49) ARCHIVE AUDIT. The tail walk only sees the last `GAP_TAIL_MAX`
++/// heights. A body lost below that band was never requested again: DNS3
++/// carried a hole at h2219461 for 3+ hours while its chain grew 70 blocks
++/// above it. The audit sweeps the rest of the window, newest first, at most
++/// this many heights per tick.
++const GAP_AUDIT_PER_TICK: u64 = 1024;
++/// (item 49) an interior hole no peer has served for this many ticks stops
++/// holding the sweep up (it is requested again on every later pass)
++const GAP_INTERIOR_TICKS: u32 = 20;
+ 
+ #[derive(Default)]
+ struct GapState {
+@@ -857,6 +866,33 @@ struct GapState {
+     filled_from: Option<String>,
+     /// set when the rollback branch fired (height rolled back to)
+     rolled_back_to: Option<u64>,
++    /// (item 49) the outstanding hole is an INTERIOR one, below the tail
++    /// walk's band: the chain continues above it, so it must never take the
++    /// phantom-tip rollback branch
++    interior: bool,
++    /// (item 49) archive-audit cursor: where the sweep in progress resumes
++    /// (None = at the top, just under the tail band). Heights go newest first.
++    audit_at: Option<u64>,
++    /// (item 49) completed sweeps of the window below the tail band
++    audit_sweeps: u32,
++    /// (item 49) holes found by the sweep in progress
++    audit_found: u32,
++    /// (item 49) heights of interior holes already reported once (bounded);
++    /// a re-find is served quietly instead of being logged as new
++    audit_seen: Vec<u64>,
++}
++
++/// (item 49) What one pass of the archive audit did.
++#[derive(Default)]
++struct AuditPass {
++    /// the LOWEST height of this pass whose body is nowhere local
++    hole: Option<(u64, Hash)>,
++    /// heights examined
++    checked: u64,
++    /// cached-but-unwritten bodies appended to the store
++    repaired: u32,
++    /// the pass ran down to the window base: it covered the whole range
++    wrapped: bool,
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -2453,8 +2489,7 @@ fn gap_find_missing(
+     threaded_tip: Option<u64>,
+ ) -> Option<(u64, Hash)> {
+     let tip = stg.tip_height;
+-    let from_thread = threaded_tip.map_or(tip.saturating_sub(GAP_TAIL_MAX), |t| t + 1);
+-    let lower = from_thread.max(tip.saturating_sub(GAP_TAIL_MAX));
++    let lower = gap_tail_lower(stg, threaded_tip);
+     for h in lower..=tip {
+         let Some(e) = stg.entry_abs(h) else { continue };
+         let hash = e.hash;
+@@ -2467,6 +2502,134 @@ fn gap_find_missing(
+     None
+ }
+ 
++/// First height the tail walk (`gap_find_missing`) owns; everything below it
++/// is the archive audit's range.
++fn gap_tail_lower(stg: &ChainState, threaded_tip: Option<u64>) -> u64 {
++    let from_thread =
++        threaded_tip.map_or(stg.tip_height.saturating_sub(GAP_TAIL_MAX), |t| t + 1);
++    from_thread.max(stg.tip_height.saturating_sub(GAP_TAIL_MAX))
++}
++
++/// (item 49) A canonical height whose body is not in the store may still be
++/// in the recent cache: the block handler caches raw bytes BEFORE validation
++/// and with height 0 for any body that does not extend the tip (a peer
++/// pushing an old block), and nothing then appends it — DNS3 held h2219489
++/// and h2219490 exactly that way. Append it now, but only after the same
++/// hash + link + merkle check a peer-served gap fill passes: the cache is
++/// unvalidated. `Ok(true)` = written; `Ok(false)` = nothing is cached under
++/// this hash; `Err` = the cached bytes are not this slot's block (never
++/// written).
++fn gap_append_cached(
++    stg: &ChainState,
++    store: &Arc<BlockStore>,
++    recent: &RecentBlocks,
++    h: u64,
++    hash: &Hash,
++) -> Result<bool, String> {
++    let Some((_, payload)) = recent.get(hash) else {
++        return Ok(false);
++    };
++    let mut r = Reader::new(payload);
++    let b = Block::read(&mut r).map_err(|e| format!("cached body parse: {}", e))?;
++    r.expect_done()
++        .map_err(|e| format!("cached body trailing bytes: {}", e))?;
++    gap_fill_valid(&b, h, hash, stg)?;
++    store.append_block(payload, Some(h))?;
++    Ok(true)
++}
++
++/// (item 49) Append every TAIL-band body that is cached but not on disk (see
++/// `gap_append_cached`). Runs each tick BEFORE the tail walk: a body the
++/// recent cache was masking from `gap_find_missing` is in the store the same
++/// tick. Returns how many were written.
++fn gap_repair_cached_tail(
++    stg: &ChainState,
++    store: &Arc<BlockStore>,
++    recent: &RecentBlocks,
++    threaded_tip: Option<u64>,
++) -> u32 {
++    let lower = gap_tail_lower(stg, threaded_tip);
++    let mut repaired = 0u32;
++    for h in lower..=stg.tip_height {
++        let Some(e) = stg.entry_abs(h) else { continue };
++        let on_disk = store
++            .block_by_hash(&e.hash)
++            .map(|v| v.is_some())
++            .unwrap_or(false);
++        if on_disk {
++            continue;
++        }
++        // Err = the cached bytes are not this slot's block: the tail walk
++        // right after requests the real one from a peer
++        if gap_append_cached(stg, store, recent, h, &e.hash).unwrap_or(false) {
++            repaired += 1;
++            log(&format!(
++                "archive audit: h{} {} was cached but not in the store — appended",
++                h,
++                tri7_core::p2p::internal_to_display(&e.hash)
++            ));
++        }
++    }
++    repaired
++}
++
++/// (item 49) One pass of the ARCHIVE AUDIT: the window BELOW the tail walk's
++/// band, newest first from `cursor`, at most `budget` heights. A canonical
++/// height whose body is neither on disk nor validly cached is a hole; the
++/// pass reports the lowest one it saw (the sweep continues past it and
++/// re-finds it on every later pass until a peer serves it). A cached body
++/// that passes `gap_append_cached` is written on the spot and counted.
++///
++/// `below` is the tail band's first height (exclusive top of this range);
++/// the pass runs down to the window base and then wraps (`wrapped`), with
++/// the cursor back at the top.
++fn gap_audit_interior(
++    stg: &ChainState,
++    store: &Arc<BlockStore>,
++    recent: &RecentBlocks,
++    below: u64,
++    cursor: &mut Option<u64>,
++    budget: u64,
++) -> AuditPass {
++    let mut pass = AuditPass::default();
++    let base = stg.base;
++    // newest first: the next height examined is `next - 1`
++    let mut next = cursor.map_or(below, |c| c).min(below).max(base + 1);
++    loop {
++        if next <= base || pass.checked >= budget {
++            break;
++        }
++        let h = next - 1;
++        pass.checked += 1;
++        if let Some(e) = stg.entry_abs(h) {
++            let on_disk = store
++                .block_by_hash(&e.hash)
++                .map(|v| v.is_some())
++                .unwrap_or(false);
++            if !on_disk {
++                match gap_append_cached(stg, store, recent, h, &e.hash) {
++                    Ok(true) => {
++                        pass.repaired += 1;
++                        log(&format!(
++                            "archive audit: h{} {} was cached but not in the store — appended",
++                            h,
++                            tri7_core::p2p::internal_to_display(&e.hash)
++                        ));
++                    }
++                    _ => pass.hole = Some((h, e.hash)),
++                }
++            }
++        }
++        next = h;
++        if h == base {
++            pass.wrapped = true;
++            break;
++        }
++    }
++    *cursor = if pass.wrapped { None } else { Some(next) };
++    pass
++}
++
+ /// Roll tipstate back one height (branch b): the phantom tip's body exists on
+ /// no reachable peer, so the EFFECTIVE network tip is tip-1 (whose window
+ /// entries are all present). Truncates entries/checksums/records, UNWINDS the
+@@ -13692,18 +13855,33 @@ fn handle_message(
+                                         recent.insert(hash, gh, &msg.payload);
+                                         stats.gap_filled += 1;
+                                         let mut g = gap.lock().unwrap();
++                                        let interior = g.interior;
+                                         g.filled_from = Some(peer.label.clone());
+                                         g.missing = None;
+                                         g.since = None;
+                                         g.ticks_failed = 0;
+-                                        log(&format!(
+-                                            "GAP RECOVERY: body for h{} {} appended to the store from {} — tail complete",
+-                                            gh,
+-                                            tri7_core::p2p::internal_to_display(&hash),
+-                                            peer.label
+-                                        ));
++                                        g.interior = false;
++                                        g.audit_seen.retain(|x| *x != gh);
++                                        // the tail line's text is unchanged:
++                                        // deploy checks match on it
++                                        let line = if interior {
++                                            format!(
++                                                "GAP RECOVERY: interior archive hole filled — body for h{} {} appended to the store from {}",
++                                                gh,
++                                                tri7_core::p2p::internal_to_display(&hash),
++                                                peer.label
++                                            )
++                                        } else {
++                                            format!(
++                                                "GAP RECOVERY: body for h{} {} appended to the store from {} — tail complete",
++                                                gh,
++                                                tri7_core::p2p::internal_to_display(&hash),
++                                                peer.label
++                                            )
++                                        };
++                                        log(&line);
+                                         write_gap_marker(cfg, serde_json::json!({
+-                                            "branch": "recovered_from_peer",
++                                            "branch": if interior { "interior_hole_filled_from_peer" } else { "recovered_from_peer" },
+                                             "height": gh,
+                                             "hash": tri7_core::p2p::internal_to_display(&hash),
+                                             "from_peer": peer.label,
+@@ -16559,35 +16737,127 @@ pub fn main_args(argv: &[String]) -> i32 {
+             // would report every body as "missing" and spam getdata)
+             if matches!(store.status(), StoreStatus::Ready { .. }) {
+                 let threaded = store.threaded_tip();
++                // (item 49) The rollback branch below takes the chain lock
++                // with the gap lock held (gap → st), so the audit reads the
++                // gap state BEFORE the chain lock is taken, never under it.
++                let (busy, cursor) = {
++                    let g = gap_shared.lock().unwrap();
++                    (
++                        g.missing.is_some()
++                            && !(g.interior && g.ticks_failed > GAP_INTERIOR_TICKS),
++                        g.audit_at,
++                    )
++                };
++                let mut interior = false;
++                let mut audited: Option<(AuditPass, Option<u64>, u64, u64)> = None;
+                 let found = {
+                     let stg = st_shared.lock().unwrap();
+-                    gap_find_missing(&stg, &store, &recent_shared.lock().unwrap(), threaded)
++                    let recent = recent_shared.lock().unwrap();
++                    // a tail body the recent cache holds but the store does
++                    // not is written before the walk can be masked by it
++                    gap_repair_cached_tail(&stg, &store, &recent, threaded);
++                    match gap_find_missing(&stg, &store, &recent, threaded) {
++                        tail @ Some(_) => tail,
++                        // an outstanding hole owns the tick: its fill is awaited
++                        None if busy => None,
++                        None => {
++                            let top = gap_tail_lower(&stg, threaded);
++                            let mut c = cursor;
++                            let pass = gap_audit_interior(
++                                &stg,
++                                &store,
++                                &recent,
++                                top,
++                                &mut c,
++                                GAP_AUDIT_PER_TICK,
++                            );
++                            let hole = pass.hole;
++                            interior = hole.is_some();
++                            audited = Some((pass, c, stg.base, top));
++                            hole
++                        }
++                    }
+                 };
+                 let mut gap = gap_shared.lock().unwrap();
++                if let Some((pass, cursor, base, top)) = audited {
++                    gap.audit_at = cursor;
++                    gap.audit_found += pass.hole.map_or(0, |_| 1);
++                    if pass.wrapped {
++                        gap.audit_sweeps += 1;
++                        // said on the first two passes, on every pass that
++                        // found something, and then every 64th: this line is
++                        // the operator's evidence that the archive is whole
++                        if gap.audit_sweeps <= 2
++                            || gap.audit_found > 0
++                            || gap.audit_sweeps % 64 == 0
++                        {
++                            log(&format!(
++                                "archive audit: sweep {} covered h{}..h{} below the tail band \
++                                 — {} hole(s) found, {} cached body/bodies written to the store{}",
++                                gap.audit_sweeps,
++                                base,
++                                top.saturating_sub(1),
++                                gap.audit_found,
++                                pass.repaired,
++                                if gap.audit_found == 0 {
++                                    " — no body missing below the tail band"
++                                } else {
++                                    ""
++                                }
++                            ));
++                        }
++                        gap.audit_found = 0;
++                    }
++                }
+                 match found {
+                     None => {
+                         if gap.missing.is_some() {
+-                            log("gap recovery: window tail complete — no missing bodies");
++                            log(if gap.interior {
++                                "gap recovery: interior archive hole resolved — no missing bodies"
++                            } else {
++                                "gap recovery: window tail complete — no missing bodies"
++                            });
+                         }
+                         gap.missing = None;
+                         gap.since = None;
+                         gap.ticks_failed = 0;
++                        gap.interior = false;
+                     }
+                     Some((h, hash)) => {
+                         stats.gap_ticks += 1;
+                         if gap.missing != Some((h, hash)) {
+-                            log(&format!(
+-                                "GAP RECOVERY: tail body missing h{} {} — requesting \
+-                                 getdata(MSG_BLOCK) from every peer (rollback to h{} after \
+-                                 {} unresolved ticks)",
+-                                h,
+-                                tri7_core::p2p::internal_to_display(&hash),
+-                                h.saturating_sub(1),
+-                                GAP_ROLLBACK_TICKS
+-                            ));
++                            // a re-found interior hole is served quietly: it
++                            // was reported when it was first seen
++                            let again = interior && gap.audit_seen.contains(&h);
++                            if !again {
++                                if interior {
++                                    log(&format!(
++                                        "GAP RECOVERY: interior archive hole h{} {} — the chain \
++                                         continues above it; requesting getdata(MSG_BLOCK) from \
++                                         every peer",
++                                        h,
++                                        tri7_core::p2p::internal_to_display(&hash)
++                                    ));
++                                    gap.audit_seen.push(h);
++                                    if gap.audit_seen.len() > 64 {
++                                        gap.audit_seen.remove(0);
++                                    }
++                                } else {
++                                    log(&format!(
++                                        "GAP RECOVERY: tail body missing h{} {} — requesting \
++                                         getdata(MSG_BLOCK) from every peer (rollback to h{} after \
++                                         {} unresolved ticks)",
++                                        h,
++                                        tri7_core::p2p::internal_to_display(&hash),
++                                        h.saturating_sub(1),
++                                        GAP_ROLLBACK_TICKS
++                                    ));
++                                }
++                                gap.since = Some(Instant::now());
++                                gap.ticks_failed = 0;
++                            }
+                             gap.missing = Some((h, hash));
+-                            gap.since = Some(Instant::now());
+-                            gap.ticks_failed = 0;
++                            gap.interior = interior;
+                         }
+                         let body =
+                             tri7_core::p2p::build_getdata(&[(tri7_core::p2p::MSG_BLOCK, hash)]);
+@@ -16610,16 +16880,28 @@ pub fn main_args(argv: &[String]) -> i32 {
+                         }
+                         stats.gap_requests += 1;
+                         gap.ticks_failed += 1;
+-                        log(&format!(
+-                            "gap: getdata for h{} sent to {} peer(s), unfilled ticks {}/{}",
+-                            h, sent, gap.ticks_failed, GAP_ROLLBACK_TICKS
+-                        ));
++                        if !gap.interior {
++                            log(&format!(
++                                "gap: getdata for h{} sent to {} peer(s), unfilled ticks {}/{}",
++                                h, sent, gap.ticks_failed, GAP_ROLLBACK_TICKS
++                            ));
++                        } else if gap.ticks_failed <= GAP_INTERIOR_TICKS
++                            || gap.ticks_failed % 120 == 0
++                        {
++                            log(&format!(
++                                "gap: getdata for h{} (interior archive hole) sent to {} peer(s), \
++                                 unfilled ticks {} — the audit sweep resumes at {}",
++                                h, sent, gap.ticks_failed, GAP_INTERIOR_TICKS
++                            ));
++                        }
+                         // ---- branch (b): the phantom tip ------------------
+                         // only when the missing body IS the tip, the store
+                         // threads exactly one below it, and the gap outlived
+-                        // every peer's chance to serve it
++                        // every peer's chance to serve it. An interior hole
++                        // is never the tip: the chain continues above it.
+                         let tip_now = st_shared.lock().unwrap().tip_height;
+-                        if h == tip_now
++                        if !gap.interior
++                            && h == tip_now
+                             && gap.ticks_failed >= GAP_ROLLBACK_TICKS
+                             && threaded == Some(tip_now - 1)
+                         {
+@@ -21291,6 +21573,161 @@ mod tests {
+         assert_eq!(gap_find_missing(&stg, &store, &recent, Some(104)), None);
+     }
+ 
++    // ---- item 49: the archive audit below the tail band --------------------
++
++    /// A ready store built from `n` chained blocks with the bodies at
++    /// `absent` left out of the file, plus a chain window whose entries ARE
++    /// those blocks (real hashes and links). Returns (dir, store, window,
++    /// blocks). The dir must outlive the store: its drop deletes the file.
++    fn audited_store(
++        tag: &str,
++        n: u64,
++        absent: &[u64],
++    ) -> (
++        crate::testsupport::TestDir,
++        Arc<BlockStore>,
++        ChainState,
++        Vec<Block>,
++    ) {
++        let dir = crate::testsupport::test_dir(tag);
++        let path = dir.join("blk.dat");
++        let mut blocks = Vec::new();
++        let mut frames = Vec::new();
++        let mut hashes = Vec::new();
++        let mut prev = [0u8; 32];
++        for i in 0..n {
++            let b = bin_block(prev, 0x11 + i as u8);
++            prev = b.hash();
++            if !absent.contains(&i) {
++                frames.extend_from_slice(&bin_frame(&b));
++            }
++            hashes.push(b.hash());
++            blocks.push(b);
++        }
++        std::fs::write(&path, &frames).unwrap();
++        let store = tri7_core::blockindex::BlockStore::new(Some(path), Some(dir.join("idx")));
++        store.spawn_build(Some(tri7_core::blockindex::BuildOracle {
++            base: 0,
++            hashes: hashes.clone(),
++            tip: n - 1,
++        }));
++        wait_store_ready(&store);
++        let mut stg = synthetic_chain(0, n - 1);
++        for (i, b) in blocks.iter().enumerate() {
++            stg.entries[i].hash = b.hash();
++            stg.entries[i].prev_hash = b.prev_hash;
++        }
++        stg.tip_hash = hashes[n as usize - 1];
++        (dir, store, stg, blocks)
++    }
++
++    /// The DNS3 shape (2026-11-25): the chain kept growing above bodies that
++    /// never reached the file. Below the tail band the audit must (a) WRITE a
++    /// body the recent cache holds but never appended — the block handler
++    /// caches raw bytes before validation, with height 0, for any body that
++    /// does not extend the tip — and (b) report a height whose body is
++    /// nowhere local, the lowest first.
++    #[test]
++    fn archive_audit_finds_the_interior_hole_and_writes_a_cached_body() {
++        // 10 blocks; the bodies of h2, h5 and h8 never reached the file
++        let (_dir, store, stg, blocks) = audited_store("tri7-audit", 10, &[2, 5, 8]);
++        assert!(store.block_by_hash(&blocks[2].hash()).unwrap().is_none());
++        let mut recent = RecentBlocks::new();
++        recent.insert(blocks[5].hash(), 0, &bin_frame(&blocks[5])[8..]);
++        recent.insert(blocks[8].hash(), 0, &bin_frame(&blocks[8])[8..]);
++
++        // pass 1 over h0..h6 (the tail band is h7..h9): h5 is written from
++        // the cache, h2 is nowhere and is reported
++        let mut cursor = None;
++        let pass = gap_audit_interior(&stg, &store, &recent, 7, &mut cursor, 1024);
++        assert_eq!(
++            pass.hole,
++            Some((2, blocks[2].hash())),
++            "the lowest height whose body is nowhere local"
++        );
++        assert_eq!(pass.repaired, 1, "a valid cached body is written, not requested");
++        assert_eq!(pass.checked, 7);
++        assert!(pass.wrapped, "the pass ran down to the window base");
++        assert!(cursor.is_none(), "…and the next sweep starts at the top again");
++        let hit = store
++            .block_by_hash(&blocks[5].hash())
++            .unwrap()
++            .expect("h5 is on disk now");
++        assert_eq!(hit.hash, blocks[5].hash());
++
++        // pass 2: h5 is on disk; only h2 is still a hole
++        let pass = gap_audit_interior(&stg, &store, &recent, 7, &mut cursor, 1024);
++        assert_eq!(pass.hole.map(|(h, _)| h), Some(2));
++        assert_eq!(pass.repaired, 0);
++
++        // the tail band: the recent cache MASKS h8 from the tail walk, and
++        // nothing else ever appended it
++        assert_eq!(gap_find_missing(&stg, &store, &recent, Some(6)), None);
++        assert!(store.block_by_hash(&blocks[8].hash()).unwrap().is_none());
++        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, Some(6)), 1);
++        assert!(store.block_by_hash(&blocks[8].hash()).unwrap().is_some());
++        // nothing left to write
++        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, Some(6)), 0);
++    }
++
++    /// The sweep is paced (a bounded number of heights per tick), resumes
++    /// where it stopped, and wraps to the top once it reaches the window
++    /// base — so the whole range below the tail band is covered.
++    #[test]
++    fn archive_audit_paces_the_sweep_and_wraps_to_the_top() {
++        // holes at h4 and h0 tell exactly which heights each pass examined
++        let (_dir, store, stg, blocks) = audited_store("tri7-audit-pace", 10, &[4, 0]);
++        let recent = RecentBlocks::new();
++        let mut cursor = None;
++        // four passes of at most three, newest first: h9..h7 | h6..h4 | h3..h1 | h0
++        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
++        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(7), false));
++        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
++        assert_eq!(
++            (pass.checked, pass.hole.map(|(h, _)| h), cursor, pass.wrapped),
++            (3, Some(4), Some(4), false)
++        );
++        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
++        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(1), false));
++        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
++        assert_eq!(
++            (pass.checked, pass.hole.map(|(h, _)| h), cursor, pass.wrapped),
++            (1, Some(0), None, true)
++        );
++        // the sweep wrote nothing and reported every height: only the two
++        // absent bodies are missing
++        for (i, b) in blocks.iter().enumerate() {
++            let on_disk = store.block_by_hash(&b.hash()).unwrap().is_some();
++            assert_eq!(on_disk, i != 4 && i != 0, "h{i}");
++        }
++        // the next sweep starts over at the top
++        let pass = gap_audit_interior(&stg, &store, &recent, 10, &mut cursor, 3);
++        assert_eq!((pass.checked, pass.hole, cursor, pass.wrapped), (3, None, Some(7), false));
++    }
++
++    /// The recent cache is UNVALIDATED. A body cached under a missing
++    /// height's hash that is not that height's block (a stale-branch sibling,
++    /// a mis-keyed entry) must be treated as a hole, never written.
++    #[test]
++    fn archive_audit_never_writes_a_cached_body_that_is_not_the_chain_s() {
++        let (_dir, store, stg, blocks) = audited_store("tri7-audit-stale", 10, &[5]);
++        // a sibling of h5: same parent, different body
++        let stale = bin_block(blocks[4].hash(), 0xEE);
++        assert_ne!(stale.hash(), blocks[5].hash());
++        let mut recent = RecentBlocks::new();
++        recent.insert(blocks[5].hash(), 5, &bin_frame(&stale)[8..]);
++
++        assert_eq!(gap_find_missing(&stg, &store, &recent, None), None, "the tail walk is masked by the cache");
++        assert_eq!(gap_repair_cached_tail(&stg, &store, &recent, None), 0);
++        let mut cursor = None;
++        // the audit's range is everything below h6: h5 is its first height
++        let pass = gap_audit_interior(&stg, &store, &recent, 6, &mut cursor, 1024);
++        assert_eq!(pass.hole.map(|(h, _)| h), Some(5), "reported as a hole");
++        assert_eq!(pass.repaired, 0);
++        assert!(store.block_by_hash(&blocks[5].hash()).unwrap().is_none());
++        assert!(store.block_by_hash(&stale.hash()).unwrap().is_none(), "the stale body itself is never written");
++    }
++
+     // ---- LIVE-STORE TEST SERIALIZATION (lock + reset) ----
+     //
+     // set_live_store / seed_chain_slots / chain_slot_note / rollback_tip /
