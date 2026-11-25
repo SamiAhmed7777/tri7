@@ -1,21 +1,30 @@
 # tri7 modern-client loop — session handoff (2026-11-02, phase 6)
 
-## TOPOLOGY (authoritative — 2026-11-02 phase 6, remediation)
+## TOPOLOGY (authoritative — 2026-11-25 item 46)
 
-**tri7d IS the DNS2 primary node. The legacy trianglesd is retired
-(stopped+disabled). Any other description is history, not current state.**
+**tri7d IS the DNS2 primary node. The legacy trianglesd remains active on
+public 24113 for its existing consumers; it is not retired. tri7d owns the
+published onion through a separate loopback listener on 24114.**
 
 | Port | Role |
 |---|---|
-| 19112 | tri7d native JSON-RPC (loopback only; `--no-proxy`; 16 native methods incl. getbestblockhash) |
-| 24113 | tri7d inbound P2P listener (bind 0.0.0.0; ufw allow v4+v6; tor HS gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 → 127.0.0.1:24113) |
+| 19112 | tri7d native JSON-RPC (loopback only; `--no-proxy`) |
+| 24113 | legacy `trianglesd` public P2P listener; do not start tri7d on this port |
+| 24114 | tri7d loopback P2P listener; tor HS `gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113` → `127.0.0.1:24114` |
 | 19113 | autossh tunnel → sami-pc:19112 RPC (triangles-api consumer) — unrelated to tri7d, never bind it |
 
-Outbound attach targets (rotation with fallback; .onion via tor SOCKS
-127.0.0.1:9050): sami-pc 100.85.236.10:24113/:24112, DNS3 100.81.59.99:24112/:24113,
-DNS3 onion i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112.
-All targets down ⇒ HEADLESS (native RPCs from persisted state, rotation retried
-each 30s poll tick — POLL_SECS in follow_tip.rs).
+The authoritative three-node onion/seed table is
+[`docs/network-seeds.md`](docs/network-seeds.md). DNS2, DNS3, and Pi each seed
+both other nodes. Tor is a boot-ordering dependency of tri7d on all three;
+Pi's `tor.service` is enabled. The checked-in DNS2 unit is a template; the
+live node uses the documented `override.conf` and ordering drop-ins.
+sami-pc was unreachable and is not part of the 2026-11-25 acceptance claim.
+
+All targets down ⇒ HEADLESS (native RPCs from persisted state, rotation
+retried each poll tick). Peer-table bootstrap alone does not prove a full
+mesh: acceptance requires protocol-70206 `/tri7:7.0.0/` sessions from every
+node to both peers, with at least one fleet-peer inbound session on DNS2.
+See `docs/peer-mesh-repair-2026-11-25.md` for the live evidence.
 
 Inbound peers: server-side handshake (they send version first; we reply
 version+verack; non-handshake messages received during the handshake are

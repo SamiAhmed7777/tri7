@@ -1,7 +1,7 @@
 [Unit]
 Description=tri7 daemon (DNS2 primary: native RPC + P2P listener + relay)
 Documentation=file:/root/tri7/HANDOFF.md
-After=network-online.target trianglesd.service
+After=network-online.target tor.service trianglesd.service
 Wants=network-online.target
 
 [Service]
@@ -9,20 +9,17 @@ Type=simple
 User=tri7
 Group=tri7
 # TOPOLOGY (single source of truth — keep HANDOFF.md in sync with this):
-#   tri7d IS the DNS2 primary node. The legacy trianglesd is retired
-#   (stopped+disabled). Ports:
+#   tri7d IS the DNS2 primary node. Legacy trianglesd remains active for
+#   its existing consumers and owns public 24113. Ports:
 #     19112  native JSON-RPC (loopback ONLY; 1MB request cap; --no-proxy)
-#     24113  inbound P2P listener (0.0.0.0; tor HS gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion
-#            j5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 -> 127.0.0.1:24113)
+#     24113  legacy trianglesd public P2P; never start tri7d here
+#     24114  tri7d loopback P2P listener; tor HS gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion
+#            :24113 -> 127.0.0.1:24114. All three nodes order tri7d after tor.
 #     19113  autossh tunnel to sami-pc's RPC (triangles-api consumer) —
 #            UNRELATED to tri7d, never bind or re-route it
-#   Outbound attach targets (tried in rotation with fallback; .onion via the
-#   local tor SOCKS at 127.0.0.1:9050):
-#     100.85.236.10:24113 / :24112   sami-pc (canonical chain reference)
-#     100.81.59.99:24112 / :24113    DNS3
-#     i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112
-#   All targets down => HEADLESS mode (native RPCs from persisted state,
-#   rotation retried each poll tick; tipstate write cadence continues).
+#   Authoritative onion/seed table: docs/network-seeds.md. Every fleet node
+#   seeds both peers; live acceptance requires six directed protocol-70206
+#   /tri7:7.0.0/ sessions, not just a SOCKS TCP reply.
 #   Inbound peers get handshake + getdata/getheaders serving and may push
 #   validated blocks, which are relayed to all peers (inv -> getdata).
 #   Data sources: tipstate window, blockindex over /var/lib/tri7/blk0001.dat
@@ -32,9 +29,9 @@ Group=tri7
 ExecStart=/opt/tri7/bin/follow_tip \
   --daemon 100.85.236.10:24113,100.85.236.10:24112 \
   --daemon 100.81.59.99:24112,100.81.59.99:24113 \
-  --onion i6tk7soznftvoibtskwlezviskiererhjndpsmrff4kaxw7jnd5izfqd.onion:24112 \
+  --onion brudzmft5zvvrvlzfeywy2n7gh4bu7egsbjab4ois6xwxgnqjitxywid.onion:24113 \
   --socks 127.0.0.1:9050 \
-  --listen-port 24113 --listen-bind 0.0.0.0 \
+  --listen-port 24114 --listen-bind 127.0.0.1 \
   --conf /etc/tri7/triangles.conf --state-dir /var/lib/tri7 --forever \
   --rpc-port 19112 --rpc-bind 127.0.0.1 --no-proxy \
   --blocks-file /var/lib/tri7/blk0001.dat \
@@ -56,8 +53,8 @@ RestartSec=30
 # Footprint bound: window ~13MB + block index ~53MB + tx index ~72MB + height
 # maps ~26MB + snapshots ~10MB + recent-blocks cache ~4MB ~= 180MB steady;
 # ~200MB transient during the first index build (subsequent restarts load the
-# on-disk caches in ~1-2s). 512M ~= 2.5x steady headroom; the retired legacy
-# trianglesd was ~1.5GB.
+# on-disk caches in ~1-2s). 512M ~= 2.5x steady headroom; the active legacy
+# trianglesd was ~1.5GB at the 2026-11-02 measurement.
 MemoryMax=512M
 # Hardening: outbound P2P rotation + tor SOCKS + inbound P2P listener +
 # loopback-only RPC; write access limited to its state dir; conf copy (not
