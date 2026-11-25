@@ -18,6 +18,14 @@ The authoritative three-node onion/seed table is
 both other nodes. Tor is a boot-ordering dependency of tri7d on all three;
 Pi's `tor.service` is enabled. The checked-in DNS2 unit is a template; the
 live node uses the documented `override.conf` and ordering drop-ins.
+Memory ceiling (2026-11-25 item 47): DNS2's tri7d runs `MemoryMax=2G`,
+`MemorySwapMax=0` through the drop-in
+`/etc/systemd/system/tri7d.service.d/50-item47-memory-headroom.conf`; the
+template carries the same two keys. The old 512M cap OOM-killed the staker
+21 times in 7 hours. Watch `memory.events` in the unit's cgroup
+(`memory.events` under `/sys/fs/cgroup/system.slice/tri7d.service/` on
+DNS2's default hierarchy): any non-zero `max` means the ceiling was touched
+and the sizing needs another look. See `docs/memory-headroom-2026-11-25.md`.
 sami-pc was unreachable and is not part of the 2026-11-25 acceptance claim.
 
 All targets down ⇒ HEADLESS (native RPCs from persisted state, rotation

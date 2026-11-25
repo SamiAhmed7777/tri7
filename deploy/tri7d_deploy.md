@@ -62,10 +62,16 @@ ls -ln ids, runuser return codes) for cross-checking.
 ## Unit contract (tri7d.service)
 - `Restart=on-failure`, `RestartSec=30`: any non-zero exit (2/3/4/5) or signal
   death → restart after 30s; `systemctl stop` stays stopped.
-- `MemoryMax=512M`: measured peak RSS **12.7 MB** (90s live run as tri7 via
-  `/usr/bin/time -v`, full state re-verify + 3000-header backfill + 100-block
-  backfill + follow loop). ~20x headroom, well under the 512M target, vs legacy
-  trianglesd ~1.5 GB.
+- `MemoryMax=2G`, `MemorySwapMax=0` (raised from `MemoryMax=512M` on
+  2026-11-25, workqueue item 47). The old figure quoted here — peak RSS
+  **12.7 MB** from a 90 s run on a short chain — no longer holds: on the
+  2.22M-height chain a boot needs 0.45-0.5 GiB of non-reclaimable memory and
+  the same binary with swap allowed peaked at 907 MiB RAM plus 456 MiB swap
+  in one boot. A 512M cap OOM-killed the staker 21 times in 7 hours.
+  Two boots under 2G peaked at 467 and 481 MiB non-reclaimable with zero
+  ceiling hits. Size per host: at least 1.25x the largest per-boot footprint
+  observed, and leave ceiling + 1 GiB to the host. Measurements and limits:
+  [`docs/memory-headroom-2026-11-25.md`](../docs/memory-headroom-2026-11-25.md).
 - Hardening: NoNewPrivileges, ProtectSystem=strict, ProtectHome=yes,
   ReadWritePaths=/var/lib/tri7, PrivateTmp, kernel/controlgroup guards.
 - No staking, no broadcast, no listening sockets — outbound only.

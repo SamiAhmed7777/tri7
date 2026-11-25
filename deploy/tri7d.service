@@ -50,12 +50,23 @@ Restart=on-failure
 # Note: any non-zero exit (2 usage / 3 validation / 4 protocol / 5 seed) and
 # signal death trigger this restart; `systemctl stop` stays stopped.
 RestartSec=30
-# Footprint bound: window ~13MB + block index ~53MB + tx index ~72MB + height
-# maps ~26MB + snapshots ~10MB + recent-blocks cache ~4MB ~= 180MB steady;
-# ~200MB transient during the first index build (subsequent restarts load the
-# on-disk caches in ~1-2s). 512M ~= 2.5x steady headroom; the active legacy
-# trianglesd was ~1.5GB at the 2026-11-02 measurement.
-MemoryMax=512M
+# Footprint bound, from live measurements on the 2.22M-height chain
+# (2026-11-25, workqueue item 47; docs/memory-headroom-2026-11-25.md):
+# - a boot needs 0.45-0.5 GiB of non-reclaimable memory (anon + kernel), plus
+#   page cache on top that the kernel can reclaim;
+# - the same binary where swap was allowed peaked at 907 MiB RAM plus
+#   456 MiB swap in one boot; RAM+swap upper bound 1307 MiB over 12 boots
+#   in 14 days (the boot-time transient, workqueue item 48);
+# - a 512M cap on that host OOM-killed the staker 21 times in 7 hours.
+# 2G = 1.57x the largest observed bound. Size per host: never below 1.25x
+# the largest per-boot footprint observed for this binary, and keep at least
+# ceiling + 1 GiB available to the host.
+# The earlier figures in this comment (12.7 MB peak RSS, ~180 MB steady)
+# were measured on a short chain and are obsolete.
+MemoryMax=2G
+# No swap for the staker: a spike must show up in memory.peak / memory.events
+# (and be killed cleanly at MemoryMax) rather than hide in swap.
+MemorySwapMax=0
 # Hardening: outbound P2P rotation + tor SOCKS + inbound P2P listener +
 # loopback-only RPC; write access limited to its state dir; conf copy (not
 # /root/.triangles) for RPC creds; blocks file via hardlink.
