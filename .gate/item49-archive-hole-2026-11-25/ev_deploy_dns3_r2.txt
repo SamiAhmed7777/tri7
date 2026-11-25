@@ -1,0 +1,109 @@
+driver started 2026-11-25T13:49:49Z on vmi3080415 target=dns3; local HEAD f40b827; new binary sha256 3ff22133fa7fbe9635bd842f8cafecdc661e2b01bb4f0341153d64153835fcc1; harness sha256 f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba; check sha256 584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38
+stage binary exit=0; stage scripts exit=0
+3ff22133fa7fbe9635bd842f8cafecdc661e2b01bb4f0341153d64153835fcc1  /tmp/item49-deploy/follow_tip.new
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item49-deploy/tri7d_swap_verify_rollback.sh
+584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38  /tmp/item49-deploy/balances_chain_ordered.py
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d  /opt/tri7/bin/follow_tip.prev-item49
+save-previous exit=0
+### [1] state before (read-only)
+active
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 13:30:21 UTC MemoryCurrent=443768832 MemoryMax=3221225472 
+running sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d
+{"method": "getblockcount", "params": [], "result": 2219587, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 2, "error": null}
+{"method": "getnetworkinfo", "params": [], "result": {"connections": 2, "localaddresses": [], "protocolversion": 70206, "subversion": "/tri7:7.0.0/", "timeoffset": 0, "transports": "clearnet+tor+i2p", "uptime_secs": 1070, "version": 70000, "warnings": ""}, "error": null}
+-rwxr-xr-x 1 root root 7555400 2026-11-25 10:25:00.145492852 +0000 follow_tip
+-rwxr-xr-x 1 root root 7449808 2026-11-22 02:04:35.103907745 +0000 follow_tip.bak-01a4e079
+-rwxr-xr-x 1 root root 7233088 2026-11-14 15:17:30.111546737 +0000 follow_tip.bak-1794741092
+-rwxr-xr-x 1 root root 7527344 2026-11-24 06:57:36.379356031 +0000 follow_tip.bak-1b48fc22
+-rwxr-xr-x 1 root root 7414792 2026-11-18 15:36:51.038353808 +0000 follow_tip.bak-1d8f568c
+-rwxr-xr-x 1 root root 7234224 2026-11-14 16:38:15.046164838 +0000 follow_tip.bak-27779bd2
+-rwxr-xr-x 1 root root 7445832 2026-11-19 00:32:40.751850458 +0000 follow_tip.bak-37d43258
+-rwxr-xr-x 1 root root 7476056 2026-11-23 02:57:15.187524558 +0000 follow_tip.bak-702b0517
+-rwxr-xr-x 1 root root 7430008 2026-11-19 00:11:28.347192185 +0000 follow_tip.bak-77bd7bda
+-rwxr-xr-x 1 root root 6985808 2026-11-09 19:07:28.562868001 +0000 follow_tip.bak-816de5fc
+-rwxr-xr-x 1 root root 7493768 2026-11-23 17:08:06.745886544 +0000 follow_tip.bak-83cfe73a
+-rwxr-xr-x 1 root root 6765272 2026-11-08 00:38:31.103879062 +0000 follow_tip.bak-871dbf3
+-rwxr-xr-x 1 root root 7480064 2026-11-23 12:50:27.180727563 +0000 follow_tip.bak-87755353
+-rwxr-xr-x 1 root root 7056248 2026-11-10 03:26:25.603320627 +0000 follow_tip.bak-8a0c9f86
+-rwxr-xr-x 1 root root 7539000 2026-11-24 19:14:35.675398666 +0000 follow_tip.bak-91222c24
+-rwxr-xr-x 1 root root 7527344 2026-11-24 17:44:51.437262114 +0000 follow_tip.bak-96c47105
+-rwxr-xr-x 1 root root 7514128 2026-11-24 03:20:25.424711071 +0000 follow_tip.bak-9f73fc6e
+-rwxr-xr-x 1 root root 7066984 2026-11-10 06:56:35.629463212 +0000 follow_tip.bak-a5386462
+-rwxr-xr-x 1 root root 6716104 2026-11-07 15:02:16.516835799 +0000 follow_tip.bak-b0e9684
+-rwxr-xr-x 1 root root 7251400 2026-11-17 12:06:00.394430155 +0000 follow_tip.bak-b1e4f559
+-rwxr-xr-x 1 root root 6551424 2026-11-07 06:48:57.018252868 +0000 follow_tip.bak-b5351f9
+-rwxr-xr-x 1 root root 7233552 2026-11-14 10:02:29.136630333 +0000 follow_tip.bak-b7149dd5
+-rwxr-xr-x 1 root root 7205136 2026-11-13 18:34:37.319090627 +0000 follow_tip.bak-cf4ba9c-pre
+-rwxr-xr-x 1 root root 6885072 2026-11-08 02:21:16.195873687 +0000 follow_tip.bak-d022f195
+-rwxr-xr-x 1 root root 6831408 2026-11-08 02:22:52.054303537 +0000 follow_tip.bak-d48cf4b
+-rwxr-xr-x 1 root root 6980712 2026-11-09 10:42:15.556841074 +0000 follow_tip.bak-d709c2b9
+-rwxr-xr-x 1 root root 7451824 2026-11-22 02:04:35.116907960 +0000 follow_tip.bak-e5975e59-item38
+-rwxr-xr-x 1 root root 7202392 2026-11-12 04:18:13.838724491 +0000 follow_tip.bak-e601c2eb
+-rwxr-xr-x 1 root root 6890776 2026-11-09 10:42:15.545840901 +0000 follow_tip.bak-f168710
+-rwxr-xr-x 1 root root 7238568 2026-11-17 11:38:17.156610289 +0000 follow_tip.bak-f2e3d3aa
+-rwxr-xr-x 1 root root 7221168 2026-11-14 08:39:54.668124580 +0000 follow_tip.bak-fdaaaa9b
+-rwxr-xr-x 1 root root 7445832 2026-11-20 02:34:39.721815145 +0000 follow_tip.bak-interim-37d43258
+-rwxr-xr-x 1 root root 7119656 2026-11-11 14:01:51.493022585 +0000 follow_tip.bak-item23
+-rwxr-xr-x 1 root root 7303944 2026-11-17 21:18:37.396048051 +0000 follow_tip.bak9
+-rwxr-xr-x 1 root root 7453272 2026-11-20 00:10:54.587052428 +0000 follow_tip.item35-e562eb9b-staledrop
+-rwxr-xr-x 1 root root 7480064 2026-11-23 02:56:57.830254670 +0000 follow_tip.new-item39
+-rwxr-xr-x 1 root root 7493768 2026-11-23 12:50:22.478655155 +0000 follow_tip.new-item40
+-rwxr-xr-x 1 root root 7527344 2026-11-23 20:25:31.592737682 +0000 follow_tip.new-item42
+-rwxr-xr-x 1 root root 7527344 2026-11-24 06:52:14.536285655 +0000 follow_tip.new-item43
+-rwxr-xr-x 1 root root 7539576 2026-11-24 19:07:54.000000000 +0000 follow_tip.new-item44
+-rwxr-xr-x 1 root root 7539576 2026-11-24 19:14:35.700399058 +0000 follow_tip.prev-item
+-rwxr-xr-x 1 root root 7555400 2026-11-25 10:25:00.145492852 +0000 follow_tip.prev-item49
+### [2] the real deploy on dns3 (previous binary kept at /opt/tri7/bin/follow_tip.prev-item49; the harness rolls back itself when the check rejects)
+{"outcome":"rolled-back","running_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","unit_state":"active","rehearsal":"0","unit":"tri7d","reason":"tri7d is not active after the restart","old_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","new_sha256":"3ff22133fa7fbe9635bd842f8cafecdc661e2b01bb4f0341153d64153835fcc1","restart_epoch":"1795614624","bin":"/opt/tri7/bin/follow_tip","rollback_binary":"/opt/tri7/bin/follow_tip.prev-item49","check":"no build has started yet (the daemon may still be loading the block index)"}
+deploy exit=1 at 2026-11-25T13:54:41Z
+### [3] readback
+host=appt arch=x86_64 at=2026-11-25T13:54:44Z pid=2822466
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 13:54:36 UTC MemoryCurrent=2367488 MemoryMax=3221225472 MemorySwapMax=infinity ActiveState=active SubState=running 
+running exe: /opt/tri7/bin/follow_tip sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d
+{"method": "getblockcount", "params": [], "rpc_error": "<urlopen error [Errno 111] Connection refused>"}
+{"method": "getconnectioncount", "params": [], "rpc_error": "<urlopen error [Errno 111] Connection refused>"}
+-rwxr-xr-x 1 root root 7555400 2026-11-25 10:25:00.145492852 +0000 follow_tip
+-rwxr-xr-x 1 root root 7449808 2026-11-22 02:04:35.103907745 +0000 follow_tip.bak-01a4e079
+-rwxr-xr-x 1 root root 7233088 2026-11-14 15:17:30.111546737 +0000 follow_tip.bak-1794741092
+-rwxr-xr-x 1 root root 7527344 2026-11-24 06:57:36.379356031 +0000 follow_tip.bak-1b48fc22
+-rwxr-xr-x 1 root root 7414792 2026-11-18 15:36:51.038353808 +0000 follow_tip.bak-1d8f568c
+-rwxr-xr-x 1 root root 7234224 2026-11-14 16:38:15.046164838 +0000 follow_tip.bak-27779bd2
+-rwxr-xr-x 1 root root 7445832 2026-11-19 00:32:40.751850458 +0000 follow_tip.bak-37d43258
+-rwxr-xr-x 1 root root 7476056 2026-11-23 02:57:15.187524558 +0000 follow_tip.bak-702b0517
+-rwxr-xr-x 1 root root 7430008 2026-11-19 00:11:28.347192185 +0000 follow_tip.bak-77bd7bda
+-rwxr-xr-x 1 root root 6985808 2026-11-09 19:07:28.562868001 +0000 follow_tip.bak-816de5fc
+-rwxr-xr-x 1 root root 7493768 2026-11-23 17:08:06.745886544 +0000 follow_tip.bak-83cfe73a
+-rwxr-xr-x 1 root root 6765272 2026-11-08 00:38:31.103879062 +0000 follow_tip.bak-871dbf3
+-rwxr-xr-x 1 root root 7480064 2026-11-23 12:50:27.180727563 +0000 follow_tip.bak-87755353
+-rwxr-xr-x 1 root root 7056248 2026-11-10 03:26:25.603320627 +0000 follow_tip.bak-8a0c9f86
+-rwxr-xr-x 1 root root 7539000 2026-11-24 19:14:35.675398666 +0000 follow_tip.bak-91222c24
+-rwxr-xr-x 1 root root 7527344 2026-11-24 17:44:51.437262114 +0000 follow_tip.bak-96c47105
+-rwxr-xr-x 1 root root 7514128 2026-11-24 03:20:25.424711071 +0000 follow_tip.bak-9f73fc6e
+-rwxr-xr-x 1 root root 7066984 2026-11-10 06:56:35.629463212 +0000 follow_tip.bak-a5386462
+-rwxr-xr-x 1 root root 6716104 2026-11-07 15:02:16.516835799 +0000 follow_tip.bak-b0e9684
+-rwxr-xr-x 1 root root 7251400 2026-11-17 12:06:00.394430155 +0000 follow_tip.bak-b1e4f559
+-rwxr-xr-x 1 root root 6551424 2026-11-07 06:48:57.018252868 +0000 follow_tip.bak-b5351f9
+-rwxr-xr-x 1 root root 7233552 2026-11-14 10:02:29.136630333 +0000 follow_tip.bak-b7149dd5
+-rwxr-xr-x 1 root root 7205136 2026-11-13 18:34:37.319090627 +0000 follow_tip.bak-cf4ba9c-pre
+-rwxr-xr-x 1 root root 6885072 2026-11-08 02:21:16.195873687 +0000 follow_tip.bak-d022f195
+-rwxr-xr-x 1 root root 6831408 2026-11-08 02:22:52.054303537 +0000 follow_tip.bak-d48cf4b
+-rwxr-xr-x 1 root root 6980712 2026-11-09 10:42:15.556841074 +0000 follow_tip.bak-d709c2b9
+-rwxr-xr-x 1 root root 7451824 2026-11-22 02:04:35.116907960 +0000 follow_tip.bak-e5975e59-item38
+-rwxr-xr-x 1 root root 7202392 2026-11-12 04:18:13.838724491 +0000 follow_tip.bak-e601c2eb
+-rwxr-xr-x 1 root root 6890776 2026-11-09 10:42:15.545840901 +0000 follow_tip.bak-f168710
+-rwxr-xr-x 1 root root 7238568 2026-11-17 11:38:17.156610289 +0000 follow_tip.bak-f2e3d3aa
+-rwxr-xr-x 1 root root 7221168 2026-11-14 08:39:54.668124580 +0000 follow_tip.bak-fdaaaa9b
+-rwxr-xr-x 1 root root 7445832 2026-11-20 02:34:39.721815145 +0000 follow_tip.bak-interim-37d43258
+-rwxr-xr-x 1 root root 7119656 2026-11-11 14:01:51.493022585 +0000 follow_tip.bak-item23
+-rwxr-xr-x 1 root root 7303944 2026-11-17 21:18:37.396048051 +0000 follow_tip.bak9
+-rwxr-xr-x 1 root root 7453272 2026-11-20 00:10:54.587052428 +0000 follow_tip.item35-e562eb9b-staledrop
+-rwxr-xr-x 1 root root 7480064 2026-11-23 02:56:57.830254670 +0000 follow_tip.new-item39
+-rwxr-xr-x 1 root root 7493768 2026-11-23 12:50:22.478655155 +0000 follow_tip.new-item40
+-rwxr-xr-x 1 root root 7527344 2026-11-23 20:25:31.592737682 +0000 follow_tip.new-item42
+-rwxr-xr-x 1 root root 7527344 2026-11-24 06:52:14.536285655 +0000 follow_tip.new-item43
+-rwxr-xr-x 1 root root 7539576 2026-11-24 19:07:54.000000000 +0000 follow_tip.new-item44
+-rwxr-xr-x 1 root root 7539576 2026-11-24 19:14:35.700399058 +0000 follow_tip.prev-item
+ls: cannot access '/var/lib/tri7/*.pending': No such file or directory
+driver finished 2026-11-25T13:54:50Z
+driver_exit=0 at 2026-11-25T13:54:50Z

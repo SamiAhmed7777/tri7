@@ -1,0 +1,10 @@
+GRADE=A urn=urn:ump:pthfgs74qnm3felrufe2hf46iad5tiuqzu3q4gjq2oyayaprrhcq
+{
+  "blocking": [],
+  "polish": [
+    "The skip aborts the whole body phase on the FIRST refusal; if a later body in the picks would have validated, it is also skipped this boot \u2014 consider whether per-body continue (still refusing only the offending body) is preferable once the crash-loop fix is proven in the canary, or at least note the trade-off in the doc comment.",
+    "The skip arm logs via the generic log() path; a stable machine-readable note key (e.g. in the SUMMARY note field, not just the counter) would make future fork-turbulence boots greppable the way the exit-4 notes were.",
+    "The one_block_peer test helper writes the frame and ignores the write_all result with `let _ =` \u2014 fine in a test, but a brief comment or expect() would keep the helper uniform with surrounding test code.",
+    "Consider asserting the log line contains 'refused' in at least one test so the operator-visible message is pinned, not just the counter."
+  ]
+}

@@ -1,0 +1,671 @@
+2026-11-25T13:20:08+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:08Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:20:08+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:08Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:20:09+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:09Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:20:39+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:39Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:20:39+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:39Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:20:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:20:41Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:09+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:09Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:10+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:10Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:10+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:10Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:41Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:41Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:21:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:21:41Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:11+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:11Z] empty tip-poll reply (streak trigger) while in:127.0.0.1:44114 (/tri7:7.0.0/ h2219550) claims h2219572 (we are h2219572) — requesting window-locator reconciliation
+2026-11-25T13:22:11+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:11Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:12Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:41Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:41+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:41Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:22:42+00:00 appt follow_tip[2763423]: [2026-11-25T13:22:42Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:11+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:11Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:12+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:12Z] recon: competing branch h2219551..h2219570 (19 blk, work 43712980155826103824416768) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:43+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:43Z] recon: competing branch h2219542..h2219550 (8 blk, work 8466903093002173771939840) is NOT heavier than ours h2219572 (work 68023367175854908669689856) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:44+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:44Z] recon: competing branch h2219551..h2219571 (20 blk, work 45695196905042001363206144) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:44+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:44Z] recon: competing branch h2219551..h2219571 (20 blk, work 45695196905042001363206144) is NOT heavier than ours h2219572 (work 48962492720443626505633792) above the fork — ignored, reconciliation closed
+2026-11-25T13:23:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:47Z] h2219573: no external checksum oracle for this block — adopting locally computed 34447ed4
+2026-11-25T13:23:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:47Z] TIP ADVANCE → h2219573 197bbba7b1ee05b3f50c0b64e2e97e05982788bc0879c7564362f4d531d72894 (kernel enforced) via in:127.0.0.1:44114 (/tri7:7.0.0/ h2219550)
+2026-11-25T13:23:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:23:47Z] relay: announced h2219573 to 5 peer(s) (inv)
+2026-11-25T13:24:13+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:13Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219573 (work 69910134398455210754179072) above the fork — ignored, reconciliation closed
+2026-11-25T13:24:15+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:15Z] recon: competing branch h2219551..h2219571 (20 blk, work 45695196905042001363206144) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:24:15+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:15Z] recon: competing branch h2219551..h2219571 (20 blk, work 45695196905042001363206144) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:24:45+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:45Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219573 (work 69910134398455210754179072) above the fork — ignored, reconciliation closed
+2026-11-25T13:24:45+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:45Z] recon: competing branch h2219551..h2219572 (21 blk, work 47320242392727117235224576) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:24:46+00:00 appt follow_tip[2763423]: [2026-11-25T13:24:46Z] recon: competing branch h2219551..h2219572 (21 blk, work 47320242392727117235224576) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:15+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:15Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219573 (work 69910134398455210754179072) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:16+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:16Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:16+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:16Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:46+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:46Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219573 (work 69910134398455210754179072) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:46+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:46Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:46+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:46Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219573 (work 50849259943043928590123008) above the fork — ignored, reconciliation closed
+2026-11-25T13:25:49+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:49Z] h2219574: no external checksum oracle for this block — adopting locally computed 5be0b85f
+2026-11-25T13:25:49+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:49Z] TIP ADVANCE → h2219574 43cb89b7f97d0ba11a6dd238d8a2524343f707224c90bdf818e3b82bc5cdef0c (kernel enforced) via in:127.0.0.1:44114 (/tri7:7.0.0/ h2219550)
+2026-11-25T13:25:49+00:00 appt follow_tip[2763423]: [2026-11-25T13:25:49Z] relay: announced h2219574 to 5 peer(s) (inv)
+2026-11-25T13:26:17+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:17Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219574 (work 71330760991301589675278336) above the fork — ignored, reconciliation closed
+2026-11-25T13:26:17+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:17Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219574 (work 52269886535890307511222272) above the fork — ignored, reconciliation closed
+2026-11-25T13:26:18+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:18Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219574 (work 52269886535890307511222272) above the fork — ignored, reconciliation closed
+2026-11-25T13:26:29+00:00 appt systemd[1]: Stopping tri7d.service - tri7 daemon (from-zero synced node)...
+2026-11-25T13:26:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:47Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219574 (work 71330760991301589675278336) above the fork — ignored, reconciliation closed
+2026-11-25T13:26:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:47Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219574 (work 52269886535890307511222272) above the fork — ignored, reconciliation closed
+2026-11-25T13:26:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:47Z] h2219575: no external checksum oracle for this block — adopting locally computed 21162766
+2026-11-25T13:26:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:47Z] TIP ADVANCE → h2219575 79e5132a07c61135937d9238e228e6bb155fc28432ba602e76a73d6a4cef45c1 (kernel enforced) via in:127.0.0.1:44114 (/tri7:7.0.0/ h2219550)
+2026-11-25T13:26:47+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:47Z] relay: announced h2219575 to 5 peer(s) (inv)
+2026-11-25T13:26:48+00:00 appt follow_tip[2763423]: [2026-11-25T13:26:48Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219575 (work 53708496157761733539135488) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:18+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:18Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219575 (work 72769370613173015703191552) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:19+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:19Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219575 (work 53708496157761733539135488) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:19+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:19Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219575 (work 53708496157761733539135488) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:19+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:19Z] h2219576: no external checksum oracle for this block — adopting locally computed e1999057
+2026-11-25T13:27:19+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:19Z] TIP ADVANCE → h2219576 3b9b0737e1ccdbc0c9368b83a7cf671d2b196f827287401e231867dbc7f95c4c (kernel enforced) via in:127.0.0.1:44114 (/tri7:7.0.0/ h2219550)
+2026-11-25T13:27:19+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:19Z] relay: announced h2219576 to 5 peer(s) (inv)
+2026-11-25T13:27:49+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:49Z] recon: competing branch h2219542..h2219551 (9 blk, work 8832738632495614658609152) is NOT heavier than ours h2219576 (work 74300485237548024242110464) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:49+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:49Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219576 (work 55239610782136742078054400) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:51+00:00 appt follow_tip[2763423]: [2026-11-25T13:27:51Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219576 (work 55239610782136742078054400) above the fork — ignored, reconciliation closed
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: State 'stop-sigterm' timed out. Killing.
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Killing process 2763423 (follow_tip) with signal SIGKILL.
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Failed to kill control group /system.slice/tri7d.service, ignoring: Invalid argument
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T13:27:59+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Consumed 24min 49.882s CPU time, 920.6M memory peak, 365.6M memory swap peak.
+2026-11-25T13:27:59+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:27:59+00:00 appt follow_tip[2813967]: [2026-11-25T13:27:59Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T13:27:59+00:00 appt follow_tip[2813967]: [2026-11-25T13:27:59Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219573 services 1
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] loading tipstate.json …
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214977
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215177
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215377
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215577
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215777
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215977
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216177
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216377
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216577
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216777
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216977
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217177
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217377
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217577
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217777
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217977
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214977; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T13:28:08+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:08Z] item25: modifier chain audit clean (4519 generated heights compared, replay floor rel 81, 32 samples) [boot]
+2026-11-25T13:28:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:12Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219551 services 1
+2026-11-25T13:28:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:12Z] state: tip h2219576 3b9b0737e1ccdbc0c9368b83a7cf671d2b196f827287401e231867dbc7f95c4c · daemon getblockcount -1
+2026-11-25T13:28:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:12Z] chain slots: seeded 4600 window entries from base h2214977 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T13:28:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:28:12Z] backfill: requesting headers from h2216576 (locator f3585d50fca774dc003e9d662c2450b773ffd9b8f88d9603407c6f6273822fc1)
+2026-11-25T13:30:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:12Z] backfill: validated 2975 headers linking h2216577 → h2219551 (hash9 + linkage, daemon-served)
+2026-11-25T13:30:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:12Z] backfill: requesting 100 full blocks
+2026-11-25T13:30:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:12Z] h2216577: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T13:30:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:12Z] backfill: 10 blocks fully validated so far
+2026-11-25T13:30:12+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:12Z] backfill: 20 blocks fully validated so far
+2026-11-25T13:30:13+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:13Z] backfill: 30 blocks fully validated so far
+2026-11-25T13:30:13+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:13Z] backfill: 40 blocks fully validated so far
+2026-11-25T13:30:14+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:14Z] backfill: 50 blocks fully validated so far
+2026-11-25T13:30:14+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:14Z] backfill: 60 blocks fully validated so far
+2026-11-25T13:30:15+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:15Z] backfill: 70 blocks fully validated so far
+2026-11-25T13:30:15+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:15Z] backfill: 80 blocks fully validated so far
+2026-11-25T13:30:16+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:16Z] backfill: 90 blocks fully validated so far
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: SUMMARY
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "exit_code": 4,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "messages": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "adoption_body_stalls": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "blocks_received": 100,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "blocks_relayed": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "blocks_validated_hist": 99,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "blocks_validated_live": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "checksums_verified": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "dup_tx_peer_kept": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "dup_tx_refused": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "dup_tx_spentness_unprovable": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "dup_tx_store_unprovable": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "gap_filled": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "gap_requests": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "gap_rollback": false,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "gap_ticks": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "getdata_served": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "getdata_tx_served": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "getheaders_served": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "handshakes": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "headers_backfilled": 2975,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "headers_new": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "headers_processed": 2975,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "inbound_accepted": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "inbound_polls": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "kernel_enforced": 43,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "kernel_seeded": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "kernel_skipped_no_oracle": 56,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "nbits_checked": 99,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "parse_failures": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "polls": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "reconnects": 1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "recv": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "addr": 1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "block": 100,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "getaddr": 1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "getheaders": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "headers": 3,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "inv": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "ping": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "sendheaders": 1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "smsgPing": 1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "verack": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "version": 2
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     },
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "reorgs": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "sent": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "getaddr": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "getdata": 4,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "getheaders": 3,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "pong": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "sendheaders": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "verack": 2,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "version": 2
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     },
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "sigs_checked": 99,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "tx_getdatas_sent": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "txs_accepted": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "txs_received": 0,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "txs_rejected": 0
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   },
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "note": "backfill: link failure at h2219547: prev 94f42fed6bcb69c00b0483c580421496a332acfdac67bbf8f9a00fd1d1815ce6 != validated 9e0de473faa371d71bb9d8a440faeda4584b0069eb8ac897f21db6b0b63de683",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "protocol": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "listen": "0.0.0.0:24113",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "magic": "70352205",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "outbound_targets": [
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:       "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     ],
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "protocol_version": 70206,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "user_agent": "/tri7:7.0.0/"
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   },
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "tip": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "at_daemon_tip": false,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "blockhash": "3b9b0737e1ccdbc0c9368b83a7cf671d2b196f827287401e231867dbc7f95c4c",
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "daemon_getblockcount": -1,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "height": 2219576
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   },
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "window": {
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "base": 2214977,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "entries": 4600,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:     "utxo_tracked": 2328
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   }
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: }
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:17Z] node finish: exit 4 (summary not persisted)
+2026-11-25T13:30:17+00:00 appt systemd[1]: tri7d.service: Main process exited, code=exited, status=4/NOPERMISSION
+2026-11-25T13:30:17+00:00 appt systemd[1]: tri7d.service: Failed with result 'exit-code'.
+2026-11-25T13:30:17+00:00 appt systemd[1]: tri7d.service: Consumed 4.753s CPU time, 7.1M memory peak, 0B memory swap peak.
+2026-11-25T13:30:21+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:30:21+00:00 appt systemd[1]: tri7d.service: Consumed 4.753s CPU time, 7.1M memory peak, 0B memory swap peak.
+2026-11-25T13:30:21+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:30:21+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:21Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T13:30:21+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:21Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219573 services 1
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] loading tipstate.json …
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214977
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215177
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215377
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215577
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215777
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215977
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216177
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216377
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216577
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216777
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216977
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217177
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217377
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217577
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217777
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217977
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214977; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T13:30:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:22Z] item25: modifier chain audit clean (4519 generated heights compared, replay floor rel 81, 32 samples) [boot]
+2026-11-25T13:30:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:23Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219573 services 1
+2026-11-25T13:30:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:23Z] state: tip h2219576 3b9b0737e1ccdbc0c9368b83a7cf671d2b196f827287401e231867dbc7f95c4c · daemon getblockcount -1
+2026-11-25T13:30:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:23Z] chain slots: seeded 4600 window entries from base h2214977 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T13:30:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:30:23Z] backfill: requesting headers from h2216576 (locator f3585d50fca774dc003e9d662c2450b773ffd9b8f88d9603407c6f6273822fc1)
+2026-11-25T13:32:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:23Z] backfill: validated 2997 headers linking h2216577 → h2219573 (hash9 + linkage, daemon-served)
+2026-11-25T13:32:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:23Z] backfill: requesting 100 full blocks
+2026-11-25T13:32:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:24Z] h2216577: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T13:32:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:24Z] backfill: 10 blocks fully validated so far
+2026-11-25T13:32:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:24Z] backfill: 20 blocks fully validated so far
+2026-11-25T13:32:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:24Z] backfill: 30 blocks fully validated so far
+2026-11-25T13:32:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:25Z] backfill: 40 blocks fully validated so far
+2026-11-25T13:32:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:25Z] backfill: 50 blocks fully validated so far
+2026-11-25T13:32:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:25Z] backfill: 60 blocks fully validated so far
+2026-11-25T13:32:26+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:26Z] backfill: 70 blocks fully validated so far
+2026-11-25T13:32:27+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:27Z] backfill: 80 blocks fully validated so far
+2026-11-25T13:32:27+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:27Z] backfill: 90 blocks fully validated so far
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] backfill: 100 blocks fully validated so far
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] backfill: 100 blocks fully validated (kernel enforced 44 / seeded 0)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] smsg: engine live with 10 wallet key(s) — store /var/lib/tri7/smsg
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: rpc: balances snapshot loaded from /var/lib/tri7/balances.json (h2219460, 10 wallet addrs, wallet 101643309 sats, 44407 received-addrs)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: rpc: wallet UTXO snapshot loaded from /var/lib/tri7/wallet_utxos.json (h2219460, 6 UTXOs, 101643309 sats)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] rpc: block index build started (background thread, cache-first)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] keypool: census 0 entries (oldest epoch n/a)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] keypool: top-up maintainer running (target 100, check every 900s)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] p2p: inbound listener on 0.0.0.0:24113 (getdata/getheaders/push-block)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:32:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:28Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219576 (work 55239610782136742078054400) above the fork — ignored, reconciliation closed
+2026-11-25T13:32:32+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:32Z] serving degraded (store building, 100000 frames) — getheaders from out:ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 cannot be answered from the index yet
+2026-11-25T13:32:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:43Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:32:58+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:58Z] inbound peer connected: in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:32:59+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:59Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:32:59+00:00 appt follow_tip[2814532]: [2026-11-25T13:32:59Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219576 (work 55239610782136742078054400) above the fork — ignored, reconciliation closed
+2026-11-25T13:33:04+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:04Z] addr: merged 19 of 21 entries (store 22 peers)
+2026-11-25T13:33:05+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:05Z] h2219577: no external checksum oracle for this block — adopting locally computed e7233c00
+2026-11-25T13:33:05+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:05Z] TIP ADVANCE → h2219577 74625a23ea92a52559770302d05b3beff1a7a320adb0a4a351ce9b02c0eebefc (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:33:05+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:05Z] relay: announced h2219577 to 2 peer(s) (inv)
+2026-11-25T13:33:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:06Z] h2219578: no external checksum oracle for this block — adopting locally computed 2946a264
+2026-11-25T13:33:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:06Z] TIP ADVANCE → h2219578 0f9142495e8b5f8f46741d7c5a2811f554f06ce7d5027a4eaf376c7a9323c7e1 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:33:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:06Z] h2219579: no external checksum oracle for this block — adopting locally computed 0a87db26
+2026-11-25T13:33:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:06Z] TIP ADVANCE → h2219579 002a06e587cf89fc4a0951b2c49ae8641133c51bb69afd76e34ecb4ead6174e1 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:33:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:06Z] relay: announced h2219579 to 2 peer(s) (inv)
+2026-11-25T13:33:14+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:14Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2214980 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2214980 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215180 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215180 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215380 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215380 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215580 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215580 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215780 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215780 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215980 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2215980 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216180 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216180 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216380 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216380 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216580 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216580 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216780 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216780 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216980 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2216980 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217180 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217180 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217380 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217380 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217580 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217580 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217780 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217780 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217980 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: h2217980 refused by fold (hash/parse gate)
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214980; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T13:33:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:28Z] kernel-window backfill retry #1: floor 4597 → 4600
+2026-11-25T13:33:29+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:29Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219579 (work 60625446001018560070025216) above the fork — ignored, reconciliation closed
+2026-11-25T13:33:29+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:29Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:33:34+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:34Z] serving degraded (store building, 2100000 frames) — getheaders from in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576) cannot be answered from the index yet
+2026-11-25T13:33:36+00:00 appt follow_tip[2814532]: [blockidx] ready: 2220151 frames, 4519199 txs, heights_ok=true, threaded_tip=Some(2219576), writable=true, built in 67s, fork re-threaded 6702 frames
+2026-11-25T13:33:38+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219579: height map/appendix serves nothing but the live chain slot is 002a06e587cf89fc4a0951b2c49ae8641133c51bb69afd76e34ecb4ead6174e1 — serving the chain's body
+2026-11-25T13:33:38+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219578: height map/appendix serves nothing but the live chain slot is 0f9142495e8b5f8f46741d7c5a2811f554f06ce7d5027a4eaf376c7a9323c7e1 — serving the chain's body
+2026-11-25T13:33:38+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219577: height map/appendix serves nothing but the live chain slot is 74625a23ea92a52559770302d05b3beff1a7a320adb0a4a351ce9b02c0eebefc — serving the chain's body
+2026-11-25T13:33:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:38Z] wallet-seed: store's newest body is h2219576 (tip h2219579) - seeding up to there; newer coins arrive as bodies land
+2026-11-25T13:33:44+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:44Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:33:58+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:58Z] balances-build: the loaded snapshot covers h2219460 but its replay chased h2219570 — retrying
+2026-11-25T13:33:58+00:00 appt follow_tip[2814532]: [2026-11-25T13:33:58Z] balances-build: start (snapshot h2219460, chain tip h2219579) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T13:34:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:00Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:34:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:00Z] recon: competing branch h2219551..h2219573 (22 blk, work 49075072621211144559788032) is NOT heavier than ours h2219579 (work 60625446001018560070025216) above the fork — ignored, reconciliation closed
+2026-11-25T13:34:04+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:04Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T13:34:05+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219461: height map/appendix serves nothing but the live chain slot is 7b6a7917a9e7c705800a9523e6c74555c0e6d78b1f435345838e1bae4801b183 — serving the chain's body
+2026-11-25T13:34:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:09Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T13:34:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:11Z] h2219580: no external checksum oracle for this block — adopting locally computed ec68c540
+2026-11-25T13:34:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:11Z] TIP ADVANCE → h2219580 02677929f4f7d6c6ab2bd1dcf9c3c6d90269a1fa8d9c445de9e8ea2d5664a500 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:34:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:11Z] relay: announced h2219580 to 2 peer(s) (inv)
+2026-11-25T13:34:13+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:13Z] recon: competing branch h2219551..h2219574 (23 blk, work 51029408364038012125839360) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:34:13+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:13Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T13:34:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:15Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:34:18+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:18Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T13:34:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:23Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T13:34:27+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:27Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T13:34:29+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:29Z] kernel-window backfill: 3100 block(s) folded (store 3100, rpc 0) in 271.15142ms — kernel coverage spans the full staking window (floor 0)
+2026-11-25T13:34:29+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:29Z] kernel-window backfill retry #2: floor 4599 → 0
+2026-11-25T13:34:30+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:30Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:34:31+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:31Z] recon: competing branch h2219551..h2219574 (23 blk, work 51029408364038012125839360) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:34:31+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:31Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T13:34:36+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:36Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T13:34:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:40Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T13:34:44+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:44Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T13:34:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:46Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:34:48+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:48Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T13:34:53+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:53Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T13:34:58+00:00 appt follow_tip[2814532]: [2026-11-25T13:34:58Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:01Z] stake tick: wallet live view not ready yet (seeding)
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:01Z] recon: competing branch h2219551..h2219574 (23 blk, work 51029408364038012125839360) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219472: height map/appendix serves nothing but the live chain slot is b51410962a9e008a978a6e827c5f76da160c2153fac698e085672edfc434188b — serving the chain's body
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219489: height map/appendix serves nothing but the live chain slot is 840ff9e890682d2ff78c64420b32439bc65ab660e8ff486734b82b6ace406182 — serving the chain's body
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [blockidx] STALE SLOT h2219490: height map/appendix serves nothing but the live chain slot is a94357477f2b19448509a3c06fa8bcb723119b44b218f2c966879c197e9e113f — serving the chain's body
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:01Z] wallet live seed: sequential walk + index window done in 82.6s (7 skipped height(s), first h2208247, last h2219490 — archive coverage hole; balances exclude those heights)
+2026-11-25T13:35:01+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:01Z] wallet live view ready: window h0..h2219576 — 5 outputs (5 owned) balance 101659670 sats
+2026-11-25T13:35:04+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:04Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T13:35:08+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:08Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T13:35:13+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:13Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T13:35:17+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:17Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T13:35:21+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:21Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T13:35:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:24Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T13:35:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:28Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T13:35:32+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:32Z] recon: competing branch h2219551..h2219574 (23 blk, work 51029408364038012125839360) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:35:32+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:32Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T13:35:36+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:36Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T13:35:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:38Z] balances-build: done in 100.3s — coverage h2219460 tip e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22 · supply 226993061570 sats · 18020 live UTXOs · wallet 10 keys 101643309 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T13:35:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:38Z] balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h2219461 although its chain continues above it
+2026-11-25T13:35:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:35:38Z] balances-build: coverage h2219460 short of the chased tip h2219579 — retrying in 60s
+2026-11-25T13:36:02+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:02Z] recon: competing branch h2219551..h2219575 (24 blk, work 52384039636192921317801984) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:36:32+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:32Z] recon: competing branch h2219551..h2219575 (24 blk, work 52384039636192921317801984) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:36:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:38Z] balances-build: start (snapshot h2219460, chain tip h2219580) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T13:36:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:40Z] recon: competing branch h2219551..h2219576 (25 blk, work 53742917649497814137307136) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:36:42+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:42Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T13:36:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:46Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T13:36:50+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:50Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T13:36:54+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:54Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T13:36:58+00:00 appt follow_tip[2814532]: [2026-11-25T13:36:58Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T13:37:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:03Z] recon: competing branch h2219551..h2219576 (25 blk, work 53742917649497814137307136) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:37:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:03Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T13:37:08+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:08Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T13:37:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:11Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T13:37:16+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:16Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T13:37:20+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:20Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T13:37:24+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:24Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T13:37:29+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:29Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T13:37:33+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:33Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T13:37:33+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:33Z] recon: competing branch h2219551..h2219576 (25 blk, work 53742917649497814137307136) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:37:37+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:37Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T13:37:41+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:41Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T13:37:44+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:44Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T13:37:48+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:48Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T13:37:51+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:51Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T13:37:55+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:55Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T13:37:59+00:00 appt follow_tip[2814532]: [2026-11-25T13:37:59Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T13:38:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:03Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T13:38:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:03Z] recon: competing branch h2219551..h2219576 (25 blk, work 53742917649497814137307136) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:38:07+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:07Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T13:38:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:09Z] balances-build: done in 91.0s — coverage h2219460 tip e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22 · supply 226993061570 sats · 18020 live UTXOs · wallet 10 keys 101643309 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T13:38:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:09Z] balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h2219461 although its chain continues above it
+2026-11-25T13:38:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:09Z] balances-build: coverage h2219460 short of the chased tip h2219580 — retrying in 120s
+2026-11-25T13:38:34+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:34Z] recon: competing branch h2219551..h2219576 (25 blk, work 53742917649497814137307136) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:38:42+00:00 appt follow_tip[2814532]: [2026-11-25T13:38:42Z] recon: competing branch h2219551..h2219577 (26 blk, work 55233801117600527876620288) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:39:04+00:00 appt follow_tip[2814532]: [2026-11-25T13:39:04Z] recon: competing branch h2219551..h2219577 (26 blk, work 55233801117600527876620288) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:39:35+00:00 appt follow_tip[2814532]: [2026-11-25T13:39:35Z] recon: competing branch h2219551..h2219577 (26 blk, work 55233801117600527876620288) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:40:05+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:05Z] recon: competing branch h2219551..h2219577 (26 blk, work 55233801117600527876620288) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:40:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:09Z] balances-build: start (snapshot h2219460, chain tip h2219580) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T13:40:14+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:14Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T13:40:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:15Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:40:18+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:18Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T13:40:23+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:23Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T13:40:26+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:26Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T13:40:30+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:30Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T13:40:34+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:34Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T13:40:36+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:36Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:40:39+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:39Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T13:40:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:43Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T13:40:48+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:48Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T13:40:52+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:52Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T13:40:56+00:00 appt follow_tip[2814532]: [2026-11-25T13:40:56Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T13:41:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:00Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T13:41:04+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:04Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T13:41:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:06Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:41:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:09Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T13:41:13+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:13Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T13:41:17+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:17Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T13:41:21+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:21Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T13:41:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:25Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T13:41:30+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:30Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T13:41:35+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:35Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T13:41:37+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:37Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:41:39+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:39Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T13:41:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:43Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T13:41:45+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:45Z] balances-build: done in 95.9s — coverage h2219460 tip e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22 · supply 226993061570 sats · 18020 live UTXOs · wallet 10 keys 101643309 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T13:41:45+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:45Z] balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h2219461 although its chain continues above it
+2026-11-25T13:41:45+00:00 appt follow_tip[2814532]: [2026-11-25T13:41:45Z] balances-build: coverage h2219460 short of the chased tip h2219580 — retrying in 240s
+2026-11-25T13:42:06+00:00 appt follow_tip[2814532]: [2026-11-25T13:42:06Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:42:37+00:00 appt follow_tip[2814532]: [2026-11-25T13:42:37Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219580 (work 62456483924609898356146176) above the fork — ignored, reconciliation closed
+2026-11-25T13:42:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:42:40Z] h2219581: no external checksum oracle for this block — adopting locally computed 4f6598f4
+2026-11-25T13:42:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:42:40Z] TIP ADVANCE → h2219581 8497beaae32246aa8665c50cfc8f9fb08d56d0e91cdceb91f31c2e97a8ca0f28 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:42:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:42:40Z] relay: announced h2219581 to 2 peer(s) (inv)
+2026-11-25T13:43:07+00:00 appt follow_tip[2814532]: [2026-11-25T13:43:07Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219581 (work 64279925981503868360458240) above the fork — ignored, reconciliation closed
+2026-11-25T13:43:37+00:00 appt follow_tip[2814532]: [2026-11-25T13:43:37Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219581 (work 64279925981503868360458240) above the fork — ignored, reconciliation closed
+2026-11-25T13:43:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:43:40Z] h2219582: no external checksum oracle for this block — adopting locally computed 68a24227
+2026-11-25T13:43:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:43:40Z] TIP ADVANCE → h2219582 2dfc34aebff9a2dc1a07d646f6c12dcb3f665a2398852192442477f2fd19fc81 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:43:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:43:40Z] relay: announced h2219582 to 2 peer(s) (inv)
+2026-11-25T13:44:08+00:00 appt follow_tip[2814532]: [2026-11-25T13:44:08Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219582 (work 65561408963420506092994560) above the fork — ignored, reconciliation closed
+2026-11-25T13:44:38+00:00 appt follow_tip[2814532]: [2026-11-25T13:44:38Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219582 (work 65561408963420506092994560) above the fork — ignored, reconciliation closed
+2026-11-25T13:45:08+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:08Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219582 (work 65561408963420506092994560) above the fork — ignored, reconciliation closed
+2026-11-25T13:45:39+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:39Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219582 (work 65561408963420506092994560) above the fork — ignored, reconciliation closed
+2026-11-25T13:45:45+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:45Z] balances-build: start (snapshot h2219460, chain tip h2219582) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T13:45:49+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:49Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+2026-11-25T13:45:54+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:54Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+2026-11-25T13:45:59+00:00 appt follow_tip[2814532]: [2026-11-25T13:45:59Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+2026-11-25T13:46:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:00Z] STAKE: kernel solved after 11 attempts (0.000453527s) — coin da5fb518ad72b9b2b62a4695f1a6750a483ee27c1708267852d99d43406da7c2:1 (29063702 sats, 0 coin-days), reward 2333 sats, fees 0
+2026-11-25T13:46:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:00Z] h2219583: no external checksum oracle for this block — adopting locally computed 6117a51a
+2026-11-25T13:46:00+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:00Z] STAKE MINTED → h2219583 54f29fe31999967307020a070b3ed95fa78d9881e2fed87f8286eeb156307bb3 (self-validated: kernel enforced, nbits enforced) — relaying to 2 peer(s)
+2026-11-25T13:46:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:03Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+2026-11-25T13:46:07+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:07Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+2026-11-25T13:46:09+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:09Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:46:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:11Z] balances-build: ... 600000 blocks, 11901 live UTXOs
+2026-11-25T13:46:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:15Z] balances-build: ... 700000 blocks, 11202 live UTXOs
+2026-11-25T13:46:18+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:18Z] balances-build: ... 800000 blocks, 11818 live UTXOs
+2026-11-25T13:46:22+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:22Z] balances-build: ... 900000 blocks, 11512 live UTXOs
+2026-11-25T13:46:26+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:26Z] balances-build: ... 1000000 blocks, 12028 live UTXOs
+2026-11-25T13:46:30+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:30Z] balances-build: ... 1100000 blocks, 12139 live UTXOs
+2026-11-25T13:46:33+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:33Z] balances-build: ... 1200000 blocks, 12657 live UTXOs
+2026-11-25T13:46:37+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:37Z] balances-build: ... 1300000 blocks, 12737 live UTXOs
+2026-11-25T13:46:40+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:40Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:46:41+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:41Z] balances-build: ... 1400000 blocks, 13034 live UTXOs
+2026-11-25T13:46:44+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:44Z] balances-build: ... 1500000 blocks, 13198 live UTXOs
+2026-11-25T13:46:48+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:48Z] balances-build: ... 1600000 blocks, 13290 live UTXOs
+2026-11-25T13:46:51+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:51Z] balances-build: ... 1700000 blocks, 13692 live UTXOs
+2026-11-25T13:46:55+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:55Z] balances-build: ... 1800000 blocks, 14137 live UTXOs
+2026-11-25T13:46:59+00:00 appt follow_tip[2814532]: [2026-11-25T13:46:59Z] balances-build: ... 1900000 blocks, 14051 live UTXOs
+2026-11-25T13:47:03+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:03Z] balances-build: ... 2000000 blocks, 14956 live UTXOs
+2026-11-25T13:47:08+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:08Z] balances-build: ... 2100000 blocks, 33421 live UTXOs
+2026-11-25T13:47:10+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:10Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:47:12+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:12Z] balances-build: ... 2200000 blocks, 17780 live UTXOs
+2026-11-25T13:47:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:15Z] balances-build: done in 89.2s — coverage h2219460 tip e4c2f6754aa2718d48da8b7f47b3de71d7a1aa3d47f7fcd4a0450fd98a355f22 · supply 226993061570 sats · 18020 live UTXOs · wallet 10 keys 101643309 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T13:47:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:15Z] balances-build: chain-ordered walk stopped at h2219461 — the chain store holds nothing at h2219461 although its chain continues above it
+2026-11-25T13:47:15+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:15Z] balances-build: coverage h2219460 short of the chased tip h2219582 — retrying in 480s
+2026-11-25T13:47:28+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:28Z] keypool: maintainer refill failed: refill_keypool: /var/lib/tri7/wallet.dat has no HD seed — tri7 refills only seed wallets (an imported random-key wallet cannot be topped up from a phrase)
+2026-11-25T13:47:41+00:00 appt follow_tip[2814532]: [2026-11-25T13:47:41Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:48:11+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:11Z] recon: competing branch h2219551..h2219578 (27 blk, work 56716960683103693863649280) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:48:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:25Z] recon: competing branch h2219551..h2219579 (28 blk, work 58247965131062432115982336) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:48:42+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:42Z] recon: competing branch h2219551..h2219579 (28 blk, work 58247965131062432115982336) is NOT heavier than ours h2219583 (work 66934427826531096965677056) above the fork — ignored, reconciliation closed
+2026-11-25T13:48:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:43Z] h2219584: no external checksum oracle for this block — adopting locally computed afc6eea5
+2026-11-25T13:48:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:43Z] TIP ADVANCE → h2219584 c2c5f0ba91fa8dff8a27e30fd343b594340a520531b3ecdc87e3170174e6f44d (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:48:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:48:43Z] relay: announced h2219584 to 2 peer(s) (inv)
+2026-11-25T13:49:12+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:12Z] recon: competing branch h2219551..h2219579 (28 blk, work 58247965131062432115982336) is NOT heavier than ours h2219584 (work 68272599269263761767137280) above the fork — ignored, reconciliation closed
+2026-11-25T13:49:25+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:25Z] recon: competing branch h2219551..h2219580 (29 blk, work 59366507537565890744680448) is NOT heavier than ours h2219584 (work 68272599269263761767137280) above the fork — ignored, reconciliation closed
+2026-11-25T13:49:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:43Z] recon: competing branch h2219551..h2219580 (29 blk, work 59366507537565890744680448) is NOT heavier than ours h2219584 (work 68272599269263761767137280) above the fork — ignored, reconciliation closed
+2026-11-25T13:49:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:46Z] h2219585: no external checksum oracle for this block — adopting locally computed b2918fab
+2026-11-25T13:49:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:46Z] TIP ADVANCE → h2219585 6fc0540ab50b9b5c4fa936fa95c72dd1d8991ba5bd9556d27012b1516c631319 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:49:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:46Z] h2219586: no external checksum oracle for this block — adopting locally computed 93d987ae
+2026-11-25T13:49:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:46Z] TIP ADVANCE → h2219586 e93abb775fbef9736e4d8cf98ec0e69989b3cea4d22ed7ea485fcd9964a77fe7 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:49:46+00:00 appt follow_tip[2814532]: [2026-11-25T13:49:46Z] relay: announced h2219586 to 2 peer(s) (inv)
+2026-11-25T13:50:13+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:13Z] recon: competing branch h2219551..h2219580 (29 blk, work 59366507537565890744680448) is NOT heavier than ours h2219586 (work 70951410438697958825263104) above the fork — ignored, reconciliation closed
+2026-11-25T13:50:16+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:16Z] h2219587: no external checksum oracle for this block — adopting locally computed 5136a387
+2026-11-25T13:50:16+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:16Z] TIP ADVANCE → h2219587 1718fc24d9be0e167ee1994a08769692d242d90268d07cc50f2e52b0cb46a36a (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:50:16+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:16Z] relay: announced h2219587 to 2 peer(s) (inv)
+2026-11-25T13:50:24+00:00 appt systemd[1]: Stopping tri7d.service - tri7 daemon (from-zero synced node)...
+2026-11-25T13:50:43+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:43Z] recon: competing branch h2219551..h2219580 (29 blk, work 59366507537565890744680448) is NOT heavier than ours h2219587 (work 72503010847723038500192256) above the fork — ignored, reconciliation closed
+2026-11-25T13:50:50+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:50Z] h2219588: no external checksum oracle for this block — adopting locally computed 50d1b92b
+2026-11-25T13:50:50+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:50Z] TIP ADVANCE → h2219588 bab1421ff76d166ac51e1945ae381791616b490fa5c736c7a3437730db229e79 (kernel enforced) via in:127.0.0.1:37038 (/tri7:7.0.0/ h2219576)
+2026-11-25T13:50:50+00:00 appt follow_tip[2814532]: [2026-11-25T13:50:50Z] relay: announced h2219588 to 2 peer(s) (inv)
+2026-11-25T13:51:14+00:00 appt follow_tip[2814532]: [2026-11-25T13:51:14Z] recon: competing branch h2219551..h2219580 (29 blk, work 59366507537565890744680448) is NOT heavier than ours h2219588 (work 74259542595254525047603200) above the fork — ignored, reconciliation closed
+2026-11-25T13:51:44+00:00 appt follow_tip[2814532]: [2026-11-25T13:51:44Z] recon: competing branch h2219551..h2219581 (30 blk, work 60541344428020004508663808) is NOT heavier than ours h2219588 (work 74259542595254525047603200) above the fork — ignored, reconciliation closed
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: State 'stop-sigterm' timed out. Killing.
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: Killing process 2814532 (follow_tip) with signal SIGKILL.
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: Failed to kill control group /system.slice/tri7d.service, ignoring: Invalid argument
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T13:51:54+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:51:54+00:00 appt systemd[1]: tri7d.service: Consumed 8min 53.794s CPU time, 871.8M memory peak, 115.8M memory swap peak.
+2026-11-25T13:51:54+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:51:54+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:54Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T13:51:54+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:54Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] handshake ok: gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 — peer version 70206 (/tri7:7.0.0/) start height 2219581 services 1
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] loading tipstate.json …
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214989
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215189
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215389
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215589
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215789
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215989
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216189
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216389
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216589
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216789
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216989
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217189
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217389
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217589
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217789
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217989
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214989; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T13:51:58+00:00 appt follow_tip[2821733]: [2026-11-25T13:51:58Z] item25: modifier chain audit clean (4515 generated heights compared, replay floor rel 85, 32 samples) [boot]
+2026-11-25T13:52:00+00:00 appt follow_tip[2821733]: [2026-11-25T13:52:00Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219581 services 1
+2026-11-25T13:52:00+00:00 appt follow_tip[2821733]: [2026-11-25T13:52:00Z] state: tip h2219588 bab1421ff76d166ac51e1945ae381791616b490fa5c736c7a3437730db229e79 · daemon getblockcount -1
+2026-11-25T13:52:00+00:00 appt follow_tip[2821733]: [2026-11-25T13:52:00Z] chain slots: seeded 4600 window entries from base h2214989 — height serving follows the threaded tip (stale-slot guard on)
+2026-11-25T13:52:00+00:00 appt follow_tip[2821733]: [2026-11-25T13:52:00Z] backfill: requesting headers from h2216588 (locator 2d2d0234ef1db07e8b16affd5a6d44a28ca7908f04a869bf2ea25d30e566aaee)
+2026-11-25T13:54:01+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:01Z] backfill: validated 2993 headers linking h2216589 → h2219581 (hash9 + linkage, daemon-served)
+2026-11-25T13:54:01+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:01Z] backfill: requesting 100 full blocks
+2026-11-25T13:54:27+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:27Z] h2216589: pre-window coinstake, no external proof oracle — kernel evidence skipped (linkage+checksum+sig only); 1 so far
+2026-11-25T13:54:27+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:27Z] backfill: 10 blocks fully validated so far
+2026-11-25T13:54:27+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:27Z] backfill: 20 blocks fully validated so far
+2026-11-25T13:54:27+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:27Z] backfill: 30 blocks fully validated so far
+2026-11-25T13:54:27+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:27Z] backfill: 40 blocks fully validated so far
+2026-11-25T13:54:28+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:28Z] backfill: 50 blocks fully validated so far
+2026-11-25T13:54:28+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:28Z] backfill: 60 blocks fully validated so far
+2026-11-25T13:54:29+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:29Z] backfill: 70 blocks fully validated so far
+2026-11-25T13:54:30+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:30Z] backfill: 80 blocks fully validated so far
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:31Z] backfill: 90 blocks fully validated so far
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: SUMMARY
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "exit_code": 4,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "messages": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "adoption_body_stalls": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "blocks_received": 100,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "blocks_relayed": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "blocks_validated_hist": 99,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "blocks_validated_live": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "checksums_verified": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "dup_tx_peer_kept": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "dup_tx_refused": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "dup_tx_spentness_unprovable": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "dup_tx_store_unprovable": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "gap_filled": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "gap_requests": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "gap_rollback": false,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "gap_ticks": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "getdata_served": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "getdata_tx_served": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "getheaders_served": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "handshakes": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "headers_backfilled": 2993,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "headers_new": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "headers_processed": 2993,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "inbound_accepted": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "inbound_polls": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "kernel_enforced": 43,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "kernel_seeded": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "kernel_skipped_no_oracle": 56,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "nbits_checked": 99,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "parse_failures": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "polls": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "reconnects": 1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "recv": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "addr": 1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "block": 100,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "getaddr": 1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "getheaders": 4,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "headers": 3,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "inv": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "ping": 3,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "sendheaders": 1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "smsgPing": 1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "verack": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "version": 2
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     },
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "reorgs": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "sent": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "getaddr": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "getdata": 4,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "getheaders": 3,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "pong": 3,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "sendheaders": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "verack": 2,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "version": 2
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     },
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "sigs_checked": 99,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "tx_getdatas_sent": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "txs_accepted": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "txs_received": 0,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "txs_rejected": 0
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   },
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "note": "backfill: link failure at h2219559: prev 0d4faf0dacd31603fa71c326ab4ded8ab7cd193cc4462f123e220f0260622db3 != validated 7d270318a0e3f4ee00d24af231ce8a141ba4d3eddcc574c0bcd6eca53d95f702",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "protocol": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "listen": "0.0.0.0:24113",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "magic": "70352205",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "outbound_targets": [
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:       "ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113"
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     ],
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "protocol_version": 70206,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "user_agent": "/tri7:7.0.0/"
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   },
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "tip": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "at_daemon_tip": false,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "blockhash": "bab1421ff76d166ac51e1945ae381791616b490fa5c736c7a3437730db229e79",
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "daemon_getblockcount": -1,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "height": 2219588
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   },
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "window": {
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "base": 2214989,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "entries": 4600,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:     "utxo_tracked": 2333
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   }
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: }
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:31Z] node finish: exit 4 (summary not persisted)
+2026-11-25T13:54:31+00:00 appt systemd[1]: tri7d.service: Main process exited, code=exited, status=4/NOPERMISSION
+2026-11-25T13:54:31+00:00 appt systemd[1]: tri7d.service: Failed with result 'exit-code'.
+2026-11-25T13:54:31+00:00 appt systemd[1]: tri7d.service: Consumed 4.840s CPU time, 6.9M memory peak, 0B memory swap peak.
+2026-11-25T13:54:36+00:00 appt systemd[1]: Stopped tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:54:36+00:00 appt systemd[1]: tri7d.service: Consumed 4.840s CPU time, 6.9M memory peak, 0B memory swap peak.
+2026-11-25T13:54:36+00:00 appt systemd[1]: Started tri7d.service - tri7 daemon (from-zero synced node).
+2026-11-25T13:54:36+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:36Z] addnode=gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 accepted (tor)
+2026-11-25T13:54:36+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:36Z] addnode=ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 accepted (tor)
+2026-11-25T13:54:57+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:57Z] handshake gxvrhv3qitnc6kobrhsrse46bmcfitnybapor3or3oczzuxn6hfzxyid.onion:24113 failed: handshake timed out waiting for verack
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] handshake ok: ra32xf5ogzq2ialyjyptodb6ibhs4owcfvvzkvind2mz4ntrbijqk2yd.onion:24112 — peer version 70206 (/tri7:7.0.0/) start height 2219588 services 1
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] loading tipstate.json …
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2214989
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215189
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215389
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215589
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215789
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215989
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216189
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216389
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216589
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216789
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216989
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217189
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217389
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217589
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217789
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217989
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2214989; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+2026-11-25T13:54:58+00:00 appt follow_tip[2822466]: [2026-11-25T13:54:58Z] item25: modifier chain audit clean (4515 generated heights compared, replay floor rel 85, 32 samples) [boot]
+2026-11-25T13:56:00+00:00 appt follow_tip[2822466]: [2026-11-25T13:56:00Z] handshake qgrkbxy7j2vuu5flhnyvho7chk7pfzk4o72p5pgdb6nrf72mz7kq.b32.i2p:24112 failed: handshake timed out waiting for verack
+2026-11-25T13:56:25+00:00 appt follow_tip[2822466]: [2026-11-25T13:56:25Z] handshake 43kgtx6vcz2253vo5ybfq3ax5sj5mmw5dy4l64fypw74yauvje4gmbyd.onion:24113 failed: handshake timed out waiting for verack
+2026-11-25T13:57:27+00:00 appt follow_tip[2822466]: [2026-11-25T13:57:27Z] handshake ztj5lcg4tgcn7lh7wlrgvmfhf42itoetwgh42doogu7w3gdhxtbq.b32.i2p:24113 failed: handshake timed out waiting for verack
+2026-11-25T13:57:30+00:00 appt follow_tip[2822466]: [2026-11-25T13:57:30Z] handshake mb3ox52uzwh7d7u6ct6mdapcsyqcxiffz53hlydwsr7cwhvys5za.b32.i2p:24113 failed: peer closed connection

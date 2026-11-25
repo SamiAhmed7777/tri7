@@ -1,0 +1,25 @@
+# DNS3 boot exits 2026-11-25 — the item-50 root cause evidence
+# pulled 15:3xZ from ev_dns3_journal_1320-onward.txt + ev_deploy_dns3_r2.txt (gate dir item49)
+
+## boot 1: 13:30:17Z pid 2813967 (r1 deploy, new binary 3ff22133)
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: SUMMARY
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "exit_code": 4,
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]:   "note": "backfill: link failure at h2219547: prev 94f42fed6bcb69c00b0483c580421496a332acfdac67bbf8f9a00fd1d1815ce6 != validated 9e0de473faa371d71bb9d8a440faeda4584b0069eb8ac897f21db6b0b6
+2026-11-25T13:30:17+00:00 appt follow_tip[2813967]: [2026-11-25T13:30:17Z] node finish: exit 4 (summary not persisted)
+
+## boot 2: 13:54:31Z pid 2821733 (r2 deploy, same binary)
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: SUMMARY
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "exit_code": 4,
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]:   "note": "backfill: link failure at h2219559: prev 0d4faf0dacd31603fa71c326ab4ded8ab7cd193cc4462f123e220f0260622db3 != validated 7d270318a0e3f4ee00d24af231ce8a141ba4d3eddcc574c0bcd6eca53d
+2026-11-25T13:54:31+00:00 appt follow_tip[2821733]: [2026-11-25T13:54:31Z] node finish: exit 4 (summary not persisted)
+
+## systemd reaction (restart loop fuel) — both boots
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Main process exited, code=killed, status=9/KILL
+2026-11-25T13:27:59+00:00 appt systemd[1]: tri7d.service: Failed with result 'timeout'.
+2026-11-25T13:30:17+00:00 appt systemd[1]: tri7d.service: Main process exited, code=exited, status=4/NOPERMISSION
+2026-11-25T13:30:17+00:00 appt systemd[1]: tri7d.service: Failed with result 'exit-code'.
+
+## deploy driver verdict (r2)
+{"outcome":"rolled-back","running_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","unit_state":"active","rehearsal":"0","unit":"tri7d","reason":"tri7d is not active after the restart","old_sha256":"60ee7604b18a107
+deploy exit=1 at 2026-11-25T13:54:41Z
+driver_exit=0 at 2026-11-25T13:54:50Z

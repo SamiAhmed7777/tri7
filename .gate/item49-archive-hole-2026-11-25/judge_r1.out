@@ -1,0 +1,11 @@
+GRADE=A urn=urn:ump:apr6lujrxcd5urx4sb7mrwfelik4ovaa42lyvmkgxaswqo34wzrq
+{
+  "blocking": [],
+  "polish": [
+    "After set_len cuts the torn journal tail, consider an fsync (or fsync of the parent dir after remove) so the cut/removal itself survives a crash before the records are re-landed.",
+    "While an interior hole is outstanding (< GAP_INTERIOR_TICKS), a newly appearing TAIL gap waits for the busy flag to clear \u2014 consider checking the tail walk even when busy, since a tail hole is strictly more urgent than an interior one.",
+    "pending_journal_append opens/creates the file on every record; holding an open handle per drain epoch would save an open+fsync syscall per buffered body during a hot build.",
+    "audit_seen is capped at 64 via remove(0); a VecDeque or small ring would avoid O(n) shifting, though at n=64 this is cosmetic.",
+    "Consider logging the journal path in the recovery line so the operator can correlate with the on-disk file directly."
+  ]
+}

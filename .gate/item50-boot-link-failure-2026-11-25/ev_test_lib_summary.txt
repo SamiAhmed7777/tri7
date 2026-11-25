@@ -1,0 +1,16 @@
+# full cargo test --lib — item-50 working tree, 2026-11-25T15:34:20Z
+test result: ok. 947 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 125.80s
+
+cargo exit=0
+end 2026-11-25T15:34:20Z
+
+# targeted backfill_body family (7 tests incl. the 3 new)
+running 7 tests
+test node_embedded::tests::backfill_body_peer_death_after_headers_returns_ok_never_a_fatal_err ... ok
+test node_embedded::tests::backfill_body_span_tracks_the_measured_store_shortfall ... ok
+test node_embedded::tests::backfill_body_kernel_refusal_links_but_fails_validation_skips_never_fatal ... ok
+test node_embedded::tests::backfill_body_stall_zero_bodies_returns_ok_zero_never_a_fatal_err ... ok
+test node_embedded::tests::backfill_body_link_failure_skips_the_phase_never_a_fatal_err ... ok
+test node_embedded::tests::backfill_body_garbage_block_payload_skips_the_phase_never_a_fatal_err ... ok
+test node_embedded::tests::backfill_body_that_links_and_validates_is_counted ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 941 filtered out; finished in 9.71s

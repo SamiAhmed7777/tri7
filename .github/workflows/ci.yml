@@ -85,13 +85,17 @@ jobs:
       # exe. Bump = change $ver + $want here AND deploy/windows/tor-bundle/
       # README.md, verified against the release's signed
       # sha256sums-signed-build.txt.
-      - name: Fetch bundled tor (pinned 16.0.1 + SHA256 gate)
+      - name: Fetch bundled tor (pinned 16.0.3 + SHA256 gate)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = '16.0.1'
+          # 16.0.1 was REMOVED from dist.torproject.org (2026-11-25: the
+          # release directory 404s, keeping only current versions) — the
+          # Windows gate died on Invoke-WebRequest 404. Bumped to 16.0.3,
+          # digest from the signed sha256sums-signed-build.txt.
+          $ver = '16.0.3'
           $url = "https://dist.torproject.org/torbrowser/$ver/tor-expert-bundle-windows-x86_64-$ver.tar.gz"
-          $want = '9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b'
+          $want = 'b70cabe2b93b5b1fd144466e42afaabe7a1a470228912657b3b5776e9cb7a9f1'
           $tgz = Join-Path $env:RUNNER_TEMP 'tor-expert-bundle.tar.gz'
           Invoke-WebRequest -Uri $url -OutFile $tgz
           $got = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLower()

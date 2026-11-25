@@ -14,11 +14,11 @@ client-only torrc.
 
 | field | value |
 |---|---|
-| version | **16.0.1** (latest torbrowser release shipping a Windows expert bundle; 16.0.2 is Android-only) |
-| file | `tor-expert-bundle-windows-x86_64-16.0.1.tar.gz` |
-| URL | `https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-windows-x86_64-16.0.1.tar.gz` |
-| SHA256 | `9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b` |
-| source of digest | official signed `sha256sums-signed-build.txt` for 16.0.1 |
+| version | **16.0.3** (latest torbrowser release shipping a Windows expert bundle; 16.0.2 is Android-only; 16.0.1 was removed from dist.torproject.org on/before 2026-11-25 — the pinned URL began 404ing, which is what forced this bump) |
+| file | `tor-expert-bundle-windows-x86_64-16.0.3.tar.gz` |
+| URL | `https://dist.torproject.org/torbrowser/16.0.3/tor-expert-bundle-windows-x86_64-16.0.3.tar.gz` |
+| SHA256 | `b70cabe2b93b5b1fd144466e42afaabe7a1a470228912657b3b5776e9cb7a9f1` |
+| source of digest | official signed `sha256sums-signed-build.txt` for 16.0.3 (digest cross-checked against a local HTTPS download 2026-11-25) |
 
 To bump: change the version + digest in **both** the CI step (hardcoded
 `$ver` / `$want`) and this file, verify the digest against the signed
@@ -26,7 +26,7 @@ To bump: change the version + digest in **both** the CI step (hardcoded
 
 ## What ships
 
-`tor.exe` only. The 16.0.1 windows expert bundle tor binary is statically
+`tor.exe` only. The 16.0.3 windows expert bundle tor binary is statically
 linked (no DLLs); geoip data, pluggable transports and docs from the bundle
 are deliberately not shipped — the wallet uses tor as a client-only SOCKS
 provider, nothing else.

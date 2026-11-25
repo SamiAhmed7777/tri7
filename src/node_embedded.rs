@@ -4190,6 +4190,9 @@ struct Stats {
     blocks_received: u64,
     blocks_validated_live: u64,
     blocks_validated_hist: u64,
+    /// (item 50, 2026-11-25) boot backfill bodies refused by validation —
+    /// the serving peer's branch did not match our persisted chain
+    blocks_backfill_refused: u64,
     kernel_enforced: u64,
     kernel_seeded: u64,
     kernel_skipped_no_oracle: u64,
@@ -4256,6 +4259,7 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "blocks_received": s.blocks_received,
         "blocks_validated_live": s.blocks_validated_live,
         "blocks_validated_hist": s.blocks_validated_hist,
+        "blocks_backfill_refused": s.blocks_backfill_refused,
         "kernel_enforced": s.kernel_enforced,
         "kernel_seeded": s.kernel_seeded,
         "kernel_skipped_no_oracle": s.kernel_skipped_no_oracle,
@@ -8289,11 +8293,18 @@ fn run_backfill(
 /// Fault treatment follows the item-17 precedent for the header phase: a
 /// boot must never exit(4) on a PEER's serving behavior. A session error
 /// (peer death, wire garbage at the pump layer), an unusable served payload,
-/// a failed getdata send, or a deadline stall returns the count of blocks
-/// validated so far — the caller turns 0 into a WARN+skip. ONLY a kernel
-/// VALIDATION failure of a served body stays fatal (a chain problem, not a
-/// transport problem: loud exit + operator eyes; disclosed remainder — no
-/// live occurrence of that shape).
+/// a failed getdata send, a deadline stall, or a served body that FAILS
+/// validation returns the count of blocks validated so far — the caller
+/// turns 0 into a WARN+skip. The old "kernel VALIDATION failure of a served
+/// body stays fatal" remainder died on 2026-11-25 (item 50): DNS3 boots
+/// 13:30:17Z and 13:54:31Z each asked the first-connected peer — DNS2, on
+/// the losing side of a near-tied fork — and the served body carried the
+/// losing predecessor ("link failure at h2219547 / h2219559"). exit(4)
+/// meant systemd re-dialed the SAME peer and crash-looped the node until
+/// the peer reorged. The peer's branch view is not evidence about OUR
+/// chain: the phase skips (WARN + blocks_backfill_refused counter), and
+/// the follow loop re-validates everything it actually accepts from the
+/// persisted tip.
 fn backfill_fetch_bodies(
     sess: &mut Session,
     st: &ChainState,
@@ -8386,7 +8397,18 @@ fn backfill_fetch_bodies(
                         }
                     };
                     let header = headers.iter().find(|hdr| hdr.hash() == hash);
-                    validate_block(
+                    // (item 50, 2026-11-25) the first two LIVE occurrences
+                    // of the old fatal remainder: DNS3 boots 13:30:17Z
+                    // (h2219547) and 13:54:31Z (h2219559). The serving peer
+                    // was DNS2, then on the losing side of a near-tied fork,
+                    // so the body carried the LOSING predecessor. A served
+                    // body that does not validate is the PEER's branch view,
+                    // never evidence about our own chain: skip the phase
+                    // like every other peer fault (the follow loop owns the
+                    // chain from the persisted tip; gap recovery fetches
+                    // what backfill missed) instead of exit(4)-looping the
+                    // boot against the same peer.
+                    if let Err(e) = validate_block(
                         st,
                         rpc,
                         stats,
@@ -8397,7 +8419,14 @@ fn backfill_fetch_bodies(
                             prev_entry,
                             live: false,
                         },
-                    )?;
+                    ) {
+                        stats.blocks_backfill_refused += 1;
+                        log(&format!(
+                            "backfill: served body h{} refused ({}) — skipping the body phase (follow loop owns the chain)",
+                            height, e
+                        ));
+                        return Ok(validated);
+                    }
                     stats.blocks_validated_hist += 1;
                     validated += 1;
                     if validated % 10 == 0 {
@@ -25013,6 +25042,108 @@ mod tests {
             stats.blocks_received >= 1,
             "the garbage block frame must have been received and counted"
         );
+    }
+
+    // ---- 2026-11-25 boot-link-failure (item 50): a served body that does
+    // not validate against OUR chain is the peer's branch view, never a
+    // local chain problem — the body phase must skip, never exit(4) ----
+
+    /// A one-shot TCP "peer" that serves exactly one wire-valid `block`
+    /// message and then holds the socket open.
+    fn one_block_peer(block: &Block) -> (Session, std::thread::JoinHandle<()>) {
+        let payload = block.serialize();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let holder = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let frame = tri7_core::p2p::encode_message("block", &payload).expect("encode ok");
+            use std::io::Write as _;
+            let _ = s.write_all(&frame);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port())).unwrap();
+        (sess, holder)
+    }
+
+    #[test]
+    fn backfill_body_link_failure_skips_the_phase_never_a_fatal_err() {
+        let _live_store_serial = lock_live_store_tests();
+        // the LIVE 2026-11-25 shapes (DNS3 13:30:17Z h2219547, 13:54:31Z
+        // h2219559): the first-connected peer was on the losing side of a
+        // near-tied fork, so the served body carried the LOSING predecessor
+        // — the OLD code let that Err reach finish(EXIT_PROTOCOL): exit 4,
+        // systemd restart, the SAME peer, the same exit: a crash loop that
+        // only ends when the peer reorgs. Now: WARN + skip the phase.
+        let stg = synthetic_chain(100, 105);
+        let loser_parent = [0x77u8; 32]; // the peer's own h104 on its branch
+        let served = bin_block(loser_parent, 0x31);
+        let (mut sess, holder) = one_block_peer(&served);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks = vec![(served.hash(), 105)];
+        let no_headers: Vec<Block> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a served body off our chain must be Ok(validated-so-far), never a fatal Err");
+        holder.join().unwrap();
+        assert_eq!(validated, 0, "the non-linking body must not be counted");
+        assert_eq!(stats.blocks_received, 1);
+        assert_eq!(
+            stats.blocks_backfill_refused, 1,
+            "the refusal must be counted for the SUMMARY"
+        );
+    }
+
+    #[test]
+    fn backfill_body_kernel_refusal_links_but_fails_validation_skips_never_fatal() {
+        let _live_store_serial = lock_live_store_tests();
+        // links to our entry at h104 but fails a later kernel check (the
+        // header lies about the merkle root): a served body WE refuse is
+        // equally peer behaviour — non-fatal, counted, phase skipped
+        let stg = synthetic_chain(100, 105);
+        let our_parent = stg.entry_abs(104).unwrap().hash;
+        let mut served = bin_block(our_parent, 0x32);
+        served.merkle_root = [0x5Au8; 32];
+        let (mut sess, holder) = one_block_peer(&served);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks = vec![(served.hash(), 105)];
+        let no_headers: Vec<Block> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a kernel-refused body must be Ok(validated-so-far), never a fatal Err");
+        holder.join().unwrap();
+        assert_eq!(validated, 0);
+        assert_eq!(stats.blocks_received, 1);
+        assert_eq!(stats.blocks_backfill_refused, 1);
+    }
+
+    #[test]
+    fn backfill_body_that_links_and_validates_is_counted() {
+        let _live_store_serial = lock_live_store_tests();
+        // control: the new skip arm is NOT "always skip" — a body that
+        // chains to our entry and passes the kernel still counts
+        let stg = synthetic_chain(100, 105);
+        let our_parent = stg.entry_abs(104).unwrap().hash;
+        let served = mk_body_block(our_parent, 0x33, 0x2000_ffff, 1_700_000_000 + 105 * 600);
+        let (mut sess, holder) = one_block_peer(&served);
+        let rpc = Rpc::new("127.0.0.1", 1, "", "");
+        let mut stats = Stats::default();
+        let picks = vec![(served.hash(), 105)];
+        let no_headers: Vec<Block> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let validated = backfill_fetch_bodies(
+            &mut sess, &stg, &rpc, &mut stats, &no_headers, picks, deadline,
+        )
+        .expect("a valid served body must be Ok(1)");
+        holder.join().unwrap();
+        assert_eq!(validated, 1, "the linking valid body must be counted");
+        assert_eq!(stats.blocks_validated_hist, 1);
+        assert_eq!(stats.blocks_backfill_refused, 0);
     }
 
     #[test]
