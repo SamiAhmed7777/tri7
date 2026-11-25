@@ -36,6 +36,9 @@ Files (worktree names carry a numeric prefix, e.g. `2_item48.diff`):
 | `ev_check_selftest_r8.txt` | the acceptance check's 24-case selftest (round-8 version)
 | `ev_check_selftest_r9.txt` | the acceptance check's 25-case selftest on the FINAL bytes: + malformed-second-height stop line |
 | `ev_deploy_dns3_r2.txt` | the live DNS3 second canary: pending 900 s → clean rollback; the journal that proved the h2219461 archive hole persistent |
+| `ev_deploy_dns3_r3.txt` | the live DNS3 accepted deploy (third canary, final checker): frontier convergence accepted, new binary running |
+| `ev_deploy_pi.txt` | the live Pi accepted deploy: negative check 1, aarch64 native build, walk past the fork to h2219495 |
+| `ev_deploy_dns2.txt` | the live DNS2 accepted deploy (last, sole heavy staker): loser snapshot h2208645 → winner h2219498, RPC supply == snapshot |
 | `ev_deploy_dns3.txt` | the live DNS3 canary attempt: rejected and rolled back cleanly — and the journal that taught the live-tip semantic |
 | `ev_harness_rehearsal_r4.txt` | the deploy harness on its round-4 FINAL bytes, every branch, incl. T9 boot-refusing binary and T10 failing restart command |
 | `judge_round1.log`, `r1_verdict.json` | round-1 verdict (D) and its two blocking issues, both fixed |
@@ -258,3 +261,25 @@ WINNING branch). The line is height-associated like the retry line (a stop line 
 and the snapshot agreement still applies. Without the store's line, short-of-tip stays pending (the archive's top below
 the live tip, transient) or rejects (no retry scheduled). 25-case selftest (`ev_check_selftest_r9.txt`); the STOP line's two printed heights must both equal coverage+1. The archive
 hole itself is a separate defect — filed as a new workqueue item, not item 48's scope.
+
+
+## 14. Fleet results (all three nodes accepted, 2026-11-25 10:20–10:51Z)
+
+| node | deploy verdict | running binary | balances.json after | journal shape |
+|---|---|---|---|---|
+| DNS3 (canary) | accepted exit 0 (`ev_deploy_dns3_r3.txt`) | 60ee7604… (new) | h2219460, winner, frontier of the h2219461 archive hole | index order · store stop line · budgeted retry (60→120 s) |
+| Pi (aarch64) | accepted exit 0 (`ev_deploy_pi.txt`) | dc0efe52… (native build) | h2219495, winner, 1 body behind the tip | index order · store stop line at the tip · retry in 30 s |
+| DNS2 (author, last) | accepted exit 0 (`ev_deploy_dns2.txt`) | 60ee7604… (new) | h2219498, winner | index order · tip-lag · retry in 30 s |
+
+Cross-check on DNS2 (the DoD): the snapshot total `total_balance_sats 226993213411` equals the RPC's live
+`moneysupply_sats 226993213411` exactly; the wallet column reads 5,250,114,684 sats on the WINNING branch
+(the pre-fix loser snapshot had credited 5,475,391,199 — the losing branch inflated the wallet's snapshot view).
+The pre-fix state (same epoch, verbatim in §11's host journal): every 6–10 min the file-order walk rewrote
+balances.json onto the loser h2208645 `02d723be…`, supply 226,842,485,015. NRestarts=0 on all three after their
+deploys; rss 427–472 MiB against DNS2's 2G MemoryMax.
+
+DoD: retry loop CONVERGED (the snapshot tracks the store's canonical frontier on each node; the walk is I/O-budgeted
+with backoff, no core pinning); balances.json matches the live view at the fork (exact supply match, winner branch);
+file-order fork fixture tests in the lib (11 `balances_build` tests, `dfdf937`); judge grades r4 A / r7 A / r9 B
+gated the three commits; the seed path is untouched (`cargo test --lib` 937 passed / 0 failed / 1 ignored, incl. the seed re-anchor suite).
+The DNS3 archive hole at h2219461 is a pre-existing follower-side write defect — filed as a NEW workqueue item.

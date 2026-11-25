@@ -1,0 +1,33 @@
+driver started 2026-11-25T10:44:04Z on vmi3080415; local HEAD 91dfe4a; new binary sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d; harness sha256 f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba; check sha256 584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item48-deploy/tri7d_swap_verify_rollback.sh
+584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38  /tmp/item48-deploy/balances_chain_ordered.py
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d  /root/tri7/target/release/follow_tip
+
+### [1] negative test on the node: the check against the OLD binary that is still running (must reject)
+the build replayed in file (pre-item-48 log line, no order field) order — this binary predates the fix: coverage h2208645 tip 02d723be5e4cefbc…
+negative check_exit=1 (1 expected)
+
+### [2] the real deploy on DNS2 (running binary sha256 922357122aa7b961… → 60ee7604b18a1077…)
+{"outcome":"accepted","running_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","unit":"tri7d","reason":"check passed","old_sha256":"922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d","new_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","restart_epoch":"1795603447","bin":"/opt/tri7/bin/follow_tip","rollback_binary":"/opt/tri7/bin/follow_tip.prev-item","check":"finished build of this process: index order, converged to the block store's canonical frontier — coverage h2219498 (the store's own line reports it holds no body at h2219499 although its chain continues above it), snapshot file agrees, tip cf19a93d61510434…"}
+deploy exit=0
+
+### [3] readback
+host=vmi3080415 arch=x86_64 at=2026-11-25T10:51:19Z
+unit: active since Wed 2026-11-25 02:45:38 PST NRestarts=0
+running exe: /opt/tri7/bin/follow_tip sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d
+memory: rss_mb=472 MemoryMax=2147483648 MemorySwapMax=0
+## balances-build lifecycle lines since the current process started (verbatim)
+2026-11-25T02:47:50-08:00 [2026-11-25T10:47:50Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+2026-11-25T02:49:20-08:00 [2026-11-25T10:49:20Z] balances-build: start (snapshot h2208645, chain tip h2219504) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T02:51:09-08:00 [2026-11-25T10:51:09Z] balances-build: done in 108.3s — coverage h2219498 tip cf19a93d61510434592e40efc093461ca5c5ed531f2596d18fd8bc996549d836 · supply 226993213411 sats · 18031 live UTXOs · wallet 263 keys 5250114684 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T02:51:09-08:00 [2026-11-25T10:51:09Z] balances-build: chain-ordered walk stopped at h2219499 — the chain store holds nothing at h2219499 although its chain continues above it
+2026-11-25T02:51:09-08:00 [2026-11-25T10:51:09Z] balances-build: coverage h2219498 short of the chased tip h2219504 — retrying in 30s
+## staking / RPC readiness lines of the current process (first 6 matching)
+2026-11-25T02:47:58-08:00 vmi3080415 follow_tip[3528628]: [2026-11-25T10:47:58Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+## snapshot file
+mtime 2026-11-25T10:51:09Z {'height': 2219498, 'replay_target_height': 2219504, 'covered_tip_hash': 'cf19a93d61510434592e40efc093461ca5c5ed531f2596d18fd8bc996549d836'} total_balance_sats 226993213411 live_utxos 18031 wallet_balance_sats 5250114684
+## RPC (loopback, if the node keeps its credentials in /etc/tri7/triangles.conf)
+{'blocks': 2219504, 'bestblockhash': 'e7e80a6ae951d54ac1ddcc389857ee2cd6bb6a0cda60c55ea67faf44c742aeaa', 'moneysupply': 226993.213411, 'moneysupply_sats': 226993213411, 'moneysupply_coverage_height': 2219504}
+connections 2
+## staged files left: -rwxr-xr-x root 7555400 follow_tip;-rwxr-xr-x root 7449808 follow_tip.bak-01a4e079;-rwxr-xr-x root 7233088 follow_tip.bak-1794740743;-rwxr-xr-x root 7527344 follow_tip.bak-1b48fc22;-rwxr-xr-x root 7414792 follow_tip.bak-1d8f568c;-rwxr-xr-x root 7234224 follow_tip.bak-27779bd2;-rwxr-xr-x root 7445832 follow_tip.bak-37d43258;-rwxr-xr-x root 7070064 follow_tip.bak-3f2c439c;-rwxr-xr-x root 7476056 follow_tip.bak-702b0517;-rwxr-xr-x root 7430008 follow_tip.bak-77bd7bda;-rwxr-xr-x root 6980712 follow_tip.bak-79618b2;-rwxr-xr-x root 6985808 follow_tip.bak-816de5fc;-rwxr-xr-x root 7493768 follow_tip.bak-83cfe73a;-rwxr-xr-x root 6831408 follow_tip.bak-850f733;-rwxr-xr-x root 6765272 follow_tip.bak-871dbf3;-rwxr-xr-x root 7480064 follow_tip.bak-87755353;-rwxr-xr-x root 7056248 follow_tip.bak-8a0c9f86;-rwxr-xr-x root 7539000 follow_tip.bak-91222c24;-rwxr-xr-x root 7527344 follow_tip.bak-96c47105;-rwxr-xr-x root 7514128 follow_tip.bak-9f73fc6e;-rwxr-xr-x root 7066984 follow_tip.bak-a5386462;-rwxr-xr-x root 6716104 follow_tip.bak-b0e9684;-rwxr-xr-x root 7251400 follow_tip.bak-b1e4f559;-rwxr-xr-x root 6551424 follow_tip.bak-b5351f9;-rwxr-xr-x root 7233552 follow_tip.bak-b7149dd5;-rwxr-xr-x root 5370688 follow_tip.bak-c69f195f;-rwxr-xr-x root 7205136 follow_tip.bak-cf4ba9c-pre;-rwxr-xr-x root 6885072 follow_tip.bak-d022f195;-rwxr-xr-x root 6883912 follow_tip.bak-d48cf4b;-rwxr-xr-x root 7453272 follow_tip.bak-e562eb9b;-rwxr-xr-x root 7451824 follow_tip.bak-e5975e59;-rwxr-xr-x tri7 7202392 follow_tip.bak-e601c2eb;-rwxr-xr-x root 6919280 follow_tip.bak-f168710;-rwxr-xr-x root 7238568 follow_tip.bak-f2e3d3aa;-rwxr-xr-x root 7221168 follow_tip.bak-fdaaaa9b;-rwxr-xr-x root 7119656 follow_tip.bak-item23;-rwxr-xr-x root 7303944 follow_tip.bak9;-rwxr-xr-x root 5745312 follow_tip.new7;-rwxr-xr-x root 7205136 follow_tip.pre-20261113;-rwxr-xr-x root 5586256 follow_tip.prev;-rwxr-xr-x root 7539576 follow_tip.prev-item; balances_chain_ordered.py tri7d_swap_verify_rollback.sh 
+driver finished 2026-11-25T10:51:26Z

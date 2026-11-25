@@ -1,0 +1,46 @@
+driver started 2026-11-25T10:33:43Z on vmi3080415; local HEAD 91dfe4a; harness sha256 f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba; check sha256 584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38
+pi source before: ad31567 [grade=B urn:urn:ump:tarlwywo5sejctzqhbeusfvh7zhpiq4rwdwuf5hjx
+ea0d25466bb90eeebbb40c5c16ea60f763c7a1d90cf1b5952272cf329f630475  /root/tri7/target/release/follow_tip
+ea0d25466bb90eeebbb40c5c16ea60f763c7a1d90cf1b5952272cf329f630475  /root/tri7/target/release/follow_tip.prev-item48
+save-previous exit=0
+
+### [1] source sync (the committed tree; target/ and .git excluded) and native build on the Pi
+rsync exit=0
+    Finished `release` profile [optimized] target(s) in 1m 07s
+real	1m7.256s
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580  /root/tri7/target/release/follow_tip
+ea0d25466bb90eeebbb40c5c16ea60f763c7a1d90cf1b5952272cf329f630475  /root/tri7/target/release/follow_tip.prev-item48
+-rwxr-xr-x 2 root root 7081648 Nov 25 10:35 /root/tri7/target/release/follow_tip
+
+### [2] stage the harness and the check on the Pi
+scp scripts exit=0
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item48-deploy/tri7d_swap_verify_rollback.sh
+584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38  /tmp/item48-deploy/balances_chain_ordered.py
+
+### [3] negative test on the node: the check against the OLD binary that is still running (must reject)
+the build replayed in file (pre-item-48 log line, no order field) order — this binary predates the fix: coverage h2208649 tip a55aa6d3e9cd7b0c…
+negative check_exit=1 (1 expected)
+
+### [4] the real deploy on the Pi (in place: --bin == --new, previous binary via --prev)
+{"outcome":"accepted","running_sha256":"dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580","unit":"tri7d","reason":"check passed","old_sha256":"ea0d25466bb90eeebbb40c5c16ea60f763c7a1d90cf1b5952272cf329f630475","new_sha256":"dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580","restart_epoch":"1795602914","bin":"/root/tri7/target/release/follow_tip","rollback_binary":"/root/tri7/target/release/follow_tip.prev-item48","check":"finished build of this process: index order, converged to the block store's canonical frontier — coverage h2219495 (the store's own line reports it holds no body at h2219496 although its chain continues above it), snapshot file agrees, tip 0eaeb1404abad7ff…"}
+deploy exit=0
+
+### [5] readback
+host=ubuntu-4gb-hel1-1 arch=aarch64 at=2026-11-25T10:41:20Z
+unit: active since Wed 2026-11-25 10:36:44 UTC NRestarts=0
+running exe: /root/tri7/target/release/follow_tip sha256 dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580
+memory: rss_mb=433 MemoryMax=infinity MemorySwapMax=infinity
+## balances-build lifecycle lines since the current process started (verbatim)
+2026-11-25T10:38:55+00:00 [2026-11-25T10:38:55Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+2026-11-25T10:39:56+00:00 [2026-11-25T10:39:56Z] balances-build: start (snapshot h2208649, chain tip h2219496) — replaying /root/.triangles/blk0001.dat
+2026-11-25T10:41:09+00:00 [2026-11-25T10:41:09Z] balances-build: done in 73.3s — coverage h2219495 tip 0eaeb1404abad7ff0fb74861de17c7f9a440b6b24ee234f50225db8183cc5384 · supply 226993202116 sats · 18030 live UTXOs · wallet 11 keys 202144770 sats · index order → /var/lib/tri7/balances.json
+2026-11-25T10:41:09+00:00 [2026-11-25T10:41:09Z] balances-build: chain-ordered walk stopped at h2219496 — the chain store holds nothing at h2219496 although its chain continues above it
+2026-11-25T10:41:09+00:00 [2026-11-25T10:41:09Z] balances-build: coverage h2219495 short of the chased tip h2219496 — retrying in 30s
+## staking / RPC readiness lines of the current process (first 6 matching)
+2026-11-25T10:38:56+00:00 ubuntu-4gb-hel1-1 follow_tip[3380967]: [2026-11-25T10:38:56Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+## snapshot file
+mtime 2026-11-25T10:41:09Z {'height': 2219495, 'replay_target_height': 2219496, 'covered_tip_hash': '0eaeb1404abad7ff0fb74861de17c7f9a440b6b24ee234f50225db8183cc5384'} total_balance_sats 226993202116 live_utxos 18030 wallet_balance_sats 202144770
+## RPC (loopback, if the node keeps its credentials in /etc/tri7/triangles.conf)
+RPC probe skipped: FileNotFoundError [Errno 2] No such file or directory: '/etc/tri7/triangles.conf'
+## staged files left:  balances_chain_ordered.py tri7d_swap_verify_rollback.sh 
+driver finished 2026-11-25T10:41:21Z
