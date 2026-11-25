@@ -1,0 +1,60 @@
+# transcript: harness_rehearsal.sh — deploy/tri7d_swap_verify_rollback.sh run against a THROWAWAY transient unit (item48-rehearsal, /bin/sleep copies) on vmi3080415. tri7d is not touched.
+# harness sha256 abc6e4981c2225fec4add46d67bf6ed716b93b9db60daa78ebd579582df37bf2 · check sha256 74ee3aa690a13ef783fd9a46ab19ee37d2694c59dfd5e4a0baa289e863be081f · rehearsal script sha256 6ca45a4e256dcbe082bd0728a73802c4a9bb6bdf9b8511db7f00dad3dfe4ca97
+# first line of each test = the expectation; then the harness output, its exit code, and the state read back from the unit (which binary the process runs, what the path holds, what the rollback file holds).
+host=vmi3080415 at=2026-11-25T06:33:26Z unit=item48-rehearsal (transient, ExecStart=/tmp/item48-reh/daemon infinity)
+harness sha256 abc6e4981c2225fec4add46d67bf6ed716b93b9db60daa78ebd579582df37bf2 · check sha256 74ee3aa690a13ef783fd9a46ab19ee37d2694c59dfd5e4a0baa289e863be081f
+v1 8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24
+v2 5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d
+v3 e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9
+state: running=v1 path=v1 prev-file=none unit=active
+
+### T1 precondition: --new byte-identical to --bin → exit 2, nothing changed
+nothing to deploy: /tmp/item48-reh/v1 is the binary already in service (8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24)
+exit=2
+state: running=v1 path=v1 prev-file=none unit=active
+
+### T2 accept path: check exit 0 → accepted, v2 in service, previous kept at daemon.prev-item
+{"outcome":"accepted","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit":"item48-rehearsal","reason":"check passed","old_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","new_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","restart_epoch":"1795588407","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v2 path=v2 prev-file=v1 unit=active
+
+### T3 --rehearse-rollback: real swap to v3 + restart, forced rejection → v2 back in service
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"1","unit":"item48-rehearsal","reason":"rehearsal: rejection forced after the swap","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795588408","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=0
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T4 reject via the REAL check (stays pending → deadline) → rollback, exit 1
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check still pending after 25s","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","restart_epoch":"1795588458","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"no build has started yet (the daemon may still be loading the block index)"}
+exit=1
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T5 reject: check exit 1 at once → rollback, exit 1
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check rejected (exit 1)","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795588494","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=reject"}
+exit=1
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T6 precondition: in-place build (--new is --bin) without --prev → exit 2
+an in-place build (--new is --bin) needs --prev: without it there is no rollback
+exit=2
+state: running=v2 path=v3 prev-file=none unit=active
+
+### T6b in-place build with --prev: accepted, v3 in service
+{"outcome":"accepted","running_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","unit":"item48-rehearsal","reason":"check passed","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795588500","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-saved","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v3 path=v3 prev-file=none unit=active
+
+### T6c in-place build, check rejects → --prev (v3) back in service, exit 1
+{"outcome":"rolled-back","running_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check rejected (exit 1)","old_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","new_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","restart_epoch":"1795588501","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-saved2","check":"fakecheck verdict=reject"}
+exit=1
+state: running=v3 path=v3 prev-file=none unit=active
+
+### T7 accept after pending: the check answers pending until the verdict file flips at +12 s
+{"outcome":"accepted","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit":"item48-rehearsal","reason":"check passed","old_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","new_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","restart_epoch":"1795588508","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v2 path=v2 prev-file=v3 unit=active
+
+### T8 precondition: unit not active → exit 2
+no such unit: item48-rehearsal
+exit=2
+
+tri7d untouched: active pid 2921802 since Tue 2026-11-24 19:51:11 PST; throwaway unit: gone

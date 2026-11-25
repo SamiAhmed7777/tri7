@@ -74,6 +74,10 @@ fn main() {
     };
     let opts = BalancesBuildOpts {
         blk: std::path::Path::new(&path),
+        // the standalone CLI owns no chain map: file order (a fork whose
+        // loser sits ahead of its winner in the archive is followed by the
+        // loser — use a node's --balances builder for chain-true snapshots)
+        canonical: None,
         out: std::path::Path::new(&out_path),
         wallet: wallet_path.as_deref().map(std::path::Path::new),
         utxos_out: utxos_out_path.as_deref().map(std::path::Path::new),

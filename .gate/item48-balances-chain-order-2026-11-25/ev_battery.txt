@@ -1,0 +1,43 @@
+# transcript: final battery on vmi3080415, sources = the bytes in source_sha256.txt (git diff in item48.diff)
+=== FINAL BATTERY 2026-11-25T06:11:08Z on vmi3080415 — HEAD c91b076 + working tree ===
+--- source sha256 ---
+9cf83a9f46ec4010e667042dda62c37444b6c47e1f24a7a93f5f6585a3e00240  src/balances_build.rs
+ec12eb7fe31600f29951de3ea8efcdeeb46797e44198a33f8a7c8c3ac0331366  src/bin/balances.rs
+7c09b220fef91beab9f346529248fed4bced8fc38dfed57c22a9ee64fc31388e  src/node_embedded.rs
+6c12f3104f49456f700eeb4481e27aea9c80111c11c05eb3bc20e15fd7b95f59  examples/balances_chain_probe.rs
+--- [1] cargo check --all-targets ---
+check_exit=0
+warnings_total=170 warnings_in_touched_files=0
+--- [2] cargo test --lib ---
+test_lib_exit=0
+test result: ok. 937 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 124.83s
+balances_build tests: 15 ok
+--- [3] release build (example + bins) ---
+build_exit=0
+warning: `tri7-core` (lib) generated 63 warnings (run `cargo fix --lib -p tri7-core` to apply 30 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 41s
+9ec0a636cf601cfa44c1fd48b30b35baaa496696eaca754993910e656cc7f494  target/release/examples/balances_chain_probe
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d  target/release/follow_tip
+6dfe41eb009323e37f768641514b8aa1d73376e0033153de352b9a975e826b0b  target/release/balances
+--- [4] RUN 3 index-ordered (final bytes) ---
+started 2026-11-25T06:15:28Z on vmi3080415
+8ad479eb0d2293c7cec6a7e2bd888028247c94e7975ae18b8b7dcd4f2711f317  /root/.hermes/cache/scratch/item48-rehearsal/blk0001.dat
+54944b2d08b3f706e83d717a300e3788eb2f750987350ce87d032bdaa3278a6c  /root/.hermes/cache/scratch/item48-rehearsal/tipstate.json
+oracle: window_base h2214751 .. tip h2219350 (4600 entries), tipstate height Number(2219350)
+[blockidx] ready: 2219821 frames, 4518539 txs, heights_ok=true, threaded_tip=Some(2219350), writable=true, built in 74s, fork re-threaded 6107 frames
+index: Ready { frames: 2219821, txs_indexed: 4518539, heights_ok: true, threaded_tip: Some(2219350), build_secs: 74 } — built in 75.1s
+{"blocks":2219351,"cap_note":null,"covered_to":2219350,"index_build_secs":75.1,"live_utxos":18028,"out":"/root/.hermes/cache/scratch/item48-rehearsal/balances.rehearsal.json","reached_target":true,"replay_order":"index","replay_secs":110.2,"replay_target":2219350,"supply_sats":226992597204,"tip_hash":"72c64e3069322a4b18a0eee0771523ad8e8a5a73d5e5178fc4a386620ea53d17","tip_is_window_tip":true}
+probe_exit=0
+finished 2026-11-25T06:18:48Z
+--- [5] file-order on the SAME copy (bin/balances --allow-stale --out) ---
+started 2026-11-25T06:18:48Z
+replay: 2208646 blocks (genesis..2208645), tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e
+outputs: 2637459 non-empty processed, 2637459 attributed to an address, 18051 live UTXOs held
+supply: total live balance 226842485015 sats (226842485015 attributed + 0 unattributed in 0 UTXOs)
+anomalies: 41 untracked spends, 6 duplicate-txid overwrites
+wallet: 0 keys / 0 distinct addresses, 0 funded; balance 0 sats in 0 UTXOs; received(regular/P2PKH) 0 sats; received(all) 0 sats
+JSON written: /root/.hermes/cache/scratch/item48-rehearsal/balances.fileorder.json
+ALL BALANCE CHECKS PASSED
+fileorder_exit=0
+finished 2026-11-25T06:20:18Z
+--- battery done 2026-11-25T06:20:18Z ---

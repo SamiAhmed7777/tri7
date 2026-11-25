@@ -1,0 +1,361 @@
+diff --git a/src/node_embedded.rs b/src/node_embedded.rs
+index a651db9..e0bd1b1 100644
+--- a/src/node_embedded.rs
++++ b/src/node_embedded.rs
+@@ -3115,20 +3115,26 @@ struct Config {
+     rpc_listen_port: u16,
+     rpc_max_body: usize,
+     rpc_debug: bool,
+     proxy_timeout_secs: u64,
+     blocks_file: Option<PathBuf>,
+     balances_path: PathBuf,
+     /// true when `--balances PATH` was given EXPLICITLY: the node then
+     /// BUILDS and maintains the snapshot at that path (background builder
+     /// thread, atomic writes) instead of only serving an existing file.
+     balances_build: bool,
++    /// `--balances-file-order`: replay the archive in FILE order (the
++    /// historical first-writer-wins walk) instead of chain order. Opt-out
++    /// only — file order follows the LOSER of a fork whose losing block was
++    /// stored ahead of the winner (item 48: DNS2's snapshot stayed pinned to
++    /// a stale branch at h2208645, ~100 s of replay per retry, for days).
++    balances_file_order: bool,
+     wallet_utxos_path: PathBuf,
+     index_dir: PathBuf,
+     // ---- phase 7 milestone 2: staking / wallet / smsg / i2p ----
+     /// integrated staking loop (conf `stake=1` or --stake; --no-stake wins)
+     stake: Option<bool>,
+     /// staking reserve in microTRI (v5 -reservebalance; conf
+     /// `reservebalance=<tri>` is the deployment default, the CLI flag
+     /// overrides). Coins above balance - reserve sit out of staking.
+     reserve_sats: i64,
+     /// kernel-search cadence seconds
+@@ -3227,20 +3233,23 @@ fn usage() -> ! {
+                              transaction index (default: <state-dir>/blk0001.dat\n\
+                              then /root/.triangles/blk0001.dat). The index is\n\
+                              built in a background thread and cached under\n\
+                              <state-dir>/index/.\n\
+          --balances PATH     replay-derived balances snapshot (balances.json).\n\
+                              Given EXPLICITLY, the node BUILDS and maintains\n\
+                              the snapshot at PATH in a background thread\n\
+                              (atomic writes; the native `richlist` explorer\n\
+                              verb serves it). Without the flag the node only\n\
+                              SERVES an existing snapshot and never writes one.\n\
++                             The replay follows the CHAIN (heights resolved\n\
++                             through the block index); --balances-file-order\n\
++                             replays the archive's own frame order instead.\n\
+          --wallet-utxos PATH replay-derived wallet UTXO snapshot\n\
+          --index-dir DIR     where index caches live (default <state-dir>/index)"
+     );
+     node_exit(EXIT_USAGE);
+ }
+ 
+ /// Built-in fleet seed floor — ("transport tag", "host:port"). The tags are
+ /// documentation; `PeerTarget::parse` derives the transport from the host
+ /// Overlay-only seed floor (operator policy 2026-11-13: "Triangles should
+ /// not be on clearnet"). These seeds are a FLOOR, never a ceiling: they are
+@@ -3319,20 +3328,21 @@ fn parse_args(argv: &[String]) -> Config {
+         rpc_enabled: true,
+         rpc_bind: "127.0.0.1".into(),
+         no_proxy: false,
+         rpc_listen_port: 19113,
+         rpc_max_body: 1_048_576,
+         rpc_debug: false,
+         proxy_timeout_secs: 10,
+         blocks_file: None,             // resolved against state_dir / archive below
+         balances_path: PathBuf::new(), // defaults filled below
+         balances_build: false,
++        balances_file_order: false,
+         wallet_utxos_path: PathBuf::new(),
+         index_dir: PathBuf::new(),
+         stake: None,
+         reserve_sats: 0,
+         stake_tick_secs: 15,
+         wallet_path: None,
+         i2p_socks: ("127.0.0.1".into(), 4447),
+         sync_from_zero: false,
+         explicit_peers: false,
+         new_wallet: None,
+@@ -3471,20 +3481,22 @@ fn parse_args(argv: &[String]) -> Config {
+             }
+             "--rpc-debug" => cfg.rpc_debug = true,
+             "--proxy-timeout" => {
+                 cfg.proxy_timeout_secs = need(&mut i, &args).parse().unwrap_or_else(|_| usage())
+             }
+             "--blocks-file" => cfg.blocks_file = Some(PathBuf::from(need(&mut i, &args))),
+             "--balances" => {
+                 cfg.balances_path = PathBuf::from(need(&mut i, &args));
+                 cfg.balances_build = true;
+             }
++            // (item 48) opt OUT of chain-ordered replay — see the field doc
++            "--balances-file-order" => cfg.balances_file_order = true,
+             "--wallet-utxos" => cfg.wallet_utxos_path = PathBuf::from(need(&mut i, &args)),
+             "--index-dir" => cfg.index_dir = PathBuf::from(need(&mut i, &args)),
+             _ => usage(),
+         }
+         i += 1;
+     }
+     cfg.explicit_peers = explicit_peers;
+     if cfg.peers.is_empty() {
+         die(EXIT_USAGE, "no outbound targets: --daemon/--onion required");
+     }
+@@ -15431,36 +15443,47 @@ pub fn main_args(argv: &[String]) -> i32 {
+     // short per-call locks (no lock is held across the 40 ms sleep).
+     let st_shared: SharedState = Arc::new(Mutex::new(st));
+     // ---- explorer: `--balances` builder thread -------------------------------
+     // An EXPLICIT --balances PATH means the node MAINTAINS its balances
+     // snapshot: a background thread rebuilds it (full-archive replay via the
+     // shared balances_build engine, atomic tmp+rename writes) when it is
+     // missing or its coverage fell behind the tip, and the native `richlist`
+     // verb serves it (mtime-keyed cache → a rebuild is visible without a
+     // restart). The replay touches NO daemon locks and runs on its own
+     // thread — explorer pressure stays separable from relay/staking flow.
++    //
++    // REPLAY ORDER (item 48): the walk reads blocks by HEIGHT through the
++    // block index (chain-slot overlay → threaded height map → appendix) and
++    // chain-checks every one, so a fork whose loser was stored ahead of the
++    // winner can no longer steer the snapshot onto the losing branch. The
++    // archive's own frame order is only used with --balances-file-order.
+     if cfg.balances_build {
+         let b_blk = blocks_file.clone();
+         let b_out = cfg.balances_path.clone();
+         let b_utxos = cfg.wallet_utxos_path.clone();
+         let b_wallet = cfg.wallet_path.clone();
+         let b_st = Arc::clone(&st_shared);
++        let b_store = Arc::clone(&store);
++        let b_file_order = cfg.balances_file_order;
+         let builder = std::thread::Builder::new().name("balances-build".into());
+         builder
+             .spawn(move || {
+                 // ~1 day of PoS minting (≈15 s/block); stale by more than
+                 // this → rebuild. Re-check cadence 6 h; missing blk file
+                 // (fresh from-zero folder) retries in 10 min.
+                 const REFRESH_BEHIND: u64 = 5_760;
+                 const REFRESH_CHECK_SECS: u64 = 6 * 3600;
+                 const NO_BLK_RETRY_SECS: u64 = 600;
++                // a warming block index is a WAIT, not a build error
++                const INDEX_WAIT_SECS: u64 = 30;
+                 let mut blk_missing_logged = false;
++                let mut index_wait_logged = false;
+                 let mut sched = RebuildSchedule::new();
+                 let mut last_attempt: Option<std::time::Instant> = None;
+                 // BALANCES PACING (F8): consecutive ERROR attempts and the
+                 // stop threshold. The pre-fix loop slept a flat 600s forever
+                 // on errors and a flat 6h after a short walk, ignoring the
+                 // backoff the scheduler already computes.
+                 let mut err_streak: u32 = 0;
+                 const MAX_BUILD_ERRORS: u32 = 20;
+                 // logged-once guard for the startup seeding
+                 let mut short_seeded = false;
+@@ -15475,20 +15498,42 @@ pub fn main_args(argv: &[String]) -> i32 {
+                                     b_blk,
+                                     NO_BLK_RETRY_SECS
+                                 ));
+                                 blk_missing_logged = true;
+                             }
+                             std::thread::sleep(Duration::from_secs(NO_BLK_RETRY_SECS));
+                             continue;
+                         }
+                     };
+                     blk_missing_logged = false;
++                    // (item 48) the replay reads the chain THROUGH the block
++                    // index — wait for its build rather than count a warming
++                    // index as a build error (20 of those would end the
++                    // builder for good). A FAILED index falls through: the
++                    // build reports it with the status attached.
++                    if !b_file_order
++                        && matches!(
++                            b_store.status(),
++                            StoreStatus::Unconfigured | StoreStatus::Building { .. }
++                        )
++                    {
++                        if !index_wait_logged {
++                            log(&format!(
++                                "balances-build: waiting for the block index ({:?}) — the replay reads the chain in height order",
++                                b_store.status()
++                            ));
++                            index_wait_logged = true;
++                        }
++                        std::thread::sleep(Duration::from_secs(INDEX_WAIT_SECS));
++                        continue;
++                    }
++                    index_wait_logged = false;
+                     // snapshot coverage height (missing/unparseable → 0),
+                     // and the tip its replay was chasing
+                     let snap_doc = std::fs::read_to_string(&b_out)
+                         .ok()
+                         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+                     let snap_h = snap_doc
+                         .as_ref()
+                         .and_then(|v| v["height"].as_u64())
+                         .unwrap_or(0);
+                     let snap_target = snap_doc
+@@ -15502,25 +15547,34 @@ pub fn main_args(argv: &[String]) -> i32 {
+                     // (14 blocks short of the tip is not "stale by 5760").
+                     // THE RULE: an on-disk snapshot that covers less than
+                     // the tip its replay chased is an OUTSTANDING short walk.
+                     if seed_short_snapshot(&mut sched, snap_target, snap_h, &mut short_seeded) {
+                         log(&format!(
+                             "balances-build: the loaded snapshot covers h{} but its replay chased h{} — retrying",
+                             snap_h,
+                             snap_target.unwrap_or_default()
+                         ));
+                     }
+-                    // chain tip (try_lock only — never block on the loop)
+-                    let tip = b_st
+-                        .try_lock()
+-                        .map(|g| g.tip_height)
+-                        .unwrap_or(snap_h.max(0));
++                    // chain tip (try_lock only — never block on the loop).
++                    // (item 48) when the follow loop holds the state right
++                    // now, ask again in a second: falling back to the
++                    // snapshot's own height stamped a bogus target on the
++                    // snapshot AND read the walk as "converged", resetting
++                    // the short-walk backoff (seen live: "chain tip h2208645"
++                    // at a real tip of h2219300).
++                    let tip = match b_st.try_lock() {
++                        Ok(g) => g.tip_height,
++                        Err(_) => {
++                            std::thread::sleep(Duration::from_secs(1));
++                            continue;
++                        }
++                    };
+                     let stale = snap_h.saturating_add(REFRESH_BEHIND) < tip || snap_h == 0;
+                     let elapsed = last_attempt
+                         .map(|t| t.elapsed().as_secs())
+                         .unwrap_or(u64::MAX);
+                     if !sched.due(stale, elapsed) {
+                         // sleep only the REMAINING wait: the scheduler owns
+                         // the pacing, so there is never a second sleep after
+                         // the build
+                         let remain = if sched.streak > 0 {
+                             sched.backoff_secs().saturating_sub(elapsed).max(1)
+@@ -15538,20 +15592,29 @@ pub fn main_args(argv: &[String]) -> i32 {
+                         tip,
+                         blk.display()
+                     ));
+                     let started = std::time::Instant::now();
+                     // coverage contract: accept whatever the walk reaches
+                     // (EOF at any height, or a stale-branch stop) — the
+                     // snapshot's own height + tip hash are served honestly
+                     // by the richlist verb so consumers can judge the lag.
+                     let opts = tri7_core::balances_build::BalancesBuildOpts {
+                         blk: &blk,
++                        // (item 48) chain order: heights resolved through the
++                        // block index, every body chain-checked against the
++                        // one before it — the archive's frame order no longer
++                        // decides which branch the snapshot follows
++                        canonical: if b_file_order {
++                            None
++                        } else {
++                            Some(&*b_store as &dyn tri7_core::balances_build::CanonicalBlocks)
++                        },
+                         out: &b_out,
+                         wallet: b_wallet.as_deref(),
+                         // pair the UTXO dump with the balances rebuild so the
+                         // listunspent coverage gate (height AND hash must
+                         // match across BOTH snapshots) stays green
+                         utxos_out: b_wallet.as_ref().map(|_| b_utxos.as_path()),
+                         end_height: 0,
+                         // the tip this replay is chasing: the snapshot
+                         // publishes it, so the RPC can tell a whole-chain
+                         // figure from one that was capped by a hole
+@@ -15561,34 +15624,46 @@ pub fn main_args(argv: &[String]) -> i32 {
+                     let mut progress = |blocks: usize, live: usize| {
+                         log(&format!(
+                             "balances-build: ... {} blocks, {} live UTXOs",
+                             blocks, live
+                         ));
+                     };
+                     match tri7_core::balances_build::build_balances_snapshot(&opts, &mut progress)
+                     {
+                         Ok(rep) => {
+                             log(&format!(
+-                                "balances-build: done in {:.1}s — coverage h{} tip {} · supply {} sats · {} live UTXOs · wallet {} keys {} sats → {}",
++                                "balances-build: done in {:.1}s — coverage h{} tip {} · supply {} sats · {} live UTXOs · wallet {} keys {} sats · {} order → {}",
+                                 started.elapsed().as_secs_f64(),
+                                 rep.covered_to,
+                                 rep.tip_hash_display,
+                                 rep.total_balance_sats,
+                                 rep.live_utxos,
+                                 rep.wallet_key_count,
+                                 rep.wallet_balance_sats,
++                                rep.replay_order,
+                                 rep.out_path.display()
+                             ));
+                             // did the walk reach the tip it chased? if not,
+                             // blocks were landing while it walked - record it
+                             // and loop: the scheduler paces the retry, so the
+                             // snapshot converges to the whole chain.
++                            // (item 48) in CHAIN order a short walk is never
++                            // "blocks landed meanwhile" alone — it is the
++                            // store refusing a height (a hole, or a row that
++                            // does not chain): say so, once per attempt.
++                            if let (Some(note), false) = (rep.cap_note.as_deref(), b_file_order) {
++                                log(&format!(
++                                    "balances-build: chain-ordered walk stopped at h{} — {}",
++                                    rep.covered_to + 1,
++                                    note
++                                ));
++                            }
+                             last_attempt = Some(std::time::Instant::now());
+                             err_streak = 0;
+                             sched.record((rep.covered_to as u64) >= tip);
+                             if sched.streak > 0 {
+                                 log(&format!(
+                                     "balances-build: coverage h{} short of the chased tip h{} — retrying in {}s",
+                                     rep.covered_to,
+                                     tip,
+                                     sched.backoff_secs()
+                                 ));
+@@ -15604,23 +15679,28 @@ pub fn main_args(argv: &[String]) -> i32 {
+                             err_streak = err_streak.saturating_add(1);
+                             if err_streak >= MAX_BUILD_ERRORS {
+                                 log(&format!(
+                                     "balances-build: FAILED after {} consecutive attempts ({}): giving up — the snapshot stays at its last good coverage",
+                                     err_streak, e
+                                 ));
+                                 break;
+                             }
+                             sched.record(false);
+                             let wait = sched.backoff_secs().max(30);
++                            let detail = if b_file_order {
++                                e
++                            } else {
++                                format!("{e} [block index: {:?}]", b_store.status())
++                            };
+                             log(&format!(
+                                 "balances-build: FAILED (attempt {}/{}): {} — retrying in {}s",
+-                                err_streak, MAX_BUILD_ERRORS, e, wait
++                                err_streak, MAX_BUILD_ERRORS, detail, wait
+                             ));
+                             std::thread::sleep(Duration::from_secs(wait));
+                             continue;
+                         }
+                     }
+                     // BALANCES PACING (F8): a SHORT walk waits the scheduler's
+                     // backoff (30..1800s), not the flat 6h refresh — the whole
+                     // point of the ladder is to converge quickly, then slowly.
+                     let wait = if sched.streak > 0 {
+                         sched.backoff_secs().max(30)
+@@ -20806,20 +20886,21 @@ mod tests {
+             summary_out: None,
+             rpc_enabled: false,
+             rpc_bind: "127.0.0.1".into(),
+             rpc_listen_port: 0,
+             rpc_max_body: 1 << 20,
+             rpc_debug: false,
+             proxy_timeout_secs: 5,
+             blocks_file: None,
+             balances_path: PathBuf::from("/tmp/tri7-gate-test/balances.json"),
+             balances_build: false,
++            balances_file_order: false,
+             wallet_utxos_path: PathBuf::from("/tmp/tri7-gate-test/wallet_utxos.json"),
+             index_dir: PathBuf::from("/tmp/tri7-gate-test/index"),
+             stake: Some(true),
+             reserve_sats: 0,
+             stake_tick_secs: 15,
+             wallet_path: None,
+             i2p_socks: ("127.0.0.1".into(), 4447),
+             sync_from_zero: false,
+             explicit_peers: false,
+             new_wallet: None,

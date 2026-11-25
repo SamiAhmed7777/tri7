@@ -1,0 +1,134 @@
+# harness rehearsal evidence (final harness bytes: round-2 fixes + accept-time active guard), DNS2 throwaway units, tri7d untouched
+harness sha256 3bd69d505deb14ca1784fa769cb217974a5d2e3f693dadd3de47fb9d9e451ae1
+check sha256 6049e94892397989108cd40d92479509ebab83c6b441caf857c569936a751de2
+
+host=vmi3080415 at=2026-11-25T08:22:46Z unit=item48-rehearsal (transient, ExecStart=/tmp/item48-reh/daemon infinity)
+harness sha256 3bd69d505deb14ca1784fa769cb217974a5d2e3f693dadd3de47fb9d9e451ae1 · check sha256 6049e94892397989108cd40d92479509ebab83c6b441caf857c569936a751de2
+v1 8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24
+v2 5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d
+v3 e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9
+state: running=v1 path=v1 prev-file=none unit=active
+
+### T1 precondition: --new byte-identical to --bin → exit 2, nothing changed
+nothing to deploy: /tmp/item48-reh/v1 is the binary already in service (8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24)
+exit=2
+state: running=v1 path=v1 prev-file=none unit=active
+
+### T2 accept path: check exit 0 → accepted, v2 in service, previous kept at daemon.prev-item
+{"outcome":"accepted","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit":"item48-rehearsal","reason":"check passed","old_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","new_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","restart_epoch":"1795594968","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v2 path=v2 prev-file=v1 unit=active
+
+### T3 --rehearse-rollback: real swap to v3 + restart, forced rejection → v2 back in service
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"1","unit":"item48-rehearsal","reason":"rehearsal: rejection forced after the swap","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795594969","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=0
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T4 reject via the REAL check (stays pending → deadline) → rollback, exit 1
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check still pending after 25s","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","restart_epoch":"1795595020","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"no build has started yet (the daemon may still be loading the block index)"}
+exit=1
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T5 reject: check exit 1 at once → rollback, exit 1
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check rejected (exit 1)","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795595058","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=reject"}
+exit=1
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T6 precondition: in-place build (--new is --bin) without --prev → exit 2
+an in-place build (--new is --bin) needs --prev: without it there is no rollback
+exit=2
+state: running=v2 path=v3 prev-file=none unit=active
+
+### T6b in-place build with --prev: accepted, v3 in service
+{"outcome":"accepted","running_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","unit":"item48-rehearsal","reason":"check passed","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795595064","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-saved","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v3 path=v3 prev-file=none unit=active
+
+### T6c in-place build, check rejects → --prev (v3) back in service, exit 1
+{"outcome":"rolled-back","running_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"check rejected (exit 1)","old_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","new_sha256":"8ac215ec4c1ce4a9c23a10cd3e5898d60419bdfab1ac7444d6bdd1690701de24","restart_epoch":"1795595065","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-saved2","check":"fakecheck verdict=reject"}
+exit=1
+state: running=v3 path=v3 prev-file=none unit=active
+
+### T7 accept after pending: the check answers pending until the verdict file flips at +12 s
+{"outcome":"accepted","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit":"item48-rehearsal","reason":"check passed","old_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","new_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","restart_epoch":"1795595071","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=accept"}
+exit=0
+state: running=v2 path=v2 prev-file=v3 unit=active
+
+### T8 precondition: unit not active → exit 2, nothing changed
+no such unit: item48-rehearsal
+exit=2
+state: running=v2 path=v2 prev-file=v3 unit=active
+
+### T9 new binary refuses to boot: restart leaves the unit down → the harness must roll back the binary AND restart
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehearsal","reason":"item48-rehearsal is not active after the restart","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc","restart_epoch":"1795595094","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=1
+  expected: outcome=rolled-back, the unit active again, the path back to v2 (or the binary it had before)
+state: running=v2 path=v2 prev-file=none unit=active
+
+### T10 the restart COMMAND itself fails (unit masked): caught, the swap is undone, no set -e abort
+Created symlink /etc/systemd/system/item48-rehearsal.service → /dev/null.
+masked item48-rehearsal
+{"outcome":"accepted","running_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","unit":"item48-rehearsal","reason":"check passed","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795595113","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":"fakecheck verdict=accept"}
+exit=0
+  expected: the harness finishes (does not abort), the previous binary is back in place (the unit stays stopped: masked), a ROLLBACK-FAILED or rolled-back line
+Removed "/etc/systemd/system/item48-rehearsal.service".
+state: running=v3 path=v3 prev-file=v2 unit=active
+  (after unmasking the unit is started with whatever the harness left in place)
+
+### final: tri7d untouched: active pid 2921802 since Tue 2026-11-24 19:51:11 PST
+full rehearsal exit=0
+
+### failure-branch rehearsal (run 1); fresh unit names each time (a failed transient unit stays loaded)
+host=vmi3080415 at=2026-11-25T08:25:19Z unit=item48-rehfail-3277372-1795595119 (transient, fresh name this run)
+harness sha256 3bd69d505deb14ca1784fa769cb217974a5d2e3f693dadd3de47fb9d9e451ae1
+old 5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d
+alt e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9
+dead 275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc
+Running as unit: item48-rehfail-3277372-1795595119.service; invocation ID: 86cb65c259d64271ad38c06525c6b8ed
+state: running=old path=old unit=active
+
+### T9 new binary refuses to boot (unit ends down) → rollback must restore the previous binary AND the unit must be active again
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehfail-3277372-1795595119","reason":"item48-rehfail-3277372-1795595119 is not active after the restart","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc","restart_epoch":"1795595121","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=1 (expect 1)
+  expected: outcome=rolled-back, unit active, path back to old, process running old
+state: running=old path=old unit=active
+
+### T10 the restart COMMAND itself fails (shim) → no set -e abort, swap undone, previous process still in service
+Job for item48-rehfail-3277372-1795595119.service failed to start.
+Job for item48-rehfail-3277372-1795595119.service failed to start.
+rollback: the binary is back in place but the unit did not restart — run: systemctl restart item48-rehfail-3277372-1795595119
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehfail-3277372-1795595119","reason":"the restart did not start the unit — rolling back","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795595126","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=1
+  expected: outcome=rolled-back (the binary is back), unit active (its process was never stopped in this simulation)
+state: running=old path=old unit=active
+
+tri7d untouched: active pid 2921802 since Tue 2026-11-24 19:51:11 PST
+failbranch exit=0
+
+### failure-branch rehearsal (run 2)
+host=vmi3080415 at=2026-11-25T08:25:32Z unit=item48-rehfail-3277874-1795595132 (transient, fresh name this run)
+harness sha256 3bd69d505deb14ca1784fa769cb217974a5d2e3f693dadd3de47fb9d9e451ae1
+old 5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d
+alt e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9
+dead 275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc
+Running as unit: item48-rehfail-3277874-1795595132.service; invocation ID: 8151bfe7e1454fa3a20f564df22f9a9f
+state: running=old path=old unit=active
+
+### T9 new binary refuses to boot (unit ends down) → rollback must restore the previous binary AND the unit must be active again
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehfail-3277874-1795595132","reason":"item48-rehfail-3277874-1795595132 is not active after the restart","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc","restart_epoch":"1795595133","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=1 (expect 1)
+  expected: outcome=rolled-back, unit active, path back to old, process running old
+state: running=old path=old unit=active
+
+### T10 the restart COMMAND itself fails (shim) → no set -e abort, swap undone, previous process still in service
+Job for item48-rehfail-3277874-1795595132.service failed to start.
+Job for item48-rehfail-3277874-1795595132.service failed to start.
+rollback: the binary is back in place but the unit did not restart — run: systemctl restart item48-rehfail-3277874-1795595132
+{"outcome":"rolled-back","running_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","unit_state":"active","rehearsal":"0","unit":"item48-rehfail-3277874-1795595132","reason":"the restart did not start the unit — rolling back","old_sha256":"5cdf2808404bfcb3614e11cd01a6a57e1783aca01b6562209df1758c059de57d","new_sha256":"e3bfddd185f88ac73647317be9030edded523c65d199fb8c25a8a34bb7e237e9","restart_epoch":"1795595139","bin":"/tmp/item48-reh/daemon","rollback_binary":"/tmp/item48-reh/daemon.prev-item","check":""}
+exit=1
+  expected: outcome=rolled-back (the binary is back), unit active (its process was never stopped in this simulation)
+state: running=old path=old unit=active
+
+tri7d untouched: active pid 2921802 since Tue 2026-11-24 19:51:11 PST
+failbranch exit=0
+evidence captured 2026-11-25T08:25:44Z

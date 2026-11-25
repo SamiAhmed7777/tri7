@@ -1,0 +1,18 @@
+# transcript: the balances_build unit tests inside the final `cargo test --lib` run (full result line at the end) — log /root/.hermes/cache/scratch/item48-rehearsal/final_test_lib.log
+balances_build::tests::builds_snapshot_and_reaches_end_height ... ok
+balances_build::tests::incomplete_replay_fails_coverage ... ok
+balances_build::tests::file_order_follows_the_loser_at_a_loser_first_fork ... ok
+balances_build::tests::index_order_ends_at_the_registered_tip_not_at_raced_bodies_above_it ... ok
+balances_build::tests::index_order_finds_a_hole_even_when_the_source_does_not_know_its_top ... ok
+balances_build::tests::index_order_refuses_a_genesis_whose_prev_is_not_zero ... ok
+balances_build::tests::index_order_follows_a_chain_that_advances_mid_walk ... ok
+balances_build::tests::index_order_refuses_an_index_row_that_does_not_chain ... ok
+balances_build::tests::index_order_threads_the_winning_branch_past_the_loser ... ok
+balances_build::tests::index_order_stops_at_a_hole_and_never_applies_what_sits_above_it ... ok
+balances_build::tests::stale_branch_requires_allow_stale_flag ... ok
+balances_build::tests::write_is_atomic_no_tmp_left_behind ... ok
+balances_build::tests::the_node_block_store_is_a_chain_source_at_a_loser_first_fork ... ok
+balances_build::tests::respent_sibling_vin_cannot_strand_wallet_utxos_in_the_dump ... ok
+balances_build::tests::index_order_is_byte_identical_to_file_order_on_a_fork_free_archive ... ok
+test result: ok. 937 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 124.83s
+# the whole-suite log: 1661 lines, FAILED/panicked lines: 0

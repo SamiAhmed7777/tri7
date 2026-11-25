@@ -1,0 +1,19 @@
+# transcript: deploy/checks/balances_chain_ordered.py — --selftest, then the live NEGATIVE test on vmi3080415 (old binary still in service since the current boot), then the no-argument case. 2026-11-25T06:36:54Z
+PASS  want 3 got 3  pending: index still loading — no build has started yet (the daemon may still be loading the block index)
+PASS  want 3 got 3  pending: build running — the build is running
+PASS  want 0 got 0  accepted — first build of this process: index order, coverage h2219400 = the chased tip h2219400, snapshot file agrees, tip abababababababab…
+PASS  want 1 got 1  rejected: file order (pre-fix line) — the build replayed in file (pre-item-48 log line, no order field) order — this binary predates the fix: balances-build: done in 86.4s — 
+PASS  want 1 got 1  rejected: file order (opt-out flag) — the build replayed in file order — this binary predates the fix: balances-build: done in 90.0s — coverage h2219400 tip ababababababababa
+PASS  want 1 got 1  rejected: short of the chased tip — coverage h2208246 is short of the chased tip h2219400
+PASS  want 1 got 1  rejected: build failed — a build failed: balances-build: FAILED (attempt 1/12): replay error — retrying in 30s
+PASS  want 1 got 1  rejected: walk stopped short — the chain-ordered walk stopped short: balances-build: chain-ordered walk stopped at h2208645 — the chain store holds nothing at h2208645 but does
+PASS  want 1 got 1  rejected: snapshot file behind the journal — the snapshot file disagrees with the journal: height=2208246 tip='cdcdcdcdcdcdcdcd' replay_target_height=2219350 vs h2219400 abababab
+PASS  want 1 got 1  rejected: snapshot file unreadable — the snapshot file cannot be read
+PASS  want 1 got 1  rejected: done without a start — a build finished without a start line: balances-build: done in 90.0s — coverage h2219400 tip ababababababababababababababababababababababababab
+selftest: 11 cases, 0 failed
+selftest_exit=0
+
+## negative test, live: python3 deploy/checks/balances_chain_ordered.py 1795578671   (restart epoch = start of the current boot 2026-11-25T03:51:11Z; the running binary predates the fix)
+the build replayed in file (pre-item-48 log line, no order field) order — this binary predates the fix: balances-build: done in 87.9s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18
+check_exit=1 (1 = rejected: expected)
+no-argument exit=2 (2 = usage: expected)

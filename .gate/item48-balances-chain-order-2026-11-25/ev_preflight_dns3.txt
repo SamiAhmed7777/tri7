@@ -1,0 +1,42 @@
+# transcript: DNS3 (ssh dns3, appt) pre-flight rehearsal 2026-11-25T06:36:06Z. probe binary sha256 9ec0a636cf601cfa44c1fd48b30b35baaa496696eaca754993910e656cc7f494 (built on DNS2 from the sources in source_sha256.txt), copied with scp.
+# the probe runs under systemd-run with MemoryMax=400M MemorySwapMax=0, on COPIES of blk0001.dat/tipstate.json in /tmp/item48-rehearsal; the copy is deleted afterwards.
+host=appt at=2026-11-25T06:36:09Z nproc=2 avail_mb=881
+live node before: unit active pid 2572518 exe /opt/tri7/bin/follow_tip sha256 922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d
+probe sha256 9ec0a636cf601cfa44c1fd48b30b35baaa496696eaca754993910e656cc7f494
+live before copy: blk size 988261458 mtime 2026-11-25 06:33:14 · snapshot height 2208246 mtime 2026-11-25 06:19:32
+copies: blk size 988261458 sha256 7b9c7aeebfebd1b82dcce9344a30c03dc4e7cc5d0cec58feff4a29d949e73245 · tipstate sha256 cda12a6441a190bc02b694868c9e5c55ecada6e7574a5364695dae9ec793748e
+probe started 2026-11-25T06:36:14Z
+oracle: window_base h2214778 .. tip h2219377 (4600 entries), tipstate height Number(2219377)
+[blockidx] ready: 2219924 frames, 4518745 txs, heights_ok=true, threaded_tip=Some(2219377), writable=true, built in 74s, fork re-threaded 6503 frames
+index: Ready { frames: 2219924, txs_indexed: 4518745, heights_ok: true, threaded_tip: Some(2219377), build_secs: 74 } — built in 74.8s
+... 100000 blocks (11043 live UTXOs) at 4.3s
+... 200000 blocks (7692 live UTXOs) at 9.1s
+... 300000 blocks (6119 live UTXOs) at 13.8s
+... 400000 blocks (8205 live UTXOs) at 18.0s
+... 500000 blocks (8812 live UTXOs) at 22.0s
+... 600000 blocks (11901 live UTXOs) at 26.1s
+... 700000 blocks (11202 live UTXOs) at 29.8s
+... 800000 blocks (11818 live UTXOs) at 34.6s
+... 900000 blocks (11512 live UTXOs) at 39.2s
+... 1000000 blocks (12028 live UTXOs) at 43.4s
+... 1100000 blocks (12139 live UTXOs) at 47.6s
+... 1200000 blocks (12657 live UTXOs) at 51.9s
+... 1300000 blocks (12737 live UTXOs) at 55.9s
+... 1400000 blocks (13034 live UTXOs) at 59.4s
+... 1500000 blocks (13198 live UTXOs) at 63.2s
+... 1600000 blocks (13290 live UTXOs) at 67.0s
+... 1700000 blocks (13692 live UTXOs) at 70.9s
+... 1800000 blocks (14137 live UTXOs) at 74.6s
+... 1900000 blocks (14051 live UTXOs) at 78.3s
+... 2000000 blocks (14956 live UTXOs) at 82.0s
+... 2100000 blocks (33421 live UTXOs) at 85.9s
+... 2200000 blocks (17780 live UTXOs) at 89.8s
+{"blocks":2219378,"cap_note":null,"covered_to":2219377,"index_build_secs":74.8,"live_utxos":18023,"out":"/tmp/item48-rehearsal/balances.rehearsal.json","reached_target":true,"replay_order":"index","replay_secs":92.5,"replay_target":2219377,"supply_sats":226992712064,"tip_hash":"dd330e750836fe577731455b7f04aaad673284ac63e7e622694e710393f7d5fb","tip_is_window_tip":true}
+probe_exit=0
+probe finished 2026-11-25T06:39:01Z
+rehearsal snapshot: {'height': 2219377, 'replay_target_height': 2219377, 'covered_tip_hash': 'dd330e750836fe577731455b7f04aaad673284ac63e7e622694e710393f7d5fb'} supply_sats 226992712064
+live snapshot after: {'height': 2208246, 'replay_target_height': 2219369, 'covered_tip_hash': '203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8'} mtime 2026-11-25T06:19:32Z
+live node after: unit active pid 2572518 · index cache dir newer than the probe start? /var/lib/tri7/blk0001.dat /var/lib/tri7/tipstate.json /var/lib/tri7/peers.json /var/lib/tri7/tipstate.json.bak 
+copy removed; left in /tmp/item48-rehearsal: balances.rehearsal.json balances_chain_probe tipstate.json 
+ssh_exit=0
+finished 2026-11-25T06:39:02Z

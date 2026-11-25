@@ -1,0 +1,18 @@
+host=ubuntu-4gb-hel1-1 arch=aarch64 at=2026-11-25T06:17:22Z
+unit: active since Wed 2026-11-25 00:57:58 UTC NRestarts=0
+running exe: /root/tri7/target/release/follow_tip sha256 ea0d25466bb90eeebbb40c5c16ea60f763c7a1d90cf1b5952272cf329f630475
+## balances-build lifecycle lines, 30 h, verbatim (last 10)
+2026-11-25T04:42:25+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T04:42:25Z] balances-build: coverage h2208649 short of the chased tip h2219321 — retrying in 1800s
+2026-11-25T05:12:25+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:12:25Z] balances-build: start (snapshot h2208649, chain tip h2219333) — replaying /root/.triangles/blk0001.dat
+2026-11-25T05:13:30+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:13:30Z] balances-build: done in 65.8s — coverage h2208649 tip a55aa6d3e9cd7b0cc6d9ded20ba537c38b780158c4f528d47fe88bad649ffc7e · supply 226842618026 sats · 18051 live UTXOs · wallet 11 keys 100251709 sats → /var/lib/tri7/balances.json
+2026-11-25T05:13:30+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:13:30Z] balances-build: coverage h2208649 short of the chased tip h2219333 — retrying in 1800s
+2026-11-25T05:43:30+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:43:30Z] balances-build: start (snapshot h2208649, chain tip h2219348) — replaying /root/.triangles/blk0001.dat
+2026-11-25T05:44:36+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:44:36Z] balances-build: done in 65.9s — coverage h2208649 tip a55aa6d3e9cd7b0cc6d9ded20ba537c38b780158c4f528d47fe88bad649ffc7e · supply 226842618026 sats · 18051 live UTXOs · wallet 11 keys 100251709 sats → /var/lib/tri7/balances.json
+2026-11-25T05:44:36+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T05:44:36Z] balances-build: coverage h2208649 short of the chased tip h2219348 — retrying in 1800s
+2026-11-25T06:14:36+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T06:14:36Z] balances-build: start (snapshot h2208649, chain tip h2219365) — replaying /root/.triangles/blk0001.dat
+2026-11-25T06:15:42+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T06:15:42Z] balances-build: done in 66.2s — coverage h2208649 tip a55aa6d3e9cd7b0cc6d9ded20ba537c38b780158c4f528d47fe88bad649ffc7e · supply 226842618026 sats · 18051 live UTXOs · wallet 11 keys 100251709 sats → /var/lib/tri7/balances.json
+2026-11-25T06:15:42+00:00 ubuntu-4gb-hel1-1 follow_tip[3235515]: [2026-11-25T06:15:42Z] balances-build: coverage h2208649 short of the chased tip h2219365 — retrying in 1800s
+## RPC (loopback): blocks / moneysupply / coverage
+RPC probe failed: FileNotFoundError [Errno 2] No such file or directory: '/etc/tri7/triangles.conf'
+## snapshot file
+mtime 2026-11-25T06:15:42Z {'height': 2208649, 'replay_target_height': 2219365, 'covered_tip_hash': 'a55aa6d3e9cd7b0cc6d9ded20ba537c38b780158c4f528d47fe88bad649ffc7e'}

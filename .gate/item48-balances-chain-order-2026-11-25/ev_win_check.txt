@@ -1,0 +1,18 @@
+started 2026-11-25T06:44:49Z
+warning: unused import: `std::path::Path`
+warning: unused import: `BufReader`
+warning: unused import: `tri7_core::legacy::Tx`
+warning: unused variable: `secret`
+warning: unused import: `Message`
+warning: unused import: `Sha256`
+warning: unused variable: `start_minimized`
+warning: unused import: `Digest`
+warning: unused variable: `rel_c`
+warning: unused variable: `b`
+warning: unused variable: `d`
+warning: unused variable: `h22`
+warning: unused variable: `gen`
+warning: unused variable: `e`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 36s
+check_exit=0
+finished 2026-11-25T06:46:26Z

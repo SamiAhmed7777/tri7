@@ -1,0 +1,18 @@
+# transcript: independent supply cross-check, 2026-11-25T06:41:45Z, host vmi3080415. Script: crosscheck_supply.py (read-only; DNS2's live RPC answers with the OLD binary, whose chain index is not what item 48 changes). 1 TRI = 1e6 sats.
+rehearsal on the DNS2 archive copy, index order: tip h2219350 72c64e3069322a4b… total_balance_sats 226992597204
+rehearsal on the DNS3 archive copy, index order: tip h2219377 dd330e750836fe57… total_balance_sats 226992712064
+getblockhash 2219350 = 72c64e3069322a4b…  == the rehearsal tip at that height
+getblockhash 2219377 = dd330e750836fe57…  == the rehearsal tip at that height
+chain, tx by tx: sum(outputs - spent inputs) over blocks h2219351..h2219377 = 114860 sats
+rehearsals:     supply(DNS3 h2219377) - supply(DNS2 h2219350) = 114860 sats  EQUAL
+RESULT: PASS
+script_exit=0
+
+## DNS3 after the pre-flight: did the probe write an index cache on the live node? (read-only)
+index-dir files newer than the staged probe binary: 0 (0 expected)
+total 139976
+drwxr-xr-x 2 tri7 tri7     4096 2026-11-25 00:58 .
+drwx------ 8 tri7 tri7     4096 2026-11-25 06:41 ..
+-rw-r--r-- 1 tri7 tri7 71027593 2026-11-25 00:58 blockidx.bin
+-rw-r--r-- 1 tri7 tri7 72294192 2026-11-25 00:58 txidx.bin
+unit active pid 2572518

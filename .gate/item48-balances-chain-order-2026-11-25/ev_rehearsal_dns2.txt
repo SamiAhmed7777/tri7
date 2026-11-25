@@ -1,0 +1,31 @@
+# transcript A/B on ONE archive copy — DNS2's blk0001.dat copied at 2026-11-24 21:46:35 (sha256 8ad479eb0d2293c7cec6a7e2bd888028247c94e7975ae18b8b7dcd4f2711f317) + tipstate.json copy (sha256 54944b2d08b3f706e83d717a300e3788eb2f750987350ce87d032bdaa3278a6c). The live node was not touched.
+
+## [A] INDEX order — examples/balances_chain_probe (built from the final sources), output file: $D/balances.rehearsal.json. Progress lines (one per 100k blocks) removed; everything else verbatim:
+started 2026-11-25T06:15:28Z on vmi3080415
+8ad479eb0d2293c7cec6a7e2bd888028247c94e7975ae18b8b7dcd4f2711f317  /root/.hermes/cache/scratch/item48-rehearsal/blk0001.dat
+54944b2d08b3f706e83d717a300e3788eb2f750987350ce87d032bdaa3278a6c  /root/.hermes/cache/scratch/item48-rehearsal/tipstate.json
+oracle: window_base h2214751 .. tip h2219350 (4600 entries), tipstate height Number(2219350)
+[blockidx] ready: 2219821 frames, 4518539 txs, heights_ok=true, threaded_tip=Some(2219350), writable=true, built in 74s, fork re-threaded 6107 frames
+index: Ready { frames: 2219821, txs_indexed: 4518539, heights_ok: true, threaded_tip: Some(2219350), build_secs: 74 } — built in 75.1s
+{"blocks":2219351,"cap_note":null,"covered_to":2219350,"index_build_secs":75.1,"live_utxos":18028,"out":"/root/.hermes/cache/scratch/item48-rehearsal/balances.rehearsal.json","reached_target":true,"replay_order":"index","replay_secs":110.2,"replay_target":2219350,"supply_sats":226992597204,"tip_hash":"72c64e3069322a4b18a0eee0771523ad8e8a5a73d5e5178fc4a386620ea53d17","tip_is_window_tip":true}
+probe_exit=0
+finished 2026-11-25T06:18:48Z
+
+## [B] FILE order — target/release/balances (built from the final sources; file order is the standalone CLI's only mode) on the SAME copy: ./target/release/balances $D/blk0001.dat $D/balances.fileorder.json --allow-stale --replay-target 2219350 . Progress lines removed; everything else verbatim:
+started 2026-11-25T06:18:48Z
+replay: 2208646 blocks (genesis..2208645), tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e
+outputs: 2637459 non-empty processed, 2637459 attributed to an address, 18051 live UTXOs held
+supply: total live balance 226842485015 sats (226842485015 attributed + 0 unattributed in 0 UTXOs)
+anomalies: 41 untracked spends, 6 duplicate-txid overwrites
+wallet: 0 keys / 0 distinct addresses, 0 funded; balance 0 sats in 0 UTXOs; received(regular/P2PKH) 0 sats; received(all) 0 sats
+JSON written: /root/.hermes/cache/scratch/item48-rehearsal/balances.fileorder.json
+ALL BALANCE CHECKS PASSED
+fileorder_exit=0
+finished 2026-11-25T06:20:18Z
+
+## [C] the three snapshot files, key fields (python3 json):
+index order  (probe output): height=2219350 replay_target_height=2219350 covered_tip_hash=72c64e3069322a4b18a0eee0771523ad8e8a5a73d5e5178fc4a386620ea53d17 blocks_replayed=2219351 live_utxos=18028 total_balance_sats=226992597204 untracked_spends=58 duplicate_txids=8
+file order   (standalone CLI): height=2208645 replay_target_height=None covered_tip_hash=02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e blocks_replayed=2208646 live_utxos=18051 total_balance_sats=226842485015 untracked_spends=41 duplicate_txids=6
+live snapshot (written by the OLD daemon)   : height=2208645 replay_target_height=2208645 covered_tip_hash=02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e blocks_replayed=2208646 live_utxos=18051 total_balance_sats=226842485015 untracked_spends=41 duplicate_txids=6
+
+(The standalone CLI omits replay_target_height when its walk stops before the target — src/balances_build.rs writes that key only on a reached target; pre-existing behaviour, not changed here.)

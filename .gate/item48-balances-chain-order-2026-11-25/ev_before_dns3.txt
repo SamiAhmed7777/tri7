@@ -1,0 +1,18 @@
+host=appt arch=x86_64 at=2026-11-25T06:17:19Z
+unit: active since Wed 2026-11-25 00:56:24 UTC NRestarts=0
+running exe: /opt/tri7/bin/follow_tip sha256 922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d
+## balances-build lifecycle lines, 30 h, verbatim (last 10)
+2026-11-25T04:13:56+00:00 appt follow_tip[2572518]: [2026-11-25T04:13:56Z] balances-build: coverage h2208246 short of the chased tip h2219302 — retrying in 1800s
+2026-11-25T04:43:56+00:00 appt follow_tip[2572518]: [2026-11-25T04:43:56Z] balances-build: start (snapshot h2208246, chain tip h2219323) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T04:45:24+00:00 appt follow_tip[2572518]: [2026-11-25T04:45:24Z] balances-build: done in 87.5s — coverage h2208246 tip 203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8 · supply 226841559503 sats · 18047 live UTXOs · wallet 10 keys 100000000 sats → /var/lib/tri7/balances.json
+2026-11-25T04:45:24+00:00 appt follow_tip[2572518]: [2026-11-25T04:45:24Z] balances-build: coverage h2208246 short of the chased tip h2219323 — retrying in 1800s
+2026-11-25T05:15:24+00:00 appt follow_tip[2572518]: [2026-11-25T05:15:24Z] balances-build: start (snapshot h2208246, chain tip h2219335) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T05:16:46+00:00 appt follow_tip[2572518]: [2026-11-25T05:16:46Z] balances-build: done in 82.6s — coverage h2208246 tip 203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8 · supply 226841559503 sats · 18047 live UTXOs · wallet 10 keys 100000000 sats → /var/lib/tri7/balances.json
+2026-11-25T05:16:46+00:00 appt follow_tip[2572518]: [2026-11-25T05:16:46Z] balances-build: coverage h2208246 short of the chased tip h2219335 — retrying in 1800s
+2026-11-25T05:46:46+00:00 appt follow_tip[2572518]: [2026-11-25T05:46:46Z] balances-build: start (snapshot h2208246, chain tip h2219350) — replaying /var/lib/tri7/blk0001.dat
+2026-11-25T05:48:13+00:00 appt follow_tip[2572518]: [2026-11-25T05:48:13Z] balances-build: done in 86.4s — coverage h2208246 tip 203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8 · supply 226841559503 sats · 18047 live UTXOs · wallet 10 keys 100000000 sats → /var/lib/tri7/balances.json
+2026-11-25T05:48:13+00:00 appt follow_tip[2572518]: [2026-11-25T05:48:13Z] balances-build: coverage h2208246 short of the chased tip h2219350 — retrying in 1800s
+## RPC (loopback): blocks / moneysupply / coverage
+{'blocks': 2219368, 'bestblockhash': 'dde53b2975e163285474bd2bd87e088f77e858a10df7c407f17c36beec138479', 'moneysupply': 226841.559503, 'moneysupply_sats': 226841559503, 'moneysupply_coverage_height': 2219368}
+## snapshot file
+mtime 2026-11-25T05:48:13Z {'height': 2208246, 'replay_target_height': 2219350, 'covered_tip_hash': '203294d2c94583434aad5299e862e8f10bfef685fc62b82ba175a747f1a878b8'}

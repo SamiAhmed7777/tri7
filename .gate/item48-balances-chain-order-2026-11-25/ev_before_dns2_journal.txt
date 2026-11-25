@@ -1,0 +1,34 @@
+# DNS2 (this host, vmi3080415) — tri7d journal, balances-build lifecycle lines, 7 days up to 2026-11-25T06:16:42Z — OLD binary (pre-fix)
+# running binary: /opt/tri7/bin/follow_tip sha256 922357122aa7b96140245fa5b12b81f3e8ad99e87b3d91aabfb0a80b9a928b8d
+# unit: active since Tue 2026-11-24 19:51:11 PST NRestarts=0
+
+## count of builds per day (7d) and the distinct (coverage, tip) pairs they published
+51
+     51 2026-11-24
+     51 coverage h2208645 tip 02d723be…
+
+## last 24 lifecycle lines (start/done/FAILED/retrying), verbatim
+2026-11-24T19:39:27-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:39:27Z] balances-build: start (snapshot h2208645, chain tip h2219291) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:41:06-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:41:06Z] balances-build: done in 99.1s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:41:06-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:41:06Z] balances-build: coverage h2208645 short of the chased tip h2219291 — retrying in 120s
+2026-11-24T19:43:06-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:43:06Z] balances-build: start (snapshot h2208645, chain tip h2219293) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:44:35-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:44:35Z] balances-build: done in 89.3s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:44:35-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:44:35Z] balances-build: coverage h2208645 short of the chased tip h2219293 — retrying in 240s
+2026-11-24T19:48:35-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:48:35Z] balances-build: start (snapshot h2208645, chain tip h2219294) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:50:07-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:50:07Z] balances-build: done in 91.4s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:50:07-08:00 vmi3080415 follow_tip[2901769]: [2026-11-25T03:50:07Z] balances-build: coverage h2208645 short of the chased tip h2219294 — retrying in 480s
+2026-11-24T19:51:30-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:51:30Z] balances-build: the loaded snapshot covers h2208645 but its replay chased h2219294 — retrying
+2026-11-24T19:51:30-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:51:30Z] balances-build: start (snapshot h2208645, chain tip h2219296) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:52:58-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:52:58Z] balances-build: done in 87.9s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:52:58-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:52:58Z] balances-build: coverage h2208645 short of the chased tip h2219296 — retrying in 60s
+2026-11-24T19:53:58-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:53:58Z] balances-build: start (snapshot h2208645, chain tip h2219296) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:55:30-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:55:30Z] balances-build: done in 92.2s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:55:30-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:55:30Z] balances-build: coverage h2208645 short of the chased tip h2219296 — retrying in 120s
+2026-11-24T19:57:30-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:57:30Z] balances-build: start (snapshot h2208645, chain tip h2219298) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T19:58:55-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:58:55Z] balances-build: done in 84.2s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T19:58:55-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T03:58:55Z] balances-build: coverage h2208645 short of the chased tip h2219298 — retrying in 240s
+2026-11-24T20:02:55-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T04:02:55Z] balances-build: start (snapshot h2208645, chain tip h2219300) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T20:04:34-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T04:04:34Z] balances-build: done in 99.6s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json
+2026-11-24T20:04:34-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T04:04:34Z] balances-build: coverage h2208645 short of the chased tip h2219300 — retrying in 480s
+2026-11-24T20:12:34-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T04:12:34Z] balances-build: start (snapshot h2208645, chain tip h2208645) — replaying /var/lib/tri7/blk0001.dat
+2026-11-24T20:14:10-08:00 vmi3080415 follow_tip[2921802]: [2026-11-25T04:14:10Z] balances-build: done in 95.6s — coverage h2208645 tip 02d723be5e4cefbcd6be57aeead9f83b6ac7db9a0229d5b3cb8a24dae45d864e · supply 226842485015 sats · 18051 live UTXOs · wallet 263 keys 5475391199 sats → /var/lib/tri7/balances.json

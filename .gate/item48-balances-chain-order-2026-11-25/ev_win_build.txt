@@ -1,0 +1,36 @@
+started 2026-11-25T07:50:51Z
+warning: unused variable: `wallet_ready`
+warning: unused variable: `base`
+warning: unused variable: `wp`
+warning: unused variable: `parse_err`
+warning: unused variable: `entries`
+warning: unused variable: `deps`
+warning: unused import: `tri7_core::legacy::Tx`
+warning: unused variable: `start_minimized`
+warning: unused variable: `sk_dest`
+    Finished `release` profile [optimized] target(s) in 2m 31s
+build_exit=0
+-rwxr-xr-x 2 root root 4931507 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/addrindex_build.exe
+-rwxr-xr-x 2 root root 4870432 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/balances.exe
+-rwxr-xr-x 2 root root 4164409 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/bdb_migrate.exe
+-rwxr-xr-x 2 root root 4044034 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/bdb_salvage.exe
+-rwxr-xr-x 2 root root 5002849 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/consistency.exe
+-rwxr-xr-x 2 root root 7944293 Nov 24 23:53 target/x86_64-pc-windows-gnu/release/follow_tip.exe
+-rwxr-xr-x 2 root root 2428906 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/historical_sig_corpus.exe
+-rwxr-xr-x 2 root root 3978814 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/read_wallet.exe
+-rwxr-xr-x 2 root root 2367818 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/sig_probe.exe
+-rwxr-xr-x 2 root root 4204936 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/spend_dryrun.exe
+-rwxr-xr-x 2 root root 4217647 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/spend_live.exe
+-rwxr-xr-x 2 root root 5196105 Nov 24 23:53 target/x86_64-pc-windows-gnu/release/stake_mint.exe
+-rwxr-xr-x 2 root root 2477506 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/store_canonicalize.exe
+-rwxr-xr-x 2 root root 1925308 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/tri7-onion-rotate.exe
+-rwxr-xr-x 2 root root 5067778 Nov 24 23:53 target/x86_64-pc-windows-gnu/release/tri7.exe
+-rwxr-xr-x 2 root root 5915314 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/tri7_wallet_gui.exe
+-rwxr-xr-x 2 root root 5010578 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/txhistory.exe
+-rwxr-xr-x 2 root root 2350619 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/validate_chain.exe
+-rwxr-xr-x 2 root root 2347937 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/validate_difficulty.exe
+-rwxr-xr-x 2 root root 2418117 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/validate_pos.exe
+-rwxr-xr-x 2 root root 2343125 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/verify_sigs.exe
+-rwxr-xr-x 2 root root 4034048 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/wallet_crypt.exe
+-rwxr-xr-x 2 root root 4147208 Nov 24 23:52 target/x86_64-pc-windows-gnu/release/wallet_keytool.exe
+finished 2026-11-25T07:53:24Z

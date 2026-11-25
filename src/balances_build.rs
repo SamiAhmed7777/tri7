@@ -18,6 +18,21 @@
 //!
 //! The JSON layout is byte-compatible with the historical bin output:
 //! {height, covered_tip_hash, totals{...}, wallet[], balances{}, received_regular{}}.
+//!
+//! REPLAY ORDER (item 48, live-caught on DNS2 2026-11-24). The file-order
+//! walk is FIRST-WRITER-WINS: at a fork whose loser reached the archive
+//! before the winner (h2208645, loser `02d723be…` stored one frame ahead of
+//! the canonical child of the same parent) the walk APPLIES the loser and
+//! reports the winner's first frame as a stale branch. balances.json then
+//! tracks the losing branch, and no retry can ever change that — every
+//! ~100 s replay re-reads 2.2M frames to the same wrong answer. A caller
+//! that owns the chain's own map therefore sets [`BalancesBuildOpts::canonical`]
+//! and the replay becomes INDEX-ORDERED: heights 0,1,2,… are resolved through
+//! the node's block index (chain-slot overlay → build height map → appendix),
+//! every body is chain-checked against the one before it, and the walk stops
+//! at the first height the store cannot serve. One accounting pass serves
+//! both orders, so a fork-free archive yields byte-identical output either
+//! way (pinned by test).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,9 +53,51 @@ struct WalletUtxo {
     from_coinstake: bool,
 }
 
+/// The chain's own answer to "which block is at height h" — implemented by
+/// the node's [`crate::blockindex::BlockStore`], whose resolution order is
+/// the live chain's registered slot, then the build-time height map, then
+/// the first-arrival appendix, and which serves nothing above the chain tip.
+///
+/// `Ok(None)` means the store holds no chain body for that height: a hole,
+/// or the top of what it holds.
+pub trait CanonicalBlocks {
+    fn block_at(
+        &self,
+        height: u64,
+    ) -> Result<Option<(crate::legacy::Block, crate::legacy::Hash)>, String>;
+    /// The top of the chain this source can vouch for, when it knows: the
+    /// live registered tip of a node's store, else the highest body it holds.
+    /// `block_at` serving nothing AT OR BELOW this height is a HOLE; nothing
+    /// above it is simply the end of the chain.
+    fn chain_top(&self) -> Option<u64> {
+        None
+    }
+}
+
+impl CanonicalBlocks for crate::blockindex::BlockStore {
+    fn block_at(
+        &self,
+        height: u64,
+    ) -> Result<Option<(crate::legacy::Block, crate::legacy::Hash)>, String> {
+        Ok(self
+            .block_by_height(height)?
+            .map(|hit| (hit.block, hit.hash)))
+    }
+    fn chain_top(&self) -> Option<u64> {
+        // the registered chain tip when the chain is armed (bodies stored
+        // above it were raced, not chain); else the disk-bodies oracle
+        self.chain_slot_tip().or_else(|| self.threaded_tip())
+    }
+}
+
 pub struct BalancesBuildOpts<'a> {
     /// blk0001.dat to replay.
     pub blk: &'a Path,
+    /// INDEX-ORDERED replay through the chain's own map (see the module
+    /// note). `None` keeps the historical FILE-ORDER replay — correct for a
+    /// fork-free archive, and for a forked one only when no loser sits ahead
+    /// of the winner in the file.
+    pub canonical: Option<&'a dyn CanonicalBlocks>,
     /// balances.json destination (written atomically).
     pub out: &'a Path,
     /// wallet.dat for the wallet slice (None = build chain-wide only; the
@@ -94,6 +151,105 @@ pub struct BalancesBuildReport {
     pub utxos_out_path: Option<std::path::PathBuf>,
     pub utxos_count: usize,
     pub utxos_total_sats: i64,
+    /// `"index"` when the replay was index-ordered, `"file"` when it walked
+    /// the archive in file order.
+    pub replay_order: &'static str,
+    /// Why an INDEX-ordered replay stopped short of the store's top: the
+    /// store served a body that does not chain onto the one before it (the
+    /// walk refuses it rather than splice two branches together), or holds
+    /// nothing at a height it does hold a body above (a hole). File-order
+    /// walks leave this None (their stop is the walker's stale branch).
+    pub cap_note: Option<String>,
+}
+
+/// What the block source handed the accounting pass.
+enum Pulled {
+    /// the chain's block at the next height
+    Block(usize, crate::legacy::Block, crate::legacy::Hash),
+    /// the source cannot deliver the chain at this height: file order = a
+    /// stale-branch stop; index order = a hole in the store, or an index
+    /// row that does not chain. Nothing at or above it is applied.
+    Capped(usize),
+    Eof,
+}
+
+/// One INDEX-ORDERED pull: the chain's block at height `h`, chain-checked
+/// against `prev` (the block the walk applied just before). `Ok(None)` from
+/// the source is the END of the chain unless the source says its chain
+/// continues above `h` — then it is a HOLE and the walk is capped there.
+fn pull_indexed(
+    chain: &dyn CanonicalBlocks,
+    h: usize,
+    prev: Option<crate::legacy::Hash>,
+    cap_note: &mut Option<String>,
+) -> Result<Pulled, String> {
+    match chain.block_at(h as u64) {
+        Err(e) => Err(format!("chain store at h{h}: {e}")),
+        Ok(Some((block, hash))) => Ok(chain_checked(h, block, hash, prev, cap_note)),
+        Ok(None) => {
+            let continues = match chain.chain_top() {
+                Some(top) => h as u64 <= top,
+                // the source does not say where its chain ends: probe one
+                // height up
+                None => chain
+                    .block_at(h as u64 + 1)
+                    .map_err(|e| format!("chain store at h{}: {e}", h + 1))?
+                    .is_some(),
+            };
+            if !continues {
+                return Ok(Pulled::Eof);
+            }
+            // the source says its chain continues above h — unless it simply
+            // ADVANCED between the two questions: ask once more before
+            // calling it a hole.
+            match chain.block_at(h as u64) {
+                Err(e) => Err(format!("chain store at h{h}: {e}")),
+                Ok(Some((block, hash))) => Ok(chain_checked(h, block, hash, prev, cap_note)),
+                Ok(None) => {
+                    *cap_note = Some(format!(
+                        "the chain store holds nothing at h{h} although its chain continues above it"
+                    ));
+                    Ok(Pulled::Capped(h))
+                }
+            }
+        }
+    }
+}
+
+/// Chain check for an index-served body: the genesis must carry a zero prev
+/// hash, every other block must name the block the walk applied just before
+/// it. Anything else is refused — the walk ends rather than splices.
+fn chain_checked(
+    h: usize,
+    block: crate::legacy::Block,
+    hash: crate::legacy::Hash,
+    prev: Option<crate::legacy::Hash>,
+    cap_note: &mut Option<String>,
+) -> Pulled {
+    let links = if h == 0 {
+        block.prev_hash == [0u8; 32]
+    } else {
+        Some(block.prev_hash) == prev
+    };
+    if links {
+        return Pulled::Block(h, block, hash);
+    }
+    *cap_note = Some(if h == 0 {
+        format!(
+            "the chain store's block at h0 ({}) does not have a zero prev hash",
+            crate::legacy::hash_to_display(&hash)
+        )
+    } else {
+        format!(
+            "the chain store's block at h{h} ({}) does not chain onto the block it served at h{} ({})",
+            crate::legacy::hash_to_display(&hash),
+            h - 1,
+            prev
+                .map(|p| crate::legacy::hash_to_display(&p))
+                .unwrap_or_default()
+        )
+    });
+    Pulled::Capped(h)
 }
 
 /// Replay + aggregate + write. `progress` is called every 100k blocks with
@@ -130,8 +286,18 @@ pub fn build_balances_snapshot(
     };
 
     // ---- replay ------------------------------------------------------------
-    let mut walker = ArchiveWalker::open(opts.blk.to_str().ok_or("blk path not UTF-8")?)
-        .map_err(|e| format!("open blk file: {}", e))?;
+
+    // (item 48) the block source. Both orders feed ONE accounting pass below,
+    // so a fork-free archive produces the same snapshot either way.
+    let mut walker = None;
+    if opts.canonical.is_none() {
+        walker = Some(
+            ArchiveWalker::open(opts.blk.to_str().ok_or("blk path not UTF-8")?)
+                .map_err(|e| format!("open blk file: {}", e))?,
+        );
+    }
+    let mut index_prev: Option<crate::legacy::Hash> = None;
+    let mut cap_note: Option<String> = None;
     let mut utxos = UtxoSet::new();
     // daemon getreceivedbyaddress semantics (regular txs, P2PKH scripts only)
     let mut received_regular: HashMap<[u8; 21], i64> = HashMap::new();
@@ -155,14 +321,34 @@ pub fn build_balances_snapshot(
         wallet_payloads.iter().map(|(p, _)| *p).collect();
 
     loop {
-        let (_height, block, hash) = match walker.step() {
-            Err(e) => return Err(e),
-            Ok(Step::Eof) => break,
-            Ok(Step::StaleBranch(h)) => {
+        let pulled = match (opts.canonical, walker.as_mut()) {
+            // INDEX ORDER: height `blocks` from the chain's own map, refused
+            // unless it chains onto the block before it. A chain that flips
+            // mid-walk (reorg) or an index row that disagrees with its
+            // neighbours ends the walk HERE — never a splice of two branches.
+            (Some(chain), _) => {
+                let pulled = pull_indexed(chain, blocks, index_prev, &mut cap_note)?;
+                if let Pulled::Block(_, _, hash) = &pulled {
+                    index_prev = Some(*hash);
+                }
+                pulled
+            }
+            // FILE ORDER: the historical first-writer-wins archive walk.
+            (None, Some(w)) => match w.step() {
+                Err(e) => return Err(e),
+                Ok(Step::Eof) => Pulled::Eof,
+                Ok(Step::StaleBranch(h)) => Pulled::Capped(h),
+                Ok(Step::Block(h, b, hash)) => Pulled::Block(h, b, hash),
+            },
+            (None, None) => unreachable!("file-order replay without a walker"),
+        };
+        let (_height, block, hash) = match pulled {
+            Pulled::Eof => break,
+            Pulled::Capped(h) => {
                 stale_at = Some(h);
                 break;
             }
-            Ok(Step::Block(h, b, hash)) => (h, b, hash),
+            Pulled::Block(h, b, hash) => (h, b, hash),
         };
 
         for tx in &block.vtx {
@@ -255,7 +441,20 @@ pub fn build_balances_snapshot(
     }
 
     // ---- coverage contract (shared skeleton) --------------------------------
-    let covered_to = walker.height().saturating_sub(1);
+    // File order: the walker's own count (identical to `blocks` — it counts
+    // the same delivered blocks). Index order: heights are strictly
+    // sequential from 0, so `blocks` blocks cover 0..=blocks-1.
+    let covered_to = match walker.as_ref() {
+        Some(w) => w.height().saturating_sub(1),
+        None => blocks.saturating_sub(1),
+    };
+    if blocks == 0 && opts.canonical.is_some() {
+        return Err(match &cap_note {
+            Some(note) => format!("index-ordered replay: nothing was applied — {note}"),
+            None => "index-ordered replay: the chain store served no body at height 0 — nothing replayed"
+                .to_string(),
+        });
+    }
     if outputs_processed == 0 {
         return Err(format!(
             "zero outputs processed over heights 0..{} — no coverage",
@@ -507,6 +706,8 @@ pub fn build_balances_snapshot(
         utxos_out_path: opts.utxos_out.map(|p| p.to_path_buf()),
         utxos_count,
         utxos_total_sats,
+        replay_order: if opts.canonical.is_some() { "index" } else { "file" },
+        cap_note,
     })
 }
 
@@ -643,6 +844,8 @@ mod tests {
         let out = dir.join("balances.json");
         let opts = BalancesBuildOpts {
             blk: &blk,
+            // the standalone CLI has no chain map: file order
+            canonical: None,
             out: &out,
             wallet: None,
             utxos_out: None,
@@ -690,6 +893,7 @@ mod tests {
         let out = dir.join("balances.json");
         let mk = |allow_stale: bool| BalancesBuildOpts {
             blk: &blk,
+            canonical: None,
             out: &out,
             wallet: None,
             utxos_out: None,
@@ -717,6 +921,7 @@ mod tests {
             let out = dir.join("balances.json");
             let opts = BalancesBuildOpts {
                 blk: &blk,
+                canonical: None,
                 out: &out,
                 wallet: None,
                 utxos_out: None,
@@ -906,6 +1111,7 @@ mod tests {
         let dump = dir.join("wallet_utxos.json");
         let opts = BalancesBuildOpts {
             blk: &blk,
+            canonical: None,
             out: &out,
             wallet: Some(&wpath),
             utxos_out: Some(&dump),
@@ -935,5 +1141,461 @@ mod tests {
         // 60 change (Z) at h1, which T2b then spent at h3 — zero rows remain
         assert_eq!(rows.len(), 0, "every wallet coin is canonically spent");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- item 48: replay order at a loser-first file-order fork -----------------
+
+    /// A fork stored LOSER-FIRST in the archive — the shape DNS2 has carried
+    /// since h2208645 (loser `02d723be…` sits one frame ahead of the canonical
+    /// child of the same parent).
+    ///
+    /// `blocks` = archive frame order: g, b1, LOSER(h2), WIN2(h2), WIN3(h3).
+    /// `chain`  = the chain:            g, b1, WIN2, WIN3.
+    struct LoserFirstFork {
+        blocks: Vec<Block>,
+        chain: Vec<Block>,
+    }
+
+    const FORK_A: [u8; 20] = [0x11u8; 20];
+    const FORK_LOSER: [u8; 20] = [0x5Au8; 20];
+    const FORK_WINNER: [u8; 20] = [0x6Bu8; 20];
+
+    fn loser_first_fork() -> LoserFirstFork {
+        let mut genesis = Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0xAAu8; 32],
+            time: 1_400_000_000,
+            bits: 0x1e0fffff,
+            nonce: 0,
+            vtx: vec![coinbase(FORK_A, 100)],
+            block_sig: Vec::new(),
+        };
+        genesis.merkle_root = sha256d_for_merkle(&genesis.vtx);
+        let b1 = block(genesis.hash(), vec![coinbase(FORK_A, 3)], 600);
+        let loser = block(b1.hash(), vec![coinbase(FORK_LOSER, 7)], 900);
+        let win2 = block(b1.hash(), vec![coinbase(FORK_WINNER, 9)], 901);
+        let win3 = block(win2.hash(), vec![coinbase(FORK_WINNER, 11)], 1200);
+        LoserFirstFork {
+            blocks: vec![
+                genesis.clone(),
+                b1.clone(),
+                loser,
+                win2.clone(),
+                win3.clone(),
+            ],
+            chain: vec![genesis, b1, win2, win3],
+        }
+    }
+
+    /// The chain's answer per height, the way a node's block index gives it
+    /// (`None` = the store holds no chain body there). Mirrors the real
+    /// store's contract: nothing above the registered top is served.
+    /// `top: None` = a source that does not say where its chain ends.
+    struct ChainMap {
+        rows: Vec<Option<Block>>,
+        top: Option<u64>,
+    }
+
+    impl ChainMap {
+        /// a source that knows its top: the last height it holds a body for
+        fn new(rows: Vec<Option<Block>>) -> Self {
+            let top = rows.iter().rposition(|b| b.is_some()).map(|i| i as u64);
+            ChainMap { rows, top }
+        }
+    }
+
+    impl CanonicalBlocks for ChainMap {
+        fn block_at(&self, height: u64) -> Result<Option<(Block, crate::legacy::Hash)>, String> {
+            if let Some(top) = self.top {
+                if height > top {
+                    return Ok(None); // like the real store: nothing above the registered tip
+                }
+            }
+            Ok(self
+                .rows
+                .get(height as usize)
+                .and_then(|b| b.clone())
+                .map(|b| (b.clone(), b.hash())))
+        }
+        fn chain_top(&self) -> Option<u64> {
+            self.top
+        }
+    }
+
+    fn addr_of(pay20: [u8; 20]) -> String {
+        let dest = crate::address::script_to_dest(&p2pkh(pay20)).unwrap();
+        payload_to_address(&dest.payload())
+    }
+
+    fn bal(doc: &serde_json::Value, pay20: [u8; 20]) -> i64 {
+        doc["balances"][addr_of(pay20)].as_i64().unwrap_or(0)
+    }
+
+    fn read_doc(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Build over `dir/blk0001.dat` (already written), chasing h3.
+    fn build_into(
+        dir: &Path,
+        sub: &str,
+        canonical: Option<&dyn CanonicalBlocks>,
+        allow_stale: bool,
+    ) -> Result<BalancesBuildReport, String> {
+        let blk = dir.join("blk0001.dat");
+        let out_dir = dir.join(sub);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.join("balances.json");
+        let opts = BalancesBuildOpts {
+            blk: &blk,
+            canonical,
+            out: &out,
+            wallet: None,
+            utxos_out: None,
+            end_height: 3,
+            replay_target: Some(3),
+            allow_stale,
+        };
+        let mut progress = |_: usize, _: usize| {};
+        build_balances_snapshot(&opts, &mut progress)
+    }
+
+    /// THE DEFECT, pinned: a file-order replay APPLIES the loser at the fork
+    /// and reports the winner's first frame as a stale branch.
+    #[test]
+    fn file_order_follows_the_loser_at_a_loser_first_fork() {
+        let dir = tmp_dir("item48-file-order");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let rep = build_into(&dir, "file", None, true).expect("file-order build");
+        assert_eq!(rep.replay_order, "file");
+        assert_eq!(rep.blocks, 3, "g, b1, then the LOSER at h2");
+        assert_eq!(rep.covered_to, 2, "stopped at the winner's first frame");
+        assert_eq!(
+            rep.tip_hash_display,
+            crate::legacy::hash_to_display(&f.blocks[2].hash()),
+            "the snapshot's tip IS the loser"
+        );
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_LOSER), 7, "the loser's coinbase is credited");
+        assert_eq!(bal(&doc, FORK_WINNER), 0, "the winning branch is absent");
+    }
+
+    /// THE FIX: through the chain's own map the replay threads the winner —
+    /// the loser is never applied, the walk reaches the chain's tip, and no
+    /// allow-stale concession is needed.
+    #[test]
+    fn index_order_threads_the_winning_branch_past_the_loser() {
+        let dir = tmp_dir("item48-index-order");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let map = ChainMap::new(f.chain.iter().map(|b| Some(b.clone())).collect());
+        let rep = build_into(&dir, "index", Some(&map), false).expect("index-ordered build");
+        assert_eq!(rep.replay_order, "index");
+        assert_eq!(rep.blocks, 4);
+        assert_eq!(rep.covered_to, 3);
+        assert!(rep.cap_note.is_none(), "{:?}", rep.cap_note);
+        assert_eq!(
+            rep.tip_hash_display,
+            crate::legacy::hash_to_display(&f.chain[3].hash()),
+            "the snapshot's tip is the CHAIN's tip"
+        );
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_LOSER), 0, "the loser is never applied");
+        assert_eq!(bal(&doc, FORK_WINNER), 20, "9 + 11 from the winning branch");
+        assert_eq!(bal(&doc, FORK_A), 103);
+    }
+
+    /// The two orders share ONE accounting pass: on a fork-free archive (with
+    /// a wallet and a spend dump) both snapshots are byte-identical.
+    #[test]
+    fn index_order_is_byte_identical_to_file_order_on_a_fork_free_archive() {
+        let dir = tmp_dir("item48-identical");
+        let secret = [9u8; 32];
+        let wpath = wallet_fixture(&dir, secret);
+        let secp = secp256k1::Secp256k1::signing_only();
+        let sk = secp256k1::SecretKey::from_slice(&secret).unwrap();
+        let pk33 = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+        let w20: [u8; 20] = pubkey_payload(&pk33)[1..].try_into().unwrap();
+        let c20 = [0x44u8; 20];
+
+        let mut genesis = Block {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [0xAAu8; 32],
+            time: 1_400_000_000,
+            bits: 0x1e0fffff,
+            nonce: 0,
+            vtx: vec![coinbase(w20, 100)],
+            block_sig: Vec::new(),
+        };
+        genesis.merkle_root = sha256d_for_merkle(&genesis.vtx);
+        let coin_a = genesis.vtx[0].hash();
+        let t1 = pay_tx(vec![(coin_a, 0)], vec![(c20, 40), (w20, 60)]);
+        let b1 = block(genesis.hash(), vec![coinbase(c20, 1), t1], 600);
+        let b2 = block(b1.hash(), vec![coinbase(w20, 5)], 900);
+        let b3 = block(b2.hash(), vec![coinbase(c20, 2)], 1200);
+        let linear = [genesis, b1, b2, b3];
+
+        let blk = dir.join("blk0001.dat");
+        write_blk_file(&blk, &linear);
+        let run = |sub: &str, canonical: Option<&dyn CanonicalBlocks>| -> BalancesBuildReport {
+            let out_dir = dir.join(sub);
+            std::fs::create_dir_all(&out_dir).unwrap();
+            let out = out_dir.join("balances.json");
+            let dump = out_dir.join("wallet_utxos.json");
+            let opts = BalancesBuildOpts {
+                blk: &blk,
+                canonical,
+                out: &out,
+                wallet: Some(&wpath),
+                utxos_out: Some(&dump),
+                end_height: 3,
+                replay_target: Some(3),
+                allow_stale: false,
+            };
+            let mut progress = |_: usize, _: usize| {};
+            build_balances_snapshot(&opts, &mut progress).unwrap()
+        };
+        let map = ChainMap::new(linear.iter().map(|b| Some(b.clone())).collect());
+        let by_file = run("file", None);
+        let by_index = run("index", Some(&map));
+
+        assert_eq!(by_file.covered_to, 3);
+        assert_eq!(by_index.covered_to, 3);
+        assert_eq!(by_file.tip_hash_display, by_index.tip_hash_display);
+        for (a, b) in [
+            (&by_file.out_path, &by_index.out_path),
+            (
+                by_file.utxos_out_path.as_ref().unwrap(),
+                by_index.utxos_out_path.as_ref().unwrap(),
+            ),
+        ] {
+            assert_eq!(
+                std::fs::read(a).unwrap(),
+                std::fs::read(b).unwrap(),
+                "{} must be byte-identical in both orders",
+                a.file_name().unwrap().to_string_lossy()
+            );
+        }
+        // the dump is non-trivial (the wallet holds coins at the end)
+        assert_eq!(
+            by_index.utxos_count,
+            2,
+            "wallet holds the 60-sat change from b1 and the 5-sat coinbase"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hole in the store caps an index-ordered walk AT the hole: strict
+    /// callers get the coverage error, tolerant ones get honest coverage —
+    /// and a body the store holds ABOVE the hole is never applied.
+    #[test]
+    fn index_order_stops_at_a_hole_and_never_applies_what_sits_above_it() {
+        let dir = tmp_dir("item48-hole");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let mut chain: Vec<Option<Block>> = f.chain.iter().cloned().map(Some).collect();
+        chain[2] = None; // the store is missing the chain's h2
+        let map = ChainMap::new(chain);
+
+        let err = build_into(&dir, "strict", Some(&map), false)
+            .err()
+            .expect("strict: the cap is reported");
+        assert!(
+            err.contains("stale-branch discontinuity at height 2"),
+            "got: {err}"
+        );
+
+        let rep = build_into(&dir, "tolerant", Some(&map), true).expect("tolerant build");
+        assert_eq!(rep.blocks, 2, "only g and b1 applied");
+        assert_eq!(rep.covered_to, 1);
+        let note = rep.cap_note.as_deref().expect("the hole is explained");
+        assert!(
+            note.contains("holds nothing at h2 although its chain continues above it"),
+            "{note}"
+        );
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_WINNER), 0, "h3 is served by the store but sits above the hole");
+    }
+
+    /// An index row that does not chain onto the row before it is REFUSED —
+    /// the walk ends there rather than splicing two branches together.
+    #[test]
+    fn index_order_refuses_an_index_row_that_does_not_chain() {
+        let dir = tmp_dir("item48-no-splice");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let loser_child = block(f.blocks[2].hash(), vec![coinbase(FORK_LOSER, 13)], 1500);
+        let map = ChainMap::new(vec![
+            Some(f.chain[0].clone()),
+            Some(f.chain[1].clone()),
+            Some(f.chain[2].clone()),
+            Some(loser_child), // h3 claims a parent the walk never applied
+        ]);
+        let rep = build_into(&dir, "splice", Some(&map), true).expect("build stops at h3");
+        assert_eq!(rep.covered_to, 2);
+        let note = rep.cap_note.as_deref().expect("the refusal is explained");
+        assert!(note.contains("does not chain onto the block it served at h2"), "{note}");
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_LOSER), 0, "neither the loser nor its child is applied");
+        assert_eq!(bal(&doc, FORK_WINNER), 9);
+    }
+
+    /// End to end through the REAL block index: the store is built over the
+    /// loser-first archive with the chain's window as the oracle (exactly how
+    /// a node boots), and its per-height resolution feeds the replay.
+    #[test]
+    fn the_node_block_store_is_a_chain_source_at_a_loser_first_fork() {
+        let dir = tmp_dir("item48-store");
+        let f = loser_first_fork();
+        let blk = dir.join("blk0001.dat");
+        write_blk_file(&blk, &f.blocks);
+        let store = crate::blockindex::BlockStore::new(Some(blk.clone()), Some(dir.join("idx")));
+        store.spawn_build(Some(crate::blockindex::BuildOracle {
+            base: 0,
+            hashes: f.chain.iter().map(|b| b.hash()).collect(),
+            tip: 3,
+        }));
+        let mut waited = 0;
+        while waited < 400
+            && !matches!(
+                store.status(),
+                crate::blockindex::StoreStatus::Ready { .. }
+            )
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            waited += 1;
+        }
+        assert!(
+            matches!(
+                store.status(),
+                crate::blockindex::StoreStatus::Ready {
+                    heights_ok: true,
+                    ..
+                }
+            ),
+            "index ready with authoritative heights: {:?}",
+            store.status()
+        );
+        let rep = build_into(&dir, "store", Some(&*store), false).expect("store-ordered build");
+        assert_eq!(rep.replay_order, "index");
+        assert_eq!(rep.covered_to, 3);
+        assert_eq!(
+            rep.tip_hash_display,
+            crate::legacy::hash_to_display(&f.chain[3].hash())
+        );
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_LOSER), 0);
+        assert_eq!(bal(&doc, FORK_WINNER), 20);
+    }
+
+    /// A source that does NOT say where its chain ends: the walk probes one
+    /// height up, finds a body above the hole, and is capped AT the hole.
+    #[test]
+    fn index_order_finds_a_hole_even_when_the_source_does_not_know_its_top() {
+        let dir = tmp_dir("item48-hole-no-top");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let mut chain: Vec<Option<Block>> = f.chain.iter().cloned().map(Some).collect();
+        chain[2] = None;
+        let map = ChainMap {
+            rows: chain,
+            top: None,
+        };
+        let rep = build_into(&dir, "no-top", Some(&map), true).expect("tolerant build");
+        assert_eq!(rep.covered_to, 1);
+        let note = rep.cap_note.as_deref().expect("the hole is explained");
+        assert!(note.contains("holds nothing at h2"), "{note}");
+    }
+
+    /// Bodies the store holds ABOVE its registered tip were raced there, not
+    /// chain: the walk ends at the registered tip — a clean end, no cap note.
+    #[test]
+    fn index_order_ends_at_the_registered_tip_not_at_raced_bodies_above_it() {
+        let dir = tmp_dir("item48-raced");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let raced = block(f.chain[3].hash(), vec![coinbase(FORK_LOSER, 99)], 1500);
+        let mut rows: Vec<Option<Block>> = f.chain.iter().cloned().map(Some).collect();
+        rows.push(Some(raced)); // on disk, above the registered tip h3
+        let map = ChainMap {
+            rows,
+            top: Some(3),
+        };
+        let rep = build_into(&dir, "raced", Some(&map), true)
+            .expect("the build ends at the registered tip");
+        assert_eq!(rep.covered_to, 3, "the registered tip");
+        assert!(rep.cap_note.is_none(), "{:?}", rep.cap_note);
+        let doc = read_doc(&rep.out_path);
+        assert_eq!(bal(&doc, FORK_LOSER), 0, "the raced body is never applied");
+    }
+
+    /// A chain that ADVANCES between the walk's questions (nothing at h now,
+    /// a top above h an instant later, then the body) is followed — not
+    /// reported as a hole.
+    struct AdvancingMap {
+        rows: Vec<Block>,
+        asked: std::cell::RefCell<std::collections::HashMap<u64, u32>>,
+    }
+
+    impl CanonicalBlocks for AdvancingMap {
+        fn block_at(&self, height: u64) -> Result<Option<(Block, crate::legacy::Hash)>, String> {
+            let first_ask = {
+                let mut asked = self.asked.borrow_mut();
+                let n = asked.entry(height).or_insert(0);
+                let first = *n == 0;
+                *n += 1;
+                first
+            };
+            if height == 3 && first_ask {
+                return Ok(None); // h3 has not landed YET
+            }
+            Ok(self
+                .rows
+                .get(height as usize)
+                .map(|b| (b.clone(), b.hash())))
+        }
+        // …but it has landed by the time the walk asks where the chain ends
+        fn chain_top(&self) -> Option<u64> {
+            Some(3)
+        }
+    }
+
+    #[test]
+    fn index_order_follows_a_chain_that_advances_mid_walk() {
+        let dir = tmp_dir("item48-advancing");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let map = AdvancingMap {
+            rows: f.chain.clone(),
+            asked: std::cell::RefCell::new(std::collections::HashMap::new()),
+        };
+        let rep = build_into(&dir, "advancing", Some(&map), true).expect("build reaches the tip");
+        assert_eq!(rep.covered_to, 3, "the walk followed the advance");
+        assert!(rep.cap_note.is_none(), "{:?}", rep.cap_note);
+        assert_eq!(
+            rep.tip_hash_display,
+            crate::legacy::hash_to_display(&f.chain[3].hash())
+        );
+    }
+
+    /// The genesis row is chain-checked too: a non-zero prev hash at h0 ends
+    /// the walk before anything is applied — and is REPORTED (the first
+    /// draft subtracted 1 from height 0 here).
+    #[test]
+    fn index_order_refuses_a_genesis_whose_prev_is_not_zero() {
+        let dir = tmp_dir("item48-genesis");
+        let f = loser_first_fork();
+        write_blk_file(&dir.join("blk0001.dat"), &f.blocks);
+        let mut bad = f.chain[0].clone();
+        bad.prev_hash = [0x77u8; 32];
+        let map = ChainMap::new(vec![Some(bad), Some(f.chain[1].clone())]);
+        let err = build_into(&dir, "genesis", Some(&map), true)
+            .err()
+            .expect("nothing applied is an error");
+        assert!(err.contains("nothing was applied"), "got: {err}");
+        assert!(err.contains("does not have a zero prev hash"), "got: {err}");
     }
 }
