@@ -1,0 +1,116 @@
+### [0] invalidate the balances cache (fresh-snapshot case builds nothing; the check would stay pending — same as the Pi r1 lesson)
+-rw-r--r-- 1 tri7 tri7 2180974 2026-11-25 02:53:47.201809809 -0800 /var/lib/tri7/balances.json.pre-item50
+driver started 2026-11-25T16:09:57Z on vmi3080415 target=dns2; local HEAD 52180af; new binary sha256 6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20; harness sha256 f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba; check sha256 584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38
+/root/.hermes/cache/scratch/item49_deploy.sh: line 32: mkdir -p /tmp/item49-deploy && chmod 700 /tmp/item49-deploy: No such file or directory
+cannot stage dir
+driver_exit=2 at 2026-11-25T16:09:57Z
+driver started 2026-11-25T16:12:32Z on vmi3080415 target=dns2 (local); HEAD 52180af; new sha256 6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20
+stage binary exit=0; stage scripts exit=0
+6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20  /tmp/item49-deploy/follow_tip.new
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item49-deploy/tri7d_swap_veri
+584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38  /tmp/item49-deploy/balances_chain_
+### [1] state before (read-only)
+active
+pid=3528628
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 02:45:38 PST MemoryCurrent=599515136 MemoryMax=2147483648 
+running sha256 60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d
+{"method": "getblockcount", "params": [], "result": 2219659, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 3, "error": null}
+-rwxr-xr-x 1 root root 7555400 2026-11-25 02:44:07.668850549 -0800 follow_tip
+-rwxr-xr-x 1 root root 7449808 2026-11-21 17:57:17.555460323 -0800 follow_tip.bak-01a4e079
+-rwxr-xr-x 1 root root 7233088 2026-11-14 08:36:27.834612208 -0800 follow_tip.bak-1794740743
+-rwxr-xr-x 1 root root 7527344 2026-11-23 22:45:56.734944700 -0800 follow_tip.bak-1b48fc22
+-rwxr-xr-x 1 root root 7414792 2026-11-18 07:34:15.526792262 -0800 follow_tip.bak-1d8f568c
+-rwxr-xr-x 1 root root 7234224 2026-11-14 08:36:27.706611865 -0800 follow_tip.bak-27779bd2
+-rwxr-xr-x 1 root root 7445832 2026-11-18 16:29:49.873500240 -0800 follow_tip.bak-37d43258
+-rwxr-xr-x 1 root root 7070064 2026-11-09 21:03:01.650257198 -0800 follow_tip.bak-3f2c439c
+-rwxr-xr-x 1 root root 7476056 2026-11-22 16:00:00.169470984 -0800 follow_tip.bak-702b0517
+-rwxr-xr-x 1 root root 7430008 2026-11-18 16:07:52.698868580 -0800 follow_tip.bak-77bd7bda
+-rwxr-xr-x 1 root root 6980712 2026-11-09 06:45:07.984582412 -0800 follow_tip.bak-79618b2
+-rwxr-xr-x 1 root root 6985808 2026-11-09 10:52:01.804634520 -0800 follow_tip.bak-816de5fc
+-rwxr-xr-x 1 root root 7493768 2026-11-23 09:06:31.457353613 -0800 follow_tip.bak-83cfe73a
+-rwxr-xr-x 1 root root 6831408 2026-11-07 17:52:04.540449294 -0800 follow_tip.bak-850f733
+-rwxr-xr-x 1 root root 6765272 2026-11-07 16:27:35.877083336 -0800 follow_tip.bak-871dbf3
+-rwxr-xr-x 1 root root 7480064 2026-11-22 16:00:00.838480666 -0800 follow_tip.bak-87755353
+-rwxr-xr-x 1 root root 7056248 2026-11-09 19:20:46.669370486 -0800 follow_tip.bak-8a0c9f86
+-rwxr-xr-x 1 root root 7539000 2026-11-24 11:08:53.858754146 -0800 follow_tip.bak-91222c24
+-rwxr-xr-x 1 root root 7527344 2026-11-24 09:41:33.395017281 -0800 follow_tip.bak-96c47105
+-rwxr-xr-x 1 root root 7514128 2026-11-23 19:12:26.940850635 -0800 follow_tip.bak-9f73fc6e
+-rwxr-xr-x 1 root root 7066984 2026-11-09 22:46:55.604439943 -0800 follow_tip.bak-a5386462
+-rwxr-xr-x 1 root root 6716104 2026-11-07 06:57:05.072145129 -0800 follow_tip.bak-b0e9684
+-rwxr-xr-x 1 root root 7251400 2026-11-17 04:05:20.932331731 -0800 follow_tip.bak-b1e4f559
+-rwxr-xr-x 1 root root 6551424 2026-11-07 05:12:29.240712130 -0800 follow_tip.bak-b5351f9
+-rwxr-xr-x 1 root root 7233552 2026-11-14 02:05:49.085436857 -0800 follow_tip.bak-b7149dd5
+-rwxr-xr-x 1 root root 5370688 2026-11-03 02:30:07.276909905 -0800 follow_tip.bak-c69f195f
+-rwxr-xr-x 1 root root 7205136 2026-11-13 12:21:56.129040016 -0800 follow_tip.bak-cf4ba9c-pre
+-rwxr-xr-x 1 root root 6885072 2026-11-07 20:32:20.071831728 -0800 follow_tip.bak-d022f195
+-rwxr-xr-x 1 root root 6883912 2026-11-07 18:15:52.865943924 -0800 follow_tip.bak-d48cf4b
+-rwxr-xr-x 1 root root 7453272 2026-11-19 18:31:52.490659343 -0800 follow_tip.bak-e562eb9b
+-rwxr-xr-x 1 root root 7451824 2026-11-21 17:57:17.639460599 -0800 follow_tip.bak-e5975e59
+-rwxr-xr-x 1 tri7 tri7 7202392 2026-11-11 20:16:00.636780587 -0800 follow_tip.bak-e601c2eb
+-rwxr-xr-x 1 root root 6919280 2026-11-09 02:32:16.670771695 -0800 follow_tip.bak-f168710
+-rwxr-xr-x 1 root root 7238568 2026-11-17 03:28:58.700444290 -0800 follow_tip.bak-f2e3d3aa
+-rwxr-xr-x 1 root root 7221168 2026-11-14 00:33:20.741313212 -0800 follow_tip.bak-fdaaaa9b
+-rwxr-xr-x 1 root root 7119656 2026-11-11 05:57:07.180247013 -0800 follow_tip.bak-item23
+-rwxr-xr-x 1 root root 7303944 2026-11-17 13:18:28.127203609 -0800 follow_tip.bak9
+-rwxr-xr-x 1 root root 5745312 2026-11-04 19:01:04.429280636 -0800 follow_tip.new7
+-rwxr-xr-x 1 root root 7205136 2026-11-13 12:21:55.857034218 -0800 follow_tip.pre-20261113
+-rwxr-xr-x 1 root root 5586256 2026-11-03 02:30:07.314910130 -0800 follow_tip.prev
+-rwxr-xr-x 1 root root 7539576 2026-11-24 11:08:53.893754184 -0800 follow_tip.prev-item
+### [2] save previous (running exe -> /opt/tri7/bin/follow_tip.prev-item49)
+60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d
+### [3] the real deploy (the harness rolls back itself when the check rejects; the balances cache was already invalidated — see ev_deploy_dns2.txt [0])
+{"outcome":"accepted","running_sha256":"6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20","unit":"tri7d","reason":"check passed","old_sha256":"60ee7604b18a1077f21a441311437c03b7d05c2ff4c4bfc65cc5ddfdea33916d","new_sha256":"6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20","restart_epoch":"1795623152","bin":"/opt/tri7/bin/follow_tip","rollback_binary":"/opt/tri7/bin/follow_tip.prev-item49","check":"finished build of this process: index order, coverage h2219662 at or above the chased tip h2219660, snapshot file agrees, tip f7f515164236392c…"}
+deploy exit=0 at 2026-11-25T16:19:07Z
+### [4] readback
+host=vmi3080415 arch=x86_64 at=2026-11-25T16:19:07Z pid=156069
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 08:14:04 PST MemoryCurrent=1054482432 MemoryMax=2147483648 MemorySwapMax=0 ActiveState=active SubState=running 
+running exe: /opt/tri7/bin/follow_tip sha256 6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215061
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215261
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215461
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215661
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215861
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216061
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216261
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216461
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216661
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216861
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217061
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217261
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217461
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217661
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217861
+[2026-11-25T16:14:13Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2218061
+[2026-11-25T16:14:13Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2215061; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+[2026-11-25T16:14:17Z] backfill: requesting headers from h2216660 (locator 15bb15c8c531983268a9e023e1ab6ce1abc2a77b66e350692f8528a60d73bb6c)
+[2026-11-25T16:14:22Z] backfill: validated 3000 headers linking h2216661 → h2219660 (hash9 + linkage, daemon-served)
+[2026-11-25T16:14:22Z] backfill: requesting 100 full blocks
+[2026-11-25T16:14:23Z] backfill: 10 blocks fully validated so far
+[2026-11-25T16:14:24Z] backfill: 20 blocks fully validated so far
+[2026-11-25T16:14:24Z] backfill: 30 blocks fully validated so far
+[2026-11-25T16:14:24Z] backfill: 40 blocks fully validated so far
+[2026-11-25T16:14:24Z] backfill: 50 blocks fully validated so far
+[2026-11-25T16:14:25Z] backfill: 60 blocks fully validated so far
+[2026-11-25T16:14:26Z] backfill: 70 blocks fully validated so far
+[2026-11-25T16:14:27Z] backfill: 80 blocks fully validated so far
+[2026-11-25T16:14:27Z] backfill: 90 blocks fully validated so far
+[2026-11-25T16:14:28Z] backfill: 100 blocks fully validated so far
+[2026-11-25T16:14:28Z] backfill: 100 blocks fully validated (kernel enforced 44 / seeded 0)
+[2026-11-25T16:14:28Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+[2026-11-25T16:14:29Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215061 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215061 refused by fold (hash/parse gate)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215261 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215261 refused by fold (hash/parse gate)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215461 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215461 refused by fold (hash/parse gate)
+[2026-11-25T16:15:29Z] kernel-window backfill: h2215661 refused (parse: short read: want 4 bytes, have 0 at offset 0)
+{"method": "getblockcount", "params": [], "result": 2219662, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 2, "error": null}
+{"method": "gettxoutsetinfo", "params": [], "result": {"bestblock": "f7f515164236392cd3dde19541d3f4768479561e81967ea8dd0a3071ad606eab", "bogosize": null, "hash_serialized_2": null, "height": 2219662, "note": "transactions/bogosize need a full UTXO-set pass; txouts and total_amount are the node's replay view", "total_amount": 1596.871729, "total_utxos": 338, "transactions": null, "txouts": 338}, "error": null}
+ls: cannot access '/var/lib/tri7/*.pending': No such file or directory
+-rw-r--r-- 1 tri7 tri7 2180973 2026-11-25 08:18:56.961131321 -0800 /var/lib/tri7/balances.json
+-rw-r--r-- 1 tri7 tri7 2180974 2026-11-25 02:53:47.201809809 -0800 /var/lib/tri7/balances.json.pre-item50
+driver finished 2026-11-25T16:19:11Z
+driver_exit=0 at 2026-11-25T16:19:11Z

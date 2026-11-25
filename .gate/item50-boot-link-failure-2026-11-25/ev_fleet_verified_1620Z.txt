@@ -1,0 +1,5 @@
+# fleet verification 2026-11-25T16:20Z (read-only) — item-49+50 build deployed on all three
+DNS2: active 6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20 h2219662 peers=3 staking(attempts 47984, coins_considered 109)
+DNS3: active 6f4f341199c428d05a5dbf5aefdc183d84bb4e20b9a29fbf1c35db0c49c39d20 h2219662 peers=4
+Pi:   active 6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4 (aarch64, same commit 52180af) h2219662 peers=1
+tips UNANIMOUS h2219662

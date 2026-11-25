@@ -1,0 +1,124 @@
+driver started 2026-11-25T15:46:41Z (pi leg); tree HEAD 52180af (rsync'd, committed tree)
+### [1] staged files (sha256 on the Pi)
+f0b0bbd72ec4090b21ffe9a2c138ca919320a615d00df69b6f5b35481c598dba  /tmp/item50-deploy/tri7d_swap_verify_rollback.sh
+584a10c69ad5c166b6a105f369dd85775e834438c47543f7c5201199760e7c38  /tmp/item50-deploy/balances_chain_ordered.py
+6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4  /root/tri7/target/release/follow_tip
+### [2] state before + save previous (running exe -> /root/tri7/target/release/follow_tip.prev-item50)
+active
+pid=3380967
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580  /proc/3380967/exe
+6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4  /root/tri7/target/release/follow_tip
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580  /root/tri7/target/release/follow_tip.prev-item50
+{"method": "getblockcount", "params": [], "result": 2219647, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 5, "error": null}
+### [3] the real deploy (previous binary kept at /root/tri7/target/release/follow_tip.prev-item50; the harness rolls back itself when the check rejects)
+{"outcome":"rolled-back","running_sha256":"dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580","unit_state":"active","rehearsal":"0","unit":"tri7d","reason":"check still pending after 900s","old_sha256":"dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580","new_sha256":"6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4","restart_epoch":"1795621617","bin":"/root/tri7/target/release/follow_tip","rollback_binary":"/root/tri7/target/release/follow_tip.prev-item50","check":"no build has started yet (the daemon may still be loading the block index)"}
+deploy exit=1 at 2026-11-25T16:03:33Z
+### [4] readback
+host=ubuntu-4gb-hel1-1 arch=aarch64 at=2026-11-25T16:03:34Z pid=3445415
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 16:03:28 UTC MemoryCurrent=6184960 MemoryMax=infinity ActiveState=active SubState=running 
+running exe: /root/tri7/target/release/follow_tip sha256 dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215057
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215257
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215457
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215657
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215857
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216057
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216257
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216457
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216657
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216857
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217057
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217257
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217457
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217657
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217857
+[2026-11-25T16:03:30Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2218057
+[2026-11-25T16:03:30Z] kernel-window backfill: PARTIAL â€” 0 block(s) folded (store 0, rpc 0), first hole h2215057; coverage NON-CONTIGUOUS â†’ floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+[2026-11-25T16:03:33Z] backfill: requesting headers from h2216656 (locator 64b38ca31971c17dd75d49209d9fb735c7ec01956087261cb8fd9afd46114b48)
+{"method": "getblockcount", "params": [], "rpc_error": "<urlopen error [Errno 111] Connection refused>"}
+{"method": "getconnectioncount", "params": [], "rpc_error": "<urlopen error [Errno 111] Connection refused>"}
+total 43940
+-rw-r--r--  1 root root        0 2026-07-01 20:48:14.597347835 +0000  ?@Ø‡@8@,+@@@PPP¸û
+drwx------ 31 root root     4096 2026-11-25 00:24:06.413215811 +0000 .
+drwxr-xr-x 23 root root     4096 2026-10-24 05:13:12.200386449 +0000 ..
+-rw-------  1 root root      347 2026-04-01 10:32:36.701554652 +0000 .bash_history
+-rw-r--r--  1 root root     3127 2026-11-06 07:39:13.804288084 +0000 .bashrc
+drwx------  2 root root     4096 2025-08-14 10:25:29.933000000 +0000 .cache
+drwxr-xr-x  4 root root     4096 2026-11-25 15:42:40.331577213 +0000 .cargo
+-rw-r--r--  1 root root        0 2025-08-14 10:26:44.251956369 +0000 .cloud-locale-test.skip
+drwx------  3 root root     4096 2026-11-06 09:55:51.153979795 +0000 .config
+drwxr-xr-x  2 root root     4096 2026-07-02 10:04:00.492267264 +0000 .cryptographic-triangles
+drwx------  2 root root     4096 2026-11-12 00:31:22.032940871 +0000 .gnupg
+drwxr-xr-x  4 root root     4096 2026-06-13 20:44:10.210916965 +0000 .npm
+drwxr-xr-x  3 root root     4096 2026-08-06 02:03:52.527984347 +0000 .openclaw
+-rw-r--r--  1 root root      182 2026-11-06 07:39:13.803288079 +0000 .profile
+drwxr-xr-x  6 root root     4096 2026-11-06 07:39:14.898293633 +0000 .rustup
+drwx------  2 root root     4096 2026-11-07 06:41:40.663180875 +0000 .ssh
+drwxr-xr-x 11 root root     4096 2026-11-25 00:54:42.215443338 +0000 .triangles
+drwxr-xr-x  7 root root     4096 2026-04-03 21:04:22.640893279 +0000 .triangles-old-backup-20260403
+-rw-r--r--  1 root root      304 2026-04-19 10:42:34.888584061 +0000 .wget-hsts
+-rwxr-xr-x  1 root root      679 2026-11-15 11:40:30.347144891 +0000 addr-balance-scan.sh
+-rw-r--r--  1 root root      244 2026-11-06 22:11:27.976621481 +0000 addrindex_build.log
+-rw-r--r--  1 root root      248 2026-11-06 23:41:33.924607618 +0000 addrindex_full.log
+drwxr-xr-x  2 root root     4096 2026-11-24 19:26:14.426964456 +0000 backups
+drwxr-xr-x  3 root root     4096 2026-04-01 10:45:18.192103716 +0000 build-deps
+-rw-r--r--  1 root root    17124 2026-11-11 07:37:53.198950675 +0000 build-item21.log
+-rw-r--r--  1 root root    16294 2026-11-06 22:02:00.593614502 +0000 build.log
+-rw-r--r--  1 root root     6848 2026-11-06 22:33:59.414666956 +0000 build_addr.log
+-rwx------  1 root root     8038 2026-09-01 01:38:40.709886814 +0000 cleanup-misplaced-1.6.py
+-rw-r--r--  1 root root        0 2026-06-14 00:50:29.480047115 +0000 dl.log
+-rw-r--r--  1 root root      899 2026-11-07 01:24:54.089085773 +0000 finalcap.sh
+-rw-r--r--  1 root root     2173 2026-11-07 01:27:55.958949437 +0000 finalcap2.sh
+-rw-r--r--  1 root root     1957 2026-11-07 01:32:52.265355704 +0000 finalcap3.sh
+-rwxr-xr-x  1 root root  6930816 2026-11-18 15:39:41.339196419 +0000 follow_tip.bak-7a06a642
+-rw-r--r--  1 root root   977353 2026-06-14 00:53:06.685057145 +0000 hetzner-node.log
+-rwxr-xr-x  1 root root     2381 2026-06-13 10:59:43.744333540 +0000 hetzner_build.sh
+-rwxr-xr-x  1 root root     1486 2026-06-13 11:05:35.304152933 +0000 hetzner_build2.sh
+-rwxr-xr-x  1 root root     1368 2026-06-13 11:41:05.094813723 +0000 hetzner_build3.sh
+-rwxr-xr-x  1 root root     1145 2026-06-13 20:43:36.609083512 +0000 hetzner_tridock_setup.sh
+-rw-r--r--  1 root root      408 2026-11-07 01:27:36.455856843 +0000 inbound.sh
+-rw-r--r--  1 root root      933 2026-11-06 21:26:02.383153770 +0000 onion_probe.py
+-rw-r--r--  1 root root      768 2026-11-07 01:26:55.129660624 +0000 peercheck.sh
+-rw-r--r--  1 root root      286 2026-11-09 11:00:30.174169945 +0000 pi-build-79618b2.log
+-rw-r--r--  1 root root      850 2026-06-15 02:50:18.210799221 +0000 pi-reseed.sh
+-rwxr-xr-x  1 root root       51 2026-11-06 22:04:21.143366100 +0000 restart_tri7.sh
+-rw-r--r--  1 root root     1902 2026-11-06 07:39:20.859323864 +0000 rustup.log
+drwxr-xr-x  3 root root     4096 2026-08-31 11:14:04.202972989 +0000 security
+drwx------  3 root root     4096 2026-08-31 07:14:42.743511175 +0000 security-snapshots
+-rw-r--r--  1 root root      540 2026-11-07 01:29:54.313511247 +0000 slice.sh
+-rw-r--r--  1 root root      478 2026-11-07 01:32:29.506247716 +0000 slice2.sh
+-rw-r--r--  1 root root      489 2026-11-07 01:32:50.596347785 +0000 slice3.sh
+-rw-r--r--  1 root root      738 2026-06-14 22:33:38.123373025 +0000 smsg-cleanup.sh
+-rwx------  1 root root     3317 2026-11-07 11:47:29.346750913 +0000 start_tri7.sh
+-rwxr-xr-x  1 root root      153 2026-11-06 22:04:21.139366078 +0000 stop_tri7.sh
+-rw-r--r--  1 root root 20938752 2026-03-20 10:33:55.000000000 +0000 tri-bootstrap.tar.gz
+drwxr-xr-x 16 root root     4096 2026-07-18 09:10:18.411372697 +0000 tri-cli-build
+drwxr-xr-x  6 root root     4096 2026-11-14 22:29:06.535656039 +0000 tri-pi-v7.0.3-arm64
+-rw-r--r--  1 root root 13455697 2026-11-14 22:29:36.010811740 +0000 tri-pi-v7.0.3-arm64.tar.gz
+-rw-r--r--  1 root root       93 2026-11-14 22:29:36.024811814 +0000 tri-pi-v7.0.3-arm64.tar.gz.sha256
+drwxr-xr-x 19 root root     4096 2026-11-25 06:10:39.963384946 +0000 tri7
+drwxr-xr-x  2 root root     4096 2026-11-11 14:07:54.755562849 +0000 tri7-bin
+drwxr-xr-x  4 root root     4096 2026-11-25 00:54:42.201443278 +0000 tri7-item46-backups
+drwxr-xr-x  2 root root     4096 2026-11-06 23:56:01.181146797 +0000 tri7-lab
+drwxr-xr-x 18 root root     4096 2026-11-11 14:04:59.036736058 +0000 tri7-r7
+drwxr-xr-x  5 root root     4096 2026-11-09 11:40:20.677718291 +0000 tri7-smsg
+drwxr-xr-x  2 root root     4096 2026-11-17 11:40:35.373926202 +0000 tri7-untracked-park
+drwxr-xr-x  2 root root     4096 2026-11-14 22:04:06.208735089 +0000 tri7-wallet
+drwxr-xr-x  6 root root     4096 2026-08-05 20:40:55.019618816 +0000 triangles-backup-cycle-16-20260805204010
+drwxr-xr-x  2 root root     4096 2026-08-06 12:14:25.752854564 +0000 triangles-backup-cycle-32-rollback
+drwxr-xr-x 15 root root     4096 2026-07-01 00:20:32.771153972 +0000 triangles_v5
+drwxr-xr-x 11 root root     4096 2026-06-14 21:57:02.352238902 +0000 tridock
+-rw-r--r--  1 root root    14844 2026-08-31 09:42:11.429246948 +0000 tridock-backend.log
+-rw-r--r--  1 root root  1908408 2026-08-31 10:15:48.391038419 +0000 tridock-frontend.log
+-rw-r--r--  1 root root     7963 2026-06-13 20:44:15.499048143 +0000 tridock-setup.log
+-rw-r--r--  1 root root    56370 2026-06-13 11:01:54.517614321 +0000 tripi-native-build.log
+-rw-r--r--  1 root root    52761 2026-06-13 11:07:00.739296047 +0000 tripi-native-build2.log
+-rw-r--r--  1 root root   305974 2026-06-13 11:44:38.310174652 +0000 tripi-native-build3.log
+-rw-r--r--  1 root root     3075 2026-11-06 09:40:44.061581927 +0000 verify_pi_wallet.py
+-rw-r--r--  1 root root     3747 2026-11-06 07:41:56.783390479 +0000 verify_tri7_pi.py
+-rw-r--r--  1 root root        0 2026-11-15 11:42:55.166878701 +0000 wallet-addrs-apr.txt
+-rw-r--r--  1 root root     5248 2026-11-15 11:40:04.730013783 +0000 wallet-addrs.txt
+-rw-------  1 root root    11932 2026-11-15 11:40:04.715013706 +0000 wallet-dump.txt
+driver finished 2026-11-25T16:03:35Z
+driver_exit=0 at 2026-11-25T16:03:35Z

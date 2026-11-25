@@ -1,0 +1,68 @@
+driver r2 started 2026-11-25T16:03:59Z (pi leg)
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580  /root/tri7/target/release/follow_tip
+6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4  /root/tri7/target/release/follow_tip.item50
+### [1] state before (read-only)
+active
+pid=3445415
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580
+-rw-r--r-- 1 root root 2145278 2026-11-25 10:45:00.440565294 +0000 /var/lib/tri7/balances.json
+{"method": "getblockcount", "params": [], "result": 2219656, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 1, "error": null}
+### [2] save previous (running exe -> /root/tri7/target/release/follow_tip.prev-item50)
+dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580
+### [3] invalidate the balances cache (mv balances.json balances.json.pre-item50) — the fresh-snapshot case builds nothing and the check would stay pending
+-rw-r--r-- 1 root root 2145278 2026-11-25 10:45:00.440565294 +0000 /var/lib/tri7/balances.json.pre-item50
+### [4] the real deploy (in place at the unit's path; previous kept at /root/tri7/target/release/follow_tip.prev-item50; the harness rolls back itself when the check rejects)
+{"outcome":"accepted","running_sha256":"6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4","unit":"tri7d","reason":"check passed","old_sha256":"dc0efe52e0c56ab39c525faf560287b9aab036a3a3b9ed9225e1660bfcf65580","new_sha256":"6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4","restart_epoch":"1795622651","bin":"/root/tri7/target/release/follow_tip","rollback_binary":"/root/tri7/target/release/follow_tip.prev-item50","check":"finished build of this process: index order, coverage h2219658 at or above the chased tip h2219657, snapshot file agrees, tip 591cc8c47cc7eebf…"}
+deploy exit=0 at 2026-11-25T16:09:14Z
+### [5] readback
+host=ubuntu-4gb-hel1-1 arch=aarch64 at=2026-11-25T16:09:15Z pid=3446120
+NRestarts=0 ExecMainStartTimestamp=Wed 2026-11-25 16:05:41 UTC MemoryCurrent=761683968 MemoryMax=infinity ActiveState=active SubState=running 
+running exe: /root/tri7/target/release/follow_tip sha256 6d82ac22e0343638979839181acd2c58ac2978cfcf915bcf7b28d987cee88de4
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215058
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215258
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215458
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215658
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2215858
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216058
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216258
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216458
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216658
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2216858
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217058
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217258
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217458
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217658
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2217858
+[2026-11-25T16:05:48Z] kernel-window backfill: rpc batch failed (rpc connect: Connection refused (os error 111)) at h2218058
+[2026-11-25T16:05:48Z] kernel-window backfill: PARTIAL — 0 block(s) folded (store 0, rpc 0), first hole h2215058; coverage NON-CONTIGUOUS → floor pinned at the window top (every absent coin honestly unresolvable until a retry completes); retry runs with the follow loop
+[2026-11-25T16:05:55Z] backfill: requesting headers from h2216657 (locator b753570e622901c68f2f8097572d2f91329d0ea2028e0c47f4664142f32ccb5d)
+[2026-11-25T16:06:43Z] backfill: validated 3000 headers linking h2216658 → h2219657 (hash9 + linkage, daemon-served)
+[2026-11-25T16:06:43Z] backfill: requesting 100 full blocks
+[2026-11-25T16:06:48Z] backfill: 10 blocks fully validated so far
+[2026-11-25T16:06:49Z] backfill: 20 blocks fully validated so far
+[2026-11-25T16:06:51Z] backfill: 30 blocks fully validated so far
+[2026-11-25T16:06:53Z] backfill: 40 blocks fully validated so far
+[2026-11-25T16:06:53Z] backfill: 50 blocks fully validated so far
+[2026-11-25T16:06:54Z] backfill: 60 blocks fully validated so far
+[2026-11-25T16:06:54Z] backfill: 70 blocks fully validated so far
+[2026-11-25T16:06:56Z] backfill: 80 blocks fully validated so far
+[2026-11-25T16:06:57Z] backfill: 90 blocks fully validated so far
+[2026-11-25T16:06:58Z] backfill: 100 blocks fully validated so far
+[2026-11-25T16:06:58Z] backfill: 100 blocks fully validated (kernel enforced 43 / seeded 0)
+[2026-11-25T16:06:58Z] balances-build: waiting for the block index (Building { frames_done: 0 }) — the replay reads the chain in height order
+[2026-11-25T16:06:58Z] rpc: listening on 127.0.0.1:19112 (loopback-only; native surface + transitional legacy-proxy fallback)
+[2026-11-25T16:07:58Z] balances-build: start (snapshot h0, chain tip h2219657) — replaying /root/.triangles/blk0001.dat
+[2026-11-25T16:07:58Z] kernel-window backfill: 3100 block(s) folded (store 3100, rpc 0) in 322.295968ms — kernel coverage spans the full staking window (floor 0)
+[2026-11-25T16:08:02Z] balances-build: ... 100000 blocks, 11043 live UTXOs
+[2026-11-25T16:08:05Z] balances-build: ... 200000 blocks, 7692 live UTXOs
+[2026-11-25T16:08:08Z] balances-build: ... 300000 blocks, 6119 live UTXOs
+[2026-11-25T16:08:11Z] balances-build: ... 400000 blocks, 8205 live UTXOs
+[2026-11-25T16:08:14Z] balances-build: ... 500000 blocks, 8812 live UTXOs
+{"method": "getblockcount", "params": [], "result": 2219658, "error": null}
+{"method": "getconnectioncount", "params": [], "result": 1, "error": null}
+-rw-r--r-- 1 root root 2145278 2026-11-25 16:09:10.881956356 +0000 /var/lib/tri7/balances.json
+-rw-r--r-- 1 root root 2145278 2026-11-25 10:45:00.440565294 +0000 /var/lib/tri7/balances.json.pre-item50
+driver r2 finished 2026-11-25T16:09:16Z
+driver_exit=0 at 2026-11-25T16:09:16Z

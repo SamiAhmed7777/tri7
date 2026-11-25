@@ -1,0 +1,11 @@
+GRADE=B urn=urn:ump:ofzqu3ymqe7s6lhkfjhcxkpnrjjtrtevbisu7hvjhvxiivbwhc2a
+{
+  "blocking": [],
+  "polish": [
+    "Brief claims for DNS2 (full replay 148.1s, snapshot h0\u2192h2219662, supply 226993898137 sats, wallet 263 keys 5250504286 sats, 18038 UTXOs, 'archive audit sweep 1: 0 holes') are not visible in the attached ev_deploy_dns2.txt readback \u2014 the log cuts off at the refused-block lines; either include the full readback or soften the claims to match the bytes.",
+    "DNS2 log shows 'h2215061 refused (parse: short read)' fold failures in the kernel-window backfill with no resolution shown; note the eventual outcome or file it as a follow-up finding.",
+    "CI Windows test step was still running at close; add a one-line follow-up confirming the run completed rather than relying on the fetch-gate inference alone.",
+    "The first DNS2 driver attempt failed on a mkdir/chmod one-liner bug in item49_deploy.sh (visible in ev_deploy_dns2.txt) before the finding narrative's $R issue; mention both symptoms for the next-deploy fixer.",
+    "Pi peer count of 1 in the fleet verification is thin for a live node; consider a note on expected peer targets."
+  ]
+}
