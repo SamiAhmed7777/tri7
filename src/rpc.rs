@@ -45,6 +45,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -4590,12 +4591,23 @@ impl Drop for ConnSlot {
 
 /// Accept loop — one thread per connection, one request per connection
 /// (Connection: close). Loopback load is trivial; this keeps the code tiny.
-pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
+///
+/// The loop behind [`RpcServer`]. It returns at the first accept() that
+/// comes back after the stop flag is set ([`RpcServer::stop`] makes sure one
+/// does), and returning is what drops `listener` — that close is what
+/// releases the port.
+fn serve_until(deps: Arc<ServerDeps>, listener: TcpListener, stop: &Arc<AtomicBool>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     // per-listener (not process-global) so independent servers — the daemon
     // and every test listener — never starve each other
     let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
+        // (WALLET-I2P-RESPAWN-ORPHAN-RPC) read the flag on EVERY return from
+        // accept(): the loop may be woken by any connection, not only the
+        // one stop() sends, so the check must not depend on who connected.
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
         let deps = Arc::clone(&deps);
         match conn {
             Ok(mut stream) => {
@@ -4617,6 +4629,9 @@ pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
                     continue;
                 }
                 let slot = ConnSlot(Arc::clone(&active));
+                // a stop must also end the long-lived SSE streams, so each
+                // connection thread gets its own Arc clone of the flag
+                let sse_stop = Arc::clone(stop);
                 std::thread::Builder::new()
                     .name("rpc-conn".into())
                     .spawn(move || {
@@ -4630,7 +4645,7 @@ pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
                         // live node engine the answer is an honest 404.
                         if peek_sse_path(&mut stream) {
                             match deps.ops.as_deref().and_then(|ops| ops.event_hub()) {
-                                Some(hub) => serve_sse(&mut stream, &hub),
+                                Some(hub) => serve_sse_until(&mut stream, &hub, &sse_stop),
                                 None => {
                                     let msg = json!({
                                         "result": Value::Null,
@@ -4699,7 +4714,124 @@ pub fn serve(deps: Arc<ServerDeps>, listener: TcpListener) -> ! {
             }
         }
     }
-    unreachable!("listener.incoming() never ends");
+}
+
+/// How long an owning run waits for its accept thread to release the port.
+/// A healthy accept loop is woken by one loopback connection and exits in
+/// about a millisecond; the bound only exists so a wedged thread delays a
+/// run's exit (and the wallet's 3s exit budget) by a FINITE time.
+pub const RPC_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A running RPC listener that STOPS WITH THE NODE RUN THAT OWNS IT.
+///
+/// (WALLET-I2P-RESPAWN-ORPHAN-RPC) A detached, immortal accept thread once
+/// outlived its run and kept answering with the dead run's tip, so the
+/// supervisor never saw the run end and a successor found its port held
+/// (2026-11-25). The run holds this handle for its whole lifetime: `stop`
+/// (or `Drop`, which runs on the unwind a finish()/die() raises in embedded
+/// mode) ends the accept thread, so the port is free for the successor.
+pub struct RpcServer {
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    addr: std::net::SocketAddr,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Sets `done` when the accept thread leaves its scope for ANY reason
+/// (return or panic). Declared before the loop runs, so it is dropped after
+/// the loop's `listener` — the port is released BEFORE `done` reads true.
+struct DoneOnExit(Arc<AtomicBool>);
+impl Drop for DoneOnExit {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl RpcServer {
+    /// Spawn the accept thread for an already-bound loopback listener. The
+    /// bind stays with the caller (it decides how a held port is reported
+    /// and which exit code follows).
+    pub fn start(deps: Arc<ServerDeps>, listener: TcpListener) -> Result<Self, String> {
+        let addr = listener
+            .local_addr()
+            .map_err(|e| format!("rpc listener local_addr: {e}"))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("rpc".into())
+            .spawn({
+                let stop = Arc::clone(&stop);
+                let done = Arc::clone(&done);
+                move || {
+                    let _done = DoneOnExit(done);
+                    serve_until(deps, listener, &stop);
+                }
+            })
+            .map_err(|e| format!("spawn rpc thread: {e}"))?;
+        Ok(Self {
+            stop,
+            done,
+            addr,
+            thread: Some(thread),
+        })
+    }
+
+    /// The loopback port this server owns.
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// End the accept loop and wait (bounded by `timeout`) until it has
+    /// dropped the listener. Returns true once the port is released — and on
+    /// a repeat call after a stop that already joined the thread. False
+    /// means the thread did not exit in time: the port may still be held,
+    /// which the caller must log (the flag stays set, so the thread still
+    /// exits — and releases the port — as soon as it is scheduled).
+    ///
+    /// Closing the listener is ALL a successor needs: an accepted connection
+    /// never holds the listening port (verified on Windows 11 / PowerShell
+    /// 5.1: with a child connection still open, a re-bind of the same
+    /// loopback port succeeds).
+    pub fn stop(&mut self, timeout: Duration) -> bool {
+        let Some(thread) = self.thread.take() else {
+            // nothing left to wait for: an earlier stop joined the thread, or
+            // an earlier stop timed out and detached it — done tells which
+            return self.done.load(Ordering::SeqCst);
+        };
+        self.stop.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + timeout;
+        while !self.done.load(Ordering::SeqCst) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                eprintln!(
+                    "[rpc] accept thread did not stop within {:?} — port {} may still be held",
+                    timeout,
+                    self.addr.port()
+                );
+                return false;
+            }
+            // Wake a blocked accept(): a loopback connection of our own is
+            // the only portable interrupt (std has no poll; shutdown() does
+            // not wake accept() on macOS). A refused connect just means the
+            // listener is already gone — the done flag confirms either way.
+            let _ = TcpStream::connect_timeout(&self.addr, left.min(Duration::from_millis(250)));
+            if self.done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(10)));
+        }
+        // done is set at the very end of the thread: joining is immediate. A
+        // panicked accept thread surfaces as Err and is not re-raised (the
+        // hook already printed it once).
+        let _ = thread.join();
+        true
+    }
+}
+
+impl Drop for RpcServer {
+    fn drop(&mut self) {
+        let _ = self.stop(RPC_STOP_TIMEOUT);
+    }
 }
 
 /// Bind strictly to a loopback address — refuses anything else.
@@ -4813,7 +4945,17 @@ fn sse_conn_alive(stream: &mut TcpStream) -> bool {
     }
 }
 
-pub fn serve_sse(stream: &mut TcpStream, hub: &Arc<crate::events::EventHub>) {
+/// Longest a stream waits between stop-flag checks. The keepalive cadence
+/// is a deadline, not a fixed wait: the stream re-reads its stop flag this
+/// often, and the keepalive still goes out once per KEEPALIVE_SECS without
+/// a frame.
+const SSE_STOP_POLL: Duration = Duration::from_millis(250);
+
+fn serve_sse_until(
+    stream: &mut TcpStream,
+    hub: &Arc<crate::events::EventHub>,
+    stop: &AtomicBool,
+) {
     // subscribe BEFORE headers: a cap-full hub answers an honest 503 JSON
     // instead of a stream that dies mid-handshake
     let (id, rx) = match hub.subscribe() {
@@ -4844,16 +4986,47 @@ pub fn serve_sse(stream: &mut TcpStream, hub: &Arc<crate::events::EventHub>) {
     // The loop's ONLY reads are the liveness probes in sse_conn_alive — a
     // short dedicated timeout so a gone consumer is noticed in ~250ms
     // instead of after the request-read timeout. Writes keep the 30s write
-    // timeout set by serve() (a wedged consumer stalls only this thread).
+    // timeout set by the accept loop (a wedged consumer stalls only this thread).
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    // (WALLET-I2P-RESPAWN-ORPHAN-RPC) the keepalive cadence is a deadline,
+    // not a fixed wait: the stream must re-read its stop flag often, but the
+    // keepalive still goes out once per KEEPALIVE_SECS without a frame.
+    let keepalive_every = Duration::from_secs(crate::events::KEEPALIVE_SECS);
+    let mut next_keepalive = Instant::now() + keepalive_every;
     loop {
-        match rx.recv_timeout(Duration::from_secs(crate::events::KEEPALIVE_SECS)) {
+        // a run that ended must not leave a subscriber pinned to its dead
+        // hub (keepalives forever, no event ever again): end the stream so
+        // the client reconnects to the successor
+        if stop.load(Ordering::SeqCst) {
+            // ...as an EOF, not as a reset: FIN first, then drain whatever
+            // the client sent that nobody read (a stream stopped within its
+            // first poll tick still has its request head unread, and
+            // close() with unread data is a reset on Linux)
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+            let _ = sse_conn_alive(stream);
+            break;
+        }
+        // every frame (event OR keepalive) restarts the keepalive clock, as
+        // the single full-length wait always did; the wait itself is capped
+        // so the stop flag above is re-read at least every SSE_STOP_POLL
+        let wait = next_keepalive
+            .saturating_duration_since(Instant::now())
+            .min(SSE_STOP_POLL);
+        match rx.recv_timeout(wait) {
             Ok(f) => {
                 if stream.write_all(f.as_bytes()).is_err() {
                     break;
                 }
+                next_keepalive = Instant::now() + keepalive_every;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // most timeouts are just stop-flag poll ticks — the keepalive
+                // waits for its deadline
+                if Instant::now() < next_keepalive {
+                    continue;
+                }
+                next_keepalive = Instant::now() + keepalive_every;
                 // comment frame: clients ignore it; a gone consumer errors here
                 if stream.write_all(b": keepalive\n\n").is_err() {
                     break;
@@ -4970,8 +5143,16 @@ fn base64_encode_fast(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+/// The RPC tests build real listeners with canned providers; tests in OTHER
+/// modules that need a live `ServerDeps` (node_embedded's RunSurface test)
+/// borrow this one instead of re-deriving the stubs.
+pub(crate) mod tests {
     use super::*;
+
+    /// Tip height 5, `getblockcount` exempt from auth, loopback-only HTTP.
+    pub(crate) fn canned_deps(port: u16) -> Arc<ServerDeps> {
+        sse_deps(None, port)
+    }
     use std::collections::HashMap;
 
     /// ONE shared lock for every test that mutates the process-global
@@ -9462,7 +9643,7 @@ fn sse_get(port: u16) -> std::net::TcpStream {
 fn concurrent_connections_past_the_cap_get_503() {
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(None, port), listener));
+    let _server = RpcServer::start(sse_deps(None, port), listener).expect("rpc server");
     // occupy every slot with connections that never send a request: each
     // handler thread blocks in read_request until its timeout
     let mut held: Vec<TcpStream> = Vec::new();
@@ -9489,13 +9670,189 @@ fn concurrent_connections_past_the_cap_get_503() {
     drop(held);
 }
 
+// -------------------------------------------------------------------------
+// (WALLET-I2P-RESPAWN-ORPHAN-RPC) RpcServer — the listener a node run OWNS
+// -------------------------------------------------------------------------
+
+/// One `getblockcount` over the wire (the supervisor's liveness probe).
+fn http_getblockcount(port: u16) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let body = r#"{"jsonrpc":"1.0","id":"t","method":"getblockcount","params":[]}"#;
+    write!(
+        s,
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+    let mut acc = Vec::new();
+    s.read_to_end(&mut acc).unwrap();
+    String::from_utf8_lossy(&acc).into_owned()
+}
+
+/// How long [`port_is_dead`] keeps re-probing a port that did not say "refused".
+const PORT_DEAD_BUDGET: Duration = Duration::from_secs(2);
+const PORT_DEAD_POLL: Duration = Duration::from_millis(25);
+
+/// True when nothing listens on the port any more (connect refused).
+///
+/// One connect can misreport a loopback port, so the answer must be STABLE.
+/// Observed once (2026-11-25, mutation run of this change, six tests in
+/// parallel): right after a clean stop, with the listener closed, the probe
+/// did not come back "refused" and a passing test failed on it. Refused
+/// counts at once; anything else — a connection the probe itself opened (a
+/// self-connect answers with no listener behind it), a foreign listener that
+/// grabbed the freed port, an error of another kind — is probed again for up
+/// to [`PORT_DEAD_BUDGET`] before the port is called alive. A port that is
+/// really held stays "answered" for the whole budget, so a mutation that
+/// leaves the listener open is still caught.
+fn port_is_dead(port: u16) -> bool {
+    let deadline = Instant::now() + PORT_DEAD_BUDGET;
+    let mut first: Option<String> = None;
+    loop {
+        let seen = match TcpStream::connect(("127.0.0.1", port)) {
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                if let Some(why) = first {
+                    eprintln!("[test] port {port}: first probe said {why}; refused on a retry");
+                }
+                return true;
+            }
+            Err(e) => format!("error {e}"),
+            Ok(s) => format!(
+                "answered (local {} -> peer {})",
+                s.local_addr().map(|a| a.to_string()).unwrap_or_default(),
+                s.peer_addr().map(|a| a.to_string()).unwrap_or_default()
+            ),
+        };
+        first.get_or_insert_with(|| seen.clone());
+        if Instant::now() >= deadline {
+            eprintln!("[test] port {port} is not dead after {PORT_DEAD_BUDGET:?}: {seen}");
+            return false;
+        }
+        std::thread::sleep(PORT_DEAD_POLL);
+    }
+}
+
+#[test]
+fn rpc_server_stop_releases_the_port_and_is_idempotent() {
+    let listener = bind_loopback("127.0.0.1", 0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let mut server = RpcServer::start(sse_deps(None, port), listener).expect("start");
+    assert_eq!(server.port(), port);
+    let answer = http_getblockcount(port);
+    assert!(
+        answer.contains("\"result\":5"),
+        "the live server answers its own tip: {answer}"
+    );
+    // an already-accepted child connection stays open ACROSS the stop: it
+    // must not keep the listening port for the successor
+    let child = TcpStream::connect(("127.0.0.1", port)).expect("child connect");
+    let t0 = Instant::now();
+    assert!(
+        server.stop(Duration::from_secs(10)),
+        "a healthy accept loop is woken and exits — stop reports the port released"
+    );
+    // the stop must end on the wake-up, not at its timeout: a healthy accept
+    // loop takes ~1ms; the slack is for a loaded CI box, where even a 10s
+    // budget would be exhausted only by a thread that was never woken
+    assert!(
+        t0.elapsed() < Duration::from_secs(8),
+        "stop took {:?}; one loopback wake-up should be ~1ms",
+        t0.elapsed()
+    );
+    assert!(
+        port_is_dead(port),
+        "nothing may answer on the port once its run stopped the server"
+    );
+    // the successor run binds the SAME port while the child is still open
+    let successor = bind_loopback("127.0.0.1", port).expect("successor bind");
+    drop(child);
+    let mut successor = RpcServer::start(sse_deps(None, port), successor).expect("successor start");
+    assert!(http_getblockcount(port).contains("\"result\":5"));
+    // idempotent: a repeated stop is a no-op that still says "released"
+    assert!(server.stop(Duration::from_secs(5)));
+    assert!(successor.stop(Duration::from_secs(5)));
+    assert!(port_is_dead(port));
+}
+
+/// The embedded node ends by raising NodeExit inside main_args, so the
+/// handle is dropped DURING a panic unwind. That drop must release the port.
+#[test]
+fn rpc_server_releases_the_port_when_dropped_during_a_panic_unwind() {
+    let listener = bind_loopback("127.0.0.1", 0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _server = RpcServer::start(sse_deps(None, port), listener).expect("start");
+        assert!(http_getblockcount(port).contains("\"result\":5"));
+        panic!("finish(): an embedded run ends by unwinding");
+    }));
+    assert!(unwound.is_err(), "the run must have unwound");
+    assert!(port_is_dead(port), "the drop during the unwind releases the port");
+    bind_loopback("127.0.0.1", port).expect("the successor binds the freed port");
+}
+
+/// A subscriber pinned to a run's event hub must not outlive the run: its
+/// stream ends at the stop (EOF), so the client reconnects to the successor
+/// instead of reading keepalives from a hub nothing will ever publish to.
+#[test]
+fn rpc_server_stop_ends_a_pinned_sse_subscriber() {
+    let hub = Arc::new(crate::events::EventHub::new());
+    let listener = bind_loopback("127.0.0.1", 0).expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let mut server = RpcServer::start(
+        sse_deps(Some(Arc::new(EventsOps { hub: Arc::clone(&hub) })), port),
+        listener,
+    )
+    .expect("start");
+    let mut s = sse_get(port);
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    read_until_sse(&mut s, "retry: 3000", Duration::from_secs(5));
+    assert_eq!(hub.subscriber_count(), 1, "the stream is live and subscribed");
+    server.stop(Duration::from_secs(10));
+    // the stream must END well inside one keepalive interval (15s) — the
+    // stop is what ends it, not a keepalive finding a dead client. 10s leaves
+    // room for a loaded CI box and is still before the first keepalive.
+    // EOF is the intended ending (FIN, then close); a reset also ends it.
+    s.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0u8; 256];
+    let mut ended_by_eof = false;
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => {
+                ended_by_eof = true; // the server closed the stream
+                break;
+            }
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the SSE stream must end within 10s of the stop"
+                );
+            }
+            Err(_) => break, // reset: ended too, just less politely
+        }
+    }
+    assert!(ended_by_eof, "the stream should end as an EOF, not as a reset");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while hub.subscriber_count() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(hub.subscriber_count(), 0, "the ended stream unsubscribes");
+}
+
 #[test]
 fn sse_frame_shape_through_the_real_dispatcher() {
     let hub = Arc::new(crate::events::EventHub::new());
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
+    let _server = RpcServer::start(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener).expect("rpc server");
     let mut s = sse_get(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     // handshake: SSE headers, then the retry hint proves the subscriber is
@@ -9543,7 +9900,7 @@ fn sse_frame_shape_through_the_real_dispatcher() {
 fn sse_without_a_live_engine_is_an_honest_404() {
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(None, port), listener));
+    let _server = RpcServer::start(sse_deps(None, port), listener).expect("rpc server");
     let mut s = sse_get(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let resp = read_until_sse(&mut s, "no live node engine", Duration::from_secs(5));
@@ -9556,7 +9913,7 @@ fn sse_without_a_live_engine_is_an_honest_404() {
     let listener2 = bind_loopback("127.0.0.1", 0).expect("bind");
     let port2 = listener2.local_addr().unwrap().port();
     let ops: Arc<dyn NodeOps> = Arc::new(StubOps::new(true));
-    std::thread::spawn(move || serve(sse_deps(Some(ops), port2), listener2));
+    let _server = RpcServer::start(sse_deps(Some(ops), port2), listener2).expect("rpc server");
     let mut s2 = sse_get(port2);
     s2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let resp2 = read_until_sse(&mut s2, "no live node engine", Duration::from_secs(5));
@@ -9627,7 +9984,7 @@ fn oversized_request_headers_still_complete_peek_and_post() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
+    let _server = RpcServer::start(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener).expect("rpc server");
 
     // GET /events with >1024 bytes of headers: full SSE handshake
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
@@ -9684,7 +10041,7 @@ fn peek_ceiling_is_deterministic_for_absurd_heads() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
+    let _server = RpcServer::start(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener).expect("rpc server");
 
     // (a) just under the ceiling: terminator inside the window — full SSE
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
@@ -9760,7 +10117,7 @@ fn sse_cap_full_answers_503_through_the_real_listener() {
     let hub_for_ops = Arc::clone(&hub);
     let listener = bind_loopback("127.0.0.1", 0).expect("bind");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || serve(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener));
+    let _server = RpcServer::start(sse_deps(Some(Arc::new(EventsOps { hub: hub_for_ops })), port), listener).expect("rpc server");
     let mut s = sse_get(port);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = String::new();

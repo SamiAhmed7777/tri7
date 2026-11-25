@@ -26,7 +26,7 @@
 //!     honest 503 before any SSE headers are written.
 //!
 //! When no ops engine is live (no hub), the endpoint answers an honest 404
-//! (rpc::serve handles that side); the producers here simply no-op.
+//! (the RPC accept loop handles that side); the producers here simply no-op.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

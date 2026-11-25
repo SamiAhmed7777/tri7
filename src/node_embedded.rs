@@ -192,12 +192,54 @@ pub fn set_local_rpc(f: LocalRpcFn) {
     }
 }
 
-/// Drop the registration — tests only (the node registers once per
-/// process; sibling tests must not route through a stale stub).
-#[cfg(test)]
+/// Drop the registration. A run calls this when it ends (through
+/// [`RunSurface`]'s drop): the bridge closure holds the run's OWN state, so
+/// a bridge that outlived its run kept answering the supervisor's liveness
+/// probe with a dead tip. Tests call it too, so sibling tests never route
+/// through a stale stub.
 pub fn clear_local_rpc() {
     if let Ok(mut g) = LOCAL_RPC.write() {
         *g = None;
+    }
+}
+
+/// (WALLET-I2P-RESPAWN-ORPHAN-RPC) everything a node run owns that would
+/// otherwise OUTLIVE the run on a thread of its own.
+///
+/// Invariant: a node run's RPC surface dies with the run — the accept thread
+/// that holds the loopback port, and the in-process bridge registered with
+/// [`set_local_rpc`], which holds the run's OWN state. Either one outliving
+/// its run once kept answering the supervisor's `getblockcount` probe with a
+/// dead tip, so a finished run was never respawned (2026-11-25).
+///
+/// The guard is bound in `main_args` before the RPC surface is built and
+/// lives to the end of that function, so its drop runs on EVERY exit path —
+/// including the unwind a finish()/die() raises in embedded mode, which is how
+/// every embedded run ends. External daemon runs exit the process inside
+/// `finish` before any drop runs, as before.
+struct RunSurface {
+    rpc: Option<rpc::RpcServer>,
+}
+
+impl Drop for RunSurface {
+    fn drop(&mut self) {
+        // must never panic: a panic inside a drop during the NodeExit
+        // unwind would abort the whole wallet process. embedded_log (not
+        // log): the release line must reach node.log whatever the EMBEDDED
+        // flag happens to be during the unwind.
+        if let Some(s) = self.rpc.as_mut() {
+            let port = s.port();
+            if s.stop(rpc::RPC_STOP_TIMEOUT) {
+                embedded_log(&format!(
+                    "rpc: accept thread stopped — port {port} released for the successor run"
+                ));
+            } else {
+                embedded_log(&format!(
+                    "rpc: accept thread did NOT stop — port {port} may still be held by this process"
+                ));
+            }
+        }
+        clear_local_rpc();
     }
 }
 
@@ -16357,6 +16399,10 @@ pub fn main_args(argv: &[String]) -> i32 {
             }
         }
     }
+    // (WALLET-I2P-RESPAWN-ORPHAN-RPC) THIS run owns its RPC surface for its
+    // whole lifetime — see RunSurface. Bound before the surface can exist,
+    // so the drop covers every exit path from here on.
+    let mut run_surface = RunSurface { rpc: None };
     if cfg.rpc_enabled {
         // (TRI7-RPC-01 integration) per-boot capability token for the wallet
         // GUI's own RPC client. The GUI cannot ship rpcuser/rpcpassword
@@ -16533,11 +16579,13 @@ pub fn main_args(argv: &[String]) -> i32 {
             "rpc: listening on {}:{} (loopback-only; native surface + transitional legacy-proxy fallback)",
             cfg.rpc_bind, cfg.rpc_listen_port
         ));
-        std::thread::Builder::new()
-            .name("rpc".into())
-            .spawn(move || rpc::serve(deps, listener))
-            .expect("spawn rpc thread");
+        // (WALLET-I2P-RESPAWN-ORPHAN-RPC) owned by the run, not detached:
+        // `run_surface` stops it when the run ends, on every exit path.
+        run_surface.rpc = Some(rpc::RpcServer::start(deps, listener).expect("spawn rpc thread"));
     }
+    // hold the surface to the end of the run. A bare `_` would drop it —
+    // and with it the RPC listener — right here.
+    let _run_surface = run_surface;
 
     // 4. inbound P2P listener (phase 6 — tri7d is a primary network peer)
     let listener: Option<TcpListener> = match cfg.listen_port {
@@ -19650,6 +19698,99 @@ pub(crate) fn legacy_proxy_self_warning(no_proxy: bool, host: &str, port: u16) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (WALLET-I2P-RESPAWN-ORPHAN-RPC) both orphans die with the run.
+    ///
+    /// A run builds an RPC surface (listener + in-process bridge) and then
+    /// ends — in the wallet, by raising NodeExit, i.e. by UNWINDING out of
+    /// main_args. The drop that runs during that unwind must take the port
+    /// AND the bridge with it, and leave the port free for the successor.
+    ///
+    /// Pinned in a child process: the bridge is process-global.
+    #[test]
+    fn run_surface_dies_with_the_run_and_frees_its_port() {
+        if crate::testsupport::child_process(
+            "run_surface",
+            "node_embedded::tests::run_surface_dies_with_the_run_and_frees_its_port",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
+        let port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+            let p = probe.local_addr().unwrap().port();
+            drop(probe);
+            p
+        };
+        // the run's release line must reach the supervisor's node.log (the
+        // tee path is process-global too — clean in this child process)
+        let dir = crate::testsupport::test_dir("runsurface");
+        let node_log = dir.join("node.log");
+        set_embedded_log_path(&node_log);
+        // The run: bind, start the server, register the bridge, END.
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut surface = RunSurface { rpc: None };
+            let listener = rpc::bind_loopback("127.0.0.1", port).expect("run binds its port");
+            surface.rpc = Some(
+                rpc::RpcServer::start(crate::rpc::tests::canned_deps(port), listener)
+                    .expect("start rpc thread"),
+            );
+            set_local_rpc(Box::new(|method, _params| {
+                if method == "getblockcount" {
+                    // the tip the frozen wallet kept serving in the incident
+                    Ok(serde_json::json!(2_219_608))
+                } else {
+                    Err("stub: not supported".into())
+                }
+            }));
+            // mid-run: the port AND the in-process bridge both answer
+            assert!(local_rpc_ready());
+            assert_eq!(local_rpc("getblockcount", &[]).unwrap(), serde_json::json!(2_219_608));
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let body = r#"{"jsonrpc":"1.0","id":"t","method":"getblockcount","params":[]}"#;
+            use std::io::{Read, Write};
+            write!(
+                s,
+                "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let mut acc = Vec::new();
+            s.read_to_end(&mut acc).unwrap();
+            let answer = String::from_utf8_lossy(&acc).into_owned();
+            assert!(answer.contains("\"result\":5"), "the run's server answers: {answer}");
+            let _held_to_the_end = surface;
+            panic!("finish(): an embedded run ends by unwinding");
+        }));
+        assert!(ended.is_err(), "the run must have unwound");
+
+        // post-run: neither the bridge nor the port answers, and the port is
+        // free for the successor
+        assert!(!local_rpc_ready(), "the in-process bridge dies with its run");
+        assert!(local_rpc("getblockcount", &[]).is_err());
+        assert!(
+            matches!(
+                std::net::TcpStream::connect(("127.0.0.1", port)),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+            ),
+            "nothing answers on the port once the run has ended"
+        );
+        let successor = rpc::bind_loopback("127.0.0.1", port)
+            .expect("the successor run binds the port run 1 released");
+        drop(successor);
+        // ...and the run SAID so in node.log: this is the line an operator
+        // greps for to know a wallet build carries the fix
+        let logged = std::fs::read_to_string(&node_log).unwrap_or_default();
+        assert!(
+            logged.contains(&format!(
+                "rpc: accept thread stopped — port {port} released for the successor run"
+            )),
+            "the release must be logged to node.log; got:\n{logged}"
+        );
+    }
 
     /// (item 44c) DNS3-style self-proxy: a node started without --no-proxy
     /// is warned at startup, by name and port; cutover mode stays silent.

@@ -1840,6 +1840,17 @@ fn is_fresh_store(state_dir: &Path) -> bool {
     !crate::node_embedded::store_has_bodies(&state_dir.join("blk0001.dat"))
 }
 
+/// Append one line to state\gui-refresh.log — the supervisor's own view of
+/// each ensure, next to the step-1 lines it already writes there. Best
+/// effort: diagnostics must never fail a decision.
+fn refresh_diag(path: &Path, line: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 pub struct EmbeddedNode {
     pub rpc_port: u16,
     /// true ⇔ cfg.rpc_addr was configured: attach to the EXTERNAL daemon
@@ -2292,7 +2303,16 @@ impl EmbeddedNode {
                     )
                 });
         }
-        if step1.is_ok() {
+        // (WALLET-I2P-RESPAWN-ORPHAN-RPC) an ANSWERING port is not liveness:
+        // a dead run's RPC thread once kept answering getblockcount with its
+        // stale tip, so this step said "already running" forever (2026-11-25).
+        // The node now tears its RPC surface down with the run
+        // (node_embedded::RunSurface); the decision must not depend on it:
+        // once OUR run has finished, no answer — ours or anyone's — may
+        // vouch for it.
+        let our_run_finished =
+            self.node_thread.is_some() && self.node_finished.load(Ordering::SeqCst);
+        if step1.is_ok() && !our_run_finished {
             // health witness: start the "has this run stayed up?" clock the
             // first time OUR thread answers RPC (a run that survives
             // HEALTHY_RESET_WINDOW resets the restart counter when it ends)
@@ -2300,6 +2320,23 @@ impl EmbeddedNode {
                 self.healthy_since = Some(Instant::now());
             }
             return Ok(true);
+        }
+        if let Ok(v) = &step1 {
+            // our_run_finished is the only way to get here with an answer
+            let code = self.node_exit_code.load(Ordering::SeqCst);
+            crate::node_embedded::embedded_log(&format!(
+                "supervisor: RPC answers on 127.0.0.1:{} (getblockcount {v}) but OUR node run \
+                 has finished (exit code {code}) — an answering port is not liveness; reaping \
+                 and respawning",
+                self.rpc_port
+            ));
+            refresh_diag(
+                &diag_path,
+                &format!(
+                    "ensure: step1_ok={v} our_run_finished=1 exit_code={code} — an answering port \
+                     is not liveness\n"
+                ),
+            );
         }
         // 2. attach-to-EXTERNAL mode (rpc_addr configured — fleet/advanced):
         //    NEVER start anything in-process. The fleet daemon may still be
@@ -2321,6 +2358,19 @@ impl EmbeddedNode {
                 code,
                 self.restarts + 1
             ));
+            // ...and in the GUI's own refresh log, where the 2026-11-25
+            // wedge left nothing but step1_ok lines: name the exit and the
+            // branch the reap takes
+            refresh_diag(
+                &diag_path,
+                &format!(
+                    "ensure: reaped node run exit_code={code} inbound_respawn={} rpc_stop={} \
+                     restarts_before={}\n",
+                    self.respawn_for_inbound,
+                    crate::shutdown::rpc_stopped(),
+                    self.restarts
+                ),
+            );
             self.node_thread = None; // reap
             // (TRI7-RPC-02) / (TRI7-I2P-02) an INTENTIONAL stop is not a
             // restart. Either the supervisor asked for one (the i2p inbound
@@ -2749,6 +2799,67 @@ mod tests {
     static SHUTDOWN_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn lock_shutdown_flags() -> std::sync::MutexGuard<'static, ()> {
         SHUTDOWN_FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A stub node's whole RPC surface: one canned `getblockcount` answer per
+    /// connection, served until `done()` says stop. With `done` bound to the
+    /// shutdown flag this is a supervised run; bound to a plain flag it is
+    /// an ORPHAN — a run's listener that outlived the run.
+    fn answer_loop(listener: std::net::TcpListener, tip: u64, done: impl Fn() -> bool) {
+        listener.set_nonblocking(true).ok();
+        while !done() {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf);
+                    let body = format!(r#"{{"result":{tip},"error":null,"id":"tri7-gui"}}"#);
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(http.as_bytes());
+                }
+                _ => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
+
+    /// Poll `cond` until true or `budget` runs out; returns the outcome.
+    fn wait_until(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cond()
+    }
+
+    /// The tip answering on `port` right now (the supervisor's own probe).
+    fn answering_tip(port: u16) -> Option<u64> {
+        crate::gui::rpc_client::rpc_call(
+            &format!("127.0.0.1:{port}"),
+            "getblockcount",
+            &[],
+        )
+        .ok()
+        .and_then(|v| v.as_u64())
+    }
+
+    /// The tip the frozen wallet kept serving in the incident of 2026-11-25.
+    const STALE_TIP: u64 = 2_219_608;
+    /// The fleet's height when that was diagnosed: 107 above the stale tip.
+    /// (A later read the same day showed a 202-block gap: the chain moved on.)
+    const FRESH_TIP: u64 = STALE_TIP + 107;
+
+    /// Stop the live run of a test and leave the process-global flags clean.
+    fn stop_and_reset(n: &mut EmbeddedNode) {
+        crate::shutdown::request();
+        wait_until(Duration::from_secs(5), || n.node_finished.load(Ordering::SeqCst));
+        crate::shutdown::reset();
     }
 
     #[test]
@@ -3248,6 +3359,226 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         crate::shutdown::reset();
+    }
+
+    /// (WALLET-I2P-RESPAWN-ORPHAN-RPC) regression for the live wedge of
+    /// 2026-11-25: the i2p inbound respawn stopped the node run, and the
+    /// dead run's detached RPC thread kept answering getblockcount with its
+    /// stale tip, so step 1 of ensure_running returned "already running" on
+    /// every refresh and the wallet froze behind the fleet.
+    ///
+    /// Run 1 here IS that shape: it ends at once and leaves an ORPHAN
+    /// answering the port. An answering port must never vouch for a finished
+    /// run: the supervisor must reap it and spawn a successor anyway.
+    #[test]
+    fn a_finished_run_is_never_masked_by_an_answering_port() {
+        let _flag_guard = lock_shutdown_flags();
+        crate::shutdown::reset();
+        let port = free_dead_port();
+        let dir = crate::testsupport::test_dir("nsorphan");
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        n.restart_backoff_base = Duration::ZERO;
+        n.i2p.spawn_gave_up = true;
+        n.i2p.system_probe_port = free_dead_port();
+
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let rel_runner = Arc::clone(&release);
+        let rn = Arc::clone(&runs);
+        n.runner_override = Some(Arc::new(move |_argv: &[String]| {
+            if rn.fetch_add(1, Ordering::SeqCst) == 0 {
+                // run 1: the pre-fix node — it ends, and its RPC thread
+                // outlives it, still serving the run's stale tip
+                let orphan = std::net::TcpListener::bind(("127.0.0.1", port))
+                    .expect("run 1 binds the RPC port");
+                let rel_orphan = Arc::clone(&release);
+                std::thread::spawn(move || {
+                    answer_loop(orphan, STALE_TIP, move || {
+                        rel_orphan.load(Ordering::SeqCst)
+                    })
+                });
+                return Ok(0);
+            }
+            // the successor. The orphan is gone by the time a REAL run has
+            // ended (node_embedded::RunSurface releases the port first);
+            // the release flag models that here, so the bind is retried
+            // only across the orphan thread's last loop iteration.
+            rel_runner.store(true, Ordering::SeqCst);
+            let listener = loop {
+                match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(l) => break l,
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            };
+            answer_loop(listener, FRESH_TIP, crate::shutdown::requested);
+            Ok(0)
+        }));
+
+        // 1. first spawn: the run ends at once; the orphan answers the warmup
+        assert!(
+            n.ensure_running(&wallet, &dir, &[]).unwrap(),
+            "run 1's orphan answers the warmup probe"
+        );
+        assert!(wait_until(Duration::from_secs(5), || {
+            n.node_finished.load(Ordering::SeqCst)
+        }));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(answering_tip(port), Some(STALE_TIP));
+
+        // 2. the next refreshes must NOT be fooled by the answering port
+        //    (one refresh every 20ms, like a GUI tick)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let respawned = loop {
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            if runs.load(Ordering::SeqCst) == 2 && !n.node_finished.load(Ordering::SeqCst) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            respawned,
+            "a finished run must be reaped and a successor spawned despite the answering port"
+        );
+        assert_eq!(n.restarts, 1, "one unexpected exit, counted once");
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(port) == Some(FRESH_TIP)),
+            "the port now answers with the SUCCESSOR's tip, not the stale one"
+        );
+
+        // 3. the GUI's own refresh log names what happened
+        let diag = std::fs::read_to_string(dir.join("state").join("gui-refresh.log")).unwrap();
+        assert!(
+            diag.contains("our_run_finished=1 exit_code=0 — an answering port is not liveness"),
+            "the log must confess the answered-but-finished state: {diag}"
+        );
+        assert!(
+            diag.contains(
+                "ensure: reaped node run exit_code=0 inbound_respawn=false rpc_stop=false restarts_before=0"
+            ),
+            "the log must record the reap: {diag}"
+        );
+
+        stop_and_reset(&mut n);
+    }
+
+    /// (WALLET-I2P-RESPAWN-ORPHAN-RPC) the exact sequence of the incident:
+    /// the ONE supervised i2p respawn. Run 1 is a live run that honours the
+    /// stop request — and leaves an orphan answering when it ends. The
+    /// respawn must still complete: run 2 is spawned WITH --listen-bind and
+    /// answers with its own tip.
+    #[test]
+    fn i2p_respawn_completes_even_when_the_old_run_leaves_an_orphan_answerer() {
+        let _flag_guard = lock_shutdown_flags();
+        crate::shutdown::reset();
+        let port = free_dead_port();
+        let dir = crate::testsupport::test_dir("nsi2porph");
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        n.restart_backoff_base = Duration::ZERO;
+        n.i2p.spawn_gave_up = true;
+        n.i2p.system_probe_port = free_dead_port();
+
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let argv_log: Arc<std::sync::Mutex<Vec<Vec<String>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let al = Arc::clone(&argv_log);
+        let rel_runner = Arc::clone(&release);
+        n.runner_override = Some(Arc::new(move |argv: &[String]| {
+            let first = {
+                let mut log = al.lock().unwrap();
+                let first = log.is_empty();
+                log.push(argv.to_vec());
+                first
+            };
+            let listener = if first {
+                // run 1: a live run on its own listener
+                let l = std::net::TcpListener::bind(("127.0.0.1", port))
+                    .expect("run 1 binds the RPC port");
+                answer_loop(l.try_clone().expect("clone"), STALE_TIP, crate::shutdown::requested);
+                // ...which ends by handing that SAME listener to a detached
+                // thread: the pre-fix node's accept thread outliving its run
+                l
+            } else {
+                // the successor (see the test above for the release flag)
+                rel_runner.store(true, Ordering::SeqCst);
+                loop {
+                    match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                        Ok(l) => break l,
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            };
+            if first {
+                let rel_orphan = Arc::clone(&release);
+                std::thread::spawn(move || {
+                    answer_loop(listener, STALE_TIP, move || {
+                        rel_orphan.load(Ordering::SeqCst)
+                    })
+                });
+                return Ok(0);
+            }
+            answer_loop(listener, FRESH_TIP, crate::shutdown::requested);
+            Ok(0)
+        }));
+
+        // 1. no destination yet → spawned with --no-listen, answering
+        assert!(n.ensure_running(&wallet, &dir, &[]).unwrap());
+        assert!(n.spawn_without_listen, "no destination → --no-listen");
+        assert_eq!(answering_tip(port), Some(STALE_TIP), "run 1 is live");
+
+        // 2. the tunnel comes up mid-run: the supervised stop fires, run 1
+        //    ends, the orphan keeps answering — the respawn must land anyway
+        n.i2p.destination = Some("abcdefghijklmnop.b32.i2p".into());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let respawned = loop {
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            if argv_log.lock().unwrap().len() == 2 && !n.node_finished.load(Ordering::SeqCst) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(respawned, "the orphan must not block the inbound respawn");
+        {
+            let log = argv_log.lock().unwrap();
+            let run2 = &log[1];
+            assert!(
+                run2.iter().any(|a| a == "--listen-bind"),
+                "run 2 must enable the inbound listener: {run2:?}"
+            );
+            assert!(
+                !run2.iter().any(|a| a == "--no-listen"),
+                "run 2 must NOT stay headless: {run2:?}"
+            );
+        }
+        assert_eq!(n.restarts, 0, "the inbound respawn is intentional");
+        assert!(n.inbound_respawn_done && !n.spawn_without_listen);
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(port) == Some(FRESH_TIP)),
+            "run 2 answers with its OWN tip"
+        );
+
+        // 3. run 2 is live WITH the listener: no second respawn
+        assert!(n.ensure_running(&wallet, &dir, &[]).unwrap());
+        assert_eq!(argv_log.lock().unwrap().len(), 2, "still one respawn");
+
+        // 4. the refresh log records the reap and its branch
+        let diag = std::fs::read_to_string(dir.join("state").join("gui-refresh.log")).unwrap();
+        assert!(diag.contains("our_run_finished=1"), "{diag}");
+        assert!(
+            diag.contains("reaped node run exit_code=0 inbound_respawn=true rpc_stop=false"),
+            "{diag}"
+        );
+
+        stop_and_reset(&mut n);
     }
 
     /// TRI7-GUI-02: the restart delay is 5s * 2^(n-1), capped at 120s.
