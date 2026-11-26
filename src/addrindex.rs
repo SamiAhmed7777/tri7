@@ -1254,13 +1254,22 @@ pub fn txids(c: &Connection, addrs: &[String]) -> Result<Vec<[u8; 32]>, String> 
 /// Keeps the index in step with block acceptance instead of rebuilding it.
 ///
 /// Opt-in stays opt-in: it only opens when `addressindex.db` already exists.
-/// If the DB is behind (a gap), apply() refuses rather than writing a block out
-/// of order, because a missing output row would make a later spend unmarkable
-/// and the balance would drift. The 5-minute builder closes any such gap.
+/// If the DB is behind (a gap), the in-order `apply` refuses rather than
+/// writing a block out of order, because a missing output row would make a
+/// later spend unmarkable and the balance would drift. The catch-up builder
+/// closes any such gap — and (item 54 B-i) so does the daemon itself through
+/// [`LiveIndex::catch_up_range`] + [`LiveIndex::apply_after_catchup`] when the
+/// store holds the canonical bodies in between.
 pub struct LiveIndex {
     conn: Connection,
     next_height: u64,
 }
+
+/// (item 54 B-i) The most blocks one in-process catch-up applies. DNS2's
+/// steady state under the 10-minute builder is a handful of blocks; a gap
+/// wider than this means nobody has indexed for a long time and the
+/// builder's file-order walk is the right tool, not a loop of store reads.
+pub const LIVE_CATCHUP_MAX: u64 = 256;
 
 impl LiveIndex {
     pub fn open_if_built(state_dir: &Path) -> Option<LiveIndex> {
@@ -1327,7 +1336,90 @@ impl LiveIndex {
         }
     }
 
+    /// The daemon's per-block write for a caller that applies every block in
+    /// order (tests, tools). The daemon itself uses
+    /// [`Self::catch_up_range`] + [`Self::apply_after_catchup`].
     pub fn apply(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {
+        self.apply_after_catchup(block, height, &[])
+    }
+
+    /// (item 54 B-i) The applied height as the database holds it right now.
+    pub fn applied_height(&self) -> u64 {
+        stored_height(&self.conn).unwrap_or(0)
+    }
+
+    /// (item 54 B-i, 2026-11-26 DNS2) The heights the daemon must supply so
+    /// that a block accepted at `height` can be written: every height from
+    /// the index's applied height + 1 up to (not including) `height`, read
+    /// from the DATABASE and not from the in-memory cursor.
+    ///
+    /// The cursor was the defect. It was set once at open and advanced only
+    /// by this handle's own successful writes, while the catch-up builder —
+    /// another process — moved the database underneath it. On DNS2 the
+    /// daemon opened with the index at h2219657 and refused every block for
+    /// 16+ hours ("index is at h2219657, block is h2220420"), so the index
+    /// advanced only when the 10-minute builder ran and listunspent kept
+    /// coins spent by the newest blocks listed for minutes (item 53 E2).
+    ///
+    /// `None` when nothing is to be fetched: the index is current, the
+    /// builder is at or past this block's height, or the gap is wider than
+    /// [`LIVE_CATCHUP_MAX`] (the builder's walk is the tool for that).
+    pub fn catch_up_range(&mut self, height: u64) -> Result<Option<std::ops::Range<u64>>, String> {
+        self.next_height = stored_height(&self.conn)? + 1;
+        Ok(match height.checked_sub(self.next_height) {
+            Some(gap) if gap > 0 && gap <= LIVE_CATCHUP_MAX => Some(self.next_height..height),
+            _ => None,
+        })
+    }
+
+    /// (item 54 B-i) The daemon's per-block write: `block` accepted at
+    /// `height`, preceded by `missed` — the chain's blocks for the heights
+    /// [`Self::catch_up_range`] named, oldest first.
+    ///
+    /// The cursor is re-read from the database first, so a builder run
+    /// between the two calls can only shrink the gap. The whole gap must be
+    /// in hand BEFORE anything is written: a missing body refuses the write
+    /// outright and leaves the index exactly as it was (the builder catches
+    /// up). Every block still passes the parent check, so a catch-up can
+    /// never climb over an orphan the builder has not rewound yet.
+    pub fn apply_after_catchup(
+        &mut self,
+        block: &crate::legacy::Block,
+        height: u64,
+        missed: &[(u64, crate::legacy::Block)],
+    ) -> Result<(), String> {
+        self.next_height = stored_height(&self.conn)? + 1;
+        if height > self.next_height {
+            let from = self.next_height;
+            // the gap [from, height) must be covered height by height
+            let mut at = from;
+            for (h, _) in missed {
+                if *h < at {
+                    // the builder landed this one in between: nothing to write
+                    continue;
+                }
+                if *h != at {
+                    break;
+                }
+                at += 1;
+            }
+            if at != height {
+                return Err(format!(
+                    "index is at h{}, block is h{height} — the chain's body at h{at} is not in hand (builder will catch up)",
+                    from - 1
+                ));
+            }
+            // a write that fails part-way keeps the blocks already written
+            // (each one canonical and parent-checked); the rest is refused
+            for (h, b) in missed.iter().filter(|(h, _)| *h >= from) {
+                self.apply_in_order(b, *h)?;
+            }
+        }
+        self.apply_in_order(block, height)
+    }
+
+    /// One block, only directly above the index's applied height.
+    fn apply_in_order(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {
         if height != self.next_height {
             return Err(format!(
                 "index is at h{}, block is h{} (builder will catch up)",
@@ -1454,6 +1546,59 @@ impl LiveIndex {
     }
 }
 
+/// (item 54 B-i) The daemon's index write, in two lock windows.
+///
+/// 1. under the index lock: [`LiveIndex::catch_up_range`] — how far the
+///    database is behind the accepted block;
+/// 2. with NO index lock held: the chain's bodies for that range, read from
+///    the block store (`by_height`). The store has its own lock; the two are
+///    never nested here, so no RPC reader that holds one can wait on the
+///    other;
+/// 3. under the index lock again: [`LiveIndex::apply_after_catchup`] — the
+///    gap, then the block, after re-reading the applied height (a builder
+///    run in between can only shrink the gap).
+///
+/// Returns how many blocks below `height` the call wrote, and the write's
+/// own result for the caller's log. Without `by_height` (tests, tools) or
+/// with nothing to fetch this is exactly the old single-window write.
+pub fn apply_live_block<G>(
+    lock: &dyn Fn() -> Option<G>,
+    block: &crate::legacy::Block,
+    height: u64,
+    by_height: Option<&dyn Fn(u64) -> Option<crate::legacy::Block>>,
+) -> (usize, Result<(), String>)
+where
+    G: std::ops::DerefMut<Target = Option<LiveIndex>>,
+{
+    // a height the database will not give is no reason to skip the write:
+    // step 3 reads it again and refuses there if a gap remains
+    let range = match lock() {
+        Some(mut g) => match g.as_mut() {
+            Some(ix) => ix.catch_up_range(height).unwrap_or(None),
+            None => return (0, Err("live index absent".to_string())),
+        },
+        None => return (0, Err("live index lock unavailable".to_string())),
+    };
+    let missed: Vec<(u64, crate::legacy::Block)> = match (range, by_height) {
+        (Some(r), Some(f)) if !r.is_empty() => r.filter_map(|h| f(h).map(|b| (h, b))).collect(),
+        _ => Vec::new(),
+    };
+    let Some(mut g) = lock() else {
+        return (0, Err("live index lock unavailable".to_string()));
+    };
+    let Some(ix) = g.as_mut() else {
+        return (0, Err("live index absent".to_string()));
+    };
+    let from = ix.applied_height().saturating_add(1);
+    let r = ix.apply_after_catchup(block, height, &missed);
+    let caught_up = match &r {
+        // only the blocks below `height` that were still missing count
+        Ok(()) => missed.iter().filter(|(h, _)| *h >= from).count(),
+        Err(_) => 0,
+    };
+    (caught_up, r)
+}
+
 /// Whether a block may be appended at `height`. Read-only; `apply_once`
 /// repeats the height check under its own transaction.
 enum Appendable {
@@ -1465,6 +1610,19 @@ enum Appendable {
     /// the block just below is not this block's parent: an orphan the
     /// catch-up builder has not rewound yet
     Orphaned { at: u64, held: [u8; 32] },
+}
+
+/// (item 54 B-i) The applied height as the DATABASE holds it right now —
+/// whoever wrote it, this handle or the catch-up builder — with a read
+/// failure reported instead of read as zero (a cursor moved to h0 on a busy
+/// read would refuse every block with a misleading height).
+fn stored_height(c: &Connection) -> Result<u64, String> {
+    c.query_row(
+        "SELECT COALESCE(MAX(CAST(v AS INTEGER)),0) FROM meta WHERE k='height'",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("index height: {e}"))
 }
 
 fn appendable(
@@ -2616,5 +2774,317 @@ mod tests {
         apply_block(&c, 13, &c13.hash(), &real_txs(&c13)).unwrap();
         live.apply(&c13, 13).expect("this very block already holds the height");
         assert_eq!(spendable(&mut c), (13, TRUTH));
+    }
+
+    // ---- item 54 B-i: the daemon's live index follows the chain -----------
+
+    /// A base of ten blocks written by the daemon's own handle (each pays the
+    /// staker 1000), then the chain above it: D0 pays 500 at h11, D1
+    /// re-stakes coin 5 at h12, D2 pays 500 at h13, D3 re-stakes coin 7 at
+    /// h14. Fully indexed: eight untouched coins + 500 + 600 + 420 + 500 + 700.
+    struct LagScene {
+        dir: crate::testsupport::TestDir,
+        /// the daemon's handle, behind the same lock shape the daemon uses
+        cell: std::sync::Mutex<Option<LiveIndex>>,
+        c: Connection,
+        /// index 0 is h1 … index 13 is h14
+        chain: Vec<crate::legacy::Block>,
+    }
+    const LAG_TRUTH: (usize, i64) = (13, 10_720);
+
+    fn lag_scene(tag: &str) -> LagScene {
+        let dir = tmpdir(tag);
+        let (mut c, _) = begin(dir.path()).expect("begin");
+        let script = p2pkh(0xA1);
+        let mut chain = Vec::new();
+        let mut prev = hash_of(0);
+        for h in 1..=10u64 {
+            let b = real_block(prev, h as u8, &[1000], vec![], &script);
+            prev = b.hash();
+            chain.push(b);
+        }
+        let ten = prev;
+        let coin5 = (chain[4].vtx[0].hash(), 0u32);
+        let coin7 = (chain[6].vtx[0].hash(), 0u32);
+        let c11 = real_block(ten, 0xD0, &[500], vec![], &script);
+        let c12 = real_block(c11.hash(), 0xD1, &[600, 420], vec![coin5], &script);
+        let c13 = real_block(c12.hash(), 0xD2, &[500], vec![], &script);
+        let c14 = real_block(c13.hash(), 0xD3, &[700], vec![coin7], &script);
+        chain.extend([c11, c12, c13, c14]);
+        let mut live = LiveIndex::open_if_built(dir.path()).expect("live index");
+        for (i, b) in chain.iter().take(10).enumerate() {
+            live.apply(b, i as u64 + 1).expect("the daemon appends in order");
+        }
+        assert_eq!(spendable(&mut c), (10, 10_000));
+        LagScene {
+            dir,
+            cell: std::sync::Mutex::new(Some(live)),
+            c,
+            chain,
+        }
+    }
+
+    /// The daemon's accept-path write for the chain's block at `height`.
+    fn daemon_write(
+        s: &LagScene,
+        height: u64,
+        by_height: Option<&dyn Fn(u64) -> Option<crate::legacy::Block>>,
+    ) -> (usize, Result<(), String>) {
+        apply_live_block(
+            &|| s.cell.lock().ok(),
+            &s.chain[(height - 1) as usize],
+            height,
+            by_height,
+        )
+    }
+
+    /// The catch-up builder's write, as another process would make it.
+    fn builder_write(c: &Connection, chain: &[crate::legacy::Block], from: u64, to: u64) {
+        for h in from..=to {
+            let b = &chain[(h - 1) as usize];
+            apply_block(c, h, &b.hash(), &real_txs(b)).expect("builder insert");
+        }
+        finish(c, to).expect("finish");
+    }
+
+    /// The chain's body at a height, as the store serves it.
+    fn store_of(chain: Vec<crate::legacy::Block>) -> impl Fn(u64) -> Option<crate::legacy::Block> {
+        move |h: u64| chain.get(h as usize - 1).cloned()
+    }
+
+    fn assert_fully_indexed(s: &mut LagScene) {
+        assert_eq!(index_height(&s.c), 14);
+        for h in 11..=14 {
+            assert_eq!(block_at(&s.c, h).unwrap(), Some(s.chain[(h - 1) as usize].hash()));
+        }
+        assert_eq!(spendable(&mut s.c), LAG_TRUTH);
+    }
+
+    /// (item 54 B-i) THE DEFECT, DNS2 2026-11-26: the catch-up builder is
+    /// another process. It moved the database to h13 while the daemon's
+    /// handle still stood at h11 — and the handle's cursor was advanced only
+    /// by its own writes, so every later block was refused ("index is at
+    /// h10, block is h14") for the life of the process and the index moved
+    /// only when the 10-minute builder ran. The cursor now follows the
+    /// database: the very next block is written.
+    #[test]
+    fn a_stale_daemon_cursor_follows_the_builder_and_keeps_writing() {
+        let mut s = lag_scene("lag-stale-cursor");
+        builder_write(&s.c, &s.chain, 11, 13);
+        assert_eq!(index_height(&s.c), 13);
+        {
+            let g = s.cell.lock().unwrap();
+            assert_eq!(g.as_ref().unwrap().next_height, 11, "the handle still believes h11 is next");
+        }
+        let (caught_up, r) = daemon_write(&s, 14, None);
+        r.expect("the next block is written, not refused");
+        assert_eq!(caught_up, 0, "the builder had already written the gap");
+        assert_fully_indexed(&mut s);
+        // and the same handle keeps writing on its own from here
+        let c15 = real_block(s.chain[13].hash(), 0xD4, &[800], vec![], &p2pkh(0xA1));
+        let (caught_up, r) = apply_live_block(&|| s.cell.lock().ok(), &c15, 15, None);
+        r.expect("the handle writes the next block itself");
+        assert_eq!((caught_up, index_height(&s.c)), (0, 15));
+    }
+
+    /// (item 54 B-i) The daemon missed h11..=h13 — nobody indexed them. With
+    /// the chain's bodies from the store it closes the gap itself, in order,
+    /// in the same write as the block it just accepted: coin 5 (spent at
+    /// h12) and coin 7 (spent at h14) both leave the spendable set AT ONCE.
+    /// That is the freshness lag of item 53 E2 — rows spent by the newest
+    /// blocks stayed listed until the builder's next run, minutes later.
+    #[test]
+    fn a_daemon_that_missed_blocks_catches_up_from_the_store_in_process() {
+        let mut s = lag_scene("lag-catch-up");
+        let by_height = store_of(s.chain.clone());
+        let (caught_up, r) = daemon_write(&s, 14, Some(&by_height));
+        r.expect("gap + block are written");
+        assert_eq!(caught_up, 3);
+        assert_fully_indexed(&mut s);
+        let c: (i64, Option<i64>) = s
+            .c
+            .query_row(
+                "SELECT height, spent_height FROM out WHERE txid=?1 AND n=0",
+                [s.chain[4].vtx[0].hash().to_vec()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c, (5, Some(12)), "coin 5 is marked spent by the catch-up's h12");
+    }
+
+    /// A gap is climbed only with every body in hand: one missing refuses
+    /// the whole write — not even the blocks that WERE in hand are written,
+    /// so the index is exactly as it was for the builder's walk.
+    #[test]
+    fn a_catch_up_without_every_body_writes_nothing() {
+        let mut s = lag_scene("lag-missing-body");
+        let chain = s.chain.clone();
+        let by_height = move |h: u64| {
+            if h == 12 {
+                None
+            } else {
+                chain.get(h as usize - 1).cloned()
+            }
+        };
+        let (caught_up, r) = daemon_write(&s, 14, Some(&by_height));
+        let e = r.expect_err("a gap is not climbed on a missing body");
+        assert!(e.contains("h12") && e.contains("builder will catch up"), "{e}");
+        assert_eq!(caught_up, 0);
+        assert_eq!(index_height(&s.c), 10);
+        assert_eq!(block_at(&s.c, 11).unwrap(), None, "h11 was in hand and still not written");
+        assert_eq!(spendable(&mut s.c), (10, 10_000));
+    }
+
+    /// A builder run landing while the store is read (between the two lock
+    /// windows) only shrinks the gap: its blocks are left alone, the rest
+    /// are written, and the block the daemon accepted is written once.
+    #[test]
+    fn a_builder_run_between_the_lock_windows_only_shrinks_the_gap() {
+        let mut s = lag_scene("lag-builder-races");
+        let chain = s.chain.clone();
+        let builder = open(&db_path(s.dir.path())).expect("builder connection");
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let asked_in = asked.clone();
+        let by_height = move |h: u64| {
+            asked_in.borrow_mut().push(h);
+            if asked_in.borrow().len() == 1 {
+                // the 10-minute run lands now
+                builder_write(&builder, &chain, 11, 12);
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = daemon_write(&s, 14, Some(&by_height));
+        r.expect("written");
+        assert_eq!(*asked.borrow(), vec![11, 12, 13]);
+        assert_eq!(caught_up, 1, "h13 only: the builder wrote h11 and h12");
+        assert_fully_indexed(&mut s);
+    }
+
+    /// Lock discipline: exactly two index-lock windows, and the store is
+    /// read in neither — the store has its own lock, and the two are never
+    /// nested (no RPC reader holding one may wait on the other).
+    #[test]
+    fn the_store_is_read_outside_the_index_lock() {
+        let s = lag_scene("lag-lock-windows");
+        let chain = s.chain.clone();
+        let locks = std::sync::atomic::AtomicUsize::new(0);
+        let read_under_lock = std::sync::atomic::AtomicBool::new(false);
+        let cell = &s.cell;
+        let lock = || {
+            locks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            cell.lock().ok()
+        };
+        let by_height = |h: u64| {
+            if cell.try_lock().is_err() {
+                read_under_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = apply_live_block(&lock, &s.chain[13], 14, Some(&by_height));
+        r.expect("written");
+        assert_eq!(caught_up, 3);
+        assert_eq!(locks.load(std::sync::atomic::Ordering::SeqCst), 2, "two lock windows");
+        assert!(
+            !read_under_lock.load(std::sync::atomic::Ordering::SeqCst),
+            "the store was read under the index lock"
+        );
+    }
+
+    /// The bound: a gap AT the limit is climbed; one block more is left to
+    /// the builder's walk, and nothing is written in that case.
+    #[test]
+    fn a_gap_wider_than_the_bound_is_left_to_the_builder() {
+        let script = p2pkh(0xA1);
+        let mut chain = Vec::new();
+        let mut prev = hash_of(0);
+        // tag + value together keep every transaction's bytes distinct
+        for h in 1..=(10 + LIVE_CATCHUP_MAX + 2) {
+            let b = real_block(
+                prev,
+                (h % 250) as u8 + 1,
+                &[(h / 250) as i64 + 1],
+                vec![],
+                &script,
+            );
+            prev = b.hash();
+            chain.push(b);
+        }
+        // a handle at h10 that missed the whole gap
+        let mut scene = |tag: &str| {
+            let dir = tmpdir(tag);
+            let (mut c, _) = begin(dir.path()).expect("begin");
+            let mut live = LiveIndex::open_if_built(dir.path()).expect("live index");
+            for (i, b) in chain.iter().take(10).enumerate() {
+                live.apply(b, i as u64 + 1).expect("in order");
+            }
+            (dir, c, std::sync::Mutex::new(Some(live)))
+        };
+        let by_height = store_of(chain.clone());
+        // the bound is a count of MISSING blocks: h11..=h267 under a block
+        // accepted at h268 is LIVE_CATCHUP_MAX of them — climbed
+        let at = 10 + LIVE_CATCHUP_MAX + 1;
+        let (_d, c, cell) = scene("lag-bound-climbed");
+        let (caught_up, r) =
+            apply_live_block(&|| cell.lock().ok(), &chain[(at - 1) as usize], at, Some(&by_height));
+        r.expect("a gap at the bound is climbed");
+        assert_eq!((caught_up as u64, index_height(&c)), (LIVE_CATCHUP_MAX, at));
+        // one missing block more
+        let beyond = at + 1;
+        let (_d2, c2, cell2) = scene("lag-bound-refused");
+        let (caught_up, r) = apply_live_block(
+            &|| cell2.lock().ok(),
+            &chain[(beyond - 1) as usize],
+            beyond,
+            Some(&by_height),
+        );
+        let e = r.expect_err("one block past the bound is the builder's");
+        assert!(e.contains("builder will catch up"), "{e}");
+        assert_eq!(caught_up, 0);
+        assert_eq!(index_height(&c2), 10, "nothing written");
+    }
+
+    /// The gap is still the daemon's own write path: a catch-up can never
+    /// climb over an orphan the builder has not rewound. The index holds an
+    /// orphan at h11 (the node's own mint, while it was the tip); the
+    /// canonical chain's h12 is refused exactly as before.
+    #[test]
+    fn a_catch_up_never_climbs_over_an_orphan() {
+        let mut s = lag_scene("lag-orphan");
+        let script = p2pkh(0xA1);
+        let ten = s.chain[9].hash();
+        let mint = real_block(ten, 0xC1, &[600, 420], vec![(s.chain[4].vtx[0].hash(), 0u32)], &script);
+        {
+            let mut g = s.cell.lock().unwrap();
+            g.as_mut().unwrap().apply(&mint, 11).expect("the mint, while it is the tip");
+        }
+        // the builder rewound nothing; the node accepted the canonical h13
+        // whose parent (h12) the index does not hold
+        let by_height = store_of(s.chain.clone());
+        let (caught_up, r) = daemon_write(&s, 13, Some(&by_height));
+        let e = r.expect_err("never above an orphan");
+        assert!(e.contains("orphaned") || e.contains("not adding a second one"), "{e}");
+        assert_eq!(caught_up, 0);
+        assert_eq!(index_height(&s.c), 11);
+        assert_eq!(block_at(&s.c, 12).unwrap(), None, "nothing written above the orphan");
+        // the builder repairs; the daemon's SAME handle (no restart) then
+        // closes what the repair rewound and writes the next block — the
+        // cursor follows the database
+        let mut chain = Chain::new(1, 14);
+        for (i, b) in s.chain.iter().enumerate() {
+            chain.set(i as u64 + 1, b.hash(), real_txs(b));
+        }
+        let report = verify_and_repair(&mut s.c, &chain).expect("verify");
+        assert!(!report.clean, "the orphan is found");
+        // the repair is an in-place reconcile, not a rewind: the orphan's
+        // height now holds the canonical block and the coverage stands
+        assert_eq!(index_height(&s.c), 11);
+        assert_eq!(block_at(&s.c, 11).unwrap(), Some(s.chain[10].hash()));
+        // the daemon's SAME handle (no restart) then closes what the repair
+        // did not reach and writes the next block — the cursor follows the
+        // database
+        let (caught_up, r) = daemon_write(&s, 14, Some(&by_height));
+        r.expect("the repaired index is appended to by the old handle");
+        assert_eq!(caught_up, 2, "h12 and h13: the repair had already written h11");
+        assert_fully_indexed(&mut s);
     }
 }

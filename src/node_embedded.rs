@@ -8637,7 +8637,7 @@ fn collect_headers(
 /// One unspent output of the live wallet, exact per-block facts from the
 /// disk store (the kernel's nTxPrevOffset + GetCoinAge's nTime are part of
 /// consensus — approximations here would mint invalid kernels).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct LiveOut {
     height: u64,    // containing block height (absolute)
     block_time: u32,
@@ -8673,6 +8673,21 @@ struct WalletLive {
     /// is a no-op and the snapshot would keep listing a coin that no longer
     /// exists. This map is what tells the merge that the coin is gone.
     spent: HashMap<(Hash, u32), u64>,
+    /// (item 54) LIFO journal of the blocks THIS process applied to `live`
+    /// (own mints — peer bodies are not applied to this view). Each record
+    /// carries exactly what `apply_block` changed, so a fork adoption can
+    /// un-apply the replaced branch incrementally instead of paying a full
+    /// h0 reseed. A missing/short/mismatched journal is NEVER guessed at:
+    /// the unwind refuses, the view is left untouched, and the existing
+    /// STALE -> AUTOHEAL full reseed stays the fallback.
+    undo: VecDeque<UndoRec>,
+    /// The lowest height H such that every change to `live` at or above H
+    /// has a record still in `undo`. Set to `tip + 1` when a seed/reseed
+    /// swaps the map in (the replay itself leaves no records), and raised
+    /// to `dropped.height + 1` when the cap evicts the oldest record. An
+    /// unwind reaching below it is REFUSED: those heights were applied
+    /// without surviving undo data.
+    undo_from: u64,
     /// true when the wallet file is encrypted and the secrets have not been
     /// supplied yet: the node still syncs and watches its addresses, but it
     /// cannot stake or sign. Cleared by `walletpassphrase`, restored by
@@ -8688,6 +8703,61 @@ struct WalletLive {
     /// answers instead), or the false superset would serve a silent hole as
     /// current — the exact alarm-integrity class item 39 exists to kill.
     first_skip: Option<u64>,
+}
+
+/// (item 54) What one `apply_block` did to the live view, kept so the block
+/// can be un-applied exactly if its branch loses a fork. Everything the undo
+/// needs is captured AT APPLY TIME: the `spent` map keeps only a height, and
+/// the removed `LiveOut` row (containing height, block/tx time, tx_offset,
+/// created_epoch, coinstake/coinbase flags) is otherwise unrecoverable.
+#[derive(Clone, Debug)]
+struct UndoRec {
+    height: u64,
+    /// the block's own hash: an unwind only fires for the exact block the
+    /// view recorded at that height (a re-threaded height is a refusal)
+    hash: Hash,
+    /// outputs this block INSERTED into `live`, each with the exact row it
+    /// wrote (an output whose key already existed was not inserted by this
+    /// block and is not listed)
+    added: Vec<UndoAdd>,
+    /// prevouts this block removed, with their prior state
+    spent: Vec<UndoSpend>,
+}
+
+/// One output a recorded block inserted, and the row it wrote. The unwind
+/// compares the WHOLE row, not just the outpoint and height: the map has no
+/// writer that could change a row in place, so this is the complete statement
+/// of "the view still holds what this block wrote" — anything else, even at
+/// the same height, is a moved view and is refused.
+#[derive(Clone, Debug)]
+struct UndoAdd {
+    key: (Hash, u32),
+    row: LiveOut,
+}
+
+/// One prevout a recorded block spent, plus what it displaced.
+#[derive(Clone, Debug)]
+struct UndoSpend {
+    key: (Hash, u32),
+    /// the `LiveOut` row `apply_block` removed (None = the coin was not in
+    /// the map: a coin the replay snapshot holds, the deep-coin class)
+    prior: Option<LiveOut>,
+    /// the `spent` entry `apply_block` overwrote (None = the key was absent)
+    prior_spent: Option<u64>,
+}
+
+/// (item 54) How deep the un-apply journal reaches. Own mints are the only
+/// appliers of this view, so this covers far more than any observed fork
+/// (DNS2 2026-11-26: one-block losing forks). A rollback deeper than the
+/// journal is refused, never approximated.
+const UNDO_DEPTH: usize = 32;
+
+/// (item 54) Outcome of a successful incremental un-apply (for the log line).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UnwindStats {
+    blocks: usize,
+    coins_removed: usize,
+    coins_restored: usize,
 }
 
 /// txpool::UtxoView over the live map — unspent-only (spends removed).
@@ -8918,6 +8988,12 @@ impl WalletLive {
             base,
             live: HashMap::new(),
             spent: HashMap::new(),
+            // (item 54) the replay below IS the baseline: it leaves no undo
+            // records, so nothing at or below the seeded tip can be un-applied
+            // incrementally. `u64::MAX` also suppresses recording during the
+            // walk (see apply_block); the real floor is set at the end.
+            undo: VecDeque::new(),
+            undo_from: u64::MAX,
             locked: false,
             unlock_until: None,
             first_skip: None,
@@ -9067,6 +9143,11 @@ impl WalletLive {
             // node.log (alarmable) instead of bare stderr.
             wl.first_skip = first_skip;
         }
+        // (item 54) the seeded map is the baseline for the undo journal: a
+        // later fork adoption may un-apply only what was applied ABOVE this
+        // tip (own mints), never a height the replay itself produced.
+        wl.undo_from = tip.saturating_add(1);
+        wl.undo.clear();
         Ok(wl)
     }
 
@@ -9168,6 +9249,13 @@ impl WalletLive {
 
     /// Apply one accepted block: remove spent prevouts (all non-coinbase
     /// txs), add non-empty outputs.
+    ///
+    /// (item 54) Every mutation is journalled when the height is at or above
+    /// `undo_from`, so `unwind_blocks` can un-apply this block exactly if its
+    /// branch loses a fork. The journal captures the removed `LiveOut` rows
+    /// (the `spent` map keeps only a height) — without them the restored coin
+    /// would come back with wrong maturity evidence (created_epoch/height/
+    /// tx_offset) and stake on a coin the chain describes differently.
     fn apply_block(&mut self, block: &Block, height: u64) {
         // classify the block once: a stake block's first tx is the coinstake
         // (vin carries a real prevout), a PoW block's first tx is a coinbase
@@ -9187,13 +9275,27 @@ impl WalletLive {
                 .map(|tx| tx.vout.first().map(|o| o.value == 0).unwrap_or(false))
                 .unwrap_or(false);
         let _ = cb;
+        let mut rec = if height >= self.undo_from {
+            Some(UndoRec {
+                height,
+                hash: block.hash(),
+                added: Vec::new(),
+                spent: Vec::new(),
+            })
+        } else {
+            None
+        };
         for tx in block.vtx.iter().skip(1) {
             for vin in &tx.vin {
                 if vin.prev_n != u32::MAX {
+                    let key = (vin.prev_hash, vin.prev_n);
                     // remember the spend even when the coin is not in the
                     // map: it may be a coin the replay snapshot holds
-                    self.spent.insert((vin.prev_hash, vin.prev_n), height);
-                    self.live.remove(&(vin.prev_hash, vin.prev_n));
+                    let prior_spent = self.spent.insert(key, height);
+                    let prior = self.live.remove(&key);
+                    if let Some(r) = rec.as_mut() {
+                        r.spent.push(UndoSpend { key, prior, prior_spent });
+                    }
                 }
             }
         }
@@ -9201,25 +9303,175 @@ impl WalletLive {
         for tx in &block.vtx {
             for (n, vout) in tx.vout.iter().enumerate() {
                 if !(vout.value == 0 && vout.script_pubkey.is_empty()) {
-                    self.live.entry((tx.hash(), n as u32)).or_insert(LiveOut {
-                        height,
-                        block_time: block.time,
-                        tx_time: tx.time,
-                        tx_offset: offset,
-                        value: vout.value,
-                        script: vout.script_pubkey.clone(),
-                        created_epoch: if tx.time == 0 || tx.time > block.time {
-                            block.time
-                        } else {
-                            tx.time
-                        },
-                        coinstake: is_coinstake,
-                        coinbase: !is_coinstake && tx_is_coinbase(block),
-                    });
+                    let key = (tx.hash(), n as u32);
+                    // or_insert semantics kept (an output whose key is already
+                    // live is NOT overwritten), but the insert is explicit so
+                    // the journal lists only what THIS block created.
+                    if let std::collections::hash_map::Entry::Vacant(slot) = self.live.entry(key) {
+                        let row = LiveOut {
+                            height,
+                            block_time: block.time,
+                            tx_time: tx.time,
+                            tx_offset: offset,
+                            value: vout.value,
+                            script: vout.script_pubkey.clone(),
+                            created_epoch: if tx.time == 0 || tx.time > block.time {
+                                block.time
+                            } else {
+                                tx.time
+                            },
+                            coinstake: is_coinstake,
+                            coinbase: !is_coinstake && tx_is_coinbase(block),
+                        };
+                        slot.insert(row.clone());
+                        if let Some(r) = rec.as_mut() {
+                            r.added.push(UndoAdd { key, row });
+                        }
+                    }
                 }
             }
             offset += tx.serialize().len() as u32;
         }
+        if let Some(r) = rec {
+            self.undo.push_back(r);
+            while self.undo.len() > UNDO_DEPTH {
+                // evicting the oldest record RAISES the provable floor: the
+                // heights at or below the dropped one no longer have undo data
+                if let Some(dropped) = self.undo.pop_front() {
+                    self.undo_from = self.undo_from.max(dropped.height.saturating_add(1));
+                }
+            }
+        }
+    }
+
+    /// (item 54) Un-apply an abandoned branch from the live view, strictly
+    /// LIFO. `heights` is the replaced range in DESCENDING order (old tip
+    /// first) with the hash the CHAIN held at each height.
+    ///
+    /// A height with no journal record was never applied to this view (a peer
+    /// body: only own mints and reseeds touch `live`) and is skipped — the
+    /// view is provably unchanged there.
+    ///
+    /// FAIL-CLOSED, ATOMIC: the whole range is validated before the first
+    /// mutation, so a refusal leaves the view EXACTLY as it was and the
+    /// caller's STALE -> full-reseed fallback keeps its meaning. Refusals:
+    /// the range reaches below `undo_from` (records evicted, or the height
+    /// predates the seed), the journal's top is a DIFFERENT block at that
+    /// height (a re-thread), or the live map no longer holds what the record
+    /// says it wrote (some other writer touched the view).
+    fn unwind_blocks(&mut self, heights: &[(u64, Hash)]) -> Result<UnwindStats, String> {
+        let mut stats = UnwindStats::default();
+        let Some(&(lowest, _)) = heights.last() else {
+            return Ok(stats);
+        };
+        if lowest < self.undo_from {
+            return Err(format!(
+                "h{lowest} is below the undo floor h{} (records evicted, or the height predates the seed)",
+                self.undo_from
+            ));
+        }
+        // ---- pass 1: validate the whole unwind, no mutation ----
+        // `pending` = coins a HIGHER record of this range spent, keyed to
+        // the exact row they restore. Validation reads the live map as it is
+        // NOW, but a lower record must be judged in the state the unwind
+        // reaches: the ordinary chained case — a coin minted at h and staked
+        // again at h+1 — has that coin already removed by the higher block,
+        // and the higher record's undo puts it back exactly as the lower
+        // record wrote it. Only a `pending` row equal to the recorded row
+        // counts (anything else is a moved view).
+        let mut pending: HashMap<(Hash, u32), LiveOut> = HashMap::new();
+        let mut idx = self.undo.len();
+        for &(h, hash) in heights {
+            if idx > 0 && self.undo[idx - 1].height > h {
+                return Err(format!(
+                    "journal out of order: the top record is h{}, the unwind asked for h{h}",
+                    self.undo[idx - 1].height
+                ));
+            }
+            if idx == 0 || self.undo[idx - 1].height != h {
+                continue; // never applied to this view (peer body) — no-op
+            }
+            let r = &self.undo[idx - 1];
+            if r.hash != hash {
+                return Err(format!(
+                    "journal hash mismatch at h{h}: recorded {}, chain has {}",
+                    tri7_core::p2p::internal_to_display(&r.hash),
+                    tri7_core::p2p::internal_to_display(&hash)
+                ));
+            }
+            for a in &r.added {
+                match self.live.get(&a.key) {
+                    Some(o) if *o == a.row => {}
+                    _ if pending.get(&a.key) == Some(&a.row) => {}
+                    _ => {
+                        return Err(format!(
+                            "h{h}: recorded output {}:{} is not the row this block wrote — the view moved",
+                            tri7_core::p2p::internal_to_display(&a.key.0),
+                            a.key.1
+                        ))
+                    }
+                }
+            }
+            for s in &r.spent {
+                if let Some(o) = self.live.get(&s.key) {
+                    if o.height != h || !r.added.iter().any(|a| a.key == s.key) {
+                        return Err(format!(
+                            "h{h}: recorded spend {}:{} is back in the live map at h{} — the view moved",
+                            tri7_core::p2p::internal_to_display(&s.key.0),
+                            s.key.1,
+                            o.height
+                        ));
+                    }
+                }
+                if self.spent.get(&s.key) != Some(&h) {
+                    return Err(format!(
+                        "h{h}: spent entry for {}:{} is not the recorded height — the view moved",
+                        tri7_core::p2p::internal_to_display(&s.key.0),
+                        s.key.1
+                    ));
+                }
+            }
+            for s in &r.spent {
+                if let Some(p) = &s.prior {
+                    pending.insert(s.key, p.clone());
+                }
+            }
+            idx -= 1;
+        }
+        // ---- pass 2: apply it, newest block first ----
+        // the matching records are exactly the journal's tail, in order
+        while self.undo.len() > idx {
+            let r = self.undo.pop_back().expect("validated above");
+            stats.blocks += 1;
+            for a in &r.added {
+                if self.live.remove(&a.key).is_some() {
+                    stats.coins_removed += 1;
+                }
+            }
+            for s in r.spent.iter().rev() {
+                if let Some(prior) = &s.prior {
+                    self.live.insert(s.key, prior.clone());
+                    stats.coins_restored += 1;
+                }
+                match s.prior_spent {
+                    Some(prev) => {
+                        self.spent.insert(s.key, prev);
+                    }
+                    None => {
+                        self.spent.remove(&s.key);
+                    }
+                }
+            }
+        }
+        Ok(stats)
+    }
+
+    /// (item 54) A seed/reseed swapped a freshly replayed map in: the old
+    /// journal describes a map that no longer exists, so it is dropped and
+    /// the provable floor moves to just above the replayed tip.
+    fn reset_undo_after_reseed(&mut self, replay_tip: u64) {
+        self.undo.clear();
+        self.undo_from = replay_tip.saturating_add(1);
     }
 
     fn key_by_pubkey(&self) -> HashMap<Vec<u8>, &tri7_core::wallet::WalletKey> {
@@ -10754,6 +11006,10 @@ fn autoheal_stale_live_view(
     // the map now covers [base, replay_tip]: keep the view's claimed base
     // consistent with what was actually replayed (same as the RPC verb)
     wl.base = base;
+    // (item 54) the swapped map is a replay baseline: the old un-apply
+    // journal describes rows that no longer exist, so it must go (a stale
+    // journal would let a later fork "undo" changes that were never applied).
+    wl.reset_undo_after_reseed(replay_tip);
     true
 }
 
@@ -10973,7 +11229,8 @@ fn stake_tick(
     }
     recent.insert(block.hash(), height_abs, &raw);
     wl.apply_block(&block, height_abs);
-    addrindex_apply(&block, height_abs);
+    let by_height = |h: u64| store.block_by_height(h).ok().flatten().map(|hit| hit.block);
+    addrindex_apply(&block, height_abs, Some(&by_height));
     // (item 40) the own mint reconciles through the same helper every
     // accepted body now uses — the spent-input eviction this loop always
     // did (block's inputs, coinstake included), PLUS txid eviction of the
@@ -11146,12 +11403,30 @@ fn init_addrindex(state_dir: &std::path::Path) {
 }
 
 /// Best-effort: an index failure must never stop block acceptance.
-fn addrindex_apply(block: &tri7_core::legacy::Block, height: u64) {
+///
+/// (item 54 B-i) `by_height` reads the chain's block at a height from the
+/// store. With it the daemon closes a gap itself — see
+/// [`tri7_core::addrindex::apply_live_block`]. Before this the handle's
+/// cursor was set once at open and never followed the catch-up builder's
+/// writes, so after the first out-of-step block EVERY later block was
+/// refused ("index is at h2219657, block is h2220420" for 16 hours on DNS2)
+/// and the index moved only when the 10-minute builder ran.
+fn addrindex_apply(
+    block: &tri7_core::legacy::Block,
+    height: u64,
+    by_height: Option<&dyn Fn(u64) -> Option<tri7_core::legacy::Block>>,
+) {
     let Some(cell) = LIVE_ADDRINDEX.get() else { return };
-    let Ok(mut g) = cell.lock() else { return };
-    let Some(ix) = g.as_mut() else { return };
-    match ix.apply(block, height) {
-        Ok(()) => {}
+    let (caught_up, r) =
+        tri7_core::addrindex::apply_live_block(&|| cell.lock().ok(), block, height, by_height);
+    match r {
+        Ok(()) => {
+            if caught_up > 0 {
+                log(&format!(
+                    "addrindex: caught up in-process — {caught_up} block(s) beneath h{height}"
+                ));
+            }
+        }
         Err(e) => log(&format!("addrindex: h{height} skipped: {e}")),
     }
 }
@@ -11732,6 +12007,8 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 // (base is the min of the view's seed base and the
                 // chain-state base — a rollback can push it lower)
                 w.base = base;
+                // (item 54) replay baseline: the old un-apply journal is void
+                w.reset_undo_after_reseed(replay_tip);
                 if n == 0 {
                     Ok(serde_json::json!({ "wallet check passed": true }))
                 } else {
@@ -13623,6 +13900,64 @@ fn requeue_abandoned_pool_txs(
     requeued
 }
 
+/// (item 54) Un-apply the branch a fork adoption just replaced from the
+/// wallet LIVE VIEW, incrementally — the alternative the daemon had was the
+/// STALE flag plus a full h0 reseed (DNS2 2026-11-26: 79.4 s of held staking
+/// per losing fork, then AUTOHEAL).
+///
+/// `bodies` are the abandoned bodies the caller snapshotted BEFORE the
+/// rollback (`collect_abandoned_bodies`), `from_h..=to_h` the heights that
+/// actually left the chain. Every height in that range must be present: a
+/// missing body means the range cannot be proven, so the call refuses and
+/// leaves the view untouched — the existing STALE -> AUTOHEAL reseed then
+/// does the repair exactly as before. Failure is ALWAYS toward that path.
+fn unwind_wallet_live_after_rollback(
+    wl: &SharedWalletLive,
+    bodies: &[(u64, Block)],
+    from_h: u64,
+    to_h: u64,
+) {
+    if to_h < from_h {
+        return; // nothing was abandoned
+    }
+    let mut heights: Vec<(u64, Hash)> = Vec::with_capacity((to_h - from_h + 1) as usize);
+    for h in (from_h..=to_h).rev() {
+        match bodies.iter().find(|(bh, _)| *bh == h) {
+            Some((_, b)) => heights.push((h, b.hash())),
+            None => {
+                log(&format!(
+                    "wallet live: abandoned branch h{}..h{} NOT un-applied — body for h{h} unavailable, \
+                     so the incremental undo cannot be proven (the STALE -> full-reseed fallback stands)",
+                    from_h, to_h
+                ));
+                return;
+            }
+        }
+    }
+    let mut guard = match wl.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            log("wallet live: abandoned branch NOT un-applied — live-view mutex poisoned (reseed fallback stands)");
+            return;
+        }
+    };
+    let Some(view) = guard.as_mut() else {
+        return; // no live view yet: nothing to un-apply
+    };
+    match view.unwind_blocks(&heights) {
+        Ok(s) => log(&format!(
+            "wallet live: un-applied the replaced branch h{}..h{} incrementally — {} block(s) undone, \
+             {} coin(s) dropped, {} restored (no reseed needed; the abandoned branch is off the wallet view)",
+            from_h, to_h, s.blocks, s.coins_removed, s.coins_restored
+        )),
+        Err(e) => log(&format!(
+            "wallet live: incremental un-apply of h{}..h{} REFUSED — {e}; the view is unchanged and the \
+             STALE -> AUTOHEAL full reseed remains the remedy",
+            from_h, to_h
+        )),
+    }
+}
+
 fn handle_message(
     peer: &mut Peer,
     st: &mut ChainState,
@@ -14023,6 +14358,17 @@ fn handle_message(
                 // tip: those regular txs return to the relay pool through
                 // the normal gate so the winner can re-mine them.
                 if st.tip_height < pre_adopt_tip {
+                    // (item 54) the wallet live view still holds the abandoned
+                    // branch's outputs (and has its coinstake prevout removed):
+                    // un-apply it incrementally FIRST, so the pool reconcile
+                    // below validates against the restored coins instead of
+                    // phantom ones. Refusals fall back to STALE -> reseed.
+                    unwind_wallet_live_after_rollback(
+                        wl,
+                        &abandoned_bodies,
+                        st.tip_height + 1,
+                        pre_adopt_tip,
+                    );
                     requeue_abandoned_pool_txs(
                         pool,
                         wl,
@@ -14100,6 +14446,14 @@ fn handle_message(
                     // through the normal gate; a refused body changes
                     // nothing (the guard is false).
                     if st.tip_height < pre_rollback_tip {
+                        // (item 54) same incremental un-apply on the competing-
+                        // body path (see the deferred-adoption arm above).
+                        unwind_wallet_live_after_rollback(
+                            wl,
+                            &abandoned_fork_bodies,
+                            st.tip_height + 1,
+                            pre_rollback_tip,
+                        );
                         requeue_abandoned_pool_txs(
                             pool,
                             wl,
@@ -14340,7 +14694,12 @@ fn handle_message(
                     peer.sess.shutdown();
                     return Ok(());
                 }
-                addrindex_apply(&b, height_abs);
+                // (item 54 B-i) the chain's bodies for an index gap come from
+                // this node's own store; the store is read with no index lock
+                // held (see addrindex::apply_live_block)
+                let by_height =
+                    |h: u64| store.block_by_height(h).ok().flatten().map(|hit| hit.block);
+                addrindex_apply(&b, height_abs, Some(&by_height));
                 // (item 40) POOL-PEER-RECONCILE: every ACCEPTED body —
                 // minted locally or taken from a peer — reconciles the
                 // relay pool: the txs it confirmed leave, and so does
@@ -20191,6 +20550,9 @@ mod tests {
             base: 0,
             live: outs.into_iter().collect(),
             spent: HashMap::new(),
+            // (item 54) journal from height 0 up so tests can drive the undo
+            undo: VecDeque::new(),
+            undo_from: 0,
             locked: false,
             unlock_until: None,
             first_skip: None,
@@ -26438,6 +26800,9 @@ addnode=host:notaport
             base: 100,
             live: HashMap::new(),
             spent: HashMap::new(),
+            // (item 54) journal from height 0 up so tests can drive the undo
+            undo: VecDeque::new(),
+            undo_from: 0,
             locked: false,
             unlock_until: None,
             first_skip: None,
@@ -26523,6 +26888,374 @@ addnode=host:notaport
         wl2.apply_block(&block2, 102);
         assert_eq!(wl2.balance(), 0);
         assert!(wl2.candidates().0.is_empty());
+    }
+
+    // ---- (item 54) incremental un-apply of an abandoned branch ----
+
+    /// a block whose single tx pays `value` to `script` (the funding shape:
+    /// apply_block inserts the outputs, no spends)
+    fn fund_block(prev: Hash, time: u32, value: i64, script: Vec<u8>) -> Block {
+        Block {
+            version: 1,
+            prev_hash: prev,
+            merkle_root: [0u8; 32],
+            time,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![Tx {
+                version: 1,
+                time: time.saturating_sub(10),
+                vin: vec![tri7_core::legacy::Vin {
+                    prev_hash: tri7_core::legacy::sha256d(b"fund prev"),
+                    prev_n: 0,
+                    script_sig: vec![],
+                    sequence: u32::MAX,
+                }],
+                vout: vec![tri7_core::legacy::Vout { value, script_pubkey: script }],
+                locktime: 0,
+            }],
+            block_sig: Vec::new(),
+        }
+    }
+
+    /// the empty coinbase every stake block leads with (prev_n == u32::MAX)
+    fn coinbase_tx(time: u32) -> Tx {
+        Tx {
+            version: 1,
+            time,
+            vin: vec![tri7_core::legacy::Vin {
+                prev_hash: [0u8; 32],
+                prev_n: u32::MAX,
+                script_sig: vec![],
+                sequence: u32::MAX,
+            }],
+            vout: vec![tri7_core::legacy::Vout { value: 0, script_pubkey: vec![] }],
+            locktime: 0,
+        }
+    }
+
+    /// a stake block: coinbase + one tx spending `prev` and paying `value` to
+    /// `script` (the coinstake shape apply_block classifies as such)
+    fn stake_block(prev_hash: Hash, time: u32, prev: (Hash, u32), value: i64, script: Vec<u8>) -> Block {
+        Block {
+            version: 1,
+            prev_hash,
+            merkle_root: [0u8; 32],
+            time,
+            bits: 0x2000ffff,
+            nonce: 0,
+            vtx: vec![
+                coinbase_tx(time),
+                Tx {
+                    version: 1,
+                    time,
+                    vin: vec![tri7_core::legacy::Vin {
+                        prev_hash: prev.0,
+                        prev_n: prev.1,
+                        script_sig: vec![],
+                        sequence: u32::MAX,
+                    }],
+                    vout: vec![tri7_core::legacy::Vout { value, script_pubkey: script }],
+                    locktime: 0,
+                },
+            ],
+            block_sig: Vec::new(),
+        }
+    }
+
+    /// (item 54) THE COST THIS FIXES: our mint loses a fork, its block leaves
+    /// the chain, and the wallet live view must go back to EXACTLY the state
+    /// before it — the mint's outputs gone (phantom), the coinstake prevout
+    /// back with its ORIGINAL LiveOut row (lost), and no `spent` residue that
+    /// would keep the coin out of the balance merge.
+    #[test]
+    fn wallet_live_unapply_restores_the_coinstake_prevout_exactly() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[54u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        let before = wl.live.get(&(fund_hash, 0)).cloned().expect("funded coin live");
+        assert_eq!(wl.balance(), 3_000_000);
+
+        // our mint at 102 spends the funded coin and pays itself the reward
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_500, script.clone());
+        let mint_hash = mint.hash();
+        wl.apply_block(&mint, 102);
+        assert_eq!(wl.balance(), 3_000_500, "the mint's own output is live");
+        assert_eq!(wl.spent.get(&(fund_hash, 0)), Some(&102), "the prevout is marked spent");
+
+        // the fork adoption un-applies it
+        let s = wl.unwind_blocks(&[(102, mint_hash)]).expect("unwind");
+        assert_eq!(s.blocks, 1);
+        assert_eq!(wl.balance(), 3_000_000, "the mint's outputs are gone, the prevout is back");
+        assert!(wl.spent.is_empty(), "no spent residue for a coin that is unspent again");
+        let back = wl.live.get(&(fund_hash, 0)).expect("prevout restored");
+        // EVERY maturity-relevant field comes back from the journal, not from
+        // a re-derivation: created_epoch/height/tx_time/tx_offset/coinstake
+        assert_eq!(back.height, before.height);
+        assert_eq!(back.block_time, before.block_time);
+        assert_eq!(back.tx_time, before.tx_time);
+        assert_eq!(back.tx_offset, before.tx_offset);
+        assert_eq!(back.created_epoch, before.created_epoch);
+        assert_eq!(back.value, before.value);
+        assert_eq!(back.script, before.script);
+        assert_eq!(back.coinstake, before.coinstake);
+        assert_eq!(back.coinbase, before.coinbase);
+        // the view is a staking view again: the restored coin is a candidate
+        let (cands, _, _, _) = wl.candidates();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].txid, fund_hash);
+        // only the mint's record was popped: the fund block at h101 is
+        // still on the chain, so its record stays journalled
+        assert_eq!(wl.undo.len(), 1);
+        assert_eq!(wl.undo[0].height, 101);
+    }
+
+    /// (item 54) the journal is strictly LIFO: un-applying a lower height
+    /// while a higher recorded block is still applied is REFUSED, and the
+    /// refusal must leave the view untouched (no half-undone state).
+    #[test]
+    fn wallet_live_unapply_refuses_out_of_order_and_leaves_the_view_alone() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[55u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_500, script.clone());
+        wl.apply_block(&mint, 102);
+        let live_before = wl.live.clone();
+        let spent_before = wl.spent.clone();
+
+        let err = wl
+            .unwind_blocks(&[(101, fund.hash())])
+            .expect_err("h101 cannot be undone while h102 is still applied");
+        assert!(err.contains("out of order"), "got: {err}");
+        assert_eq!(wl.live.len(), live_before.len());
+        assert!(wl.live.get(&(fund_hash, 0)).is_none(), "still spent");
+        assert_eq!(wl.spent, spent_before);
+        assert_eq!(wl.undo.len(), 2, "no record was popped by the refused call");
+    }
+
+    /// (item 54) a coin created AND spent inside the abandoned branch: the
+    /// LIFO order restores it (so the outer record's undo can remove it
+    /// again) and the end state is the pre-branch one.
+    #[test]
+    fn wallet_live_unapply_handles_spends_inside_the_abandoned_branch() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[56u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        let b102 = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_500, script.clone());
+        let h102 = b102.hash();
+        wl.apply_block(&b102, 102);
+        let mint_hash = b102.vtx[1].hash();
+        let b103 = stake_block(h102, 1_700_000_300, (mint_hash, 0), 3_001_000, script.clone());
+        let h103 = b103.hash();
+        wl.apply_block(&b103, 103);
+        assert_eq!(wl.balance(), 3_001_000);
+
+        wl.unwind_blocks(&[(103, h103), (102, h102)]).expect("unwind both");
+        assert_eq!(wl.balance(), 3_000_000);
+        assert!(wl.spent.is_empty());
+        assert_eq!(wl.live.len(), 1);
+        assert!(wl.live.contains_key(&(fund_hash, 0)));
+        // the pre-branch fund record (h101) survives; h102 and h103 are gone
+        assert_eq!(wl.undo.len(), 1);
+        assert_eq!(wl.undo[0].height, 101);
+        // and the restored prevout is stakable again with its original row
+        let (cands, _, _, _) = wl.candidates();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].txid, fund_hash);
+    }
+
+    /// (item 54) FAIL TOWARD THE RESEED: no journal coverage = refusal, never
+    /// a guess. Two shapes: a height below the provable floor (records
+    /// evicted / predates the seed) and a journal invalidated by a reseed.
+    #[test]
+    fn wallet_live_unapply_refuses_without_journal_coverage() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[57u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        // (a) the floor sits above the abandoned height: nothing recorded
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        wl.undo_from = 500;
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        wl.apply_block(&fund, 101);
+        assert!(wl.undo.is_empty(), "below the floor nothing is journalled");
+        let err = wl.unwind_blocks(&[(101, fund.hash())]).expect_err("below the floor");
+        assert!(err.contains("below the undo floor"), "got: {err}");
+        assert_eq!(wl.balance(), 3_000_000, "the refused unwind changed nothing");
+
+        // (b) a reseed swapped the map in: the old journal is void
+        let mut wl2 = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let f2 = fund_block([2u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        wl2.apply_block(&f2, 101);
+        assert_eq!(wl2.undo.len(), 1);
+        wl2.reset_undo_after_reseed(150);
+        assert!(wl2.undo.is_empty());
+        let err = wl2.unwind_blocks(&[(101, f2.hash())]).expect_err("reseeded");
+        assert!(err.contains("below the undo floor"), "got: {err}");
+    }
+
+    /// (item 54) the snapshot class: `apply_block` also records a spend whose
+    /// coin was never in the live map (a coin the replay snapshot holds), so
+    /// the un-apply must DROP that `spent` entry — otherwise the merge would
+    /// keep hiding a coin the chain never spent.
+    #[test]
+    fn wallet_live_unapply_drops_a_spent_entry_for_a_coin_outside_the_map() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[58u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let outside: Hash = [7u8; 32];
+        let b = stake_block([1u8; 32], 1_700_000_200, (outside, 3), 3_000_500, script.clone());
+        let h = b.hash();
+        wl.apply_block(&b, 102);
+        assert_eq!(wl.spent.get(&(outside, 3)), Some(&102));
+        wl.unwind_blocks(&[(102, h)]).expect("unwind");
+        assert!(wl.spent.is_empty(), "the spend of a snapshot coin is undone");
+        assert!(!wl.live.contains_key(&(outside, 3)), "and the coin is NOT invented into the map");
+    }
+
+    /// (item 54) the fork-adoption entry point: it needs EVERY abandoned body
+    /// (a missing one makes the range unprovable -> refuse, view untouched),
+    /// and with them it restores the view. This is the helper both adopt arms
+    /// call.
+    #[test]
+    fn fork_adoption_unwind_needs_every_body_and_restores_the_view() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[59u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_500, script.clone());
+        // the live map is keyed by TXID: the mint's coin is the coinstake's output
+        let mint_txid = mint.vtx[1].hash();
+        wl.apply_block(&mint, 102);
+        assert!(wl.live.keys().any(|k| k.0 == mint_txid), "the mint is on the view before the unwind");
+        let wl_shared: SharedWalletLive = Arc::new(Mutex::new(Some(wl)));
+
+        // a missing body -> REFUSED, the phantom mint stays (STALE -> reseed)
+        unwind_wallet_live_after_rollback(&wl_shared, &[], 102, 102);
+        assert_eq!(wl_shared.lock().unwrap().as_ref().unwrap().balance(), 3_000_500);
+
+        // the real body -> the view is back to the pre-mint state
+        unwind_wallet_live_after_rollback(&wl_shared, &[(102, mint)], 102, 102);
+        let g = wl_shared.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        assert_eq!(w.balance(), 3_000_000);
+        assert!(w.spent.is_empty());
+        // the still-canonical fund record (h101) stays; only the mint is gone
+        assert_eq!(w.undo.len(), 1);
+        assert_eq!(w.undo[0].height, 101);
+        assert!(!w.live.keys().any(|k| k.0 == mint_txid), "the abandoned mint is off the view");
+    }
+
+    #[test]
+    fn unwind_refuses_a_row_that_moved_at_the_same_height() {
+        // The undo compares the WHOLE recorded row, not just outpoint+height:
+        // a row that differs in any field — even one still carrying the
+        // recorded height — is a moved view, and the unwind leaves everything
+        // as it found it (the STALE -> reseed fallback then repairs).
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[61u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        wl.apply_block(&fund, 101);
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund.vtx[0].hash(), 0), 3_000_500, script);
+        let mint_txid = mint.vtx[1].hash();
+        wl.apply_block(&mint, 102);
+        let mint_key = *wl.live.keys().find(|k| k.0 == mint_txid).expect("the mint is live");
+        assert_eq!(mint_key.1, 0);
+        // same height, different row: the value was changed in place
+        wl.live.get_mut(&mint_key).unwrap().value += 7;
+        let wl_shared: SharedWalletLive = Arc::new(Mutex::new(Some(wl)));
+        unwind_wallet_live_after_rollback(&wl_shared, &[(102, mint)], 102, 102);
+        let g = wl_shared.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        assert_eq!(w.balance(), 3_000_507, "the view is exactly as it was found");
+        assert_eq!(w.undo.len(), 2, "no record was popped");
+        assert!(w.live.contains_key(&mint_key));
+        assert_eq!(w.spent.get(&mint_key), None);
+        assert_eq!(w.spent.get(&(fund.vtx[0].hash(), 0)), Some(&102), "the spend entry stands");
+    }
+
+    #[test]
+    fn fork_adoption_unwind_across_peer_heights_and_several_own_mints() {
+        // An abandoned branch of four heights with OWN records at two of
+        // them and peer-only bodies at the other two; the second own mint
+        // stakes the first. The helper (the production fork-adoption path)
+        // must take the view back to exactly the pre-branch state.
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[67u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let other = tri7_core::spend::script_pubkey_p2pkh(&[9u8; 33]);
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([1u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        // h102 own mint (stakes the fund output)
+        let m1 = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_500, script.clone());
+        let m1_txid = m1.vtx[1].hash();
+        wl.apply_block(&m1, 102);
+        let m1_key = *wl.live.keys().find(|k| k.0 == m1_txid).expect("mint 1 is live");
+        // h103 peer body — never applied to this wallet's view
+        let peer_a = fund_block(m1.hash(), 1_700_000_300, 1_000, other.clone());
+        // h104 own mint (stakes the first mint)
+        let m2 = stake_block(peer_a.hash(), 1_700_000_400, m1_key, 3_001_000, script);
+        let m2_txid = m2.vtx[1].hash();
+        wl.apply_block(&m2, 104);
+        assert_eq!(wl.spent.get(&m1_key), Some(&104), "the second mint stakes the first");
+        // h105 peer body — never applied
+        let peer_b = fund_block(m2.hash(), 1_700_000_500, 1_000, other);
+        // the branch as it stands
+        assert_eq!(wl.balance(), 3_001_000);
+        assert_eq!(wl.spent.get(&(fund_hash, 0)), Some(&102));
+        assert_eq!(wl.spent.get(&m1_key), Some(&104));
+        assert_eq!(wl.undo.iter().map(|r| r.height).collect::<Vec<_>>(), vec![101, 102, 104]);
+        // the fork is adopted: h102..=h105 leave the chain
+        let wl_shared: SharedWalletLive = Arc::new(Mutex::new(Some(wl)));
+        unwind_wallet_live_after_rollback(
+            &wl_shared,
+            &[(102, m1), (103, peer_a), (104, m2), (105, peer_b)],
+            102,
+            105,
+        );
+        let g = wl_shared.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        assert_eq!(w.balance(), 3_000_000, "back to the pre-branch balance");
+        assert!(w.spent.is_empty(), "both spend entries are gone");
+        assert_eq!(w.undo.len(), 1, "only the still-canonical fund record remains");
+        assert_eq!(w.undo[0].height, 101);
+        assert!(!w.live.keys().any(|k| k.0 == m1_txid));
+        assert!(!w.live.keys().any(|k| k.0 == m2_txid));
+        assert_eq!(w.live.get(&(fund_hash, 0)).map(|o| o.value), Some(3_000_000));
+        // and the fund coin is stakable again (the candidates the staker sees)
+        let (cands, _, _, _) = w.candidates();
+        assert!(
+            cands.iter().any(|c| c.txid == fund_hash),
+            "the fund output is back among the stake candidates"
+        );
     }
 
     #[test]
@@ -28672,6 +29405,9 @@ addnode=host:notaport
             base: 100,
             live: HashMap::new(),
             spent: HashMap::new(),
+            // (item 54) journal from height 0 up so tests can drive the undo
+            undo: VecDeque::new(),
+            undo_from: 0,
             locked: false,
             unlock_until: None,
             first_skip: None,
