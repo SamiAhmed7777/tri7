@@ -1,0 +1,15 @@
+# ev: MUTATION no_drop
+# clean sha256(addrindex.rs)=397411ad6c3fe746d9ec73fec5d9cf30b5d8ab91a91d58b782b9d9a70a26bcb1
+# intended change in src/addrindex.rs: [drops.push((r.rowid, r.height, r.spent));] -> [// MUTANT: drops.push((r.rowid, r.height, r.spent));]
+# mutant sha256(addrindex.rs)=84e4d2f0c249a3e8257030144353fb866aa4fc1da0575777c0b3fee6768d7ff6
+# command: cargo test --lib deep_repair_drops
+test addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window ... FAILED
+failures:
+---- addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window stdout ----
+thread 'addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window' (3554979) panicked at src/addrindex.rs:2305:9:
+assertion `left == right` failed
+  left: DeepReport { from: 1, to: 13, applied: true, addresses: 1, rows_before: 18, rows_after: 14, unspent_before: (15, 11040), unspent_after: (16, 12040), phantom_outputs: 4, phantom_value: 2020, reheighted: 0, values_fixed: 0, markings_cleared: 1, markings_moved: 1, markings_set: 0, restored_value: 1000, missing_outputs: 0, missing_value: 0, history_removed: 2, history_moved: 0, history_added: 0, left_alone: 0, raced: 0 }
+ right: DeepReport { from: 1, to: 13, applied: true, addresses: 1, rows_before: 18, rows_after: 14, unspent_before: (15, 11040), unspent_after: (12, 10020), phantom_outputs: 4, phantom_value: 2020, reheighted: 0, values_fixed: 0, markings_cleared: 1, markings_moved: 1, markings_set: 0, restored_value: 1000, missing_outputs: 0, missing_value: 0, history_removed: 2, history_moved: 0, history_added: 0, left_alone: 0, raced: 0 }
+failures:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 965 filtered out; finished in 0.22s
+# EXIT-STATUS: 101 (non-zero = the suite KILLED the mutant)

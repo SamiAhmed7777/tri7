@@ -1,0 +1,12 @@
+# ev: GLM stand-in judge, code round 2 (Codex quota-walled; --reason quota)
+# bundle id: item53-deep-wallet-repair-code-r2   diff sha256 (judged): f3a8e3c4eef81c5a52bacaeb83e8fa67516606a6254b6ed11f9c756ea7ada4ef
+GRADE=A urn=urn:ump:2dbhvyslrfq7ffawmixnvcz23ldydy4ebu7peuf6z3lzqgdokxva
+{
+  "blocking": [],
+  "polish": [
+    "INSERT OR IGNORE counting changed==0 as raced mislabels a benign duplicate insert as a race; consider distinguishing",
+    "History deletes are unconditional by rowid; a height-conditional DELETE would match the out-row discipline at trivial cost",
+    "left_alone can double-count a row whose marking is above the walk and whose height is also edited (documented, but a distinct counter would read cleaner)",
+    "Consider a guard or warning for a walk whose from..to span is very large (first live run is the scale probe)"
+  ]
+}

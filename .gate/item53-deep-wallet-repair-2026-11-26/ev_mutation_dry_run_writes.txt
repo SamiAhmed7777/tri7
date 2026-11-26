@@ -1,0 +1,15 @@
+# ev: MUTATION dry_run_writes
+# clean sha256(addrindex.rs)=397411ad6c3fe746d9ec73fec5d9cf30b5d8ab91a91d58b782b9d9a70a26bcb1
+# intended change in src/addrindex.rs: [if !apply {] -> [if false && !apply { // MUTANT]
+# mutant sha256(addrindex.rs)=783d7e259e2c555a7c3038fe1b8383f9a13b865d3779533e7c4c66511123b06a
+# command: cargo test --lib drops_a_forks
+test addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window ... FAILED
+failures:
+---- addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window stdout ----
+thread 'addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window' (3556005) panicked at src/addrindex.rs:2302:9:
+assertion `left == right` failed: a dry run writes nothing
+  left: (12, 10020)
+ right: (15, 11040)
+failures:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 965 filtered out; finished in 0.03s
+# EXIT-STATUS: 101 (non-zero = the suite KILLED the mutant)

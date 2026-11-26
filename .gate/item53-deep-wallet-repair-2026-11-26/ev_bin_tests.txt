@@ -1,0 +1,9 @@
+# ev: addrindex_build binary tests (test profile)
+# command: cargo test --bin addrindex_build
+test tests::deep_flags_parse_strictly ... ok
+test testsupport::tests::drop_removes_the_directory ... ok
+test tests::quarantine_removes_the_db_so_consumers_see_no_index ... ok
+test testsupport::tests::adopt_covers_files ... ok
+test testsupport::tests::same_tag_never_aliases ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+# EXIT-STATUS: 0

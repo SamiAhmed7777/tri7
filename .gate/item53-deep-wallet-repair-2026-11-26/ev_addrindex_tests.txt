@@ -1,0 +1,24 @@
+# ev: the addrindex:: tests of the full lib suite (filter of ev_lib_tests_full.txt)
+# command: cargo test --lib   (full suite; this file lists only the addrindex:: lines)
+# HEAD: 815b467270bb68f6e1c75310bfb5718418abb869  diff sha256: f3a8e3c4eef81c5a52bacaeb83e8fa67516606a6254b6ed11f9c756ea7ada4ef
+# started: 2026-11-26T15:57:21Z   finished: 2026-11-26T16:00:26Z
+test addrindex::tests::a_half_recorded_index_is_audited_below_its_first_recorded_block ... ok
+test addrindex::tests::a_row_above_its_block_below_the_walks_start_is_moved_not_judged ... ok
+test addrindex::tests::a_row_above_the_walk_is_left_alone ... ok
+test addrindex::tests::a_transaction_re_mined_on_the_winning_branch_keeps_its_output ... ok
+test addrindex::tests::a_walk_asked_to_start_above_its_end_is_refused ... ok
+test addrindex::tests::a_walk_that_starts_late_leaves_the_coins_it_cannot_judge ... ok
+test addrindex::tests::authority_with_lag_serves_a_bounded_lag_on_the_same_chain ... ok
+test addrindex::tests::deep_repair_drops_a_forks_losing_branch_from_below_the_window ... ok
+test addrindex::tests::deep_repair_writes_nothing_when_the_chain_moved_under_the_walk ... ok
+test addrindex::tests::deep_repair_writes_what_the_index_never_held ... ok
+test addrindex::tests::eof_stamp_keeps_the_previous_pair_when_nothing_was_accepted ... ok
+test addrindex::tests::eof_stamp_pairs_the_last_accepted_block_with_its_own_height ... ok
+test addrindex::tests::eof_stamp_prefers_the_accepted_tail_over_the_last_slice ... ok
+test addrindex::tests::eof_stamp_written_to_the_db_passes_the_lag_aware_verdict ... ok
+test addrindex::tests::insert_spend_and_query ... ok
+test addrindex::tests::orphaned_mint_beneath_a_canonical_tip_is_removed_from_a_legacy_index ... ok
+test addrindex::tests::orphaned_mint_beneath_a_canonical_tip_is_removed_from_a_recorded_index ... ok
+test addrindex::tests::the_daemon_never_writes_above_an_orphan_or_twice_at_one_height ... ok
+test result: ok. 965 passed; 0 failed
+# EXIT-STATUS: 0

@@ -1,0 +1,12 @@
+# ev: MUTATION no_intact_check
+# clean sha256(addrindex.rs)=397411ad6c3fe746d9ec73fec5d9cf30b5d8ab91a91d58b782b9d9a70a26bcb1
+# intended change in src/addrindex.rs: [if !intact() {] -> [if false && !intact() { // MUTANT]
+# mutant sha256(addrindex.rs)=af8ff00293b0060e2166489ffc14d8dde5eda4324ff293efddcbf03e49996da3
+# command: cargo test --lib deep_repair_writes_nothing
+test addrindex::tests::deep_repair_writes_nothing_when_the_chain_moved_under_the_walk ... FAILED
+failures:
+---- addrindex::tests::deep_repair_writes_nothing_when_the_chain_moved_under_the_walk stdout ----
+thread 'addrindex::tests::deep_repair_writes_nothing_when_the_chain_moved_under_the_walk' (3555484) panicked at src/addrindex.rs:2387:14:
+failures:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 965 filtered out; finished in 0.06s
+# EXIT-STATUS: 101 (non-zero = the suite KILLED the mutant)

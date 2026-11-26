@@ -1,0 +1,15 @@
+# ev: MUTATION no_above_guard
+# clean sha256(addrindex.rs)=397411ad6c3fe746d9ec73fec5d9cf30b5d8ab91a91d58b782b9d9a70a26bcb1
+# intended change in src/addrindex.rs: [if r.height > to as i64 {] -> [if false && r.height > to as i64 { // MUTANT]
+# mutant sha256(addrindex.rs)=1d4fd60f8c85db77159d5d3b7a325aa8acc6df8f7c7d07460a185cf5fb65d465
+# command: cargo test --lib a_row_above_the_walk
+test addrindex::tests::a_row_above_the_walk_is_left_alone ... FAILED
+failures:
+---- addrindex::tests::a_row_above_the_walk_is_left_alone stdout ----
+thread 'addrindex::tests::a_row_above_the_walk_is_left_alone' (3556516) panicked at src/addrindex.rs:2427:9:
+assertion `left == right` failed: the coin and its history row
+  left: 1
+ right: 2
+failures:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 965 filtered out; finished in 2.64s
+# EXIT-STATUS: 101 (non-zero = the suite KILLED the mutant)

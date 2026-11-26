@@ -11,6 +11,16 @@
 //!
 //! Usage:
 //!   addrindex_build <block_store.dat> <state_dir> [--full]
+//!   addrindex_build <block_store.dat> <state_dir> --deep-wallet-repair[=dry|apply]
+//!                [--deep-from <height>] [--deep-wallet <wallet file>]
+//!
+//! The deep wallet-row repair (item 53) is what the run above cannot do: it
+//! walks the CANONICAL chain from the wallet's oldest row — by height through
+//! the store's own chain map, never file order — and rebuilds that wallet's
+//! rows only. Bare `--deep-wallet-repair` is the dry run: the walk and the
+//! plan, nothing written. `=apply` writes it, in ONE transaction, after
+//! asking the tipstate oracle whether the chain is still the one it walked.
+//! The `--deep` arguments are parsed strictly: a mistyped one stops the run.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -44,12 +54,20 @@ fn block_txs(block: &Block) -> addrindex::BlockTxs {
 /// The canonical chain as this run sees it: the tipstate window (read once,
 /// at start — the same authority that gives the walk its heights) and the
 /// store it just threaded. Read-only.
+///
+/// Below the window the store's own height map answers. It is frozen at
+/// build time and only the frames the threading chained — prev_hash to
+/// prev_hash, down from the oracle — occupy a height. Item 53's deep
+/// repair walks those heights; the window repair (item 52) never asks
+/// below its base.
 struct ChainView<'a> {
     base: u64,
     tip: u64,
     /// internal-order hashes: hashes[h - base]
     hashes: Vec<[u8; 32]>,
     store: &'a BlockStore,
+    /// the last block `block` served, (height, hash)
+    last: std::cell::RefCell<Option<(u64, [u8; 32])>>,
 }
 
 impl addrindex::CanonicalChain for ChainView<'_> {
@@ -60,14 +78,38 @@ impl addrindex::CanonicalChain for ChainView<'_> {
         self.tip
     }
     fn hash_at(&self, height: u64) -> Option<[u8; 32]> {
-        self.hashes
-            .get(height.checked_sub(self.base)? as usize)
-            .copied()
+        if height > self.tip {
+            return None;
+        }
+        if height >= self.base {
+            if let Some(h) = self.hashes.get((height - self.base) as usize) {
+                return Some(*h);
+            }
+        }
+        self.store.canonical_hash_at_height(height)
     }
     fn block(&self, height: u64) -> Option<addrindex::BlockTxs> {
         let hash = self.hash_at(height)?;
         match self.store.block_by_hash(&hash) {
-            Ok(Some(hit)) => Some(block_txs(&hit.block)),
+            Ok(Some(hit)) => {
+                // a chain walk, not a lookup: where heights follow one
+                // another, each block must name the one before it
+                let broken = match &*self.last.borrow() {
+                    Some((prev_h, prev_hash)) if *prev_h + 1 == height => {
+                        hit.block.prev_hash != *prev_hash
+                    }
+                    _ => false,
+                };
+                *self.last.borrow_mut() = Some((height, hash));
+                if broken {
+                    eprintln!(
+                        "canonical h{height} does not name the block at h{} — the height map is not a chain here",
+                        height - 1
+                    );
+                    return None;
+                }
+                Some(block_txs(&hit.block))
+            }
             _ => None,
         }
     }
@@ -163,6 +205,118 @@ mod tests {
         // fail-closed final check (nothing non-empty survives) is the tested
         // guarantee.
     }
+
+    /// Every `--deep` argument is either known or the run stops: a mistyped
+    /// flag must not turn what was meant as a dry run into something else.
+    #[test]
+    fn deep_flags_parse_strictly() {
+        let p = |s: &[&str]| {
+            parse_deep_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+        };
+        let dry = (DeepArgs { on: true, apply: false, from: 0 }, None);
+        assert_eq!(p(&["--deep-wallet-repair"]).unwrap(), dry);
+        assert_eq!(p(&["--deep-wallet-repair=dry"]).unwrap(), dry);
+        assert_eq!(p(&[]).unwrap(), (DeepArgs::default(), None));
+        assert_eq!(
+            p(&["--deep-wallet-repair=apply", "--deep-from", "12", "--deep-wallet", "w.dat"])
+                .unwrap(),
+            (
+                DeepArgs {
+                    on: true,
+                    apply: true,
+                    from: 12
+                },
+                Some("w.dat".to_string())
+            )
+        );
+        // an argument that is not a --deep one is not this parser's to judge
+        assert!(!p(&["--full"]).unwrap().0.on);
+        for bad in [
+            vec!["--deep-wallet-repair=dry-run"],
+            vec!["--deep-wallet-repaire"],
+            vec!["--deep-from", "5"],
+            vec!["--deep-wallet", "w.dat"],
+            vec!["--deep-wallet-repair", "--deep-from"],
+            vec!["--deep-wallet-repair", "--deep-from", "abc"],
+            vec!["--deep-wallet-repair", "--deep-wallet", "--deep-from"],
+        ] {
+            assert!(p(&bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+}
+
+/// The tipstate oracle as it stands on disk right now: (height, display
+/// hash), ascending. Read once for the window and again by the deep repair
+/// right before it writes — a reorg that lands under the walk is seen then,
+/// not applied over.
+fn tipstate_entries(state_dir: &std::path::Path) -> Vec<(u64, String)> {
+    let mut v: Vec<(u64, String)> = Vec::new();
+    if let Ok(raw) = std::fs::read_to_string(state_dir.join("tipstate.json")) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(entries) = val.get("entries").and_then(|e| e.as_array()) {
+                for e in entries {
+                    if let (Some(h), Some(hash)) = (
+                        e.get("height").and_then(|x| x.as_u64()),
+                        e.get("hash").and_then(|x| x.as_str()),
+                    ) {
+                        v.push((h, hash.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    v.sort_by_key(|(h, _)| *h);
+    v.dedup_by_key(|(h, _)| *h);
+    v
+}
+
+/// The deep-repair command line: everything after the two paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeepArgs {
+    /// `--deep-wallet-repair` was given
+    on: bool,
+    /// `=apply` was given (false: the dry run, and nothing can write without it)
+    apply: bool,
+    /// `--deep-from` (0: the wallet's oldest row)
+    from: u64,
+}
+
+/// Parse the deep-repair arguments strictly: an argument that starts with
+/// `--deep` is either one this knows or the run stops. A mistyped flag must
+/// not turn what was meant as a dry run into something else. Returns the
+/// flags and the `--deep-wallet` path, if any.
+fn parse_deep_args(args: &[String]) -> Result<(DeepArgs, Option<String>), String> {
+    let mut d = DeepArgs::default();
+    let mut wallet: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--deep-wallet-repair" || a == "--deep-wallet-repair=dry" {
+            d.on = true;
+        } else if a == "--deep-wallet-repair=apply" {
+            d.on = true;
+            d.apply = true;
+        } else if a == "--deep-from" || a == "--deep-wallet" {
+            let Some(value) = args.get(i + 1).filter(|v| !v.starts_with("--")) else {
+                return Err(format!("{a} needs a value"));
+            };
+            if a == "--deep-from" {
+                d.from = value
+                    .parse()
+                    .map_err(|_| format!("--deep-from wants a height, got {value}"))?;
+            } else {
+                wallet = Some(value.clone());
+            }
+            i += 1;
+        } else if a.starts_with("--deep") {
+            return Err(format!("unknown argument {a}"));
+        }
+        i += 1;
+    }
+    if !d.on && (d.from != 0 || wallet.is_some()) {
+        return Err("--deep-from and --deep-wallet go with --deep-wallet-repair".into());
+    }
+    Ok((d, wallet))
 }
 
 fn main() {
@@ -174,6 +328,22 @@ fn main() {
     let store_path = PathBuf::from(&args[1]);
     let state_dir = PathBuf::from(&args[2]);
     let full = args.iter().any(|a| a == "--full");
+    // Item 53's deep wallet-row repair, for the heights the verify below
+    // cannot reach. Bare `--deep-wallet-repair` is the dry run: the walk
+    // and the plan, nothing written; `=apply` writes it.
+    let (deep, deep_apply, deep_from, deep_wallet) = match parse_deep_args(&args[3..]) {
+        Ok((d, wallet)) => (d.on, d.apply, d.from, wallet),
+        Err(e) => {
+            eprintln!("usage: {e}");
+            std::process::exit(2);
+        }
+    };
+    if deep && full {
+        eprintln!(
+            "refusing: --full removes the index the deep repair reads — build it first, repair it after"
+        );
+        std::process::exit(2);
+    }
 
     if full {
         for suffix in ["", "-wal", "-shm"] {
@@ -198,26 +368,9 @@ fn main() {
     // for a full hour each while the SAME file threaded to the tip
     // oracle-first (store_gapfix passes the oracle; hash-first authority
     // skips stale frames by hash). Refuse rather than stall.
-    let expected: Vec<(u64, String)> = {
-        let mut v: Vec<(u64, String)> = Vec::new();
-        if let Ok(raw) = std::fs::read_to_string(state_dir.join("tipstate.json")) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(entries) = val.get("entries").and_then(|e| e.as_array()) {
-                    for e in entries {
-                        if let (Some(h), Some(hash)) = (
-                            e.get("height").and_then(|x| x.as_u64()),
-                            e.get("hash").and_then(|x| x.as_str()),
-                        ) {
-                            v.push((h, hash.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-        v.sort_by_key(|(h, _)| *h);
-        v.dedup_by_key(|(h, _)| *h);
-        v
-    };
+    // Read from disk, not remembered: the deep repair reads it a second
+    // time right before it writes.
+    let expected: Vec<(u64, String)> = tipstate_entries(&state_dir);
     let oracle: std::collections::HashMap<String, u64> =
         expected.iter().map(|(h, s)| (s.clone(), *h)).collect();
     println!("tipstate oracle: {} hashes", oracle.len());
@@ -324,7 +477,125 @@ fn main() {
         tip: chain_tip,
         hashes: window_hashes,
         store: &store,
+        last: std::cell::RefCell::new(None),
     };
+    // Item 53: the wallet's rows BELOW that window. The file-order catch-up
+    // gave a fork's losing branch its rows there and nothing ever checked
+    // them (DNS2, 2026-11-26: 218 of 391 listed rows were outputs of
+    // orphaned blocks). Walk the canonical chain from the wallet's oldest
+    // row and put those rows right — a dry run unless `=apply` was given.
+    // The daemon writes this index while it runs, so every write is
+    // conditional on the row still being what the snapshot saw.
+    if deep {
+        let wallet = match deep_wallet {
+            Some(p) => PathBuf::from(p),
+            None => state_dir.join("wallet.dat"),
+        };
+        // the wallet's own addresses; the key material is never read here
+        let addrs: Vec<String> = match tri7_core::wallet::read_wallet(&wallet) {
+            Ok(w) => w.keys.iter().map(|k| k.address.clone()).collect(),
+            Err(e) => {
+                eprintln!(
+                    "FAIL: deep wallet repair cannot read {} ({e}) — nothing written",
+                    wallet.display()
+                );
+                std::process::exit(2);
+            }
+        };
+        if addrs.is_empty() {
+            eprintln!(
+                "FAIL: {} holds no key addresses — nothing to scope, nothing written",
+                wallet.display()
+            );
+            std::process::exit(2);
+        }
+        let started = std::time::Instant::now();
+        // the chain must still be the one that was walked, right before the write
+        let intact = || {
+            let now: std::collections::HashMap<u64, String> =
+                tipstate_entries(&state_dir).into_iter().collect();
+            expected
+                .iter()
+                .all(|(h, hex)| now.get(h) == Some(hex))
+        };
+        let report = match addrindex::deep_wallet_repair(
+            &mut conn,
+            &view,
+            &addrs,
+            deep_from,
+            deep_apply,
+            &intact,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("FAIL: deep wallet repair: {e}");
+                std::process::exit(3);
+            }
+        };
+        let tri = |v: i64| {
+            format!("{}.{:06}", v / 1_000_000, v.rem_euclid(1_000_000))
+        };
+        println!(
+            "deep wallet repair {} — {} address(es), walked h{}..h{} in {:.1}s",
+            if report.applied {
+                "APPLIED"
+            } else {
+                "DRY RUN (nothing written)"
+            },
+            report.addresses,
+            report.from,
+            report.to,
+            started.elapsed().as_secs_f64()
+        );
+        println!(
+            "  output rows: {} before, {} after",
+            report.rows_before, report.rows_after
+        );
+        println!(
+            "  spendable before: {} rows, {} TRI",
+            report.unspent_before.0,
+            tri(report.unspent_before.1)
+        );
+        println!(
+            "  rows whose block is not canonical: {} removed, {} TRI",
+            report.phantom_outputs,
+            tri(report.phantom_value)
+        );
+        println!(
+            "  spend markings: {} cleared ({} TRI back to spendable), {} moved to the canonical spend, {} written",
+            report.markings_cleared,
+            tri(report.restored_value),
+            report.markings_moved,
+            report.markings_set
+        );
+        println!(
+            "  rows re-heighted: {}, values corrected: {}",
+            report.reheighted, report.values_fixed
+        );
+        println!(
+            "  canonical outputs the index never held: {} written, {} TRI",
+            report.missing_outputs,
+            tri(report.missing_value)
+        );
+        println!(
+            "  history rows: {} removed, {} moved, {} written",
+            report.history_removed, report.history_moved, report.history_added
+        );
+        println!(
+            "  left alone (not this walk's to judge): {}; raced (changed under the write): {}",
+            report.left_alone, report.raced
+        );
+        println!(
+            "  spendable after ({}): {} rows, {} TRI",
+            if report.applied {
+                "measured"
+            } else {
+                "projected"
+            },
+            report.unspent_after.0,
+            tri(report.unspent_after.1)
+        );
+    }
     let verify = match addrindex::verify_and_repair(&mut conn, &view) {
         Ok(r) => r,
         Err(e) => {

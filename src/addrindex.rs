@@ -580,6 +580,579 @@ fn reconcile(
     tx.commit().map_err(|e| format!("repair commit: {e}"))
 }
 
+/// What one deep repair of a wallet's rows found and did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeepReport {
+    /// first height walked
+    pub from: u64,
+    /// last height walked
+    pub to: u64,
+    /// the plan was written (false: a dry run — nothing was written)
+    pub applied: bool,
+    /// addresses in scope
+    pub addresses: u64,
+    /// output rows the scope held before, and holds after
+    pub rows_before: u64,
+    pub rows_after: u64,
+    /// the scope's spendable set before: (rows, sats)
+    pub unspent_before: (u64, i64),
+    /// ... and after: measured when applied, projected on a dry run
+    pub unspent_after: (u64, i64),
+    /// rows whose transaction is on no canonical block: removed
+    pub phantom_outputs: u64,
+    /// their value
+    pub phantom_value: i64,
+    /// rows standing at a height that is not their block's: moved
+    pub reheighted: u64,
+    /// rows whose value is not their output's: corrected
+    pub values_fixed: u64,
+    /// a spend marking of a block that is not canonical: removed — the
+    /// coin is spendable again
+    pub markings_cleared: u64,
+    /// ... or set to the canonical spend
+    pub markings_moved: u64,
+    /// a canonical spend the index had not marked: written
+    pub markings_set: u64,
+    /// value returned to the spendable set by the cleared markings
+    pub restored_value: i64,
+    /// canonical outputs of the scope the index did not hold: written
+    pub missing_outputs: u64,
+    /// their value
+    pub missing_value: i64,
+    /// history rows (getaddresstxids) of transactions that are not
+    /// canonical: removed
+    pub history_removed: u64,
+    /// history rows standing at a height that is not their transaction's:
+    /// moved
+    pub history_moved: u64,
+    /// history rows the index did not hold: written
+    pub history_added: u64,
+    /// rows, or a row's spend marking, the walk cannot judge: left as they
+    /// stood. A marking the walk did not see is never rewritten (though a
+    /// height the walk does know is still corrected — that row counts as
+    /// moved, not here).
+    pub left_alone: u64,
+    /// rows that changed after the snapshot: never overwritten
+    pub raced: u64,
+}
+
+/// Bring one wallet's rows in line with the canonical chain over heights
+/// `verify_and_repair` never reaches — below the vouchable window.
+///
+/// Item 52's repair proves the window the tipstate vouches for. Nothing
+/// beneath it was ever checked: an index built before that fix walked the
+/// store in FILE order and gave every frame that had a height its rows —
+/// the losing branch of a fork included. On DNS2 (2026-11-26) 218 of the
+/// wallet's 391 listed rows / 3581.96 TRI were outputs of orphaned blocks,
+/// and 204 real coins those orphans had "spent" were missing from the list.
+///
+/// So this walks the chain the index is judged against — by height, each
+/// block the chain's own — from `from` to the index's coverage, and keeps
+/// for the addresses in `addrs` only what that walk shows:
+///   * an output row stands only where a canonical block created it: a row
+///     whose transaction is on no canonical block is removed, one standing
+///     at another height is moved;
+///   * a coin is spent only where a canonical block spends it: a marking of
+///     a block that is not canonical is removed (or set to the real spend),
+///     and a canonical spend the index never marked is written;
+///   * a canonical output the index never held is written;
+///   * history rows (getaddresstxids) name canonical transactions only.
+/// Nothing else in the index — other addresses, `blk`, `meta` — is touched.
+///
+/// A row the walk cannot judge is left alone and counted: one created
+/// below `from`, or marked by a block above the walk (the live chain's,
+/// not this snapshot's). `from` 0 starts at the wallet's oldest row, which
+/// is why that default leaves only the second class. `apply` false is the
+/// dry run: the same walk and the same plan, and not one byte written.
+/// `intact` is asked once, right before the write: the chain must still be
+/// the one that was walked.
+pub fn deep_wallet_repair(
+    c: &mut Connection,
+    chain: &dyn CanonicalChain,
+    addrs: &[String],
+    from: u64,
+    apply: bool,
+    intact: &dyn Fn() -> bool,
+) -> Result<DeepReport, String> {
+    use std::collections::{HashMap, HashSet};
+    let mut scope_addrs: Vec<&str> = addrs.iter().map(String::as_str).collect();
+    scope_addrs.sort_unstable();
+    scope_addrs.dedup();
+    let scope: HashSet<&str> = scope_addrs.iter().copied().collect();
+    let mut rep = DeepReport {
+        from,
+        applied: apply,
+        addresses: scope.len() as u64,
+        ..DeepReport::default()
+    };
+    let to = index_height(c).min(chain.tip());
+    rep.to = to;
+    // The scope's rows as they stand, from ONE read snapshot. Read
+    // transactions only, in either mode: the dry run leaves no trace.
+    c.execute_batch("BEGIN").map_err(|e| format!("deep repair begin: {e}"))?;
+    let got = scope_rows(c, &scope_addrs);
+    let ended = c.execute_batch("ROLLBACK").map_err(|e| format!("deep repair end read: {e}"));
+    let (rows, hist_rows) = got?;
+    ended?;
+    // `from` 0: the wallet's oldest row is where its coins begin — nothing
+    // below it can be one of theirs
+    let asked_for = from != 0;
+    let from = if from == 0 {
+        rows
+            .iter()
+            .map(|r| r.height)
+            .chain(hist_rows.iter().map(|h| h.height))
+            .filter(|h| *h > 0)
+            .min()
+            .map(|h| h as u64)
+            .unwrap_or(1)
+    } else {
+        from
+    };
+    rep.from = from;
+    if rows.is_empty() && hist_rows.is_empty() {
+        // nothing of this wallet's in the index: the ordinary build writes
+        // it, not this repair — and there is nothing to walk for
+        return Ok(rep);
+    }
+    if from > to {
+        if asked_for {
+            return Err(format!(
+                "the walk would start at h{from}, above where it ends (h{to}) — nothing written"
+            ));
+        }
+        // the wallet's oldest row stands above the index's coverage: nothing
+        // of it lies where this repair walks
+        return Ok(rep);
+    }
+    rep.rows_before = rows.len() as u64;
+    for r in &rows {
+        count_unspent(&mut rep.unspent_before, r.spent, r.value);
+    }
+    // The walk.
+    // outpoint -> the scope addresses whose coin it is
+    let mut owners: HashMap<(Vec<u8>, u32), Vec<String>> = HashMap::new();
+    for r in &rows {
+        let who = owners.entry((r.txid.clone(), r.n as u32)).or_default();
+        if !who.contains(&r.addr) {
+            who.push(r.addr.clone());
+        }
+    }
+    // canonical outputs of the scope: (height, value, address, script)
+    let mut created: HashMap<(Vec<u8>, u32), (u64, i64, String, Vec<u8>)> = HashMap::new();
+    // the lowest canonical height that spends a coin of the scope
+    let mut spent_at: HashMap<(Vec<u8>, u32), u64> = HashMap::new();
+    // (txid, address) -> the lowest canonical height of a transaction that
+    // pays the address or spends its coin — what `insert_block` records
+    let mut history: HashMap<(Vec<u8>, String), u64> = HashMap::new();
+    for h in from..=to {
+        let Some(txs) = chain.block(h) else {
+            return Err(format!(
+                "the canonical block h{h} cannot be read — not repairing an index against a chain it cannot see"
+            ));
+        };
+        for (txid, outs, ins) in &txs {
+            for (n, value, script) in outs {
+                let Some(dest) = crate::address::script_to_dest(script) else {
+                    continue; // OP_RETURN / non-standard: not addressable
+                };
+                let addr = crate::address::payload_to_address(&dest.payload());
+                if !scope.contains(addr.as_str()) {
+                    continue;
+                }
+                let key = (txid.clone(), *n);
+                created
+                    .entry(key.clone())
+                    .or_insert((h, *value, addr.clone(), script.clone()));
+                let who = owners.entry(key).or_default();
+                if !who.contains(&addr) {
+                    who.push(addr.clone());
+                }
+                history.entry((txid.clone(), addr)).or_insert(h);
+            }
+            for (prev, n) in ins {
+                let key = (prev.clone(), *n);
+                let Some(who) = owners.get(&key) else {
+                    continue;
+                };
+                spent_at.entry(key).or_insert(h);
+                for a in who {
+                    history.entry((txid.clone(), a.clone())).or_insert(h);
+                }
+            }
+        }
+    }
+    // The plan.
+    struct Edit {
+        rowid: i64,
+        old_height: i64,
+        old_value: i64,
+        old_spent: Option<i64>,
+        height: u64,
+        value: i64,
+        spent: Option<i64>,
+    }
+    let mut edits: Vec<Edit> = Vec::new();
+    // (rowid, the height and the marking the snapshot saw)
+    let mut drops: Vec<(i64, i64, Option<i64>)> = Vec::new();
+    let mut adds: Vec<(String, Vec<u8>, i64, i64, u64, Vec<u8>, Option<i64>)> = Vec::new();
+    // every row as the plan leaves it: (marking, value)
+    let mut final_rows: Vec<(Option<i64>, i64)> = Vec::new();
+    let mut rows_after = rows.len() as u64;
+    let have: HashSet<(String, Vec<u8>, i64)> = rows
+        .iter()
+        .map(|r| (r.addr.clone(), r.txid.clone(), r.n))
+        .collect();
+    for r in &rows {
+        let key = (r.txid.clone(), r.n as u32);
+        let (mut height, mut value, mut spent) = (r.height as u64, r.value, r.spent);
+        // what the walk says the marking is: Some(Some(h)) spent there,
+        // Some(None) unspent, None not for this walk to judge
+        let want: Option<Option<u64>>;
+        // A row above the walk is the live chain's, not this snapshot's.
+        // The newest blocks reach the index before the store threads them,
+        // and "no canonical block" — the store's answer for a frame it has
+        // not threaded — must never be read as "orphan" for such a row.
+        if r.height > to as i64 {
+            rep.left_alone += 1;
+            final_rows.push((spent, value));
+            continue;
+        }
+        match created.get(&key) {
+            // created on the walk: its whole life is seen
+            Some((ch, cvalue, _, _)) => {
+                if *ch != height {
+                    rep.reheighted += 1;
+                    height = *ch;
+                }
+                if *cvalue != value {
+                    rep.values_fixed += 1;
+                    value = *cvalue;
+                }
+                want = Some(spent_at.get(&key).copied());
+            }
+            // created below the walk's start: the row says so itself
+            None if r.height < from as i64 => {
+                rep.left_alone += 1;
+                final_rows.push((spent, value));
+                continue;
+            }
+            None => {
+                let id: [u8; 32] = r.txid[..]
+                    .try_into()
+                    .map_err(|_| "a txid is 32 bytes".to_string())?;
+                match chain.tx_height(&id)? {
+                    // on the walk, yet not an output of this address there
+                    Some(ch) if ch >= from => {
+                        rep.left_alone += 1;
+                        final_rows.push((spent, value));
+                        continue;
+                    }
+                    // canonical, but below the walk's start — the row stood
+                    // above it, so its height is wrong at least
+                    Some(ch) => {
+                        // the height is the transaction's own to set
+                        let moved = ch != height;
+                        if moved {
+                            rep.reheighted += 1;
+                            height = ch;
+                        }
+                        // only a spend the walk saw can be judged; a row
+                        // counted as moved is not counted again as left alone
+                        match spent_at.get(&key) {
+                            Some(s) => want = Some(Some(*s)),
+                            None => {
+                                if !moved {
+                                    rep.left_alone += 1;
+                                }
+                                want = None;
+                            }
+                        }
+                    }
+                    // on no canonical block: the orphan's own output
+                    None => {
+                        drops.push((r.rowid, r.height, r.spent));
+                        rep.phantom_outputs += 1;
+                        rep.phantom_value += r.value;
+                        rows_after -= 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if let Some(w) = want {
+            // A marking that names a block above the walk belongs to the
+            // live chain, not to this snapshot: it is never rewritten. (The
+            // row's height or value is still the walk's to correct; such a
+            // row is edited with this marking carried through unchanged, and
+            // the write stays conditional on it.)
+            if r.spent.map_or(false, |s| s as u64 > to) {
+                rep.left_alone += 1;
+            } else {
+                let w = w.map(|x| x as i64);
+                if w != r.spent {
+                    match (r.spent, w) {
+                        (Some(_), None) => {
+                            rep.markings_cleared += 1;
+                            rep.restored_value += value;
+                        }
+                        (Some(_), Some(_)) => rep.markings_moved += 1,
+                        (None, Some(_)) => rep.markings_set += 1,
+                        (None, None) => {}
+                    }
+                    spent = w;
+                }
+            }
+        }
+        if height != r.height as u64 || value != r.value || spent != r.spent {
+            edits.push(Edit {
+                rowid: r.rowid,
+                old_height: r.height,
+                old_value: r.value,
+                old_spent: r.spent,
+                height,
+                value,
+                spent,
+            });
+        }
+        final_rows.push((spent, value));
+    }
+    for (key, (ch, cvalue, caddr, cscript)) in &created {
+        if have.contains(&(caddr.clone(), key.0.clone(), key.1 as i64)) {
+            continue;
+        }
+        let spent = spent_at.get(key).copied().map(|x| x as i64);
+        adds.push((
+            caddr.clone(),
+            key.0.clone(),
+            key.1 as i64,
+            *cvalue,
+            *ch,
+            cscript.clone(),
+            spent,
+        ));
+        rep.missing_outputs += 1;
+        rep.missing_value += cvalue;
+        rows_after += 1;
+        final_rows.push((spent, *cvalue));
+    }
+    // History rows: a transaction's, at the height the chain holds it.
+    let mut hist_drops: Vec<i64> = Vec::new();
+    let mut hist_moves: Vec<(i64, u64)> = Vec::new();
+    for hrow in &hist_rows {
+        match history.get(&(hrow.txid.clone(), hrow.addr.clone())) {
+            Some(ch) => {
+                if *ch as i64 != hrow.height {
+                    rep.history_moved += 1;
+                    hist_moves.push((hrow.rowid, *ch));
+                }
+            }
+            None => {
+                // above the walk or below its start: not for it to judge
+                if hrow.height > to as i64 || hrow.height < from as i64 {
+                    rep.left_alone += 1;
+                    continue;
+                }
+                let id: [u8; 32] = hrow.txid[..]
+                    .try_into()
+                    .map_err(|_| "a txid is 32 bytes".to_string())?;
+                match chain.tx_height(&id)? {
+                    None => {
+                        rep.history_removed += 1;
+                        hist_drops.push(hrow.rowid);
+                    }
+                    Some(ch) => {
+                        if ch != hrow.height as u64 {
+                            rep.history_moved += 1;
+                            hist_moves.push((hrow.rowid, ch));
+                        } else {
+                            rep.left_alone += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let hist_have: HashSet<(Vec<u8>, String)> = hist_rows
+        .iter()
+        .map(|h| (h.txid.clone(), h.addr.clone()))
+        .collect();
+    let mut hist_adds: Vec<(Vec<u8>, String, u64)> = Vec::new();
+    for ((txid, addr), ch) in &history {
+        if !hist_have.contains(&(txid.clone(), addr.clone())) {
+            rep.history_added += 1;
+            hist_adds.push((txid.clone(), addr.clone(), *ch));
+        }
+    }
+    rep.rows_after = rows_after;
+    let mut projected = (0u64, 0i64);
+    for (spent, value) in &final_rows {
+        count_unspent(&mut projected, *spent, *value);
+    }
+    if !apply {
+        rep.unspent_after = projected;
+        return Ok(rep);
+    }
+    if !intact() {
+        return Err("the chain changed under the walk — nothing written; run again".into());
+    }
+    // ONE transaction, and every write conditional on the row still being
+    // what the snapshot saw: a row the live chain moved meanwhile is left
+    // to the window repair, never overwritten.
+    let tx = c.transaction().map_err(|e| format!("deep repair write begin: {e}"))?;
+    for (rowid, old_height, old_spent) in &drops {
+        let changed = tx
+            .execute(
+                "DELETE FROM out WHERE rowid=?1 AND height=?2 AND spent_height IS ?3",
+                params![rowid, old_height, old_spent],
+            )
+            .map_err(|e| format!("deep repair delete: {e}"))?;
+        if changed == 0 {
+            rep.raced += 1;
+        }
+    }
+    for e in &edits {
+        let changed = tx
+            .execute(
+                "UPDATE out SET height=?2, value=?3, spent_height=?4 \
+                 WHERE rowid=?1 AND height=?5 AND value=?6 AND spent_height IS ?7",
+                params![
+                    e.rowid,
+                    e.height as i64,
+                    e.value,
+                    e.spent,
+                    e.old_height,
+                    e.old_value,
+                    e.old_spent
+                ],
+            )
+            .map_err(|e| format!("deep repair write: {e}"))?;
+        if changed == 0 {
+            rep.raced += 1;
+        }
+    }
+    for (addr, txid, n, value, height, script, spent) in &adds {
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO out(addr,txid,n,value,height,script,spent_height) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![addr, txid, *n as i64, value, *height as i64, script, spent],
+            )
+            .map_err(|e| format!("deep repair insert: {e}"))?;
+        if changed == 0 {
+            rep.raced += 1;
+        }
+    }
+    for rowid in &hist_drops {
+        tx.execute("DELETE FROM tx_addr WHERE rowid=?1", [rowid])
+            .map_err(|e| format!("deep repair history delete: {e}"))?;
+    }
+    for (rowid, height) in &hist_moves {
+        tx.execute(
+            "UPDATE tx_addr SET height=?2 WHERE rowid=?1",
+            params![rowid, *height as i64],
+        )
+        .map_err(|e| format!("deep repair history move: {e}"))?;
+    }
+    for (txid, addr, height) in &hist_adds {
+        tx.execute(
+            "INSERT OR IGNORE INTO tx_addr(txid,addr,height) VALUES(?1,?2,?3)",
+            params![txid, addr, *height as i64],
+        )
+        .map_err(|e| format!("deep repair history insert: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("deep repair commit: {e}"))?;
+    rep.unspent_after = spendable_set(c, &scope_addrs)?;
+    Ok(rep)
+}
+
+/// One wallet row as the deep repair reads it.
+struct ScopeRow {
+    rowid: i64,
+    addr: String,
+    txid: Vec<u8>,
+    n: i64,
+    value: i64,
+    height: i64,
+    spent: Option<i64>,
+}
+
+/// One history row (getaddresstxids) as the deep repair reads it.
+struct ScopeHistory {
+    rowid: i64,
+    txid: Vec<u8>,
+    addr: String,
+    height: i64,
+}
+
+fn scope_rows(c: &Connection, addrs: &[&str]) -> Result<(Vec<ScopeRow>, Vec<ScopeHistory>), String> {
+    let mut rows: Vec<ScopeRow> = Vec::new();
+    let mut hist: Vec<ScopeHistory> = Vec::new();
+    for a in addrs {
+        let mut st = c
+            .prepare("SELECT rowid, txid, n, value, height, spent_height FROM out WHERE addr=?1")
+            .map_err(|e| format!("deep repair scan: {e}"))?;
+        let got = st
+            .query_map(params![a], |r| {
+                Ok(ScopeRow {
+                    rowid: r.get(0)?,
+                    addr: a.to_string(),
+                    txid: r.get(1)?,
+                    n: r.get(2)?,
+                    value: r.get(3)?,
+                    height: r.get(4)?,
+                    spent: r.get(5)?,
+                })
+            })
+            .map_err(|e| format!("deep repair scan: {e}"))?;
+        for r in got {
+            rows.push(r.map_err(|e| format!("deep repair scan row: {e}"))?);
+        }
+        drop(st);
+        let mut st = c
+            .prepare("SELECT rowid, txid, height FROM tx_addr WHERE addr=?1")
+            .map_err(|e| format!("deep repair history scan: {e}"))?;
+        let got = st
+            .query_map(params![a], |r| {
+                Ok(ScopeHistory {
+                    rowid: r.get(0)?,
+                    txid: r.get(1)?,
+                    addr: a.to_string(),
+                    height: r.get(2)?,
+                })
+            })
+            .map_err(|e| format!("deep repair history scan: {e}"))?;
+        for r in got {
+            hist.push(r.map_err(|e| format!("deep repair history row: {e}"))?);
+        }
+    }
+    Ok((rows, hist))
+}
+
+fn count_unspent(set: &mut (u64, i64), spent: Option<i64>, value: i64) {
+    if spent.is_none() {
+        set.0 += 1;
+        set.1 += value;
+    }
+}
+
+/// The scope's spendable set straight from the index: (rows, sats).
+fn spendable_set(c: &Connection, addrs: &[&str]) -> Result<(u64, i64), String> {
+    let mut set = (0u64, 0i64);
+    for a in addrs {
+        let (rows, sum): (i64, i64) = c
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(value),0) FROM out WHERE addr=?1 AND spent_height IS NULL",
+                params![a],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| format!("deep repair spendable: {e}"))?;
+        set.0 += rows as u64;
+        set.1 += sum;
+    }
+    Ok(set)
+}
+
 /// getaddressbalance: {balance, received} in sats.
 pub fn balance(c: &Connection, addrs: &[String]) -> Result<(i64, i64), String> {
     let mut bal = 0i64;
@@ -1337,6 +1910,9 @@ mod tests {
     struct Chain {
         base: u64,
         blocks: Vec<Option<([u8; 32], BlockTxs)>>,
+        /// where the chain's vouchable window begins, when it is not the
+        /// first block the test chain holds (None: `base`)
+        vouch: Option<u64>,
     }
 
     impl Chain {
@@ -1344,6 +1920,7 @@ mod tests {
             Chain {
                 base,
                 blocks: vec![None; (tip - base + 1) as usize],
+                vouch: None,
             }
         }
         fn set(&mut self, h: u64, hash: [u8; 32], txs: BlockTxs) {
@@ -1356,7 +1933,7 @@ mod tests {
 
     impl CanonicalChain for Chain {
         fn base(&self) -> u64 {
-            self.base
+            self.vouch.unwrap_or(self.base)
         }
         fn tip(&self) -> u64 {
             self.base + self.blocks.len() as u64 - 1
@@ -1630,6 +2207,292 @@ mod tests {
             .unwrap();
         assert_eq!(row, 12);
         assert_eq!(spendable(&mut c), (13, 10 * 1000 + 500 + 1000));
+    }
+
+    /// The scene item 53 found on DNS2 below the vouchable window: an index
+    /// built in FILE order gave a fork's losing branch its rows. h1..=h10
+    /// pay the staker 1000 each. The node's own branch lands first — C1
+    /// at "h11" re-stakes coin 5, C2 at "h12" re-stakes coin 6 — and is
+    /// indexed while it is the tip. The heavier branch then wins: D0 pays
+    /// 500 at h11, D1 re-stakes coin 5 at h12, D2 pays 500 and spends coin
+    /// 8 at h13. Only h13 (the window) is vouched for. Spendable in truth:
+    /// eight untouched coins, D1's two, and two payments of 500.
+    fn deep_scene() -> (Chain, [BlockTx; 2]) {
+        let mut chain = Chain::new(1, 13);
+        chain.vouch = Some(13);
+        for h in 1..=10u64 {
+            chain.set(h, hash_of(h), vec![stake_tx(h as u8, &[1000], vec![])]);
+        }
+        let orphans = [
+            stake_tx(0xC1, &[600, 420], vec![([5u8; 32], 0u32)]),
+            stake_tx(0xC2, &[700, 300], vec![([6u8; 32], 0u32)]),
+        ];
+        chain.set(11, hash_of(11), vec![stake_tx(0xD0, &[500], vec![])]);
+        chain.set(
+            12,
+            hash_of(12),
+            vec![stake_tx(0xD1, &[600, 420], vec![([5u8; 32], 0u32)])],
+        );
+        chain.set(
+            13,
+            hash_of(13),
+            vec![stake_tx(0xD2, &[500], vec![([8u8; 32], 0u32)])],
+        );
+        (chain, orphans)
+    }
+
+    /// The index as the file-order catch-up left it: the orphans' rows and
+    /// markings, the winner's above them, no block recorded.
+    fn legacy_index(dir: &std::path::Path, chain: &Chain, orphans: &[BlockTx]) -> Connection {
+        let (mut c, _) = begin(dir).expect("begin");
+        for h in 1..=10 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        // the node's own branch, while it is the tip
+        insert_block(&c, 11, &orphans[..1]).expect("insert");
+        insert_block(&c, 12, &orphans[1..]).expect("insert");
+        for h in 11..=13 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        finish(&c, 13).unwrap();
+        c
+    }
+    const DEEP_LEGACY: (usize, i64) = (15, 11_040);
+    const DEEP_TRUTH: (usize, i64) = (12, 10_020);
+    /// the same sets in the report's width
+    fn wide(set: (usize, i64)) -> (u64, i64) {
+        (set.0 as u64, set.1)
+    }
+
+    /// THE regression: the orphans' four outputs are listed and two real
+    /// coins they "spent" are hidden, both below the window item 52's
+    /// repair can reach. The deep repair removes the phantom outputs, sets
+    /// coin 5's marking to the chain's own re-stake and returns coin 6.
+    #[test]
+    fn deep_repair_drops_a_forks_losing_branch_from_below_the_window() {
+        let dir = tmpdir("deep-orphans");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        assert_eq!(spendable(&mut c), DEEP_LEGACY);
+        // item 52's repair sees the window only: h13 is put right, the orphans stay
+        let window = verify_and_repair(&mut c, &chain).unwrap();
+        assert_eq!((window.clean, window.blocks_reapplied), (false, 1));
+        assert_eq!(spendable(&mut c), DEEP_LEGACY);
+
+        let intact = || true;
+        // the dry run: the same walk, the same plan, nothing written
+        let dry = deep_wallet_repair(&mut c, &chain, &[staker()], 1, false, &intact).unwrap();
+        assert!(!dry.applied);
+        assert_eq!((dry.from, dry.to), (1, 13));
+        assert_eq!((dry.phantom_outputs, dry.phantom_value), (4, 2_020));
+        assert_eq!(
+            (dry.markings_moved, dry.markings_cleared, dry.restored_value),
+            (1, 1, 1_000)
+        );
+        assert_eq!(
+            (dry.unspent_before, dry.unspent_after),
+            (wide(DEEP_LEGACY), wide(DEEP_TRUTH))
+        );
+        // eighteen rows stand, three of them spent; the orphans' four go
+        assert_eq!((dry.rows_before, dry.rows_after), (18, 14));
+        assert_eq!(
+            (dry.history_removed, dry.missing_outputs, dry.left_alone, dry.raced),
+            (2, 0, 0, 0)
+        );
+        assert_eq!(spendable(&mut c), DEEP_LEGACY, "a dry run writes nothing");
+
+        let done = deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact).unwrap();
+        assert_eq!(done, DeepReport { applied: true, ..dry });
+        assert_eq!(spendable(&mut c), DEEP_TRUTH);
+        // every row stands where a canonical block created it, and coin 5
+        // is spent where the chain spends it
+        let coin5: Option<i64> = c
+            .query_row(
+                "SELECT spent_height FROM out WHERE txid=?1 AND n=0",
+                [[5u8; 32].to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(coin5, Some(12));
+        let orphans_left: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM out WHERE txid IN (?1, ?2)",
+                [[0xC1u8; 32].to_vec(), [0xC2u8; 32].to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans_left, 0);
+        let orphan_history: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM tx_addr WHERE txid IN (?1, ?2)",
+                [[0xC1u8; 32].to_vec(), [0xC2u8; 32].to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_history, 0);
+        // again: nothing left to do
+        let again = deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact).unwrap();
+        assert_eq!(
+            (again.unspent_before, again.unspent_after),
+            (wide(DEEP_TRUTH), wide(DEEP_TRUTH))
+        );
+        assert_eq!(
+            again.phantom_outputs
+                + again.reheighted
+                + again.values_fixed
+                + again.markings_cleared
+                + again.markings_moved
+                + again.markings_set
+                + again.missing_outputs
+                + again.history_removed
+                + again.history_moved
+                + again.history_added,
+            0
+        );
+    }
+
+    #[test]
+    fn deep_repair_writes_what_the_index_never_held() {
+        let dir = tmpdir("deep-unheld");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        // the h3 coin was never indexed, and coin 8's canonical spend was
+        // never marked
+        c.execute("DELETE FROM out WHERE txid=?1", [[3u8; 32].to_vec()])
+            .unwrap();
+        c.execute("DELETE FROM tx_addr WHERE txid=?1", [[3u8; 32].to_vec()])
+            .unwrap();
+        c.execute(
+            "UPDATE out SET spent_height=NULL WHERE txid=?1",
+            [[8u8; 32].to_vec()],
+        )
+        .unwrap();
+        assert_eq!(spendable(&mut c), (15, 11_040));
+        let intact = || true;
+        let r = deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact).unwrap();
+        assert_eq!(
+            (r.missing_outputs, r.missing_value, r.markings_set, r.history_added),
+            (1, 1_000, 1, 1)
+        );
+        assert_eq!(spendable(&mut c), DEEP_TRUTH);
+    }
+
+    #[test]
+    fn deep_repair_writes_nothing_when_the_chain_moved_under_the_walk() {
+        let dir = tmpdir("deep-moved");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        let intact = || false;
+        let err = deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact)
+            .expect_err("must refuse to write over a reorg");
+        assert!(err.contains("changed under the walk"), "{err}");
+        assert_eq!(spendable(&mut c), DEEP_LEGACY);
+    }
+
+    /// Why the walk starts at 1: coins created below its start keep the
+    /// markings it cannot judge — here the orphans' spends of coins 5 and 6.
+    #[test]
+    fn a_walk_that_starts_late_leaves_the_coins_it_cannot_judge() {
+        let dir = tmpdir("deep-late");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        let intact = || true;
+        // the orphans' outputs stand at h11/h12, on the walk: removed. Coins
+        // 5 and 6 were created at h5/h6, below it: their orphan markings
+        // stay. Left alone counts the ten coins and their ten history rows.
+        let r = deep_wallet_repair(&mut c, &chain, &[staker()], 11, true, &intact).unwrap();
+        assert_eq!(
+            (r.phantom_outputs, r.markings_cleared, r.markings_moved, r.left_alone),
+            (4, 0, 0, 20)
+        );
+        // the seven coins still listed, and the winner's 2020
+        assert_eq!(spendable(&mut c), (11, 9_020));
+        // the whole chain is what decides them
+        deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact).unwrap();
+        assert_eq!(spendable(&mut c), DEEP_TRUTH);
+    }
+
+    /// A row above the walk is the live chain's, not this snapshot's: a coin
+    /// of a block the walk ends below stays listed, with its history row.
+    #[test]
+    fn a_row_above_the_walk_is_left_alone() {
+        let dir = tmpdir("deep-above");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        insert_block(&c, 14, &[stake_tx(0xE9, &[777], vec![])]).expect("insert");
+        assert_eq!(spendable(&mut c), (16, 11_040 + 777));
+        let intact = || true;
+        let r = deep_wallet_repair(&mut c, &chain, &[staker()], 1, true, &intact).unwrap();
+        assert_eq!((r.from, r.to), (1, 13));
+        assert_eq!(r.left_alone, 2, "the coin and its history row");
+        assert_eq!(r.rows_after, 15);
+        assert_eq!(spendable(&mut c), (13, DEEP_TRUTH.1 + 777));
+        let fresh: Option<i64> = c
+            .query_row(
+                "SELECT spent_height FROM out WHERE txid=?1 AND n=0",
+                [[0xE9u8; 32].to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, None, "the coin above the walk is still unspent");
+    }
+
+    /// A row can stand ABOVE its transaction's block yet below the walk's
+    /// start — a wrong height on a real coin. The height is the transaction's
+    /// own to set; the marking the walk did not see is not judged. The row
+    /// counts once: as moved, never also as left alone.
+    #[test]
+    fn a_row_above_its_block_below_the_walks_start_is_moved_not_judged() {
+        let dir = tmpdir("deep-misheight");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        // coins 3 and 5 (created h3/h5) claim h9
+        for tag in [3u8, 5u8] {
+            c.execute(
+                "UPDATE out SET height=9 WHERE txid=?1 AND n=0",
+                [[tag; 32].to_vec()],
+            )
+            .unwrap();
+        }
+        let intact = || true;
+        // from h7: both coins are below the start. Coin 3 is never spent on
+        // the walk: unmarked still, left so. Coin 5 is spent by D1 at h12: the
+        // orphan's h11 marking moves there. Coins 1, 2, 4, 6 and the six
+        // history rows of their transactions are left alone.
+        let r = deep_wallet_repair(&mut c, &chain, &[staker()], 7, true, &intact).unwrap();
+        assert_eq!((r.from, r.to), (7, 13));
+        assert_eq!((r.reheighted, r.markings_moved, r.markings_cleared), (2, 1, 0));
+        assert_eq!((r.phantom_outputs, r.left_alone), (4, 10));
+        for (tag, want) in [(3u8, (3, None)), (5u8, (5, Some(12)))] {
+            let got: (i64, Option<i64>) = c
+                .query_row(
+                    "SELECT height, spent_height FROM out WHERE txid=?1 AND n=0",
+                    [[tag; 32].to_vec()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(got, want);
+        }
+        assert_eq!(spendable(&mut c), (11, 9_020));
+    }
+
+    /// A start above where the walk ends is refused when it was asked for,
+    /// and is an empty report when the wallet's own rows all stand above the
+    /// index's coverage.
+    #[test]
+    fn a_walk_asked_to_start_above_its_end_is_refused() {
+        let dir = tmpdir("deep-empty");
+        let (chain, orphans) = deep_scene();
+        let mut c = legacy_index(&dir, &chain, &orphans);
+        let intact = || true;
+        let err = deep_wallet_repair(&mut c, &chain, &[staker()], 14, true, &intact)
+            .expect_err("a start above the walk's end");
+        assert!(err.contains("above where it ends"), "{err}");
+        assert_eq!(spendable(&mut c), DEEP_LEGACY);
+        // an index that holds nothing of the wallet's: nothing to walk for
+        let empty =
+            deep_wallet_repair(&mut c, &chain, &["nobody".to_string()], 0, true, &intact).unwrap();
+        assert_eq!((empty.addresses, empty.rows_before, empty.phantom_outputs), (1, 0, 0));
     }
 
     fn real_block(
