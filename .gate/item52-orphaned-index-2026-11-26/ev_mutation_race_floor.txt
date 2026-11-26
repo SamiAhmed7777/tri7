@@ -1,0 +1,8 @@
+
+
+failures:
+    addrindex::tests::a_half_recorded_index_is_audited_below_its_first_recorded_block
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 958 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `--lib`

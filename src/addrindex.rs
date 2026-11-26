@@ -64,7 +64,14 @@ fn create_schema(c: &Connection) -> Result<(), String> {
          CREATE TABLE IF NOT EXISTS tx_addr(txid BLOB NOT NULL, addr TEXT NOT NULL,
              height INTEGER NOT NULL, PRIMARY KEY(txid, addr));
          CREATE INDEX IF NOT EXISTS tx_addr_addr ON tx_addr(addr, height);
-         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);",
+         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+         -- WHICH block the index applied at each height. The coverage height
+         -- and its tip hash (meta) prove only the TOP block; an orphaned
+         -- block indexed below it left its outputs in place with nothing
+         -- recording it (DNS2 2026-11-25, item 52: a re-staked coin counted
+         -- twice for hours). One row per applied height, written in the same
+         -- transaction as the block's rows.
+         CREATE TABLE IF NOT EXISTS blk(height INTEGER PRIMARY KEY, hash BLOB NOT NULL);",
     )
     .map_err(|e| format!("schema: {e}"))?;
     Ok(())
@@ -209,6 +216,368 @@ pub fn set_tip_hash(c: &Connection, hash: &[u8; 32]) -> Result<(), String> {
     )
     .map_err(|e| format!("tip_hash: {e}"))?;
     Ok(())
+}
+
+/// One transaction of a block as the index stores it:
+/// (txid internal, outputs (n, value, script), spends (prev_txid, n)).
+pub type BlockTx = (Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>);
+/// One block in the shape every writer hands the index.
+pub type BlockTxs = Vec<BlockTx>;
+
+/// What `apply_block` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// the block's outputs and spend markings are in the index
+    Applied,
+    /// this very block already held the height: nothing was written
+    AlreadyApplied,
+}
+
+/// The hash of the block the index applied at `height`; None when it never
+/// recorded one there (heights indexed before the index kept this table).
+pub fn block_at(c: &Connection, height: u64) -> Result<Option<[u8; 32]>, String> {
+    let got: Option<Vec<u8>> = c
+        .query_row("SELECT hash FROM blk WHERE height=?1", [height as i64], |r| {
+            r.get(0)
+        })
+        .map(Some)
+        .or_else(|e| {
+            if e == rusqlite::Error::QueryReturnedNoRows {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| format!("blk read h{height}: {e}"))?;
+    Ok(got.and_then(|v| {
+        let mut h = [0u8; 32];
+        if v.len() == 32 {
+            h.copy_from_slice(&v);
+            Some(h)
+        } else {
+            None
+        }
+    }))
+}
+
+/// Record which block holds a height. Written with the block's own rows; the
+/// repair is the only writer that replaces a row, after removing that block's.
+pub fn record_block(c: &Connection, height: u64, hash: &[u8; 32]) -> Result<(), String> {
+    c.execute(
+        "INSERT OR REPLACE INTO blk(height,hash) VALUES(?1,?2)",
+        params![height as i64, &hash[..]],
+    )
+    .map_err(|e| format!("blk write h{height}: {e}"))?;
+    Ok(())
+}
+
+/// The lowest height the index recorded a block for (None: none yet).
+pub fn first_block_height(c: &Connection) -> Result<Option<u64>, String> {
+    let lowest: Option<i64> = c
+        .query_row("SELECT MIN(height) FROM blk", [], |r| r.get(0))
+        .map_err(|e| format!("blk min: {e}"))?;
+    Ok(lowest.map(|h| h as u64))
+}
+
+/// Apply one block at one height, exactly once. Two blocks never share a
+/// height: when a DIFFERENT block already holds it the call refuses and
+/// changes nothing. The caller owns the transaction.
+pub fn apply_block(
+    c: &Connection,
+    height: u64,
+    hash: &[u8; 32],
+    txs: &[BlockTx],
+) -> Result<(Applied, u64, u64), String> {
+    match block_at(c, height)? {
+        Some(held) if held == *hash => return Ok((Applied::AlreadyApplied, 0, 0)),
+        Some(held) => {
+            return Err(format!(
+                "the address index already holds block {} at this height and refuses to add {} beneath it",
+                txid_hex(&held),
+                txid_hex(hash)
+            ))
+        }
+        None => {}
+    }
+    let (outs, spends) = insert_block(c, height, txs)?;
+    record_block(c, height, hash)?;
+    Ok((Applied::Applied, outs, spends))
+}
+
+/// What the repair needs from the canonical chain. Everything is answered by
+/// the chain's own view — the tipstate window and the store it threaded — so
+/// a test can hand in a synthetic chain.
+pub trait CanonicalChain {
+    /// the lowest height the chain can vouch for
+    fn base(&self) -> u64;
+    /// the chain's tip
+    fn tip(&self) -> u64;
+    /// the chain's block hash (internal order) at `height`
+    fn hash_at(&self, height: u64) -> Option<[u8; 32]>;
+    /// the canonical block at `height`, in the shape `insert_block` takes
+    fn block(&self, height: u64) -> Option<BlockTxs>;
+    /// the canonical height of a transaction; Err when the lookup itself
+    /// failed (an error is never read as "not canonical")
+    fn tx_height(&self, txid: &[u8; 32]) -> Result<Option<u64>, String>;
+}
+
+/// What one run of the verify found and did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RepairReport {
+    /// every height checked holds the chain's block (nothing was written)
+    pub clean: bool,
+    /// first height checked
+    pub checked_from: u64,
+    /// last height checked
+    pub checked_to: u64,
+    /// first height that held something else (0 when clean)
+    pub bad_from: u64,
+    /// output rows of blocks that are not canonical: removed
+    pub phantom_outputs: u64,
+    /// output rows standing at a height that is not their block's: moved
+    pub reheighted: u64,
+    /// spend markings of blocks that are not canonical: removed or set to
+    /// the canonical spend
+    pub markings_fixed: u64,
+    /// history rows (getaddresstxids) of blocks that are not canonical: removed
+    pub tx_rows_removed: u64,
+    /// history rows standing at a height that is not their transaction's: moved
+    pub tx_rows_moved: u64,
+    /// canonical blocks whose rows were missing: written
+    pub blocks_reapplied: u64,
+}
+
+/// Prove the index against the chain, and repair it where it is wrong.
+///
+/// The money-path verdict compares the chain's hash with the hash the index
+/// recorded AT ITS COVERAGE HEIGHT. That proves the top block only: a block
+/// the node minted and lost to a heavier branch was indexed while it was the
+/// tip, and every later catch-up skipped its frame and indexed the winning
+/// branch above it. The orphan's outputs stayed, unspent, under a coverage
+/// height the chain does vouch for — one staked coin counted twice (DNS2,
+/// 2026-11-25: 12.608710 TRI).
+///
+/// So the proof is made per height. Every height the chain can vouch for,
+/// from the lowest one the index recorded a block for, must hold the chain's
+/// own block. The first height that does not — or that holds no recorded
+/// block at all, which means a writer that does not record applied there —
+/// starts a repair of every height from there to the coverage height: each
+/// output row must stand at a height whose canonical block holds its
+/// transaction, each spend marking must be a canonical block's spend, and
+/// each canonical block's rows are written where they are missing.
+///
+/// An index built before the index kept this table (no recorded block at
+/// all) is audited the same way, over the whole window — and so is a
+/// HALF-recorded one: a `blk` row at the tail does not narrow the audit,
+/// because it proves only its own height, not the heights beneath it.
+pub fn verify_and_repair(
+    c: &mut Connection,
+    chain: &dyn CanonicalChain,
+) -> Result<RepairReport, String> {
+    let coverage = index_height(c);
+    let mut rep = RepairReport::default();
+    if coverage == 0 {
+        rep.clean = true;
+        return Ok(rep);
+    }
+    // The audit range is the chain's whole vouchable window — NEVER clamped
+    // down to where `blk` rows begin. A `blk` row proves exactly one height;
+    // a half-recorded index (a new writer stamped the tail before the first
+    // catch-up repair ran) must not mask the unaudited legacy heights below
+    // it. Recorded-ness is a per-height fact the loop below reads through
+    // `block_at`; it is not a range selector.
+    let from = chain.base();
+    let to = coverage.min(chain.tip());
+    rep.checked_from = from;
+    rep.checked_to = to;
+    if from > to {
+        rep.clean = true;
+        return Ok(rep);
+    }
+    for h in from..=to {
+        let indexed = block_at(c, h)?;
+        let bad = match (indexed, chain.hash_at(h)) {
+            (None, None) => false, // the chain cannot vouch for this height
+            (Some(a), Some(b)) => a != b,
+            (None, Some(_)) => true, // a canonical height nothing is recorded for
+            (Some(_), None) => false,
+        };
+        if bad {
+            rep.bad_from = h;
+            reconcile(c, chain, from, to, &mut rep)?;
+            return Ok(rep);
+        }
+    }
+    rep.clean = true;
+    Ok(rep)
+}
+
+/// Bring every height in `from..=to` in line with the canonical chain, in
+/// ONE transaction: a failure leaves the index exactly as it was.
+fn reconcile(
+    c: &mut Connection,
+    chain: &dyn CanonicalChain,
+    from: u64,
+    to: u64,
+    rep: &mut RepairReport,
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
+    let tx = c.transaction().map_err(|e| format!("repair begin: {e}"))?;
+    // Pass 1 — the canonical content of every height in the range.
+    let span = (to - from + 1) as usize;
+    let mut txids_at: Vec<HashSet<Vec<u8>>> = Vec::with_capacity(span);
+    // txid -> the heights its canonical blocks hold it at
+    let mut locations: HashMap<Vec<u8>, Vec<u64>> = HashMap::new();
+    // outpoint -> the lowest canonical height that spends it in the range
+    let mut canonical_spend: HashMap<(Vec<u8>, u32), u64> = HashMap::new();
+    for h in from..=to {
+        let Some(txs) = chain.block(h) else {
+            return Err(format!(
+                "the canonical block h{h} cannot be read — not repairing an index against a chain it cannot see"
+            ));
+        };
+        let mut ids = HashSet::with_capacity(txs.len());
+        for (txid, _outs, spends) in &txs {
+            ids.insert(txid.clone());
+            locations.entry(txid.clone()).or_default().push(h);
+            for (prev, n) in spends {
+                canonical_spend.entry((prev.clone(), *n)).or_insert(h);
+            }
+        }
+        txids_at.push(ids);
+    }
+    // Pass 2 — every index row the range can touch.
+    let mut rows: Vec<(i64, Vec<u8>, i64, i64, Option<i64>)> = Vec::new();
+    {
+        let mut st = tx
+            .prepare(
+                "SELECT rowid, txid, n, height, spent_height FROM out \
+                 WHERE height BETWEEN ?1 AND ?2 OR spent_height BETWEEN ?1 AND ?2",
+            )
+            .map_err(|e| format!("repair scan: {e}"))?;
+        let got = st
+            .query_map(params![from as i64, to as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            })
+            .map_err(|e| format!("repair scan: {e}"))?;
+        for r in got {
+            rows.push(r.map_err(|e| format!("repair scan row: {e}"))?);
+        }
+    }
+    let mut gone: HashSet<i64> = HashSet::new();
+    // Where a transaction's canonical block is, when it is not at this height.
+    fn elsewhere(
+        chain: &dyn CanonicalChain,
+        locations: &HashMap<Vec<u8>, Vec<u64>>,
+        txid: &[u8],
+    ) -> Result<Option<u64>, String> {
+        if let Some(hs) = locations.get(txid) {
+            return Ok(hs.first().copied());
+        }
+        let id: [u8; 32] = txid[..]
+            .try_into()
+            .map_err(|_| "a txid is 32 bytes".to_string())?;
+        chain.tx_height(&id)
+    }
+    // Pass 3 — outputs: a row stands only where a canonical block created it.
+    for (rowid, txid, _n, height, _spent) in &rows {
+        let h = *height as u64;
+        if h < from || h > to || txids_at[(h - from) as usize].contains(txid) {
+            continue;
+        }
+        match elsewhere(chain, &locations, txid)? {
+            Some(canonical) => {
+                tx.execute("UPDATE out SET height=?2 WHERE rowid=?1", params![rowid, canonical as i64])
+                    .map_err(|e| format!("repair out height: {e}"))?;
+                tx.execute("UPDATE tx_addr SET height=?2 WHERE txid=?1", params![txid, canonical as i64])
+                    .map_err(|e| format!("repair history height: {e}"))?;
+                rep.reheighted += 1;
+            }
+            None => {
+                tx.execute("DELETE FROM out WHERE rowid=?1", [rowid])
+                    .map_err(|e| format!("repair out delete: {e}"))?;
+                gone.insert(*rowid);
+                rep.phantom_outputs += 1;
+            }
+        }
+    }
+    // Pass 4 — spend markings: only a canonical block's spend marks a coin.
+    for (rowid, txid, n, _height, spent) in &rows {
+        if gone.contains(rowid) {
+            continue;
+        }
+        let Some(s) = *spent else { continue };
+        if s < from as i64 || s > to as i64 {
+            continue;
+        }
+        let want = canonical_spend
+            .get(&(txid.clone(), *n as u32))
+            .copied();
+        if want == Some(s as u64) {
+            continue;
+        }
+        tx.execute(
+            "UPDATE out SET spent_height=?2 WHERE rowid=?1",
+            params![rowid, want.map(|w| w as i64)],
+        )
+        .map_err(|e| format!("repair marking: {e}"))?;
+        rep.markings_fixed += 1;
+    }
+    // Pass 5 — history rows (getaddresstxids) name canonical transactions only.
+    let mut history: Vec<(i64, Vec<u8>, i64)> = Vec::new();
+    {
+        let mut st = tx
+            .prepare("SELECT rowid, txid, height FROM tx_addr WHERE height BETWEEN ?1 AND ?2")
+            .map_err(|e| format!("repair history scan: {e}"))?;
+        let got = st
+            .query_map(params![from as i64, to as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?))
+            })
+            .map_err(|e| format!("repair history scan: {e}"))?;
+        for r in got {
+            history.push(r.map_err(|e| format!("repair history row: {e}"))?);
+        }
+    }
+    for (rowid, txid, height) in history {
+        let h = height as u64;
+        if h < from || h > to || txids_at[(h - from) as usize].contains(&txid) {
+            continue;
+        }
+        match elsewhere(chain, &locations, &txid)? {
+            Some(canonical) => {
+                tx.execute("UPDATE tx_addr SET height=?2 WHERE rowid=?1", params![rowid, canonical as i64])
+                    .map_err(|e| format!("repair history move: {e}"))?;
+                rep.tx_rows_moved += 1;
+            }
+            None => {
+                tx.execute("DELETE FROM tx_addr WHERE rowid=?1", [rowid])
+                    .map_err(|e| format!("repair history delete: {e}"))?;
+                rep.tx_rows_removed += 1;
+            }
+        }
+    }
+    // Pass 6 — write every canonical block whose rows were not there, and
+    // record the height whatever the case.
+    for h in from..=to {
+        let Some(hash) = chain.hash_at(h) else {
+            continue;
+        };
+        if block_at(&tx, h)? != Some(hash) {
+            let Some(txs) = chain.block(h) else {
+                return Err(format!("the canonical block h{h} cannot be read"));
+            };
+            insert_block(&tx, h, &txs)?;
+            rep.blocks_reapplied += 1;
+        }
+        record_block(&tx, h, &hash)?;
+    }
+    tx.commit().map_err(|e| format!("repair commit: {e}"))
 }
 
 /// getaddressbalance: {balance, received} in sats.
@@ -415,6 +784,35 @@ impl LiveIndex {
         // serving. The hash does.
         let block_hash = crate::legacy::hash9(&block_header_bytes(block));
 
+        // Never write above an orphaned block, and never a second block at
+        // a height. The catch-up builder once indexed the node's own mint
+        // while it was the tip; the heavier branch that replaced it was then
+        // indexed ABOVE it, and the orphan's unspent outputs stayed under a
+        // coverage height the chain does vouch for (item 52). The builder
+        // now verifies and repairs at the start of every run; this is the
+        // same rule for the daemon's own writes: the block the index holds
+        // just below must be this block's parent.
+        match appendable(&self.conn, height, &block.prev_hash, &block_hash)? {
+            Appendable::Yes => {}
+            Appendable::AlreadyApplied => {
+                // the builder got here first, with this very block
+                self.next_height = height + 1;
+                return Ok(());
+            }
+            Appendable::Held(other) => {
+                return Err(format!(
+                    "index already holds block {} at h{height} — not adding a second one",
+                    txid_hex(&other)
+                ));
+            }
+            Appendable::Orphaned { at, held } => {
+                return Err(format!(
+                    "index holds orphaned block {} at h{at}, not this block's parent — the catch-up builder rewinds it",
+                    txid_hex(&held)
+                ));
+            }
+        }
+
         // A busy database must NOT be a permanent skip: the caller logs the
         // failure and moves on, so next_height never advances and the index
         // freezes at that height for the rest of the process. With the busy
@@ -451,7 +849,7 @@ impl LiveIndex {
     fn apply_once(
         &mut self,
         height: u64,
-        txs: &[(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)],
+        txs: &[BlockTx],
         block_hash: &[u8; 32],
     ) -> Result<(), String> {
         // One transaction, held by rusqlite's RAII guard: ANY error after
@@ -462,7 +860,15 @@ impl LiveIndex {
             .conn
             .transaction()
             .map_err(|e| format!("begin: {e}"))?;
-        insert_block(&tx, height, txs)?;
+        match apply_block(&tx, height, block_hash, txs)? {
+            (Applied::Applied, _, _) => {}
+            (Applied::AlreadyApplied, _, _) => {
+                // checked again under the transaction: another writer landed
+                // this very block in between — nothing to add
+                tx.commit().map_err(|e| format!("commit: {e}"))?;
+                return Ok(());
+            }
+        }
         tx.execute(
             "INSERT INTO meta(k,v) VALUES('tip_hash',?1) \
              ON CONFLICT(k) DO UPDATE SET v=excluded.v",
@@ -472,6 +878,50 @@ impl LiveIndex {
         finish(&tx, height)?;
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(())
+    }
+}
+
+/// Whether a block may be appended at `height`. Read-only; `apply_once`
+/// repeats the height check under its own transaction.
+enum Appendable {
+    Yes,
+    /// this very block already holds the height
+    AlreadyApplied,
+    /// a different block already holds the height
+    Held([u8; 32]),
+    /// the block just below is not this block's parent: an orphan the
+    /// catch-up builder has not rewound yet
+    Orphaned { at: u64, held: [u8; 32] },
+}
+
+fn appendable(
+    c: &Connection,
+    height: u64,
+    prev_hash: &[u8; 32],
+    block_hash: &[u8; 32],
+) -> Result<Appendable, String> {
+    match block_at(c, height)? {
+        Some(held) if held == *block_hash => return Ok(Appendable::AlreadyApplied),
+        Some(held) => return Ok(Appendable::Held(held)),
+        None => {}
+    }
+    if height == 0 {
+        return Ok(Appendable::Yes);
+    }
+    // the block the index holds just below; for heights indexed before the
+    // index kept the block table, the stamped coverage pair is the record
+    let below = match block_at(c, height - 1)? {
+        Some(held) => Some(held),
+        None if index_height(c) == height - 1 => index_tip_hash(c),
+        None => None,
+    };
+    match below {
+        Some(held) if held == *prev_hash => Ok(Appendable::Yes),
+        Some(held) => Ok(Appendable::Orphaned {
+            at: height - 1,
+            held,
+        }),
+        None => Ok(Appendable::Yes),
     }
 }
 
@@ -879,5 +1329,429 @@ mod tests {
         facts.coverage_height = 100;
         facts.complete = false;
         assert!(!authority_with_lag(facts, 100, Some(tip_h), MAX_INDEX_LAG).authoritative);
+    }
+
+    // ---- item 52: an orphaned block indexed beneath a canonical tip ----
+
+    /// A synthetic canonical chain. `set` re-points a height: a reorg.
+    struct Chain {
+        base: u64,
+        blocks: Vec<Option<([u8; 32], BlockTxs)>>,
+    }
+
+    impl Chain {
+        fn new(base: u64, tip: u64) -> Chain {
+            Chain {
+                base,
+                blocks: vec![None; (tip - base + 1) as usize],
+            }
+        }
+        fn set(&mut self, h: u64, hash: [u8; 32], txs: BlockTxs) {
+            self.blocks[(h - self.base) as usize] = Some((hash, txs));
+        }
+        fn txs(&self, h: u64) -> BlockTxs {
+            self.blocks[(h - self.base) as usize].as_ref().unwrap().1.clone()
+        }
+    }
+
+    impl CanonicalChain for Chain {
+        fn base(&self) -> u64 {
+            self.base
+        }
+        fn tip(&self) -> u64 {
+            self.base + self.blocks.len() as u64 - 1
+        }
+        fn hash_at(&self, height: u64) -> Option<[u8; 32]> {
+            self.blocks
+                .get(height.checked_sub(self.base)? as usize)?
+                .as_ref()
+                .map(|b| b.0)
+        }
+        fn block(&self, height: u64) -> Option<BlockTxs> {
+            self.blocks
+                .get(height.checked_sub(self.base)? as usize)?
+                .as_ref()
+                .map(|b| b.1.clone())
+        }
+        fn tx_height(&self, txid: &[u8; 32]) -> Result<Option<u64>, String> {
+            Ok(self
+                .blocks
+                .iter()
+                .position(|b| {
+                    b.as_ref()
+                        .map(|(_, txs)| txs.iter().any(|(t, _, _)| t == txid))
+                        .unwrap_or(false)
+                })
+                .map(|i| self.base + i as u64))
+        }
+    }
+
+    fn hash_of(h: u64) -> [u8; 32] {
+        crate::legacy::sha256d(&h.to_le_bytes())
+    }
+
+    /// A transaction paying `values` to the staker, spending `spends`.
+    fn stake_tx(tag: u8, values: &[i64], spends: Vec<([u8; 32], u32)>) -> BlockTx {
+        (
+            vec![tag; 32],
+            values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i as u32, *v, p2pkh(0xA1)))
+                .collect(),
+            spends.into_iter().map(|(p, n)| (p.to_vec(), n)).collect(),
+        )
+    }
+
+    fn staker() -> String {
+        let dest = crate::address::script_to_dest(&p2pkh(0xA1)).expect("p2pkh");
+        crate::address::payload_to_address(&dest.payload())
+    }
+
+    /// The index's spendable set for the staker: (rows, sum).
+    fn spendable(c: &mut Connection) -> (usize, i64) {
+        let rows = utxos(c, &[staker()]).expect("utxos");
+        (rows.len(), rows.iter().map(|u| u.value).sum())
+    }
+
+    /// h1..=h10 each pay the staker 1000. The node then mints h11 on top of
+    /// h10, re-staking the h5 coin into 600 + 420. A heavier branch replaces
+    /// h11, re-stakes the SAME coin at h12 into 600 + 420 again, and pays the
+    /// staker 500 at h11 and at h13. What is really spendable: nine untouched
+    /// coins, 500, the re-stake and 500. What the index listed: that, plus
+    /// the orphan's two outputs.
+    fn scene() -> (Chain, BlockTxs) {
+        let mut chain = Chain::new(1, 13);
+        for h in 1..=10u64 {
+            chain.set(h, hash_of(h), vec![stake_tx(h as u8, &[1000], vec![])]);
+        }
+        let coin5 = ([5u8; 32], 0u32);
+        let mint = vec![stake_tx(0xC1, &[600, 420], vec![coin5])];
+        chain.set(11, hash_of(11), vec![stake_tx(0xD0, &[500], vec![])]);
+        chain.set(12, hash_of(12), vec![stake_tx(0xD1, &[600, 420], vec![coin5])]);
+        chain.set(13, hash_of(13), vec![stake_tx(0xD2, &[500], vec![])]);
+        (chain, mint)
+    }
+    const TRUTH: i64 = 9 * 1000 + 500 + 600 + 420 + 500;
+    const DOUBLE: i64 = TRUTH + 600 + 420;
+
+    /// THE regression, on an index built before the index recorded its
+    /// blocks (every fleet index at the time). The catch-up indexes the node's
+    /// own mint while it is the tip; the heavier branch orphans it and the
+    /// coin is re-staked there; the next catch-up skips the stale frame and
+    /// indexes the winning branch ABOVE the orphan. The chain vouches for the
+    /// coverage height, so the money path serves the index with the orphan's
+    /// two outputs still in it — one coin, twice.
+    #[test]
+    fn orphaned_mint_beneath_a_canonical_tip_is_removed_from_a_legacy_index() {
+        let dir = tmpdir("orphan-legacy");
+        let (mut c, _) = begin(&dir).expect("begin");
+        let (chain, mint) = scene();
+        // the catch-up as it ran: rows only, no block recorded
+        for h in 1..=10 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        finish(&c, 10).unwrap();
+        set_tip_hash(&c, &hash_of(10)).unwrap();
+        set_complete(&c, true).unwrap();
+        // run 1: the node's own mint IS the tip — indexed
+        insert_block(&c, 11, &mint).expect("insert");
+        finish(&c, 11).unwrap();
+        set_tip_hash(&c, &hash_of(11)).unwrap();
+        // run 2, after the heavier branch: the stale frame is skipped and
+        // the winning branch is indexed above the orphan
+        for h in 11..=13 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        finish(&c, 13).unwrap();
+        set_tip_hash(&c, &hash_of(13)).unwrap();
+        // the defect, reproduced
+        let (facts, rows) = wallet_view(&mut c, &[staker()]).expect("view");
+        assert!(authority_with_lag(facts, 13, Some(hash_of(13)), MAX_INDEX_LAG).authoritative);
+        assert_eq!(rows.iter().filter(|u| u.txid == [0xC1u8; 32]).count(), 2);
+        assert_eq!(rows.iter().map(|u| u.value).sum::<i64>(), DOUBLE);
+        // the repair
+        let report = verify_and_repair(&mut c, &chain).expect("verify");
+        assert_eq!(
+            (report.clean, report.checked_from, report.checked_to, report.bad_from),
+            (false, 1, 13, 1)
+        );
+        assert_eq!(
+            (report.phantom_outputs, report.markings_fixed, report.tx_rows_removed),
+            (2, 1, 1)
+        );
+        assert_eq!(spendable(&mut c), (13, TRUTH));
+        // the re-staked coin is spent by the CANONICAL re-stake, not the orphan
+        let coin: (i64, Option<i64>) = c
+            .query_row(
+                "SELECT height, spent_height FROM out WHERE txid=?1 AND n=0",
+                [[5u8; 32].to_vec()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(coin, (5, Some(12)));
+        for h in 1..=13 {
+            assert_eq!(block_at(&c, h).unwrap(), Some(hash_of(h)));
+        }
+        // nothing left to do
+        assert!(verify_and_repair(&mut c, &chain).expect("verify").clean);
+        assert_eq!(spendable(&mut c), (13, TRUTH));
+    }
+
+    /// The race the range floor must not lose: a new writer records ONLY the
+    /// tail block while every height beneath it is legacy (never recorded,
+    /// phantoms included). The first recorded height is h13 — the audit must
+    /// still start at the chain's base, or the whole legacy window below
+    /// h13 goes unaudited and the phantoms survive forever behind one
+    /// recorded block.
+    #[test]
+    fn a_half_recorded_index_is_audited_below_its_first_recorded_block() {
+        let dir = tmpdir("orphan-half-recorded");
+        let (mut c, _) = begin(&dir).expect("begin");
+        let (chain, mint) = scene();
+        // the legacy index: rows only, no block recorded anywhere
+        for h in 1..=10 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        finish(&c, 10).unwrap();
+        set_tip_hash(&c, &hash_of(10)).unwrap();
+        set_complete(&c, true).unwrap();
+        // run 1: the node's own mint IS the tip — indexed, unrecorded
+        insert_block(&c, 11, &mint).expect("insert");
+        finish(&c, 11).unwrap();
+        set_tip_hash(&c, &hash_of(11)).unwrap();
+        // run 2: the winning branch is indexed above the orphan
+        for h in 11..=13 {
+            insert_block(&c, h, &chain.txs(h)).expect("insert");
+        }
+        finish(&c, 13).unwrap();
+        set_tip_hash(&c, &hash_of(13)).unwrap();
+        // a new writer stamps the tail block only — the index is now
+        // half-recorded: first_block_height() is 13, and the naive floor
+        // `max(base, first_recorded)` would audit nothing at all
+        record_block(&c, 13, &hash_of(13)).expect("record tail");
+        // the defect, still present beneath the recorded tail
+        let (facts, rows) = wallet_view(&mut c, &[staker()]).expect("view");
+        assert!(authority_with_lag(facts, 13, Some(hash_of(13)), MAX_INDEX_LAG).authoritative);
+        assert_eq!(rows.iter().filter(|u| u.txid == [0xC1u8; 32]).count(), 2);
+        assert_eq!(rows.iter().map(|u| u.value).sum::<i64>(), DOUBLE);
+        // the audit reads the whole vouchable window, h1..h13
+        let report = verify_and_repair(&mut c, &chain).expect("verify");
+        assert_eq!((report.checked_from, report.checked_to, report.bad_from), (1, 13, 1));
+        assert_eq!(report.phantom_outputs, 2);
+        assert_eq!(spendable(&mut c), (13, TRUTH));
+        for h in 1..=13 {
+            assert_eq!(block_at(&c, h).unwrap(), Some(hash_of(h)));
+        }
+        assert!(verify_and_repair(&mut c, &chain).expect("verify").clean);
+    }
+
+    /// The same scene once every writer records its block. A writer that
+    /// does not check its parent (the daemon before this fix) can still bury
+    /// an orphan under canonical blocks; the per-height proof finds it by the
+    /// recorded block at h11 — and finds a height nothing is recorded for.
+    #[test]
+    fn orphaned_mint_beneath_a_canonical_tip_is_removed_from_a_recorded_index() {
+        let dir = tmpdir("orphan-recorded");
+        let (mut c, _) = begin(&dir).expect("begin");
+        let (chain, mint) = scene();
+        for h in 1..=10 {
+            assert_eq!(
+                apply_block(&c, h, &hash_of(h), &chain.txs(h)).unwrap().0,
+                Applied::Applied
+            );
+        }
+        finish(&c, 10).unwrap();
+        set_tip_hash(&c, &hash_of(10)).unwrap();
+        set_complete(&c, true).unwrap();
+        // catch-up run 1: the node's own mint IS the tip — indexed, recorded
+        apply_block(&c, 11, &[0xC1u8; 32], &mint).unwrap();
+        finish(&c, 11).unwrap();
+        set_tip_hash(&c, &[0xC1u8; 32]).unwrap();
+        // the parentless writer buries it; h12 and h13 are never recorded
+        for h in 11..=13 {
+            insert_block(&c, h, &chain.txs(h)).unwrap();
+        }
+        finish(&c, 13).unwrap();
+        set_tip_hash(&c, &hash_of(13)).unwrap();
+        assert_eq!(spendable(&mut c), (15, DOUBLE));
+        let report = verify_and_repair(&mut c, &chain).unwrap();
+        assert_eq!(
+            (report.clean, report.bad_from, report.phantom_outputs, report.markings_fixed, report.tx_rows_removed),
+            (false, 11, 2, 1, 1)
+        );
+        // h11's canonical rows were missing under the orphan; h12, h13 were never recorded
+        assert_eq!(report.blocks_reapplied, 3);
+        assert_eq!(spendable(&mut c), (13, TRUTH));
+        for h in 1..=13 {
+            assert_eq!(block_at(&c, h).unwrap(), Some(hash_of(h)));
+        }
+        assert!(verify_and_repair(&mut c, &chain).unwrap().clean);
+        // a height nothing is recorded for is a height an unrecording writer
+        // touched: found, and put right
+        c.execute("DELETE FROM blk WHERE height=12", []).unwrap();
+        let report = verify_and_repair(&mut c, &chain).unwrap();
+        assert_eq!((report.clean, report.bad_from), (false, 12));
+        assert_eq!(spendable(&mut c), (13, TRUTH));
+        assert!(verify_and_repair(&mut c, &chain).unwrap().clean);
+    }
+
+    /// The same transaction in an orphaned block and, later, in a canonical
+    /// one at another height: its row was first written at the orphan's
+    /// height and the canonical insert was ignored. It IS a canonical output
+    /// — moved to its block's height, not deleted.
+    #[test]
+    fn a_transaction_re_mined_on_the_winning_branch_keeps_its_output() {
+        let dir = tmpdir("re-mined");
+        let (mut c, _) = begin(&dir).unwrap();
+        let mut chain = Chain::new(1, 12);
+        for h in 1..=10 {
+            chain.set(h, hash_of(h), vec![stake_tx(h as u8, &[1000], vec![])]);
+        }
+        let again = stake_tx(0xE7, &[700, 300], vec![]);
+        chain.set(11, hash_of(11), vec![stake_tx(0xD0, &[500], vec![])]);
+        chain.set(12, hash_of(12), vec![again.clone()]);
+        for h in 1..=10 {
+            insert_block(&c, h, &chain.txs(h)).unwrap();
+        }
+        insert_block(&c, 11, &vec![again.clone()]).unwrap(); // the orphan, while it was the tip
+        for h in 11..=12 {
+            insert_block(&c, h, &chain.txs(h)).unwrap(); // h12's insert is ignored: the row exists
+        }
+        finish(&c, 12).unwrap();
+        let row: i64 = c
+            .query_row("SELECT height FROM out WHERE txid=?1 AND n=0", [[0xE7u8; 32].to_vec()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row, 11);
+        let report = verify_and_repair(&mut c, &chain).unwrap();
+        assert_eq!((report.phantom_outputs, report.reheighted), (0, 2));
+        let row: i64 = c
+            .query_row("SELECT height FROM out WHERE txid=?1 AND n=0", [[0xE7u8; 32].to_vec()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row, 12);
+        assert_eq!(spendable(&mut c), (13, 10 * 1000 + 500 + 1000));
+    }
+
+    fn real_block(
+        prev: [u8; 32],
+        tag: u8,
+        values: &[i64],
+        spends: Vec<([u8; 32], u32)>,
+        script: &[u8],
+    ) -> crate::legacy::Block {
+        crate::legacy::Block {
+            version: 1,
+            prev_hash: prev,
+            merkle_root: [tag; 32],
+            time: 1_700_010_000 + tag as u32,
+            bits: 0x1d00_ffff,
+            nonce: tag as u32,
+            // the tag rides in the tx too, so no two test transactions share bytes
+            vtx: vec![crate::legacy::Tx {
+                version: 1,
+                time: tag as u32,
+                vin: spends
+                    .iter()
+                    .map(|(p, n)| crate::legacy::Vin {
+                        prev_hash: *p,
+                        prev_n: *n,
+                        script_sig: vec![],
+                        sequence: 0xffff_ffff,
+                    })
+                    .collect(),
+                vout: values
+                    .iter()
+                    .map(|v| crate::legacy::Vout {
+                        value: *v,
+                        script_pubkey: script.to_vec(),
+                    })
+                    .collect(),
+                locktime: 0,
+            }],
+            block_sig: vec![],
+        }
+    }
+
+    fn real_txs(block: &crate::legacy::Block) -> BlockTxs {
+        block
+            .vtx
+            .iter()
+            .map(|tx| {
+                (
+                    tx.hash().to_vec(),
+                    tx.vout
+                        .iter()
+                        .enumerate()
+                        .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
+                        .collect(),
+                    tx.vin
+                        .iter()
+                        .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
+                        .map(|v| (v.prev_hash.to_vec(), v.prev_n))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The daemon's own write (LiveIndex::apply) on the production path,
+    /// with real blocks: it never stacks a block on an orphan, and never
+    /// writes a second block at a height.
+    #[test]
+    fn the_daemon_never_writes_above_an_orphan_or_twice_at_one_height() {
+        let dir = tmpdir("daemon-guard");
+        let (mut c, _) = begin(&dir).expect("begin");
+        let script = p2pkh(0xA1);
+        let mut blocks = Vec::new();
+        let mut prev = hash_of(0);
+        for h in 1..=10u64 {
+            let b = real_block(prev, h as u8, &[1000], vec![], &script);
+            prev = b.hash();
+            blocks.push(b);
+        }
+        let mut chain = Chain::new(1, 13);
+        for (i, b) in blocks.iter().enumerate() {
+            chain.set(i as u64 + 1, b.hash(), real_txs(b));
+        }
+        let ten = blocks[9].hash();
+        let coin5 = (blocks[4].vtx[0].hash(), 0u32);
+        let mint = real_block(ten, 0xC1, &[600, 420], vec![coin5], &script);
+        let c11 = real_block(ten, 0xD0, &[500], vec![], &script);
+        let c12 = real_block(c11.hash(), 0xD1, &[600, 420], vec![coin5], &script);
+        let c13 = real_block(c12.hash(), 0xD2, &[500], vec![], &script);
+
+        let mut live = LiveIndex::open_if_built(&dir).expect("live index");
+        for (i, b) in blocks.iter().enumerate() {
+            live.apply(b, i as u64 + 1).expect("the daemon appends in order");
+        }
+        assert_eq!(spendable(&mut c), (10, 10_000));
+        live.apply(&mint, 11).expect("the node's own mint is the tip: indexed");
+        assert_eq!(spendable(&mut c), (11, 9 * 1000 + 1020));
+
+        // the heavier branch
+        chain.set(11, c11.hash(), real_txs(&c11));
+        chain.set(12, c12.hash(), real_txs(&c12));
+        chain.set(13, c13.hash(), real_txs(&c13));
+        // h11 holds the mint, which is not h12's parent: refused, nothing written
+        let err = live.apply(&c12, 12).expect_err("must refuse to write above an orphan");
+        assert!(err.contains("orphaned"), "{err}");
+        assert_eq!(index_height(&c), 11);
+        assert_eq!(block_at(&c, 12).unwrap(), None);
+        assert_eq!(spendable(&mut c), (11, 9 * 1000 + 1020));
+
+        // the catch-up builder rewinds
+        let report = verify_and_repair(&mut c, &chain).unwrap();
+        assert_eq!((report.clean, report.phantom_outputs), (false, 2));
+        // at h11 the canonical chain has not re-staked the coin yet: it is
+        // spendable again, exactly as the chain stands
+        assert_eq!(spendable(&mut c), (11, 10 * 1000 + 500));
+        // a fresh handle appends on the repaired index
+        let mut live = LiveIndex::open_if_built(&dir).expect("live index");
+        live.apply(&c12, 12).expect("h11 is the chain's block now, and this block's parent");
+        assert_eq!(spendable(&mut c), (12, 9 * 1000 + 500 + 1020));
+        // the builder got h13 first: the daemon's write is a no-op, not a copy
+        apply_block(&c, 13, &c13.hash(), &real_txs(&c13)).unwrap();
+        live.apply(&c13, 13).expect("this very block already holds the height");
+        assert_eq!(spendable(&mut c), (13, TRUTH));
     }
 }

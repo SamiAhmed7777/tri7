@@ -6847,25 +6847,39 @@ pub(crate) mod tests {
         let (script, addr) = p2pkh_script();
         let idx = TempIndex::new("interleave");
         let addrs = vec![addr.clone()];
+        let b1 = test_block(1, script.clone(), 1_000_000);
         {
             let mut live =
                 crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
-            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
-                .expect("apply h1");
+            live.apply(&b1, 1).expect("apply h1");
         }
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let applied = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let writer = {
             let dir = idx.dir.path().to_path_buf();
             let stop = stop.clone();
+            let applied = applied.clone();
+            let first_hash = b1.hash();
             std::thread::spawn(move || {
-                let mut h = 2u64;
+                let (mut h, mut prev) = (2u64, first_hash);
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut live = match crate::addrindex::LiveIndex::open_if_built(&dir) {
                         Some(l) => l,
                         None => break,
                     };
-                    let _ = live.apply(&test_block(h, script.clone(), 1_000_000), h);
-                    h += 1;
+                    // every block builds on the one the index accepted last,
+                    // as a real chain does
+                    let mut b = test_block(h, script.clone(), 1_000_000);
+                    b.prev_hash = prev;
+                    match live.apply(&b, h) {
+                        Ok(()) => {
+                            prev = b.hash();
+                            h += 1;
+                            applied.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // refused or failed: this chain is no longer taken
+                        Err(_) => break,
+                    }
                 }
             })
         };
@@ -6887,8 +6901,18 @@ pub(crate) mod tests {
             assert_eq!(sum % 1_000_000, 0, "the balance must be a whole number of coins");
             assert!(facts.coverage_height >= 1);
         }
+        // the proof is only worth anything if the writer really advanced the
+        // index while it was being read
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while applied.load(std::sync::atomic::Ordering::Relaxed) < 5 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         writer.join().unwrap();
+        assert!(
+            applied.load(std::sync::atomic::Ordering::Relaxed) >= 5,
+            "the writer applied too few blocks for the read to have raced it"
+        );
     }
 
     /// A failure AFTER the block's outputs were written must roll the whole
@@ -6897,11 +6921,11 @@ pub(crate) mod tests {
     fn a_mid_apply_failure_rolls_the_block_back() {
         let (script, _addr) = p2pkh_script();
         let idx = TempIndex::new("rollback");
+        let b1 = test_block(1, script.clone(), 1_000_000);
         {
             let mut live =
                 crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
-            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
-                .expect("apply h1");
+            live.apply(&b1, 1).expect("apply h1");
         }
         let before = idx.facts();
         // Break the index so the apply fails AFTER the output rows were
@@ -6914,9 +6938,15 @@ pub(crate) mod tests {
         {
             let mut live =
                 crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
+            // a real accepted block's parent is the chain's block before it
+            let mut b2 = test_block(2, script.clone(), 7_000_000);
+            b2.prev_hash = b1.hash();
+            let err = live
+                .apply(&b2, 2)
+                .expect_err("the apply must fail once the tx_addr write cannot land");
             assert!(
-                live.apply(&test_block(2, script.clone(), 7_000_000), 2).is_err(),
-                "the apply must fail once the tx_addr write cannot land"
+                format!("{err:?}").contains("no such table: tx_addr"),
+                "the failure must be the tx_addr write, got: {err:?}"
             );
         }
         // THE INVARIANT: the failed block left NOTHING behind. The wallet's
@@ -6947,13 +6977,15 @@ pub(crate) mod tests {
     fn the_index_position_survives_a_restart() {
         let (script, _addr) = p2pkh_script();
         let idx = TempIndex::new("restart");
+        // a real accepted block's parent is the chain's block before it
+        let b1 = test_block(1, script.clone(), 1_000_000);
+        let mut b2 = test_block(2, script.clone(), 2_000_000);
+        b2.prev_hash = b1.hash();
         {
             let mut live =
                 crate::addrindex::LiveIndex::open_if_built(&idx.dir).expect("open live index");
-            live.apply(&test_block(1, script.clone(), 1_000_000), 1)
-                .expect("apply h1");
-            live.apply(&test_block(2, script.clone(), 2_000_000), 2)
-                .expect("apply h2");
+            live.apply(&b1, 1).expect("apply h1");
+            live.apply(&b2, 2).expect("apply h2");
         }
         // the builder marks the index finished - the production way
         {
@@ -6964,7 +6996,7 @@ pub(crate) mod tests {
         let reopened = idx.reopen();
         let facts = reopened.facts();
         assert_eq!(facts.coverage_height, 2);
-        let block2 = test_block(2, vec![0x76, 0xa9], 2_000_000);
+        let block2 = b2.clone();
         let want = crate::legacy::hash9(&{
             let mut w: Vec<u8> = Vec::new();
             w.extend_from_slice(&block2.version.to_le_bytes());

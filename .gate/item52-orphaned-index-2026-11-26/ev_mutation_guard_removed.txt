@@ -1,0 +1,5 @@
+### MUTATION RUN — the daemon guard neutralized (appendable() replaced by a constant Yes), same test, same tree
+test addrindex::tests::the_daemon_never_writes_above_an_orphan_or_twice_at_one_height ... FAILED
+thread 'addrindex::tests::the_daemon_never_writes_above_an_orphan_or_twice_at_one_height' (2936506) panicked at src/addrindex.rs:1683:40:
+must refuse to write above an orphan: ()
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 957 filtered out; finished in 0.11s

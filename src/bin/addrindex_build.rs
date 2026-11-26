@@ -18,6 +18,74 @@ use tri7_core::addrindex;
 use tri7_core::blockindex::BlockStore;
 use tri7_core::legacy::{Block, Reader};
 
+/// A block in the shape the index stores it.
+fn block_txs(block: &Block) -> addrindex::BlockTxs {
+    block
+        .vtx
+        .iter()
+        .map(|tx| {
+            let outs: Vec<(u32, i64, Vec<u8>)> = tx
+                .vout
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
+                .collect();
+            let ins: Vec<(Vec<u8>, u32)> = tx
+                .vin
+                .iter()
+                .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
+                .map(|v| (v.prev_hash.to_vec(), v.prev_n))
+                .collect();
+            (tx.hash().to_vec(), outs, ins)
+        })
+        .collect()
+}
+
+/// The canonical chain as this run sees it: the tipstate window (read once,
+/// at start — the same authority that gives the walk its heights) and the
+/// store it just threaded. Read-only.
+struct ChainView<'a> {
+    base: u64,
+    tip: u64,
+    /// internal-order hashes: hashes[h - base]
+    hashes: Vec<[u8; 32]>,
+    store: &'a BlockStore,
+}
+
+impl addrindex::CanonicalChain for ChainView<'_> {
+    fn base(&self) -> u64 {
+        self.base
+    }
+    fn tip(&self) -> u64 {
+        self.tip
+    }
+    fn hash_at(&self, height: u64) -> Option<[u8; 32]> {
+        self.hashes
+            .get(height.checked_sub(self.base)? as usize)
+            .copied()
+    }
+    fn block(&self, height: u64) -> Option<addrindex::BlockTxs> {
+        let hash = self.hash_at(height)?;
+        match self.store.block_by_hash(&hash) {
+            Ok(Some(hit)) => Some(block_txs(&hit.block)),
+            _ => None,
+        }
+    }
+    fn tx_height(&self, txid: &[u8; 32]) -> Result<Option<u64>, String> {
+        // every frame holding the transaction; a frame counts only where the
+        // chain's own hash at its height IS its block (or below the window,
+        // where the threading gives heights to chained frames only)
+        for hit in self.store.tx_frames_by_id(txid)? {
+            if let Some(h) = hit.block_height {
+                if self.hash_at(h).map(|want| want == hit.block_hash).unwrap_or(true) {
+                    return Ok(Some(h));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 #[path = "../testsupport.rs"]
 mod testsupport;
@@ -160,6 +228,16 @@ fn main() {
         );
         std::process::exit(2);
     }
+    let window_base = expected[0].0;
+    // the window in internal order, for the verify (bodies are fetched by hash)
+    let window_hashes: Vec<[u8; 32]> = expected
+        .iter()
+        .map(|(_, hex)| tri7_core::p2p::display_to_internal(hex))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| {
+            eprintln!("tipstate hash unusable: {e} — refusing to index");
+            std::process::exit(2);
+        });
     let build_oracle = {
         let base = expected[0].0;
         let mut hashes = Vec::with_capacity(expected.len());
@@ -226,13 +304,60 @@ fn main() {
     };
     println!("store threaded to h{tip}");
 
-    let (conn, _) = match addrindex::begin(&state_dir) {
+    let (mut conn, _) = match addrindex::begin(&state_dir) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     };
+    // BEFORE anything new is indexed: prove every height the chain can vouch
+    // for still holds the chain's own block, and repair the ones that do not.
+    // A run resumes from its last slice commit and re-walks, so a block the
+    // node minted and lost to a heavier branch was indexed while it was the
+    // tip and then skipped on every later walk — its outputs stayed unspent
+    // under a coverage height the chain does vouch for (item 52: one coin
+    // counted twice). The walk below never indexes a second block at a
+    // height; this puts the index right before it starts.
+    let view = ChainView {
+        base: window_base,
+        tip: chain_tip,
+        hashes: window_hashes,
+        store: &store,
+    };
+    let verify = match addrindex::verify_and_repair(&mut conn, &view) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "FAIL: address index verify h{}..h{}: {e} — index NOT marked complete",
+                window_base, chain_tip
+            );
+            if let Err(ce) = addrindex::set_complete(&conn, false) {
+                eprintln!("FAIL: could not clear the completion flag ({ce})");
+                std::process::exit(4);
+            }
+            std::process::exit(3);
+        }
+    };
+    if verify.clean {
+        println!(
+            "address index verify: h{}..h{} — every height holds the chain's block",
+            verify.checked_from, verify.checked_to
+        );
+    } else {
+        println!(
+            "address index verify: h{}..h{} held another branch's content from h{} — repaired: removed {} phantom output(s), moved {} output row(s) to their block's height, fixed {} spend marking(s), removed {} and moved {} history row(s), wrote {} missing block(s)",
+            verify.checked_from,
+            verify.checked_to,
+            verify.bad_from,
+            verify.phantom_outputs,
+            verify.reheighted,
+            verify.markings_fixed,
+            verify.tx_rows_removed,
+            verify.tx_rows_moved,
+            verify.blocks_reapplied
+        );
+    }
     let resume_off: u64 = conn
         .query_row(
             "SELECT COALESCE(MAX(CAST(v AS INTEGER)),0) FROM meta WHERE k='offset'",
@@ -243,6 +368,8 @@ fn main() {
     let mut pos = if full { 0 } else { resume_off };
     let mut unresolved: u64 = 0;
     let mut stale_skipped: u64 = 0;
+    let mut stale_height: u64 = 0;
+    let mut already_held: u64 = 0;
     let mut lookup_err: Option<String> = None;
     if pos > 0 {
         println!("resuming at file offset {pos}");
@@ -312,7 +439,8 @@ fn main() {
         };
         let hash = block.hash();
         let display = tri7_core::p2p::internal_to_display(&hash);
-        let real_height = match oracle.get(&display).copied() {
+        let oracle_height = oracle.get(&display).copied();
+        let real_height = match oracle_height {
             Some(h) => h, // authoritative: tipstate knows this block's height
             None => match store.block_by_hash(&hash) {
             Ok(Some(hit)) => match hit.height {
@@ -361,23 +489,7 @@ fn main() {
             },
         };
 
-        let mut txs: Vec<(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)> = Vec::new();
-        for tx in &block.vtx {
-            let txid = tx.hash().to_vec();
-            let outs: Vec<(u32, i64, Vec<u8>)> = tx
-                .vout
-                .iter()
-                .enumerate()
-                .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
-                .collect();
-            let ins: Vec<(Vec<u8>, u32)> = tx
-                .vin
-                .iter()
-                .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
-                .map(|v| (v.prev_hash.to_vec(), v.prev_n))
-                .collect();
-            txs.push((txid, outs, ins));
-        }
+        let txs = block_txs(&block);
 
         if !in_txn {
             if let Err(e) = conn.execute_batch("BEGIN") {
@@ -386,16 +498,45 @@ fn main() {
             }
             in_txn = true;
         }
-        match addrindex::insert_block(&conn, real_height, &txs) {
-            Ok((o, s)) => {
+        match addrindex::apply_block(&conn, real_height, &hash, &txs) {
+            Ok((addrindex::Applied::Applied, o, s)) => {
                 outputs += o;
                 spends += s;
                 last_accepted_hash = Some(hash);
                 last_accepted_height = Some(real_height);
             }
+            Ok((addrindex::Applied::AlreadyApplied, _, _)) => {
+                // this run re-walks everything since its last slice commit;
+                // a block the index already holds exactly is done
+                already_held += 1;
+                last_accepted_hash = Some(hash);
+                last_accepted_height = Some(real_height);
+            }
+            Err(_) if oracle_height.is_none() => {
+                // The store's height for this frame contradicts a height the
+                // run just proved holds the chain's own block: the height is
+                // stale, not the record. Skipping the frame is correct.
+                if stale_height == 0 {
+                    println!(
+                        "walk: frame {display} claims h{real_height}, which holds the chain's block — skipping (stale height)"
+                    );
+                }
+                stale_height += 1;
+                pos += (8 + blen) as u64;
+                continue;
+            }
             Err(e) => {
-                eprintln!("h{real_height}: {e}");
-                std::process::exit(1);
+                // The tipstate itself puts this block at a height that
+                // already holds another one. Never index two blocks at one
+                // height: stop, and leave the index refusing to pose as
+                // complete. The next run's verify puts it right.
+                eprintln!("FAIL: h{real_height}: {e} — index NOT marked complete");
+                let _ = conn.execute_batch("ROLLBACK");
+                if let Err(ce) = addrindex::set_complete(&conn, false) {
+                    eprintln!("FAIL: could not clear the completion flag ({ce})");
+                    std::process::exit(4);
+                }
+                std::process::exit(3);
             }
         }
         blocks += 1;
@@ -496,7 +637,7 @@ fn main() {
         );
     }
     println!(
-        "addrindex: done — {blocks} blocks, {outputs} outputs, {spends} spends, {stale_skipped} stale fork leftover(s) skipped in {:.1}s",
+        "addrindex: done — {blocks} blocks, {outputs} outputs, {spends} spends, {stale_skipped} stale fork leftover(s) skipped, {stale_height} stale height(s) skipped, {already_held} block(s) already held in {:.1}s",
         started.elapsed().as_secs_f64()
     );
 }
