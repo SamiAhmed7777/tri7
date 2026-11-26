@@ -1,0 +1,6 @@
+# ev: the audit AFTER the apply — every listed outpoint's transaction looked up in the canonical block at its height (RPC getblockhash/getblock). Read-only. Same script as ev_audit_before.txt.
+# run from a scratch directory at 2026-11-26 09:44:01 local time; counts and sums only
+tip 2220397 rows 190 distinct heights 108 sum 1588.257142
+below-window rows 7 sum 0.508671 | NOT in canonical block@rowH: 0 sum 0.000000
+in-window rows 183 sum 1587.748471 | NOT in canonical block@rowH: 0 sum 0.000000
+block lookup failures (no canonical block served): 0 of 108

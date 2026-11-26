@@ -1,0 +1,14 @@
+# ev: item 53 — listunspent rows vs canonical block, BEFORE the repair (item53_audit.py)
+# started: 2026-11-26T08:28:38 PST
+tip 2220360 rows 383 distinct heights 241 sum 5170.155950
+below-window rows 225 sum 3582.469733 | NOT in canonical block@rowH: 218 sum 3581.961062
+in-window rows 158 sum 1587.686217 | NOT in canonical block@rowH: 0 sum 0.000000
+block lookup failures (no canonical block served): 0 of 241
+  159 ('txH=None', 'nbh=None', 'getblock:ok')
+  ex ('4454f5fc24d771', 1, 12.33, 2210003, 'ab940937dbd1', None, None, '')
+  ex ('572bd5f6149497', 1, 30.352931, 2210014, '2bb1c1cad6c4', None, None, '')
+  ex ('e46ab1883d858f', 1, 30.689691, 2210553, 'b3aeb3c48402', None, None, '')
+  ex ('6cad9ebb27e688', 1, 26.319427, 2210978, '559e796d9b40', None, None, '')
+  ex ('911d2a7cd2452a', 1, 13.89, 2210979, '43ed8622cb5c', None, None, '')
+  ex ('74c14448221192', 1, 20.87099, 2210983, 'fbaf1fe7dc2e', None, None, '')
+# EXIT-STATUS: 0 08:29:19

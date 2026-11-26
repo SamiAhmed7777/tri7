@@ -1,0 +1,8 @@
+# ev: V4 — the first timer catch-up AFTER the apply (applied 09:43:36 PST). Read-only.
+# read 2026-11-26T09:49:15 PST
+timer: Thu 2026-11-26 09:57:45 PST 8min Thu 2026-11-26 09:47:45 PST 1min 30s ago tri7-addrindex.timer tri7-addrindex.service
+Result=success;ExecMainStartTimestamp=Thu 2026-11-26 09:47:45 PST;ExecMainExitTimestamp=Thu 2026-11-26 09:48:53 PST;ExecMainStatus=0;ActiveState=inactive;
+daemon: success active 
+2026-11-26T09:47:45-08:00 vmi3080415 systemd[1]: Starting tri7-addrindex.service - tri7 address index catch-up...
+2026-11-26T09:48:53-08:00 vmi3080415 addrindex_build[3755863]: addrindex: done — 436 blocks, 4 outputs, 2 spends, 4 stale fork leftover(s) skipped, 0 stale height(s) skipped, 434 block(s) already held in 0.1s
+2026-11-26T09:48:53-08:00 vmi3080415 systemd[1]: Finished tri7-addrindex.service - tri7 address index catch-up.

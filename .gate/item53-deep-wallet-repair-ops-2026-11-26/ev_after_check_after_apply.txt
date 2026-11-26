@@ -1,0 +1,10 @@
+# ev: the checker AFTER the apply. Read-only. Expected here: V2 and V3 both PASS.
+# command: python3 item53_after_check.py   (checker sha256 1393945961e2f9f8cd14e3a5c74805967a1b3379428c84d951bcac746be9db3a, run 2026-11-26T09:44:13 PST)
+V3 coins the independent walk found canonically spent: 225 (txid stored byte-reversed in the index)
+    index spent_height == canonical height: 225   differs: 0   no row: 0
+PASS  V3 every one of the 225 coins carries its canonical spend height
+V2 node listunspent rows: 190  sum 1588.257142
+PASS  V2 every listed outpoint is an unspent row in the index (190/190)
+PASS  V2 per address the index holds exactly the listed unspent rows (190 rows over 19 addresses; addresses differing: 0)
+RESULT: ALL CHECKS PASS
+# EXIT-STATUS: 0

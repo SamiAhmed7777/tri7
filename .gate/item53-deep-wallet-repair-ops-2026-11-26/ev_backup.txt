@@ -1,0 +1,31 @@
+# ev: item 53 F4 backup — verification of the copy (read-only against the copy)
+backup file: /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db 1473306624 bytes
+journal_mode: wal
+tables: blk, meta, out, tx_addr
+max_out_rowid      2656503 (0s)
+max_txaddr_rowid   2515823 (0s)
+max_blk_rowid      2220359 (0s)
+blk_height_range   2215519..2220359 (0s)
+meta complete: 1
+meta height: 2220359
+meta offset: 988531403
+meta tip_hash: efb33075dc285d0dbe6a3456fc5fa648aae813c171ab17fdaaad600200a8...
+quick_check: running (0s)
+quick_check: ok (519s)
+BACKUP COPY WHOLE
+# EXIT-STATUS: 0 08:36:54
+# listing 2026-11-26T08:47:46 PST
+total 1443848
+drwxr-xr-x 2 root root       4096 2026-11-26 08:21 .
+drwxr-xr-x 3 root root       4096 2026-11-26 08:19 ..
+-rw-r--r-- 1 root root 1473306624 2026-11-26 08:21 addressindex.db
+-rw-r--r-- 1 root root      32768 2026-11-26 08:28 addressindex.db-shm
+-rw-r--r-- 1 root root          0 2026-11-26 08:21 addressindex.db-wal
+-rw-r--r-- 1 root root    2180973 2026-11-25 08:18 balances.json
+-rw------- 1 root root    2927432 2026-11-26 08:19 tipstate.json
+# sha256 of the files (computed 08:47:46 PST — started 08:47:46)
+8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db
+e736412856ab87c17da7d74f5fa7a79556a866f873f9b2f210598688a416ff0d  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/balances.json
+b5296480b7ebb156c6bd5b3a1b8bf960f57cf760c4d67889d475a5fb8da3c922  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/tipstate.json
+# sha256 finished 2026-11-26T08:47:52 PST
+/dev/sda1       193G  187G  6.0G  97% /

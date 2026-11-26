@@ -1,0 +1,26 @@
+# ev: item 53 deep wallet repair — LIVE dry RUN on DNS2
+# started: 2026-11-26T08:29:40 PST
+# binary: target/release/addrindex_build sha256 f477f45f32d6b56cfdeeeda8b024f8e29fb78245476e5d3b86272ff79ec4f50f
+# HEAD: 7d0793f (tracked changes: 0)
+# command: addrindex_build /var/lib/tri7/blk0001.dat /var/lib/tri7 --deep-wallet-repair
+# wallet: /var/lib/tri7/wallet.dat (the binary's default; key addresses only)
+# timer service state at start: inactive
+tipstate oracle: 4600 hashes
+[blockidx] ready: 2220885 frames, 4520667 txs, heights_ok=true, threaded_tip=Some(2220362), writable=true, built in 89s, fork re-threaded 7118 frames
+store threaded to h2220362
+deep wallet repair DRY RUN (nothing written) — 263 address(es), walked h1702608..h2220360 in 98.8s
+  output rows: 50353 before, 50135 after
+  spendable before: 383 rows, 5170.155950 TRI
+  rows whose block is not canonical: 218 removed, 3581.961062 TRI
+  spend markings: 0 cleared (0.000000 TRI back to spendable), 225 moved to the canonical spend, 0 written
+  rows re-heighted: 0, values corrected: 0
+  canonical outputs the index never held: 0 written, 0.000000 TRI
+  history rows: 159 removed, 0 moved, 1 written
+  left alone (not this walk's to judge): 0; raced (changed under the write): 0
+  spendable after (projected): 165 rows, 1588.194888 TRI
+address index verify: h2215762..h2220360 — every height holds the chain's block
+resuming at file offset 988531403
+walk: stale fork leftover at offset 988540588 (hash 96931ef32604ee50d7a29502c4bb140573140d310a2a6e9d5ca99d71a7f41193 not in the tipstate window) — skipping non-canonical frames by design
+addrindex: done — 399 blocks, 3 outputs, 4 spends, 4 stale fork leftover(s) skipped, 0 stale height(s) skipped, 397 block(s) already held in 0.9s
+# EXIT-STATUS: 0 finished 2026-11-26T08:32:51 PST
+# live index files after: 1473249280@05:29 /var/lib/tri7/addressindex.db;54635352@08:32 /var/lib/tri7/addressindex.db-wal;

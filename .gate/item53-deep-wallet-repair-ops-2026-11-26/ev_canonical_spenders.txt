@@ -1,0 +1,20 @@
+# ev: does the CANONICAL chain (the node's own getblock/getrawtransaction walk) also spend the coins the orphaned
+# transactions spent? Read-only. Started 2026-11-26T08:49:50 PST. Command: python3 item53_movecheck_full.py
+orphaned transactions: 159 (recorded heights h2209506..h2214029)
+their wallet-coin inputs with an index row: 225 distinct coins; inputs with no row: 0
+  index record: spent_height == orphan height    218
+  index record: a different spend record         7
+walked 4535 canonical blocks h2209501..h2214035 in 57s (RPC calls: 13767)
+  (walk stopped early: all coins found)
+coins the CANONICAL chain spends too (marking should MOVE): 225
+  canonical spend relative to the orphan block: min 3  median 44  max 175
+  how many within +60 blocks: 137
+coins NO canonical block spends (should return to unspent): 0
+index spend records vs the canonical spend: agree 0 / differ 225
+  differ: prevout 40c4268a151e… n=1 created h2209398 recorded spent h2209506 canonical spend h2209513
+  differ: prevout a1db706f8d98… n=2 created h2209525 recorded spent h2209650 canonical spend h2209654
+  differ: prevout 6f98f4c6a8e4… n=1 created h2209543 recorded spent h2209650 canonical spend h2209654
+  differ: prevout 995141b2a497… n=2 created h2209535 recorded spent h2209646 canonical spend h2209661
+  differ: prevout 8ac023f8f550… n=1 created h2209533 recorded spent h2209646 canonical spend h2209662
+orphaned transactions met in a canonical block (must be 0): 0
+# EXIT-STATUS: 0 finished 2026-11-26T08:50:47 PST

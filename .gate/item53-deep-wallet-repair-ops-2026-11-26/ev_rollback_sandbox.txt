@@ -1,0 +1,63 @@
+# ev: sandbox test of item53_rollback.sh — 2026-11-26T09:19:39 PST
+# sandbox: a scratch directory; fake systemctl and rpc probe; two small databases
+# script under test: sha256 eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83
+PASS  A exit 0 (got 0)
+PASS  A live index == the backup
+PASS  A the applied state is kept beside it
+PASS  A no restore file or stale wal left
+PASS  A waited for the running catch-up to end
+PASS  A order: timer stop, daemon stop, daemon start, timer start, catch-up
+PASS  A prints the proof line
+PASS  B exit 1 (got 1)
+PASS  B live index untouched
+PASS  B systemctl was never called
+PASS  B no restore file left
+PASS  C exit 1 (got 1)
+PASS  C live index untouched, the thing in the way not removed
+PASS  D exit 2 (got 2)
+PASS  D says which check failed
+PASS  D nothing was started after the failure
+PASS  E exit 2 (got 2)
+PASS  E the index was restored before that
+PASS  E names the daemon
+PASS  F exit 2 (got 2)
+PASS  F the daemon was not stopped
+PASS  F live index untouched, prepared file removed
+PASS  F names the catch-up
+PASS  G exit 2 (got 2)
+PASS  G names the RPC wait
+PASS  H exit 1 (got 1)
+PASS  H live index untouched
+PASS  H nothing was stopped or started
+PASS  H no restore file left
+PASS  I exit 0 (got 0)
+PASS  I live index untouched
+PASS  I nothing was stopped or started
+PASS  I no restore file left
+PASS  J exit 1 (got 1)
+PASS  J live index untouched
+PASS  J nothing was stopped or started
+PASS  J no restore file left
+# 37 checks, 0 failed
+# the normal path's output (A):
+#   2026-11-26 09:19:39 PST == rollback of the item 53 repair on DNS2
+#   2026-11-26 09:19:39 PST preconditions ok: backup 8192 bytes, sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf; 8071 MiB free
+#   2026-11-26 09:19:39 PST preparing the restored file next to the live one: /root/.hermes/cache/scratch/item53_rb_sandbox.9BxwxO/A/live/addressindex.db.restore (8071 MiB free)
+#   2026-11-26 09:19:39 PST prepared copy verified: sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf (8071 MiB free)
+#   2026-11-26 09:19:39 PST stopping tri7-addrindex.timer (the catch-up is left to finish)
+#   2026-11-26 09:19:40 PST stopping tri7d.service
+#   2026-11-26 09:19:40 PST swapping the file in (8071 MiB free)
+#   2026-11-26 09:19:40 PST restored index in place: sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf, root:root 644 (8071 MiB free)
+#   2026-11-26 09:19:40 PST starting tri7d.service
+#   2026-11-26 09:19:40 PST daemon answers: block count 2220400
+#   2026-11-26 09:19:40 PST starting tri7-addrindex.timer and running one catch-up
+#   2026-11-26 09:19:40 PST catch-up: Result=success
+#   2026-11-26 09:19:40 PST ROLLBACK DONE AND PROVEN: index sha256 == the backup's, daemon answering, catch-up success
+# a refused run's output (B):
+#   2026-11-26 09:19:40 PST == rollback of the item 53 repair on DNS2
+#   2026-11-26 09:19:40 PST REFUSED: the backup's sha256 is not the pinned one — nothing was touched
+# a failed run's last lines (F):
+#   2026-11-26 09:19:43 PST ROLLBACK FAILED: the catch-up service was still active after 2 s
+#   2026-11-26 09:19:43 PST units: timer , catch-up , daemon ; free space on the index's disk: 8071 MiB
+#   2026-11-26 09:19:43 PST nothing further is done. Decide with the lines above before restarting anything.
+# EXIT-STATUS: 0

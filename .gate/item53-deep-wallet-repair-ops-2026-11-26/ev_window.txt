@@ -1,0 +1,6 @@
+# ev: the vouchable window, read from the node's own tipstate (heights only)
+height 2220387
+window_base 2215788
+window size 4600 blocks
+entries 4600
+read 2026-11-26T09:27:31 PST

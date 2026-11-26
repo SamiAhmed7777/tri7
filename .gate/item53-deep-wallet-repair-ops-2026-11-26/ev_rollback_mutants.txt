@@ -1,0 +1,10 @@
+# ev: mutants of item53_rollback.sh against the sandbox (sha256 of the original: eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83)
+KILLED   no_final_hash_check — failing checks: D exit 2; D says which check failed; D nothing was started after the failure
+KILLED   stale_wal_left_in_place — failing checks: A no restore file or stale wal left
+KILLED   daemon_stopped_first — failing checks: A order: timer stop, daemon stop, daemon start, timer start, catch-up
+KILLED   prepared_copy_not_hashed — failing checks: H exit 1; H nothing was stopped or started
+KILLED   check_mode_swaps — failing checks: I exit 0
+KILLED   check_arg_typo_leaves_copy — failing checks: J no restore file left
+# 37 checks, 0 failed
+# EXIT-STATUS: 0
+# EXIT-STATUS: 0

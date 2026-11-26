@@ -1,0 +1,23 @@
+# ev: the four polish suggestions of the operations grade's round 2 (judge_ops_r2.txt) — where each stands.
+# Written after the verdict. Nothing here changes the graded files: the plan, the rollback script and
+# the checker were applied exactly as graded (file hashes in judge_ops_r2.txt).
+
+1. V2's per-address check assumes the index stores addresses in the string form listunspent returns.
+   Not changed, and already shown to hold on this node: run before the apply on the unrepaired index,
+   the checker compared the listed rows over 19 addresses with 0 differing (ev_after_check_before_apply.txt).
+   The check fails closed — a mismatch would print FAIL and exit 1, never pass.
+
+2. The rollback's chown/chmod after the swap carry '|| true'.
+   Left open. The restored file's owner and mode are printed right after the swap, and a wrong
+   ownership would then fail the daemon start, the RPC wait or the catch-up — each exits 2 and names
+   the step. So it cannot end as a silent success; it would end as a later, less precise failure.
+   If the script is ever revised: make those two commands fatal and add a sandbox case for them.
+
+3. The catch-up wait (CATCHUP_WAIT, default 600 s) should be explicit in the plan.
+   A documentation note, for the next revision of the plan: that wait comes BEFORE the daemon is
+   stopped — the daemon staking runs through it. The daemon is down only for the swap, its own start
+   and the bounded RPC wait that follows.
+
+4. A comment marking the sandbox fault-injection variables as test-only at both uses.
+   Left open (cosmetic). The first use already says "sandbox harness only"; both uses require
+   ITEM53_SANDBOX=1 AND ITEM53_TEST_FAULT together, and the live path is the same either way.

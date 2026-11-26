@@ -1,0 +1,569 @@
+# ev: item 53 deploy — the timer's binary rebuilt from the graded commit
+# started 2026-11-26T08:14:54 HEAD 7d0793f dirty=0
+# command: nice -n 10 cargo build --release --bin addrindex_build
+# old binary sha256 (before the build): 3ddece55a6ca04237c0a736639166ff033cfc7bd7a881a1b838372de4ce5cb5e
+warning: tri7-core@7.0.3: vendor/groestl.c: In function 'groestl_small_close':
+warning: tri7-core@7.0.3: vendor/groestl.c:2816:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.3:  2816 |         unsigned char *buf;
+warning: tri7-core@7.0.3:       |                        ^~~
+warning: tri7-core@7.0.3: vendor/groestl.c: In function 'groestl_big_close':
+warning: tri7-core@7.0.3: vendor/groestl.c:2952:24: warning: variable 'buf' set but not used [-Wunused-but-set-variable]
+warning: tri7-core@7.0.3:  2952 |         unsigned char *buf;
+warning: tri7-core@7.0.3:       |                        ^~~
+warning: tri7-core@7.0.3: vendor/luffa.c:147:22: warning: 'RC34' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   147 | static const sph_u32 RC34[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:140:22: warning: 'RC30' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   140 | static const sph_u32 RC30[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:101:22: warning: 'RC14' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:   101 | static const sph_u32 RC14[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:94:22: warning: 'RC10' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    94 | static const sph_u32 RC10[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:87:22: warning: 'RC04' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    87 | static const sph_u32 RC04[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+warning: tri7-core@7.0.3: vendor/luffa.c:80:22: warning: 'RC00' defined but not used [-Wunused-const-variable=]
+warning: tri7-core@7.0.3:    80 | static const sph_u32 RC00[8] = {
+warning: tri7-core@7.0.3:       |                      ^~~~
+   Compiling tri7-core v7.0.3 (/root/tri7)
+warning: unnecessary trailing semicolon
+    --> src/gui/node_supervisor.rs:2022:14
+     |
+2022 |             };
+     |              ^ help: remove this semicolon
+     |
+     = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `LAST_HARDCODED_CHECKPOINT`
+  --> src/node_embedded.rs:68:40
+   |
+68 |     tx_is_coin_base, tx_is_coin_stake, LAST_HARDCODED_CHECKPOINT,
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src/spend.rs:1006:5
+     |
+1006 |     /// Version, nTime, the two CompactSize counts, and nLockTime.
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1007 |     let base = 4 + 4 + compact_size_len(inputs.len()) + compact_size_len(n_out) + 4;
+     |     -------------------------------------------------------------------------------- rustdoc does not generate documentation for statements
+     |
+     = help: use `//` for a plain comment
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `sha256d`
+  --> src/txpool.rs:17:21
+   |
+17 | use crate::legacy::{sha256d, Block, Hash, Tx};
+   |                     ^^^^^^^
+
+warning: unused import: `WalletProvider`
+  --> src/node_embedded.rs:79:131
+   |
+79 | ...DataProvider, EntryView, Proxy, SnapshotWallet, UtxoRow, WalletProvider,
+   |                                                             ^^^^^^^^^^^^^^
+
+warning: unused variable: `wallet_clone`
+    --> src/gui/app_state.rs:1743:13
+     |
+1743 |         let wallet_clone = wallet.clone();
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wallet_clone`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `fork`
+    --> src/node_embedded.rs:2331:9
+     |
+2331 |     let fork = recon.fork_height.take();
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_fork`
+
+warning: unused variable: `b`
+    --> src/node_embedded.rs:4761:17
+     |
+4761 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> src/node_embedded.rs:4761:20
+     |
+4761 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `d`
+    --> src/node_embedded.rs:4761:23
+     |
+4761 |         let [a, b, c, d] = [addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15]];
+     |                       ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:6356:9
+     |
+6356 |     let mut connect = |stats: &mut Stats| -> Result<Session, String> {
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `wcfg`
+    --> src/node_embedded.rs:6352:9
+     |
+6352 |     let wcfg = Config {
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wcfg`
+
+warning: variable `session_dead` is assigned to, but never used
+    --> src/node_embedded.rs:6470:17
+     |
+6470 |             let mut session_dead = false;
+     |                 ^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_session_dead` instead
+
+warning: value assigned to `session_dead` is never read
+    --> src/node_embedded.rs:6505:25
+     |
+6476 |                     session_dead = true;
+     |                     ------------------- `session_dead` is overwritten here before the previous value is read
+...
+6505 |                         session_dead = true;
+     |                         ^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `session_dead` is never read
+    --> src/node_embedded.rs:6476:21
+     |
+6476 |                     session_dead = true;
+     |                     ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `sync_started`
+    --> src/node_embedded.rs:6730:9
+     |
+6730 |     let sync_started = Instant::now();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sync_started`
+
+warning: variable does not need to be mutable
+    --> src/node_embedded.rs:9104:13
+     |
+9104 |         let mut note_skip = |h: u64, skipped: &mut usize, first_skip: &mut Option<u64>, last_skip: &mut u64| {
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `a`
+    --> src/node_embedded.rs:9636:22
+     |
+9636 |             .filter(|a| {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: value assigned to `stale_coins` is never read
+     --> src/node_embedded.rs:10856:9
+      |
+10856 |         stale_coins = stale2;
+      |         ^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: unused variable: `wallet_ready`
+     --> src/node_embedded.rs:12219:21
+      |
+12219 |                 let wallet_ready = wl.is_some();
+      |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wallet_ready`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:14804:24
+      |
+14804 |             .and_then(|mut r| r.get(&hash).cloned())
+      |                        ----^
+      |                        |
+      |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:14818:24
+      |
+14818 |             .and_then(|mut r| r.at_height(h).cloned())
+      |                        ----^
+      |                        |
+      |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:14846:24
+      |
+14846 |             .and_then(|mut r| r.at_height(h).cloned())
+      |                        ----^
+      |                        |
+      |                        help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:14875:65
+      |
+14875 |         let from_recent = self.recent.try_lock().ok().and_then(|mut r| {
+      |                                                                 ----^
+      |                                                                 |
+      |                                                                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> src/node_embedded.rs:16746:25
+      |
+16746 |                     let mut stg = st_shared.lock().unwrap();
+      |                         ----^^^
+      |                         |
+      |                         help: remove this `mut`
+
+warning: unused variable: `base`
+     --> src/node_embedded.rs:16116:22
+      |
+16116 |                 let (base, tip) = {
+      |                      ^^^^
+      |
+help: you might have meant to pattern match on the similarly named constant `BASE`
+      |
+16116 -                 let (base, tip) = {
+16116 +                 let (node_embedded::RebuildSchedule::backoff_secs::BASE, tip) = {
+      |
+help: if this is intentional, prefix it with an underscore
+      |
+16116 |                 let (_base, tip) = {
+      |                      +
+
+warning: unused variable: `wp`
+     --> src/node_embedded.rs:16129:26
+      |
+16129 |                 let Some(wp) = &wp2 else { return };
+      |                          ^^ help: if this is intentional, prefix it with an underscore: `_wp`
+
+warning: value assigned to `owned_n` is never read
+     --> src/node_embedded.rs:16161:30
+      |
+16161 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+      |                              ^^^^^^^^^^^ this value is reassigned later and never used
+...
+16164 |                             owned_n = cands.len();
+      |                             --------------------- `owned_n` is overwritten here before the previous value is read
+
+warning: value assigned to `funded_n` is never read
+     --> src/node_embedded.rs:16161:43
+      |
+16161 |                         let (mut owned_n, mut funded_n) = (0usize, 0usize);
+      |                                           ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+16165 |                             funded_n = w.owned_count();
+      |                             -------------------------- `funded_n` is overwritten here before the previous value is read
+
+warning: unused variable: `parse_err`
+   --> src/replay.rs:163:17
+    |
+163 |             Err(parse_err) => {
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_parse_err`
+
+warning: variable does not need to be mutable
+    --> src/rpc.rs:2300:17
+     |
+2300 |             let mut push_group = |addrs: Vec<String>,
+     |                 ----^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: unused variable: `entries`
+    --> src/rpc.rs:2734:32
+     |
+2734 |                     let (base, entries) = deps.tip.window();
+     |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entries`
+
+warning: unused variable: `deps`
+    --> src/rpc.rs:3687:30
+     |
+3687 | fn passive_fallback(m: &str, deps: &Deps, params: &Value) -> NativeOutcome {
+     |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_deps`
+
+warning: variable does not need to be mutable
+   --> src/smsg.rs:194:9
+    |
+194 |     let mut x = a ^ 0x63;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/smsg_net.rs:556:13
+    |
+556 |         let mut pd = st.peers.entry(label.to_string()).or_default();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/spend.rs:301:13
+    |
+301 |         let mut len = 32 - start;
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/spend.rs:1152:5
+     |
+1152 |     mut fee_rate_sats: i64, // per-size-step rate (nTransactionFee), NOT a total
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: value assigned to `p` is never read
+   --> src/wallet_encrypt.rs:148:5
+    |
+148 |     p += 4;
+    |     ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: function `quiet_command` is never used
+   --> src/gui/node_supervisor.rs:105:4
+    |
+105 | fn quiet_command(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    |    ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `tor_pid` and `kills_handle` are never used
+   --> src/gui/node_supervisor.rs:220:19
+    |
+197 | impl TorSupervisor {
+    | ------------------ methods in this implementation
+...
+220 |     pub(crate) fn tor_pid(&self) -> Option<u32> {
+    |                   ^^^^^^^
+...
+225 |     pub(crate) fn kills_handle(&self) -> Arc<AtomicUsize> {
+    |                   ^^^^^^^^^^^^
+
+warning: method `kills_handle` is never used
+    --> src/gui/node_supervisor.rs:1289:19
+     |
+1256 | impl I2pSupervisor {
+     | ------------------ method in this implementation
+...
+1289 |     pub(crate) fn kills_handle(&self) -> Arc<AtomicUsize> {
+     |                   ^^^^^^^^^^^^
+
+warning: struct `SideFile` is never constructed
+    --> src/gui/state.rs:1951:8
+     |
+1951 | struct SideFile {
+     |        ^^^^^^^^
+
+warning: struct `SideEntry` is never constructed
+    --> src/gui/state.rs:1957:8
+     |
+1957 | struct SideEntry {
+     |        ^^^^^^^^^
+
+warning: function `load_side_file` is never used
+    --> src/gui/state.rs:1967:4
+     |
+1967 | fn load_side_file(path: &Path) -> Vec<SideEntry> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `save_side_file` is never used
+    --> src/gui/state.rs:1976:4
+     |
+1976 | fn save_side_file(path: &Path, entries: &[SideEntry]) -> Result<(), String> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `in_flight_tries_snapshot` is never used
+    --> src/node_embedded.rs:1652:4
+     |
+1652 | fn in_flight_tries_snapshot(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `fork` and `adopted` are never read
+    --> src/node_embedded.rs:1760:16
+     |
+1760 |     Switched { fork: u64, adopted: usize },
+     |     --------   ^^^^       ^^^^^^^
+     |     |
+     |     fields in this variant
+     |
+     = note: `ReconOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `their_work` is never read
+    --> src/node_embedded.rs:1780:5
+     |
+1774 | struct PendingAdoption {
+     |        --------------- field in this struct
+...
+1780 |     their_work: u128,
+     |     ^^^^^^^^^^
+     |
+     = note: `PendingAdoption` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `pending_adoption_live` is never used
+    --> src/node_embedded.rs:1833:4
+     |
+1833 | fn pending_adoption_live(now: Instant) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `total_recv` and `total_sent` are never used
+    --> src/node_embedded.rs:4286:8
+     |
+4279 | impl Stats {
+     | ---------- methods in this implementation
+...
+4286 |     fn total_recv(&self) -> u64 {
+     |        ^^^^^^^^^^
+...
+4289 |     fn total_sent(&self) -> u64 {
+     |        ^^^^^^^^^^
+
+warning: associated function `connect` is never used
+    --> src/node_embedded.rs:4349:8
+     |
+4348 | impl Session {
+     | ------------ associated function in this implementation
+4349 |     fn connect(addr: &str) -> Result<Session, String> {
+     |        ^^^^^^^
+
+warning: field `kernel_seeded` is never read
+    --> src/node_embedded.rs:5294:5
+     |
+5292 | struct ValidationOutcome {
+     |        ----------------- field in this struct
+5293 |     kernel_enforced: bool,
+5294 |     kernel_seeded: bool,
+     |     ^^^^^^^^^^^^^
+
+warning: function `is_dup_tx_refusal` is never used
+    --> src/node_embedded.rs:5300:4
+     |
+5300 | fn is_dup_tx_refusal(e: &str) -> bool {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: field `pubkeys` is never read
+     --> src/node_embedded.rs:11049:5
+      |
+11032 | struct OpsAdapter {
+      |        ---------- field in this struct
+...
+11049 |     pubkeys: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+      |     ^^^^^^^
+
+warning: constant `EARLY_OPS` is never used
+     --> src/node_embedded.rs:11228:7
+      |
+11228 | const EARLY_OPS: &[&str] = &[
+      |       ^^^^^^^^^
+
+warning: method `ready_early` is never used
+     --> src/node_embedded.rs:11240:8
+      |
+11238 | impl OpsAdapter {
+      | --------------- method in this implementation
+11239 |     /// True when this verb may run before the live wallet view is ready.
+11240 |     fn ready_early(&self, method: &str) -> bool {
+      |        ^^^^^^^^^^^
+
+warning: field `msgs_out` is never read
+     --> src/node_embedded.rs:18183:5
+      |
+18150 | struct Peer {
+      |        ---- field in this struct
+...
+18183 |     msgs_out: u64,
+      |     ^^^^^^^^
+
+warning: function `rand_seed` is never used
+    --> src/smsg.rs:1071:4
+     |
+1071 | fn rand_seed() -> u64 {
+     |    ^^^^^^^^^
+
+warning: associated function `key_of` is never used
+    --> src/smsg.rs:1210:8
+     |
+1168 | impl MessageStore {
+     | ----------------- associated function in this implementation
+...
+1210 |     fn key_of(folder: u16, t: &Token) -> Vec<u8> {
+     |        ^^^^^^
+
+warning: fields `pubkey`, `label`, and `encrypted` are never read
+   --> src/bdb_import.rs:318:9
+    |
+316 |     struct KeyRow {
+    |            ------ fields in this struct
+317 |         secret: Option<[u8; 32]>,
+318 |         pubkey: Vec<u8>,
+    |         ^^^^^^
+319 |         label: String,
+    |         ^^^^^
+320 |         encrypted: bool,
+    |         ^^^^^^^^^
+
+warning: function `current_unix_flavor` is never used
+   --> src/updater.rs:568:4
+    |
+568 | fn current_unix_flavor() -> UpdateFlavor {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: direct cast of function item into an integer
+    --> src/node_embedded.rs:6043:51
+     |
+6043 |         libc::signal(libc::SIGINT, tri7_on_signal as libc::sighandler_t);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+     |
+6043 |         libc::signal(libc::SIGINT, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+    --> src/node_embedded.rs:6044:52
+     |
+6044 |         libc::signal(libc::SIGTERM, tri7_on_signal as libc::sighandler_t);
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+help: first cast to a pointer `as *const ()`
+     |
+6044 |         libc::signal(libc::SIGTERM, tri7_on_signal as *const () as libc::sighandler_t);
+     |                                                    ++++++++++++
+
+warning: `tri7-core` (lib) generated 63 warnings (run `cargo fix --lib -p tri7-core` to apply 30 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 39s
+# EXIT-STATUS: 0 finished 2026-11-26T08:16:34
+-rwxr-xr-x 2 root root 3505944 2026-11-26 08:16 target/release/addrindex_build
+f477f45f32d6b56cfdeeeda8b024f8e29fb78245476e5d3b86272ff79ec4f50f  target/release/addrindex_build
+== unit
+Type=oneshot
+ExecStart=/root/tri7/target/release/addrindex_build /var/lib/tri7/blk0001.dat /var/lib/tri7
+TimeoutStartSec=900
+TimeoutStartSec=0
+
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+== git
+7d0793f [grade=A urn=urn:ump:2dbhvyslrfq7ffawmixnvcz23ldydy4ebu7peuf6z3lzqgdokxva] addrindex: deep wallet-row repair below the vouchable window
+## master
+origin/master 7d0793f
+
+== first timer run on the new binary
+Nov 26 08:17:40 vmi3080415 systemd[1]: Starting tri7-addrindex.service - tri7 address index catch-up...
+Nov 26 08:17:40 vmi3080415 addrindex_build[3582118]: tipstate oracle: 4600 hashes
+Nov 26 08:19:03 vmi3080415 addrindex_build[3582118]: [blockidx] ready: 2220882 frames, 4520661 txs, heights_ok=true, threaded_tip=Some(2220359), writable=true, built in 82s, fork re-threaded 7116 fram
+Nov 26 08:19:03 vmi3080415 addrindex_build[3582118]: store threaded to h2220359
+Nov 26 08:19:03 vmi3080415 addrindex_build[3582118]: address index verify: h2215760..h2220355 — every height holds the chain's block
+Nov 26 08:19:03 vmi3080415 addrindex_build[3582118]: resuming at file offset 988531403
+Nov 26 08:19:03 vmi3080415 addrindex_build[3582118]: walk: stale fork leftover at offset 988540588 (hash 96931ef32604ee50d7a29502c4bb140573140d310a2a6e9d5ca99d71a7f41193 not in the tipstate window) — 
+Nov 26 08:19:04 vmi3080415 addrindex_build[3582118]: addrindex: done — 396 blocks, 6 outputs, 9 spends, 4 stale fork leftover(s) skipped, 0 stale height(s) skipped, 392 block(s) already held in 0.3s
+Nov 26 08:19:04 vmi3080415 systemd[1]: tri7-addrindex.service: Deactivated successfully.
+Nov 26 08:19:04 vmi3080415 systemd[1]: Finished tri7-addrindex.service - tri7 address index catch-up.
+Nov 26 08:19:04 vmi3080415 systemd[1]: tri7-addrindex.service: Consumed 1min 17.416s CPU time, 1.0G memory peak, 0B memory swap peak.
+Result=success ExecMainStartTimestamp=Thu 2026-11-26 08:47:41 PST ExecMainExitTimestamp=Thu 2026-11-26 08:48:57 PST ExecMainStatus=0 
+# written by item53 (regenerated without byte-truncated lines)

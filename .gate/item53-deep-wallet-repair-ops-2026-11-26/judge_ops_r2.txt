@@ -1,0 +1,13 @@
+# ev: GLM stand-in judge, operations round 2 (Codex quota-walled; --reason quota)
+# bundle id: item53-deep-wallet-repair-ops-r2   judged: BRIEF.md sha256 7fb49fa932d9e21f767bc5fbcd725f8f06298e3f8bb04cbade6672cdd8582571   ev_plan.txt sha256 3e4099a8da35fe2eaea238951da5c9a659ce467307ae5e96d33f5c581aafa15a   item53_rollback.sh sha256 eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83   item53_after_check.py sha256 1393945961e2f9f8cd14e3a5c74805967a1b3379428c84d951bcac746be9db3a
+# judged 2026-11-26T09:34:21 PST brief sha256 7fb49fa932d9e21f767bc5fbcd725f8f06298e3f8bb04cbade6672cdd8582571 plan sha256 3e4099a8da35fe2eaea238951da5c9a659ce467307ae5e96d33f5c581aafa15a rollback sha256 eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83 — 18 evidence files listed in BRIEF.md
+GRADE=A urn=urn:ump:syw2izfgcrvo5lkhsgki4c6dhfn7cr2jo3xitgepe7to7gt444qa
+{
+  "blocking": [],
+  "polish": [
+    "V2's per-address check counts rows where addr matches and spent_height IS NULL; it assumes the index stores addresses in the same string form listunsent returns \u2014 a format-normalization mismatch would produce a false FAIL (safe direction, but worth a note).",
+    "The rollback's post-swap chown/chmod use '|| true'; a chown failure would leave wrong ownership while still reporting success if the hash matches \u2014 consider surfacing it.",
+    "CATCHUP_WAIT default of 600s could be tightened or made explicit in the plan text so an operator knows the rollback may hold the daemon stopped that long before failing.",
+    "The sandbox harness fault-injection env vars (ITEM53_SANDBOX/ITEM53_TEST_FAULT) are inert on the live path by construction, but a comment in the script saying they are test-only in both spots would prevent future reuse as a hidden switch."
+  ]
+}

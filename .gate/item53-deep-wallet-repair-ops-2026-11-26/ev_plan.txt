@@ -1,0 +1,155 @@
+# The plan under review: apply the deep wallet-row repair on DNS2, once
+
+## Preconditions (each one verified before the apply is run)
+
+P1. Code committed and pushed: 7d0793f on master = origin/master; the code
+    judge's round 2 graded that exact diff A (ev_code_grade_r2.txt). The
+    binary that will run is /root/tri7/target/release/addrindex_build, built
+    from 7d0793f with a clean tree (ev_deploy.txt). The run wrapper is given
+    that binary's sha256 and refuses to run any other build.
+P2. That same binary has already run the timer's ordinary catch-up once,
+    successfully (08:17:40-08:19:04 PST, ev_deploy.txt).
+P3. The dry run of the same command without `=apply` finished exit 0 at
+    08:32:51 PST, having walked h1702608..h2220360 (517,753 blocks in
+    98.8 s), with the plan below (ev_dryrun.txt). The dry run is REPEATED
+    right before the apply, and the apply goes ahead only if that fresh run
+    shows the same plan (218 / 225 / 159 / 0): ev_dryrun_fresh.txt. The
+    binary then reads the tipstate oracle again itself, right before its
+    transaction. "Nothing written" holds for the deep repair only: in
+    both modes the tail catch-up then runs as in every timer run (in the
+    fresh dry run it wrote 1 of 426 blocks, 425 were already held).
+P4. A second, independent walk of the node's own canonical chain (RPC
+    getblock / getrawtransaction, not the block store the repair reads)
+    confirms both halves of the plan: 225 coins re-spent canonically, 0 coins
+    that nothing spends, 0 orphaned transactions in a canonical block
+    (ev_canonical_spenders.txt).
+P5. A whole copy of the index, balances.json and tipstate.json exists from
+    before any repair write: /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/
+    — quick_check ok, sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015,
+    coverage h2220359, file offset 988531403 (ev_backup.txt).
+P6. The rollback script passes its sandbox (37 checks, 0 failed; six mutants
+    each caught) and its `--check` half ran on this host against the real
+    backup (ev_rollback_sandbox.txt, ev_rollback_mutants.txt,
+    ev_rollback_check_live.txt).
+
+## The command
+
+Run by hand, once, right after a timer catch-up has finished so that it does
+not overlap the next one:
+
+    /root/tri7/target/release/addrindex_build /var/lib/tri7/blk0001.dat /var/lib/tri7 --deep-wallet-repair=apply
+
+## What it writes
+
+One SQLite transaction, wallet-address rows of addressindex.db only:
+
+- 218 output rows whose transaction is in no canonical block: deleted
+- 225 spend markings (spent_height) set from the orphan block's height to
+  the canonical block that spends the coin
+- 159 history rows (tx_addr) of the orphaned transactions: deleted;
+  1 history row written
+
+Nothing else: no chain data, no wallet file, no key material, no
+balances.json, no other addresses' rows. The wallet file is opened with the
+node's own wallet reader and only its key addresses are used; nothing from
+it is printed or written. The ordinary window verify and the tail catch-up
+then run exactly as in every timer run.
+
+## Guards on the write (in the committed, graded code)
+
+- a dry run unless `=apply` is on the command line
+- rows are re-read inside the write transaction and written only if they
+  are still what the snapshot saw; anything else is counted `raced` and
+  left alone
+- the tipstate oracle is read again right before the transaction; a
+  changed window aborts (exit 3) with nothing written
+
+## Expected after the apply
+
+The run's own before and after must differ by exactly the phantom rows:
+after = before − 218 rows and − 3581.961062 TRI. In the dry run that was
+383 rows / 5170.155950 TRI -> 165 rows / 1588.194888 TRI. New stakes land
+while all this runs (listunspent had 397 rows at 09:20 PST), so the absolute
+count at apply time is higher than 165; the difference is what must match.
+Every remaining row is in the canonical block at its height.
+
+## Verification after the apply
+
+All four, in this order. Any one failing -> stop and report; no second
+apply, no improvising. The rollback below is then available and tested;
+whether to use it is decided then, with the evidence in hand.
+
+V1. The run prints APPLIED; its removed / moved / history-removed counts
+    equal the dry runs' (218 / 225 / 159); raced 0; its measured after
+    equals its measured before minus 218 rows and 3581.961062 TRI.
+V2. The audit: 0 rows outside the canonical block (was 218), in-window 0.
+    The checker item53_after_check.py then compares the index with the
+    node: every outpoint the node lists is an unspent row in the index,
+    and per address the index holds exactly as many unspent rows as the
+    node lists. Run before the apply, the same checker passes V2 and
+    fails V3 on the unrepaired index (ev_after_check_before_apply.txt).
+V3. Every moved marking against the independent walk: for all 225 coins the
+    index's spent_height equals the canonical height found in P4. Span of
+    that walk: canonical blocks h2209501..h2214035 — it stopped once every
+    coin was found — on a chain then at tip 2220370. Residual: those spends
+    lie below the vouchable window of that tip (4,600 blocks, so a base
+    near h2215771), so their finality rests on the chain not reorganising
+    more than about 4,600 blocks — the same assumption every confirmed
+    balance on this node rests on. They are not re-checked later.
+V4. The next timer catch-up finishes Result=success.
+
+## Rollback — a script, tested; not a paragraph
+
+`item53_rollback.sh` (sha256 eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83)
+restores the backup and proves it:
+
+1. Preconditions, before anything is touched: the backup hashes to its
+   pinned sha256, the three units exist, every command exists, at least the
+   backup's size plus 1 GiB is free. A failed precondition is exit 1 with
+   nothing touched.
+2. The restored file is prepared next to the live one and hash-verified —
+   still nothing live touched.
+3. Stop the timer, let a running catch-up finish, stop the daemon.
+4. Remove the WAL sidecars, rename the prepared file into place, set the
+   original owner and mode, and hash it again.
+5. Start the daemon, wait (bounded) for its RPC, start the timer, run one
+   catch-up, require Result=success.
+
+Exit 0 only when all of that held. Exit 2 names the step that failed,
+prints the units' states and the free space, and leaves the services as
+they are. Every step logs the free space of the index's disk. `--check`
+prints the three units' states at exit and stops none of them — the timer
+keeps running, so a catch-up may legitimately be active there.
+
+Evidence: 37 sandbox checks over ten scenarios and six mutants each caught
+by its expected checks (ev_rollback_sandbox.txt, ev_rollback_mutants.txt);
+the `--check` half run on this host against the real backup — prepared copy
+verified, nothing stopped (ev_rollback_check_live.txt).
+
+Cost: the applied index is kept beside the restored one as a hard link (no
+extra space); the prepared copy adds 1473306624 bytes until it is renamed.
+The daemon is down for the swap — seconds — plus its own start time.
+
+Not done for real: the swap itself has never run on the live host. Only its
+pre-swap half (`--check`) and the sandbox have.
+
+## Known limits, stated rather than hidden
+
+- The rollback snapshot is from before the dry run (08:19-08:21 PST); the
+  apply comes later. A rollback replays that gap; it loses no chain data.
+- The daemon keeps writing the index while the repair runs. Rows it changes
+  after the repair's snapshot are left alone (raced), never overwritten.
+- A reorg BELOW the vouchable window during the run is not detected: the
+  oracle vouches for the window only.
+- The backup is on the same disk as the index (the only disk, 97% full). It
+  protects against a bad write, not against a disk failure.
+- Rolling back stops the staking daemon for the length of the swap. That is
+  the cost of the safety net, not a step of the plan.
+- This corrects the item's E5 reading. Those 225 coins are not unspent coins
+  hidden from the list: the canonical chain spends every one of them, 3 to
+  175 blocks after the orphan block. Nothing returns to unspent, and the
+  listed balance falls by exactly the phantom rows' value.
+
+## Not in this step
+
+Pi and DNS3 (no address index there); F3; any wallet file or key operation.

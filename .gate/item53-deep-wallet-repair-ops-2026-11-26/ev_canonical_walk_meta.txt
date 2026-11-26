@@ -1,0 +1,7 @@
+# ev: metadata of the independent canonical walk (item53_movecheck_full.py -> item53_canonical_spend.json). Heights and counts only; no addresses.
+tip_at_walk 2220370
+walked_from 2209501
+walked_to 2214035
+canonical_spend entries 225  not_found entries 0
+canonical spend heights: min 2209513 max 2214035
+map sha256 e6522154e313591c39d10a256bd807d948bb25e2dbae57bb41e590f608f32ad1

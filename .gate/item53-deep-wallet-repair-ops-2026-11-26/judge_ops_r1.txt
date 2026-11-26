@@ -1,0 +1,13 @@
+# ev: GLM stand-in judge, operations round 1 (Codex quota-walled; --reason quota)
+# bundle id: item53-deep-wallet-repair-ops-r1   judged: BRIEF.md sha256 7a7c144928ef43c8f467ee9680da45d04a98595681b3756aa20082e1f766ed75   item53_rollback.sh sha256 0205fd4fea75dc82aa28d104d7be3e7bd40023f627fe897601a2aaa2c6e6c5a2   ev_plan.txt sha256 25e066181812828e01c3344354c568c7aff796c42afb5a571abe22596d7eb941
+# judged 09:16:55 PST — files: ev_plan.txt,item53_rollback.sh,item53_rpc_probe.py,ev_dryrun.txt,ev_audit_before.txt,ev_canonical_spenders.txt,ev_backup.txt,ev_rollback_sandbox.txt,ev_rollback_mutants.txt,ev_rollback_check_live.txt,ev_deploy.txt,ev_code_grade_r2.txt
+GRADE=A urn=urn:ump:qjnkiza73vkymm2sxzaajneerfu5wznkecblz6kn3yr7lcqymnxa
+{
+  "blocking": [],
+  "polish": [
+    "Re-run the dry run or at least the tipstate oracle immediately before the apply so counts and window are fresh at execution time.",
+    "The second `--check` run left the catch-up unit in 'activating' afterwards; consider verifying all three units quiescent at --check exit, not only before.",
+    "With ~6\u20137 GiB free and a ~1.47 GiB transient prepared copy, log free space at each rollback step so a near-full disk is visible in exit-2 evidence.",
+    "State explicitly that V3's comparison span is h2209501..h2214035 (the walk stopped early once all coins were found) and note the residual if a spend were re-checked later."
+  ]
+}

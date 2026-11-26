@@ -1,0 +1,45 @@
+# ev: the rollback's --check mode on the REAL host: preconditions + a prepared copy of the real backup, then removed. No service is touched.
+# command: bash item53_rollback.sh --check   (script sha256 05f138671fcd35a2f134e23fb32fbdb440f2da98f370e910bad6fe795b3a25d7)
+# service states before: timer active catch-up inactive daemon active
+2026-11-26 09:07:18 PST == rollback of the item 53 repair on DNS2
+2026-11-26 09:07:22 PST REFUSED: no rpc probe at /root/tri7/.gate/item53-deep-wallet-repair-ops-2026-11-26/item53_rpc_probe.py — nothing was touched
+# EXIT-STATUS: 1
+# service states after: timer active catch-up inactive daemon active
+# restore files left: 0
+# free after: 7.89 GiB
+
+# ---- second run, after chmod +x of the probe (the refusal above is the guard working)
+# command: bash item53_rollback.sh --check   (script sha256 05f138671fcd35a2f134e23fb32fbdb440f2da98f370e910bad6fe795b3a25d7)
+# service states before: timer active catch-up inactive daemon active
+2026-11-26 09:07:38 PST == rollback of the item 53 repair on DNS2
+2026-11-26 09:07:39 PST preconditions ok: backup 1473306624 bytes, sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015; 8078 MiB free
+2026-11-26 09:07:39 PST preparing the restored file next to the live one: /var/lib/tri7/addressindex.db.restore
+2026-11-26 09:07:44 PST prepared copy verified: sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015
+2026-11-26 09:07:45 PST CHECK ONLY: nothing was stopped or swapped; the prepared copy is removed
+# EXIT-STATUS: 0
+# service states after: timer active catch-up activating daemon active
+# restore files left: 0
+# free after: 7.89 GiB
+
+# ---- third run: the final script (sha256 0205fd4fea75dc82aa28d104d7be3e7bd40023f627fe897601a2aaa2c6e6c5a2); the line changed since the second run is the unknown-argument refusal
+# service states before: timer active catch-up inactive daemon active
+2026-11-26 09:12:01 PST == rollback of the item 53 repair on DNS2
+2026-11-26 09:12:12 PST preconditions ok: backup 1473306624 bytes, sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015; 7089 MiB free
+2026-11-26 09:12:12 PST preparing the restored file next to the live one: /var/lib/tri7/addressindex.db.restore
+2026-11-26 09:12:25 PST prepared copy verified: sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015
+2026-11-26 09:12:25 PST CHECK ONLY: nothing was stopped or swapped; the prepared copy is removed
+# EXIT-STATUS: 0
+# service states after: timer active catch-up inactive daemon active
+# restore files left: 0
+
+# ---- fourth run: the final script (sha256 eeb6bc5e7509d29fd9f4880c177b296ce46461d484c3f6e1bc8ec9d5f0d21c83) — it now logs free space at every step and the units at --check exit
+# service states before: timer active catch-up inactive daemon active
+2026-11-26 09:20:54 PST == rollback of the item 53 repair on DNS2
+2026-11-26 09:21:06 PST preconditions ok: backup 1473306624 bytes, sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015; 8072 MiB free
+2026-11-26 09:21:06 PST preparing the restored file next to the live one: /var/lib/tri7/addressindex.db.restore (8072 MiB free)
+2026-11-26 09:21:12 PST prepared copy verified: sha256 8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015 (6667 MiB free)
+2026-11-26 09:21:13 PST CHECK ONLY: nothing was stopped or swapped; the prepared copy is removed (8072 MiB free)
+2026-11-26 09:21:13 PST units as found now: timer active, catch-up inactive, daemon active
+# EXIT-STATUS: 0
+# service states after: timer active catch-up inactive daemon active
+# restore files left: 0
