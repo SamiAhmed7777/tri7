@@ -13,19 +13,32 @@
 # usage: bash item53_rollback.sh            restore and prove
 #        bash item53_rollback.sh --check    preconditions and the prepared copy only:
 #                                          nothing is stopped, the prepared copy is removed
+#
+# The pre-repair backup this restores by default was deleted on 2026-11-27
+# (TRI7 workqueue item 54, part D). With no backup the script refuses with
+# "no backup at ..." and touches nothing. To roll back to another verified
+# copy, set ITEM53_BACKUP_DIR and ITEM53_BACKUP_SHA256.
+#
+# TEST-ONLY: ITEM53_SANDBOX=1 with ITEM53_TEST_FAULT=<name> is the sandbox
+# harness's fault injection (item53_rollback_sandbox.sh). The script refuses
+# the run when it is asked for on the live index path.
 set -Eeuo pipefail
 
+DEFAULT_LIVE_DB=/var/lib/tri7/addressindex.db
 BACKUP_DIR=${ITEM53_BACKUP_DIR:-/root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819}
 BACKUP_DB="$BACKUP_DIR/addressindex.db"
 # sha256 of the verified backup (ev_backup.txt)
 BACKUP_SHA256=${ITEM53_BACKUP_SHA256:-8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015}
-LIVE_DB=${ITEM53_LIVE_DB:-/var/lib/tri7/addressindex.db}
+LIVE_DB=${ITEM53_LIVE_DB:-$DEFAULT_LIVE_DB}
 SC=${ITEM53_SYSTEMCTL:-systemctl}
 RPC_PROBE=${ITEM53_RPC_PROBE:-$(dirname "$(readlink -f "$0")")/item53_rpc_probe.py}
 LOCK=${ITEM53_LOCK:-/run/lock/item53-rollback.lock}
 TIMER=tri7-addrindex.timer
 CATCHUP=tri7-addrindex.service
 DAEMON=tri7d.service
+# CATCHUP_WAIT: seconds to wait for a running catch-up to end. That wait comes
+# BEFORE the daemon is stopped: the timer is stopped, the catch-up is left to
+# finish, and only then is the daemon stopped.
 CATCHUP_WAIT=${ITEM53_CATCHUP_WAIT:-600}
 RPC_WAIT=${ITEM53_RPC_WAIT:-120}
 
@@ -38,6 +51,14 @@ rollback_failed() {
   say "nothing further is done. Decide with the lines above before restarting anything."
   exit 2
 }
+# Used after the restored file is in place but its owner or mode could not be
+# set. $1 = what could not be set, $2 = the command(s) that set it by hand.
+swap_fix_failed() {
+  rollback_failed "could not $1 on the restored index. The file is in place but not yet hash-checked; $DAEMON and $TIMER are stopped. Fix it by hand — $2 — then start $DAEMON and $TIMER"
+}
+# TEST-ONLY: the sandbox harness's fault injection. It needs a live path that
+# is not the default one; on the live index path the guard below refuses the run.
+fault() { [ "${ITEM53_SANDBOX:-}" = 1 ] && [ "${ITEM53_TEST_FAULT:-}" = "$1" ] && [ "$LIVE_DB" != "$DEFAULT_LIVE_DB" ]; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 free_mb() { df -Pk "$(dirname "$LIVE_DB")" | awk 'NR==2 {printf "%d", $4 / 1024}'; }
 units_now() { printf 'timer %s, catch-up %s, daemon %s' "$("$SC" is-active "$TIMER" 2>/dev/null || true)" "$("$SC" is-active "$CATCHUP" 2>/dev/null || true)" "$("$SC" is-active "$DAEMON" 2>/dev/null || true)"; }
@@ -52,6 +73,11 @@ wait_inactive() {  # $1 = unit, $2 = seconds
 }
 
 say "== rollback of the item 53 repair on DNS2"
+# TEST-ONLY guard: the sandbox harness's fault injection never runs against the
+# live index path, whatever else is set
+if [ "${ITEM53_SANDBOX:-}" = 1 ] && [ -n "${ITEM53_TEST_FAULT:-}" ] && [ "$LIVE_DB" = "$DEFAULT_LIVE_DB" ]; then
+  refuse "sandbox fault injection was asked for on the live index path ($LIVE_DB)"
+fi
 exec 9>"$LOCK"
 flock -n 9 || refuse "another rollback holds $LOCK"
 for c in sha256sum cp mv rm ln stat df awk seq sleep flock readlink dirname "$SC"; do
@@ -81,8 +107,7 @@ if ! cp --reflink=auto "$BACKUP_DB" "$restore"; then
   refuse "the copy failed ($(free_mb) MiB free)"
 fi
 sync
-# sandbox harness only: both variables must be set; the live default path refuses
-if [ "${ITEM53_SANDBOX:-}" = 1 ] && [ "${ITEM53_TEST_FAULT:-}" = copy_corrupt ]; then
+if fault copy_corrupt; then
   printf 'x' >> "$restore"
 fi
 got=$(sha "$restore")
@@ -116,10 +141,13 @@ say "swapping the file in ($(free_mb) MiB free)"
 ln -f "$LIVE_DB" "$LIVE_DB.item53-applied" 2>/dev/null || true   # keeps the applied state for forensics; costs no space
 rm -f "$LIVE_DB-wal" "$LIVE_DB-shm"
 mv -f "$restore" "$LIVE_DB" || rollback_failed "could not move the restored file into place. The live index is UNCHANGED: starting $DAEMON and $TIMER again gives the service as it was"
-chown "$owner" "$LIVE_DB" || true
-chmod "$mode" "$LIVE_DB" || true
-# sandbox harness only: both variables must be set; the live default path refuses
-if [ "${ITEM53_SANDBOX:-}" = 1 ] && [ "${ITEM53_TEST_FAULT:-}" = post_swap_sha ]; then
+# TEST-ONLY: the sandbox harness's faults that make the two commands below fail
+chown_to=$owner chmod_to=$mode
+if fault post_swap_chown; then chown_to="item53-sandbox-no-such-user:x"; fi
+if fault post_swap_chmod; then chmod_to=98765; fi
+chown "$chown_to" "$LIVE_DB" || swap_fix_failed "give it to $owner" "chown $owner $LIVE_DB; chmod $mode $LIVE_DB"
+chmod "$chmod_to" "$LIVE_DB" || swap_fix_failed "set mode $mode on it" "chmod $mode $LIVE_DB"
+if fault post_swap_sha; then
   printf 'x' >> "$LIVE_DB"
 fi
 got=$(sha "$LIVE_DB")

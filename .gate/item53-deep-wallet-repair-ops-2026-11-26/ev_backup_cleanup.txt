@@ -1,0 +1,47 @@
+# ev: item 54 part D — the item-53 pre-repair backup deleted on DNS2
+# grade: A  urn:ump:nrgdyiswbkkrmpqiubzwpyqmk6sfn4liny53ehje6p75yw4mbc2a  (judge_ops_r3.txt, stand-in judge, 2026-11-27T16:12:58Z to 16:13:14Z)
+# graded bytes: item53_rollback.sh sha256 48482e97c40f5ca028e2e669dea040a0341a14e25b85ff5600f3c4ddb4924189
+# started: 2026-11-27T16:13:32Z
+
+## before
+total 1443848
+drwxr-xr-x 2 root root       4096 2026-11-26 08:21 .
+drwxr-xr-x 3 root root       4096 2026-11-26 09:52 ..
+-rw-r--r-- 1 root root 1473306624 2026-11-26 08:21 addressindex.db
+-rw-r--r-- 1 root root      32768 2026-11-26 08:28 addressindex.db-shm
+-rw-r--r-- 1 root root          0 2026-11-26 08:21 addressindex.db-wal
+-rw-r--r-- 1 root root    2180973 2026-11-25 08:18 balances.json
+-rw------- 1 root root    2927432 2026-11-26 08:19 tipstate.json
+disk: used_kb=197483696 avail_kb=4550976
+/dev/sda1       193G  189G  4.4G  98% /
+
+## the commands, exactly as briefed
+++ rm -f -- /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db-shm /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db-wal /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/balances.json /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/tipstate.json
+++ echo 'rm exit=0'
+rm exit=0
+++ rmdir -- /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819
+++ echo 'rmdir exit=0'
+rmdir exit=0
+++ set +x
+
+## after
+ls: cannot access '/root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819': No such file or directory
+total 1788
+drwxr-xr-x  2 root root    4096 2026-11-27 08:13 .
+drwxr-xr-x 36 root root   69632 2026-11-27 07:54 ..
+-rw-r--r--  1 root root 1745754 2026-11-26 09:52 TRI7-WORKQUEUE.pre-item53-close-20261126T0952.md
+disk: used_kb=196039852 avail_kb=5994820
+/dev/sda1       193G  187G  5.8G  98% /
+
+## the rollback script with its default backup gone (--check; nothing is stopped)
+2026-11-27 08:13:32 PST == rollback of the item 53 repair on DNS2
+2026-11-27 08:13:32 PST REFUSED: no backup at /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db — nothing was touched
+# exit=1
+
+## units and the live index after
+active active
+2649996 -rw-r--r-- 1 tri7 tri7 1473650688 Nov 27 04:53 addressindex.db
+2650000 -rw-r--r-- 1 tri7 tri7      32768 Nov 27 07:53 addressindex.db-shm
+2649998 -rw-r--r-- 1 tri7 tri7   54635352 Nov 27 07:53 addressindex.db-wal
+
+# finished: 2026-11-27T16:13:32Z

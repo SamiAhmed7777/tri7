@@ -1,0 +1,10 @@
+# ev: /var/lib/tri7 address-index entries (inode size owner mode mtime) before and after the sandbox and mutant runs of 2026-11-27
+before 2026-11-27T16:07:59Z
+2649996 -rw-r--r-- 1 tri7 tri7 1473650688 Nov 27 04:53 addressindex.db
+2650000 -rw-r--r-- 1 tri7 tri7      32768 Nov 27 07:53 addressindex.db-shm
+2649998 -rw-r--r-- 1 tri7 tri7   54635352 Nov 27 07:53 addressindex.db-wal
+after 2026-11-27T16:09:39Z
+2649996 -rw-r--r-- 1 tri7 tri7 1473650688 Nov 27 04:53 addressindex.db
+2650000 -rw-r--r-- 1 tri7 tri7      32768 Nov 27 07:53 addressindex.db-shm
+2649998 -rw-r--r-- 1 tri7 tri7   54635352 Nov 27 07:53 addressindex.db-wal
+no .restore or .item53-applied entry; same inodes, sizes, owners, modes

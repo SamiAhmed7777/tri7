@@ -1,0 +1,10 @@
+GRADE=A urn=urn:ump:nrgdyiswbkkrmpqiubzwpyqmk6sfn4liny53ehje6p75yw4mbc2a
+{
+  "blocking": [],
+  "polish": [
+    "The script header says the backup 'was deleted on 2026-11-27' before the judge-gated deletion has actually run; consider phrasing it as 'is deleted as part of item 54 part D' or updating the header atomically with the deletion so the bytes are never false in the interim.",
+    "In sandbox M the refusal-precedes-lock check uses the absence of $D/lock; a comment could note that exec 9> is what would have created it, making the check's meaning explicit.",
+    "The mutant harness's python replacement strings depend on exact whitespace (e.g. the multi-line deletions with '=> \\n'); a failed mutation is reported, which is fine, but quoting the replacement as a regex-free literal check is already done via count==1 \u2014 no change needed, just noting fragility.",
+    "free_mb reports in MiB while the precondition check computes free_kb; a single unit convention would remove a small reading hazard."
+  ]
+}

@@ -1,0 +1,21 @@
+# ev: the two refusals demonstrated on DNS2 itself, real paths, --check mode, nothing stopped — 2026-11-27T16:11:50Z
+# script sha256 48482e97c40f5ca028e2e669dea040a0341a14e25b85ff5600f3c4ddb4924189
+lock file before: -rw-r--r-- 1 root root 0 Nov 26 09:20 /run/lock/item53-rollback.lock
+
+## 1) a backup that is not there (what a run looks like after the deletion)
+# command: ITEM53_BACKUP_DIR=/root/tri7-lab/backups/does-not-exist bash item53_rollback.sh --check
+2026-11-27 08:11:50 PST == rollback of the item 53 repair on DNS2
+2026-11-27 08:11:50 PST REFUSED: no backup at /root/tri7-lab/backups/does-not-exist/addressindex.db — nothing was touched
+# exit=1
+
+## 2) sandbox fault injection asked for on the real index path
+# command: ITEM53_SANDBOX=1 ITEM53_TEST_FAULT=post_swap_sha bash item53_rollback.sh --check
+lock mtime before run 2: 2026-11-27 08:11:50.325760970
+2026-11-27 08:11:50 PST == rollback of the item 53 repair on DNS2
+2026-11-27 08:11:50 PST REFUSED: sandbox fault injection was asked for on the live index path (/var/lib/tri7/addressindex.db) — nothing was touched
+# exit=1
+lock mtime after run 2: 2026-11-27 08:11:50.325760970
+
+## after both runs
+active active
+addressindex.db addressindex.db-shm addressindex.db-wal

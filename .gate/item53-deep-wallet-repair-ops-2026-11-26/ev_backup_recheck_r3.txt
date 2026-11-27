@@ -1,0 +1,15 @@
+# ev: the item-53 backup's files and sha256, recomputed before the deletion — 2026-11-27T16:11:15Z
+# expected (ev_backup.txt): db 8aa019a7…  balances.json e7364128…  tipstate.json b5296480…
+total 1443848
+drwxr-xr-x 2 root root       4096 2026-11-26 08:21 .
+drwxr-xr-x 3 root root       4096 2026-11-26 09:52 ..
+-rw-r--r-- 1 root root 1473306624 2026-11-26 08:21 addressindex.db
+-rw-r--r-- 1 root root      32768 2026-11-26 08:28 addressindex.db-shm
+-rw-r--r-- 1 root root          0 2026-11-26 08:21 addressindex.db-wal
+-rw-r--r-- 1 root root    2180973 2026-11-25 08:18 balances.json
+-rw------- 1 root root    2927432 2026-11-26 08:19 tipstate.json
+8aa019a780aba9668978805a708a0174ae78185e201d8851b3e61663e8cb2015  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/addressindex.db
+e736412856ab87c17da7d74f5fa7a79556a866f873f9b2f210598688a416ff0d  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/balances.json
+b5296480b7ebb156c6bd5b3a1b8bf960f57cf760c4d67889d475a5fb8da3c922  /root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/tipstate.json
+1478447797	/root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819/
+disk before: used_kb=197480552 free_kb=4554120

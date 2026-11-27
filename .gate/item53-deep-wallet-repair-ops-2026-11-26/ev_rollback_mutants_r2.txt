@@ -1,0 +1,13 @@
+# ev: mutants of item53_rollback.sh against the sandbox (sha256 of the original: 48482e97c40f5ca028e2e669dea040a0341a14e25b85ff5600f3c4ddb4924189) — 2026-11-27T08:08:09 PST
+KILLED   no_final_hash_check — failing checks: D exit 2; D says which check failed; D nothing was started after the failure
+KILLED   stale_wal_left_in_place — failing checks: A no restore file or stale wal left
+KILLED   daemon_stopped_first — failing checks: A order: timer stop, daemon stop, daemon start, timer start, catch-up
+KILLED   prepared_copy_not_hashed — failing checks: H exit 1; H nothing was stopped or started
+KILLED   check_mode_swaps — failing checks: I exit 0
+KILLED   check_arg_typo_leaves_copy — failing checks: J no restore file left
+KILLED   chown_failure_ignored — failing checks: K exit 2; K nothing was started after the failure; K says which step failed; K prints the hand-fix
+KILLED   chmod_failure_ignored — failing checks: L exit 2; L nothing was started after the failure; L says which step failed; L prints the hand-fix
+KILLED   live_path_guard_removed — failing checks: M names the guard and the live path; M refused before the lock was taken
+# 51 checks, 0 failed
+# EXIT-STATUS: 0
+# EXIT-STATUS: 0

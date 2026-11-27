@@ -1,0 +1,85 @@
+# ev: sandbox test of item53_rollback.sh — 2026-11-27T08:07:59 PST
+# sandbox: a scratch directory; fake systemctl and rpc probe; two small databases
+# script under test: sha256 48482e97c40f5ca028e2e669dea040a0341a14e25b85ff5600f3c4ddb4924189
+PASS  A exit 0 (got 0)
+PASS  A live index == the backup
+PASS  A the applied state is kept beside it
+PASS  A no restore file or stale wal left
+PASS  A waited for the running catch-up to end
+PASS  A order: timer stop, daemon stop, daemon start, timer start, catch-up
+PASS  A prints the proof line
+PASS  B exit 1 (got 1)
+PASS  B live index untouched
+PASS  B systemctl was never called
+PASS  B no restore file left
+PASS  C exit 1 (got 1)
+PASS  C live index untouched, the thing in the way not removed
+PASS  D exit 2 (got 2)
+PASS  D says which check failed
+PASS  D nothing was started after the failure
+PASS  E exit 2 (got 2)
+PASS  E the index was restored before that
+PASS  E names the daemon
+PASS  F exit 2 (got 2)
+PASS  F the daemon was not stopped
+PASS  F live index untouched, prepared file removed
+PASS  F names the catch-up
+PASS  G exit 2 (got 2)
+PASS  G names the RPC wait
+PASS  H exit 1 (got 1)
+PASS  H live index untouched
+PASS  H nothing was stopped or started
+PASS  H no restore file left
+PASS  I exit 0 (got 0)
+PASS  I live index untouched
+PASS  I nothing was stopped or started
+PASS  I no restore file left
+PASS  J exit 1 (got 1)
+PASS  J live index untouched
+PASS  J nothing was stopped or started
+PASS  J no restore file left
+PASS  K exit 2 (got 2)
+PASS  K the restored file is in place
+PASS  K nothing was started after the failure
+PASS  K says which step failed
+PASS  K prints the hand-fix
+PASS  L exit 2 (got 2)
+PASS  L the restored file is in place
+PASS  L nothing was started after the failure
+PASS  L says which step failed
+PASS  L prints the hand-fix
+PASS  M exit 1 (got 1)
+PASS  M names the guard and the live path
+PASS  M refused before the lock was taken
+PASS  M systemctl was never called
+# 51 checks, 0 failed
+# the normal path's output (A):
+#   2026-11-27 08:07:59 PST == rollback of the item 53 repair on DNS2
+#   2026-11-27 08:07:59 PST preconditions ok: backup 8192 bytes, sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf; 4456 MiB free
+#   2026-11-27 08:07:59 PST preparing the restored file next to the live one: /root/.hermes/cache/scratch/item53_rb_sandbox.r6LPyc/A/live/addressindex.db.restore (4456 MiB free)
+#   2026-11-27 08:07:59 PST prepared copy verified: sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf (4456 MiB free)
+#   2026-11-27 08:07:59 PST stopping tri7-addrindex.timer (the catch-up is left to finish)
+#   2026-11-27 08:08:00 PST stopping tri7d.service
+#   2026-11-27 08:08:00 PST swapping the file in (4456 MiB free)
+#   2026-11-27 08:08:00 PST restored index in place: sha256 d427d1f03c3be84be9c46e9be2a9806af4647027b16a98b571cb316f60a7becf, root:root 644 (4456 MiB free)
+#   2026-11-27 08:08:00 PST starting tri7d.service
+#   2026-11-27 08:08:00 PST daemon answers: block count 2220400
+#   2026-11-27 08:08:00 PST starting tri7-addrindex.timer and running one catch-up
+#   2026-11-27 08:08:00 PST catch-up: Result=success
+#   2026-11-27 08:08:00 PST ROLLBACK DONE AND PROVEN: index sha256 == the backup's, daemon answering, catch-up success
+# a refused run's output (B):
+#   2026-11-27 08:08:01 PST == rollback of the item 53 repair on DNS2
+#   2026-11-27 08:08:01 PST REFUSED: the backup's sha256 is not the pinned one — nothing was touched
+# a refused run's output (M):
+#   2026-11-27 08:08:09 PST == rollback of the item 53 repair on DNS2
+#   2026-11-27 08:08:09 PST REFUSED: sandbox fault injection was asked for on the live index path (/var/lib/tri7/addressindex.db) — nothing was touched
+# a failed run's last lines (F):
+#   2026-11-27 08:08:05 PST ROLLBACK FAILED: the catch-up service was still active after 2 s
+#   2026-11-27 08:08:05 PST units: timer , catch-up , daemon ; free space on the index's disk: 4455 MiB
+#   2026-11-27 08:08:05 PST nothing further is done. Decide with the lines above before restarting anything.
+# a failed run's last lines (K):
+#   chown: invalid user: ‘item53-sandbox-no-such-user:x’
+#   2026-11-27 08:08:08 PST ROLLBACK FAILED: could not give it to root:root on the restored index. The file is in place but not yet hash-checked; tri7d.service and tri7-addrindex.timer are stopped. Fix it by hand — chown root:root /root/.hermes/cache/scratch/item53_rb_sandbox.r6LPyc/K/live/addressindex.db; chmod 644 /root/.hermes/cache/scratch/item53_rb_sandbox.r6LPyc/K/live/addressindex.db — then start tri7d.service and tri7-addrindex.timer
+#   2026-11-27 08:08:08 PST units: timer , catch-up , daemon ; free space on the index's disk: 4455 MiB
+#   2026-11-27 08:08:08 PST nothing further is done. Decide with the lines above before restarting anything.
+# EXIT-STATUS: 0

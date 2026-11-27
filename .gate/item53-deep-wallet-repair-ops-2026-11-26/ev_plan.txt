@@ -153,3 +153,45 @@ pre-swap half (`--check`) and the sandbox have.
 ## Not in this step
 
 Pi and DNS3 (no address index there); F3; any wallet file or key operation.
+
+## Revision notes — 2026-11-27, item 54 parts C and D
+
+Appended after the apply. The sections above are the text that was graded and
+run on 2026-11-26; they are left as they were.
+
+- **CATCHUP_WAIT** is 600 s by default (`ITEM53_CATCHUP_WAIT`). It is how long
+  the rollback waits for a running catch-up to end, and that wait comes BEFORE
+  the daemon is stopped: the timer is stopped, the catch-up is left to finish,
+  and only then is the daemon stopped. So a rollback can hold the timer stopped
+  for up to ten minutes with the daemon still staking, and it fails (exit 2,
+  nothing swapped) if the catch-up has not ended by then.
+- **The owner and mode of the restored index are now fatal to get right.**
+  After the swap the rollback used to run `chown` and `chmod` with `|| true`,
+  so a failed chown would have left the index with the wrong owner while the
+  script went on to print "ROLLBACK DONE AND PROVEN". It now stops with exit 2
+  and prints the commands that set them by hand (sandbox cases K and L;
+  mutants `chown_failure_ignored`, `chmod_failure_ignored`).
+- **The fault injection is test-only by construction.** `ITEM53_SANDBOX=1`
+  with `ITEM53_TEST_FAULT=<name>` is the sandbox harness's. The script used to
+  say the live default path refuses it, which was not true for `post_swap_sha`.
+  It now refuses the run before the lock is taken whenever that is asked for
+  on the live index path (sandbox case M; mutant `live_path_guard_removed`;
+  demonstrated on DNS2 itself in ev_rollback_live_refusals_r3.txt).
+- **V2's per-address check** (item53_after_check.py, unchanged) assumes the
+  index stores addresses in the same string form listunspent returns. A format
+  mismatch would show there as a FAIL, the safe direction.
+- **The backup this plan made is being deleted** as part D of item 54
+  (2026-11-27), under its own grade: BRIEF_r3_polish_cleanup.md puts that
+  deletion to the judge together with the script revision above, and
+  ev_backup_cleanup.txt is its record.
+  `/root/tri7-lab/backups/item53-pre-dryrun-2026-11-26T0819` held five files,
+  1,478,447,797 bytes. The repair it protected has been the live index
+  since 2026-11-26T09:43 PST, and the snapshot held h2220359 with the phantom
+  rows still in it: it was not a state to return to. `item53_rollback.sh`
+  now refuses with "no backup at ..." unless `ITEM53_BACKUP_DIR` and
+  `ITEM53_BACKUP_SHA256` name another verified copy.
+
+The sandbox and its mutants are kept beside the script now
+(item53_rollback_sandbox.sh, item53_rollback_mutants.sh); on 2026-11-26 they
+lived in a scratch directory. Evidence of this revision:
+ev_rollback_sandbox_r2.txt (51 checks), ev_rollback_mutants_r2.txt (9 mutants).
