@@ -31,6 +31,15 @@ windows-sys = { version = "0.59", features = [
 name = "tri7"
 path = "src/bin/tri7_cli.rs"
 
+# Watch-only light wallet over the public explorer REST surface (P6.2).
+# Feature-gated: pulls ureq/rustls so headless tri7d builds stay TLS-free
+# (same rationale as the gui-gated updater). Build:
+#   cargo build --features light-wallet --bin tri7_light_wallet
+[[bin]]
+name = "tri7_light_wallet"
+path = "src/bin/tri7_light_wallet.rs"
+required-features = ["light-wallet"]
+
 [dependencies]
 base58 = "0.2"
 clap = { version = "4", features = ["derive"] }
@@ -85,6 +94,9 @@ cbc = { version = "0.1", features = ["alloc"] }
 
 [features]
 default = []
+# Watch-only light wallet (src/light_wallet.rs + the tri7_light_wallet bin):
+# explorer REST polling needs a TLS stack, kept opt-in.
+light-wallet = ["dep:ureq"]
 gui = ["dep:egui", "dep:eframe", "dep:image", "dep:rfd", "dep:ureq", "dep:arboard",
        # the system tray icon (Windows target only: tray-icon is a
        # cfg(windows) dependency, so this is a no-op elsewhere)

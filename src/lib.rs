@@ -22,6 +22,8 @@ pub mod kernel;
 pub mod keytool;
 pub mod legacy;
 pub mod legacy_rows;
+#[cfg(feature = "light-wallet")]
+pub mod light_wallet;
 pub mod multisig;
 /// The embedded follow-tip node, welded into the GUI process (single-exe).
 pub mod node_embedded;
