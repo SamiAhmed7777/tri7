@@ -11042,6 +11042,59 @@ fn enforce_unlock_timeout(wl: &SharedWalletLive) {
     }
 }
 
+/// (item 54 E) The ONE lock order for the five follow-loop mutexes. Every
+/// thread in this file takes them in this order or not together at all:
+///
+/// ```text
+///   chain-state (st)  →  recent  →  txpool (pool)  →  stake_st  →  wallet-live (wl)
+/// ```
+///
+/// wallet-live is LAST on purpose. The follow loop holds st, recent and pool
+/// across `handle_message`, and a fork adoption inside it takes wallet-live
+/// (`unwind_wallet_live_after_rollback`). So any thread that takes wallet-live
+/// first and then wants pool / st / recent / stake_st waits forever against
+/// the loop, and the loop waits forever for wallet-live: DNS2's `tri7d` hung
+/// that way on 2026-11-27 for 82 minutes (every RPC 503, SIGTERM ignored,
+/// SIGKILL). The `getstakinginfo` arm held wallet-live and reached for the
+/// pool inside its `json!`; the loop held the pool and reached for
+/// wallet-live.
+///
+/// `try_lock` never blocks (the RPC tip/mirror reads), so it is exempt.
+///
+/// Guards for one stake tick, taken by `lock_stake_tick_set` in that order
+/// and released together.
+struct StakeTickLocks<'a> {
+    stg: std::sync::MutexGuard<'a, ChainState>,
+    recent: std::sync::MutexGuard<'a, RecentBlocks>,
+    pool: std::sync::MutexGuard<'a, tri7_core::txpool::TxPool>,
+    stake_st: std::sync::MutexGuard<'a, StakeState>,
+    wl: std::sync::MutexGuard<'a, Option<WalletLive>>,
+}
+
+/// Take the five guards a stake tick needs, in the file-wide lock order (see
+/// `StakeTickLocks`): st → recent → pool → stake_st → wallet-live. One `let`
+/// per lock, in order, so the acquisition order is the statement order.
+fn lock_stake_tick_set<'a>(
+    st_shared: &'a SharedState,
+    recent_shared: &'a Arc<Mutex<RecentBlocks>>,
+    pool_shared: &'a SharedPool,
+    stake_st_shared: &'a SharedStake,
+    wl_shared: &'a SharedWalletLive,
+) -> StakeTickLocks<'a> {
+    let stg = st_shared.lock().unwrap();
+    let recent = recent_shared.lock().unwrap();
+    let pool = pool_shared.lock().unwrap();
+    let stake_st = stake_st_shared.lock().unwrap();
+    let wl = wl_shared.lock().unwrap();
+    StakeTickLocks {
+        stg,
+        recent,
+        pool,
+        stake_st,
+        wl,
+    }
+}
+
 fn stake_tick(
     cfg: &Config,
     stg: &mut ChainState,
@@ -12759,9 +12812,22 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                 Ok(serde_json::json!({ "keys": n }))
             }
             "getstakinginfo" => {
+                // (item 54 E — the DNS2 deadlock of 2026-11-27) LOCK ORDER:
+                // the txpool is read BEFORE wallet-live is taken and its
+                // guard is dropped at once. This arm used to take wallet-live
+                // first and reach for the pool inside its json!; the follow
+                // loop holds the pool across handle_message and takes
+                // wallet-live inside it (fork adoption un-apply), so each
+                // waited for the other forever. Same order as the stake tick:
+                // pool → stake_st → wallet-live. `getmininginfo` (rpc.rs)
+                // calls this arm, so it is covered by the same lines.
+                let pooled_tx = self.pool.lock().map(|p| p.len()).unwrap_or(0);
+                let connections = self.peers_table.lock().map(|t| t.len()).unwrap_or(0);
                 let (tip_height, entry) = self.tip();
-                let wl = self.wl.lock().unwrap();
+                // stake_st before wallet-live: the follow loop's stake tick
+                // holds stake_st while it waits for wallet-live.
                 let stake_st = self.stake_st.lock().unwrap();
+                let wl = self.wl.lock().unwrap();
                 let now = now_secs() as u32;
                 let (weight, mature) = match wl.as_ref() {
                     Some(w) => w.stake_weight(now),
@@ -12853,14 +12919,14 @@ impl tri7_core::rpc::NodeOps for OpsAdapter {
                     "errors": "",
                     "currentblocksize": 0,
                     "currentblocktx": 0,
-                    "pooledtx": self.pool.lock().map(|p| p.len()).unwrap_or(0),
+                    "pooledtx": pooled_tx,
                     "difficulty": entry.as_ref().map(|e| tri7_core::rpc::difficulty_from_bits(e.bits)).unwrap_or(0.0),
                     "search-interval": tri7_core::stake::MAX_STAKE_SEARCH_INTERVAL,
                     "weight": weight,
                     "netstakeweight": net,
                     "expectedtime": expected_time,
                     "walletlocked": false,
-                    "connections": self.peers_table.lock().map(|t| t.len()).unwrap_or(0),
+                    "connections": connections,
                     "initialblockdownload": false,
                     "maturecoins": mature > 0,
                     "staking_disabled_reasons": reasons,
@@ -18231,24 +18297,40 @@ pub fn main_args(argv: &[String]) -> i32 {
             let wl_ready = wl_shared.lock().unwrap().is_some()
                 && recon_acc.branch_source.is_none();
             if wl_ready {
-                let mut wl_guard = wl_shared.lock().unwrap();
-                let wl = wl_guard.as_mut().unwrap();
-                let mut pool = pool_shared.lock().unwrap();
+                // (item 54 E) all five guards in the file-wide lock order —
+                // st → recent → pool → stake_st → wallet-live — and ALL
+                // released before the result is handled below, so the
+                // tip-mirror and last_error writes take their locks with
+                // nothing else held. The tick itself runs with the same five
+                // held as before; only the acquisition order changed.
                 let stake_result = {
-                    let mut stg = st_shared.lock().unwrap();
-                    let mut stake_st = stake_st_shared.lock().unwrap();
-                    stake_tick(
-                        &cfg,
-                        &mut stg,
-                        &rpc,
-                        &mut stats,
-                        wl,
-                        &mut pool,
-                        &mut stake_st,
-                        &store,
-                        &mut peers,
-                        &mut recent_shared.lock().unwrap(),
-                    )
+                    let mut locks = lock_stake_tick_set(
+                        &st_shared,
+                        &recent_shared,
+                        &pool_shared,
+                        &stake_st_shared,
+                        &wl_shared,
+                    );
+                    match locks.wl.as_mut() {
+                        Some(wl) => stake_tick(
+                            &cfg,
+                            &mut locks.stg,
+                            &rpc,
+                            &mut stats,
+                            wl,
+                            &mut locks.pool,
+                            &mut locks.stake_st,
+                            &store,
+                            &mut peers,
+                            &mut locks.recent,
+                        ),
+                        None => {
+                            // unloaded between the readiness probe and the
+                            // tick: skip it, never panic the follow loop
+                            log("stake tick: wallet live view not ready yet (unloaded before the tick)");
+                            Ok(false)
+                        }
+                    }
                 };
                 match stake_result {
                     Ok(true) => {
@@ -32602,6 +32684,322 @@ addnode=host:notaport
         validate_block(&stg, &rpc, &mut stats, &block_stale, &item41_live_ctx(&stg))
             .expect("still the documented partial mitigation");
         assert_eq!(stats.dup_tx_spentness_unprovable, coinstake_unprovable + 1);
+    }
+
+    // ---- item 54 E: the file-wide lock order ----
+    //
+    // st → recent → pool → stake_st → wallet-live. The two deterministic
+    // tests below fail on the pre-fix order without hanging; the third is a
+    // bounded stress run of the patterns that share the five mutexes.
+
+    /// (item 54 E) `lock_stake_tick_set` — the one place the stake tick takes
+    /// its five guards — acquires them in the file-wide order.
+    ///
+    /// Proof by observation, not by reading the source. The test thread holds
+    /// lock k; a helper thread calls the real helper. While the helper waits
+    /// it must hold EXACTLY the locks ranked before k and none ranked after
+    /// it: so it is waiting for k, and it never sits on wallet-live (or any
+    /// other late lock) while it waits for an earlier one. A helper that took
+    /// wallet-live first never gets to hold the four earlier locks in the
+    /// wallet-live case and runs into the deadline.
+    #[test]
+    fn stake_tick_lock_set_follows_the_file_wide_order() {
+        let state = rpcops_state_dir("lock-order-stake-set");
+        let adapter = ops_adapter_for_tests(state.path(), Vec::new(), None);
+        let st = Arc::clone(&adapter.st);
+        let pool = Arc::clone(&adapter.pool);
+        let stake_st = Arc::clone(&adapter.stake_st);
+        let wl = Arc::clone(&adapter.wl);
+        let recent: Arc<Mutex<RecentBlocks>> = Arc::new(Mutex::new(RecentBlocks::new()));
+
+        macro_rules! while_waiting_on {
+            ($held:ident, [$($before:ident),* $(,)?], [$($after:ident),* $(,)?]) => {{
+                // the test thread plays the owner of lock `$held`
+                let held_guard = $held.lock().unwrap();
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let helper = {
+                    let (st, recent, pool, stake_st, wl) = (
+                        Arc::clone(&st),
+                        Arc::clone(&recent),
+                        Arc::clone(&pool),
+                        Arc::clone(&stake_st),
+                        Arc::clone(&wl),
+                    );
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || {
+                        // take and release the set. Always finish the round in
+                        // progress, and check the stop flag only AFTER a full
+                        // round, so one completed round needs the release.
+                        let mut rounds = 0usize;
+                        loop {
+                            let locks = lock_stake_tick_set(&st, &recent, &pool, &stake_st, &wl);
+                            drop(locks);
+                            rounds += 1;
+                            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+                        }
+                        rounds
+                    })
+                };
+                // wait until the helper holds every lock ranked BEFORE the one
+                // the test thread owns (it is then blocked on that lock)
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let all_before_held = true $( && $before.try_lock().is_err() )*;
+                    if all_before_held {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "holding {}: the helper never took {:?} first — it is blocked on a LATER lock",
+                        stringify!($held),
+                        &[$( stringify!($before) ),*] as &[&str]
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // and none ranked AFTER it
+                $(
+                    assert!(
+                        $after.try_lock().is_ok(),
+                        "holding {}: the helper holds {} while it waits — acquired out of order",
+                        stringify!($held),
+                        stringify!($after)
+                    );
+                )*
+                drop(held_guard);
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                let rounds = helper.join().unwrap();
+                assert!(rounds >= 1, "holding {}: the helper completed no round", stringify!($held));
+            }};
+        }
+
+        // wallet-live is held: the helper must already own the other four
+        while_waiting_on!(wl, [st, recent, pool, stake_st], []);
+        // stake state is held: st, recent and pool taken first, wallet-live free
+        while_waiting_on!(stake_st, [st, recent, pool], [wl]);
+        // txpool is held: st and recent taken first, stake state + wallet-live free
+        while_waiting_on!(pool, [st, recent], [stake_st, wl]);
+        // recent is held: st taken first, the rest free
+        while_waiting_on!(recent, [st], [pool, stake_st, wl]);
+        // chain state is held: nothing else taken
+        while_waiting_on!(st, [], [recent, pool, stake_st, wl]);
+    }
+
+    /// (item 54 E — the DNS2 hang of 2026-11-27) `getstakinginfo` must not
+    /// sit on wallet-live while it waits for the txpool.
+    ///
+    /// The follow loop holds st/recent/pool across handle_message and takes
+    /// wallet-live inside it when a fork adoption un-applies the abandoned
+    /// branch. The arm used to take wallet-live first and reach for the pool
+    /// inside its json!: loop { pool → wallet-live } against RPC
+    /// { wallet-live → pool } — both waited forever. Here the test thread
+    /// plays the loop (it holds the pool, then needs wallet-live) while an RPC
+    /// thread calls the real arm. With the pool held, wallet-live must stay
+    /// reachable; an arm that parks on the pool while holding wallet-live
+    /// misses the deadline — and the pool is released before the assertion so
+    /// the test fails instead of hanging. `getmininginfo` calls this same arm.
+    #[test]
+    fn getstakinginfo_does_not_hold_wallet_live_while_waiting_for_the_pool() {
+        // The asymmetry this test pins: an arm that takes wallet-live BEFORE
+        // the pool parks on the pool *holding* wallet-live; an arm that reads
+        // the pool first parks on it holding nothing. "Parked" cannot be
+        // observed directly, so each round waits until the call is in flight
+        // (it cannot finish while the loop holds the pool) and then samples
+        // wallet-live for a short window. Repeated: a thread that is not
+        // scheduled inside one window is caught in the next.
+        const ROUNDS: usize = 25;
+        const WINDOW: Duration = Duration::from_millis(25);
+
+        fn parked_holding_wallet_live<T: Send>(
+            later: &Arc<std::sync::Mutex<T>>,
+            adapter: &Arc<OpsAdapter>,
+        ) -> Vec<(usize, usize, usize)> {
+            let mut held = Vec::new();
+            for round in 0..ROUNDS {
+                // the follow loop's side: this lock is held, as across
+                // handle_message (txpool) and for the stake tick (stake state)
+                let loop_guard = later.lock().unwrap();
+                let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+                let rpc_thread = {
+                    let adapter = Arc::clone(adapter);
+                    let entered = Arc::clone(&entered);
+                    std::thread::spawn(move || {
+                        entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let v = tri7_core::rpc::NodeOps::call(
+                            &*adapter,
+                            "getstakinginfo",
+                            &serde_json::json!([]),
+                        )
+                        .expect("getstakinginfo answers");
+                        assert!(v["pooledtx"].is_u64(), "pooledtx is a count: {v}");
+                        done_tx.send(()).unwrap();
+                    })
+                };
+                // in flight: the call cannot finish while the loop holds the lock
+                while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                let window_end = Instant::now() + WINDOW;
+                let mut samples = 0usize;
+                let mut free = 0usize;
+                while Instant::now() < window_end {
+                    samples += 1;
+                    if adapter.wl.try_lock().is_ok() {
+                        free += 1;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let finished_early = done_rx.try_recv().is_ok();
+                // release first, judge after: never leave the RPC thread parked
+                drop(loop_guard);
+                rpc_thread.join().unwrap();
+                assert!(
+                    !finished_early,
+                    "round {round}: the call finished while the loop held the lock"
+                );
+                assert!(
+                    done_rx.try_recv().is_ok(),
+                    "round {round}: the call did not complete after the release"
+                );
+                if free < samples {
+                    held.push((round, samples - free, samples));
+                }
+            }
+            held
+        }
+
+        let state = rpcops_state_dir("lock-order-getstakinginfo");
+        let adapter = Arc::new(ops_adapter_for_tests(state.path(), Vec::new(), None));
+        *adapter.wl.lock().unwrap() = Some(wallet_live_with(&[], Vec::new()));
+
+        // the txpool: the follow loop holds it across handle_message
+        let held = parked_holding_wallet_live(&adapter.pool, &adapter);
+        assert!(
+            held.is_empty(),
+            "getstakinginfo held wallet-live while it waited for the txpool — (round, samples held, samples) {held:?} — the lock-order inversion that hung DNS2"
+        );
+        // the stake state: the follow loop's stake tick holds it until
+        // wallet-live is in hand
+        let held = parked_holding_wallet_live(&adapter.stake_st, &adapter);
+        assert!(
+            held.is_empty(),
+            "getstakinginfo held wallet-live while it waited for the stake state — (round, samples held, samples) {held:?}"
+        );
+    }
+
+    /// (item 54 E) The patterns that share the five mutexes run concurrently
+    /// without a deadlock: the stake tick's set (the production helper), the
+    /// send path (the real `sendrawtransaction` arm: pool → wallet-live), the
+    /// real `getstakinginfo` arm, and the follow loop's message path
+    /// (st → recent → pool → wallet-live — replicated here, because
+    /// handle_message needs live peers). A deadlock cannot be waited out
+    /// inside a test, so a worker that never reports is a missed deadline,
+    /// not a hang.
+    #[test]
+    fn stake_set_send_path_rpc_and_message_path_do_not_deadlock() {
+        const ROUNDS: usize = 2_000;
+        let state = rpcops_state_dir("lock-order-stress");
+        let adapter = Arc::new(ops_adapter_for_tests(state.path(), Vec::new(), None));
+        *adapter.wl.lock().unwrap() = Some(wallet_live_with(&[], Vec::new()));
+        let recent: Arc<Mutex<RecentBlocks>> = Arc::new(Mutex::new(RecentBlocks::new()));
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        let deadline = Instant::now() + Duration::from_secs(60);
+
+        // A: the stake tick's set, through the production helper
+        {
+            let (st, recent, pool, stake_st, wl) = (
+                Arc::clone(&adapter.st),
+                Arc::clone(&recent),
+                Arc::clone(&adapter.pool),
+                Arc::clone(&adapter.stake_st),
+                Arc::clone(&adapter.wl),
+            );
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let _locks = lock_stake_tick_set(&st, &recent, &pool, &stake_st, &wl);
+                }
+                tx.send("stake-set").unwrap();
+            });
+        }
+        // B: the send path through the real arm — the hex decodes, the pool
+        // refuses the bytes, but the arm takes pool then wallet-live to do it
+        {
+            let adapter = Arc::clone(&adapter);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let garbage = "00".repeat(64);
+                for _ in 0..ROUNDS {
+                    let err = tri7_core::rpc::NodeOps::call(
+                        &*adapter,
+                        "sendrawtransaction",
+                        &serde_json::json!([garbage]),
+                    )
+                    .expect_err("zero bytes are not a transaction");
+                    assert_eq!(err.0, -25, "the pool's refusal code, got {err:?}");
+                }
+                tx.send("sendrawtransaction").unwrap();
+            });
+        }
+        // C: the follow loop's message path (replica of the handle_message
+        // call site's guard order)
+        {
+            let (st, recent, pool, wl) = (
+                Arc::clone(&adapter.st),
+                Arc::clone(&recent),
+                Arc::clone(&adapter.pool),
+                Arc::clone(&adapter.wl),
+            );
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let _stg = st.lock().unwrap();
+                    let _recent = recent.lock().unwrap();
+                    let _pool = pool.lock().unwrap();
+                    let _wl = wl.lock().unwrap();
+                }
+                tx.send("message-path").unwrap();
+            });
+        }
+        // D: the real getstakinginfo arm
+        {
+            let adapter = Arc::clone(&adapter);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    tri7_core::rpc::NodeOps::call(
+                        &*adapter,
+                        "getstakinginfo",
+                        &serde_json::json!([]),
+                    )
+                    .expect("getstakinginfo answers under contention");
+                }
+                tx.send("getstakinginfo").unwrap();
+            });
+        }
+        drop(tx);
+        let mut reported = Vec::new();
+        while reported.len() < 4 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let got = rx.recv_timeout(left).unwrap_or_else(|_| {
+                panic!(
+                    "deadlock: only {reported:?} finished {ROUNDS} rounds; the other worker(s) are stuck"
+                )
+            });
+            reported.push(got);
+        }
+        reported.sort_unstable();
+        assert_eq!(
+            reported,
+            [
+                "getstakinginfo",
+                "message-path",
+                "sendrawtransaction",
+                "stake-set"
+            ]
+        );
     }
 }
 
