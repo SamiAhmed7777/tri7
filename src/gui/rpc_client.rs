@@ -1034,10 +1034,6 @@ mod tests {
         // a run is live for the whole test: with no dispatcher no run is
         // answering and last_answer_age is rightly None (see the test below)
         crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
-        let key = cache_key("getblockcount", &[]);
-        assert_eq!(val(&cached_call(key.clone(), false, slow(7, 30))), 7);
-        // the last completion was four minutes ago
-        backdate_last_answer_for_tests(Duration::from_secs(240));
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         // a Run must be Send + Sync and a Receiver is not Sync: it rides in a Mutex
         let rx = std::sync::Mutex::new(rx);
@@ -1045,22 +1041,55 @@ mod tests {
             let _ = rx.lock().unwrap_or_else(|p| p.into_inner()).recv(); // until released
             Ok(serde_json::json!(9))
         });
-        // past READ_COALESCE, so this call really starts a flight
-        std::thread::sleep(READ_COALESCE + Duration::from_millis(60));
-        let shown = cached_call(key.clone(), false, stuck);
-        assert_eq!(val(&shown), 7, "the caller is shown the previous answer");
-        assert!(shown.is_ok(), "and rpc_call reports Ok — while the node has not answered");
-        std::thread::sleep(Duration::from_millis(200));
-        let age = last_answer_age().expect("the earlier completion still counts");
+        // Every call ANY test in this process completes refreshes the same
+        // process-wide stamp, and other modules' tests run in parallel with
+        // this one. So a fresh stamp once proves nothing — it may be theirs.
+        // This assertion read a 244 ms old stamp on a loaded Linux CI runner
+        // (2026-11-28) with no stuck call anywhere near it. A fresh stamp is
+        // a failure only on EVERY attempt: a stuck call that moved the stamp
+        // would move it each time. Each attempt is its own call, and every
+        // stuck worker is released before the test ends, so none is left to
+        // publish into a later test.
+        let mut keys: Vec<String> = Vec::new();
+        let mut unmoved = false;
+        let mut not_answering = false;
+        let mut last_age = Duration::ZERO;
+        for attempt in 0..12u32 {
+            let key = cache_key("getblockcount", &[serde_json::json!(attempt)]);
+            keys.push(key.clone());
+            // the previous answer this caller will be shown
+            assert_eq!(val(&cached_call(key.clone(), false, slow(7, 30))), 7);
+            // past READ_COALESCE, so this call really starts a flight
+            std::thread::sleep(READ_COALESCE + Duration::from_millis(60));
+            // the last completion was four minutes ago
+            backdate_last_answer_for_tests(Duration::from_secs(240));
+            let shown = cached_call(key, false, Arc::clone(&stuck));
+            assert_eq!(val(&shown), 7, "the caller is shown the previous answer");
+            assert!(shown.is_ok(), "and rpc_call reports Ok — while the node has not answered");
+            std::thread::sleep(Duration::from_millis(100));
+            // both verdicts from ONE read of the stamp
+            last_age = last_answer_age().expect("the earlier completion still counts");
+            not_answering =
+                !crate::gui::node_supervisor::answered_lately(Some(last_age), Duration::from_secs(180));
+            if last_age >= Duration::from_secs(239) {
+                unmoved = true;
+                break;
+            }
+            // someone else's completion: leave the busy moment behind
+            std::thread::sleep(Duration::from_millis(300) * (attempt + 1));
+        }
         assert!(
-            age >= Duration::from_secs(239),
-            "the stamp moved on a call that never completed: {age:?}"
+            unmoved && not_answering,
+            "the stamp was fresh after a call that never completed, on every attempt ({}): {last_age:?}",
+            keys.len()
         );
-        assert!(!crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
-        // release it: the call completes and the node answers again
-        tx.send(()).expect("release the stuck worker");
+        // release them: the call completes and the node answers again
+        for _ in 0..keys.len() {
+            tx.send(()).expect("release a stuck worker");
+        }
+        let key = keys.last().expect("at least one attempt");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !stored(&key).map(|a| val(&a) == 9).unwrap_or(false) {
+        while !stored(key).map(|a| val(&a) == 9).unwrap_or(false) {
             assert!(Instant::now() < deadline, "the released worker never published");
             std::thread::sleep(Duration::from_millis(20));
         }

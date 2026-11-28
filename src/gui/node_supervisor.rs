@@ -5865,15 +5865,38 @@ mod tests {
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
         n.restart_backoff_base = Duration::ZERO;
         n.hang_confirm = Duration::from_millis(300);
-        // the node's liveness clock, owned by the TEST: when did it last
-        // complete a call? (production reads this from the answer engine)
-        let last: Arc<std::sync::Mutex<Option<Instant>>> = Arc::new(std::sync::Mutex::new(None));
-        let clock = Arc::clone(&last);
+        // The node's liveness clock, owned by the TEST and read WHEN the
+        // supervisor asks — never stamped ahead of a tick. A tick does a real
+        // loopback RPC (ensure_running's step 1) BEFORE it reads this clock,
+        // and on a loaded machine that took longer than the 300 ms window
+        // below (the Windows CI runner, 2026-11-28): "answered just now",
+        // stamped before the tick, was 300+ ms old by the time it was read.
+        // Production's window is 180 s, where that delay is nothing. So the
+        // test states a fact about the run, and the clock turns it into an
+        // age at the moment of reading.
+        #[derive(Clone, Copy)]
+        enum Run {
+            /// has completed nothing since it started
+            New,
+            /// is completing calls right now
+            Answering,
+            /// completed its last call at that instant, nothing since
+            Silent(Instant),
+        }
+        fn age_of(r: Run) -> Option<Duration> {
+            match r {
+                Run::New => None,
+                Run::Answering => Some(Duration::ZERO),
+                Run::Silent(t) => Some(t.elapsed()),
+            }
+        }
+        let run: Arc<std::sync::Mutex<Run>> = Arc::new(std::sync::Mutex::new(Run::New));
+        let clock = Arc::clone(&run);
         n.liveness_probe = Some(Arc::new(move || {
-            clock.lock().unwrap_or_else(|p| p.into_inner()).map(|t| t.elapsed())
+            clock.lock().ok().map(|g| age_of(*g)).unwrap_or(None)
         }));
         // a canned loopback RPC surface that keeps answering for the whole
-        // test (30 s hang-safety net), like every other stub here
+        // test (120 s hang-safety net), like every other stub here
         let release = Arc::new(AtomicBool::new(false));
         let rel = Arc::clone(&release);
         n.runner_override = Some(Arc::new(move |_argv: &[String]| {
@@ -5881,20 +5904,18 @@ mod tests {
             // the flag is cloned per run, never moved out of the closure
             let rel = Arc::clone(&rel);
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-            let safety_deadline = Instant::now() + Duration::from_secs(30);
+            let safety_deadline = Instant::now() + Duration::from_secs(120);
             answer_loop(listener, 7, move || {
                 rel.load(Ordering::SeqCst) || Instant::now() > safety_deadline
             });
             Ok(0)
         }));
-        let set_last = |ago: Option<Duration>| {
-            *last.lock().unwrap_or_else(|p| p.into_inner()) = ago.map(|a| Instant::now() - a);
-        };
+        let say = |r: Run| *run.lock().unwrap_or_else(|p| p.into_inner()) = r;
 
         // 1. first boot: the node has completed nothing yet — starting, never hung
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
         assert!(
-            wait_until(Duration::from_secs(5), || answering_tip(port) == Some(7)),
+            wait_until(Duration::from_secs(20), || answering_tip(port) == Some(7)),
             "the stub node never came up"
         );
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
@@ -5903,22 +5924,25 @@ mod tests {
         // 2. it answered 10 s ago and nothing since. step1 is STILL `Ok` (the
         //    stub answers; in production the engine replays the old answer) and
         //    the run is alive — the trap. It must be flagged.
-        set_last(Some(Duration::from_secs(10)));
+        say(Run::Silent(Instant::now() - Duration::from_secs(10)));
         assert_eq!(answering_tip(port), Some(7), "step1 is Ok while the node is silent");
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
         assert!(n.run_hung(), "alive + silent past the window = hung, whatever step1 says");
-        assert_eq!(n.restarts(), 0, "a hung run is not restarted — nothing can restart it in place");
+        assert_eq!(n.restarts, 0, "a hung run is not restarted — nothing can restart it in place");
         // and the flag is what the UI's snapshot carries
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
         assert!(n.run_hung(), "hung is stable across ticks while the silence lasts");
 
-        // 3. a call completed just now: the flag lifts
-        set_last(Some(Duration::ZERO));
+        // 3. a call is completing right now: the flag lifts
+        say(Run::Answering);
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
         assert!(!n.run_hung(), "an answered run is not hung");
 
-        // 4. silent for 100 ms of a 300 ms window: still given the benefit of the doubt
-        set_last(Some(Duration::from_millis(100)));
+        // 4. silent for 1 s of a 60 s window: still given the benefit of the
+        //    doubt. A wide window on purpose — the age is read after the tick's
+        //    RPC and must still be inside it however slow that was.
+        n.hang_confirm = Duration::from_secs(60);
+        say(Run::Silent(Instant::now() - Duration::from_secs(1)));
         let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
         assert!(!n.run_hung(), "inside the confirm window a silent run is not hung");
 
