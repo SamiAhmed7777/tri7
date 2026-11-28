@@ -65,6 +65,16 @@ pub const BUNDLED_TOR_SOCKS_PORT: u16 = 58033;
 const TOR_SOCKS_WAIT: Duration = Duration::from_secs(30);
 /// per-connect probe timeout for the SOCKS endpoint check
 const TOR_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+/// (2026-11-28, sami-pc "stuck finding peers") a live child's SOCKS port must
+/// fail this many CONSECUTIVE health checks before the child is restarted.
+/// One check is a single probe with TOR_PROBE_TIMEOUT and no retry: at
+/// 04:33:51Z that one probe failed on a HEALTHY tor — the node was mid-boot
+/// with every dial in flight, and the tor had relayed a handshake one second
+/// earlier — and the supervisor killed it. ensure() runs every ~15s, so three
+/// checks are ~30s of CONFIRMED silence: still far inside the time a user
+/// needs to notice, while a tor that is merely busy answers again on the next
+/// check and is left alone.
+const TOR_FAILS_BEFORE_RESTART: u32 = 3;
 
 /// windows-only process-creation flag: tor.exe gets NO console window in the
 /// GUI session (cfg(windows)-guarded use in spawn_bundled)
@@ -81,7 +91,8 @@ pub enum TorStatus {
     /// the bundled tor.exe child (shipped with the wallet) is running
     Bundled(u16),
     /// no usable tor this session — the wallet continues WITHOUT tor
-    /// (clearnet bootstrap peers still work); tor is never allowed to block
+    /// (i2p peers still work; the wallet never falls back to clearnet —
+    /// the network has no clearnet P2P); tor is never allowed to block
     /// the wallet
     Unavailable,
 }
@@ -162,6 +173,11 @@ pub struct TorSpawnRequest {
 ///    loudly (named error) and continue WITHOUT tor — never block the
 ///    wallet on tor.
 /// 6. the child is tracked and killed cleanly on drop (GUI exit).
+/// 7. (2026-11-28, sami-pc "stuck finding peers") a failed health check is
+///    re-checked (TOR_FAILS_BEFORE_RESTART) before anything is restarted, a
+///    child lost under a live node run is brought back on the SAME port
+///    first, and every change of endpoint is logged — the node dials one
+///    port, fixed at spawn, and must never be left on a port nothing answers.
 pub struct TorSupervisor {
     log_path: PathBuf,
     status: TorStatus,
@@ -190,6 +206,21 @@ pub struct TorSupervisor {
     /// production → the real resolver runs; unresolvable ports yield None.
     listener_resolver:
         Option<Arc<dyn Fn(u16) -> Option<(u32, String)> + Send + Sync>>,
+    /// (2026-11-28, sami-pc port drift) consecutive health checks on which
+    /// our live child's SOCKS port did not answer. The child is restarted
+    /// only when this reaches `fails_before_restart`; one success clears it.
+    health_fail_streak: u32,
+    /// TOR_FAILS_BEFORE_RESTART in production; tests read it to run the exact
+    /// number of checks
+    fails_before_restart: u32,
+    /// the SOCKS port the LIVE node run dials, written by the node supervisor
+    /// at every spawn and reap (`commit_run_port`). While it is the pinned
+    /// bundled port, a lost child is brought back on THAT port before any
+    /// other tor is looked at (step 1b of ensure).
+    committed_port: Option<u16>,
+    /// the last status this lane announced; a status is logged only when it
+    /// changes (the lane runs every ~15s)
+    settled: Option<TorStatus>,
     /// kill counter — Drop bookkeeping (test-observable kill-on-drop)
     kills: Arc<AtomicUsize>,
 }
@@ -208,12 +239,55 @@ impl TorSupervisor {
             bundled_probe_port: BUNDLED_TOR_SOCKS_PORT,
             socks_wait: TOR_SOCKS_WAIT,
             listener_resolver: None,
+            health_fail_streak: 0,
+            fails_before_restart: TOR_FAILS_BEFORE_RESTART,
+            committed_port: None,
+            settled: None,
             kills: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn status(&self) -> TorStatus {
         self.status.clone()
+    }
+
+    /// (2026-11-28, sami-pc port drift) tell the lane which SOCKS port the
+    /// LIVE node run dials — `None` while no run of ours is dialling (attach
+    /// mode, or the run was reaped). Written by EmbeddedNode::ensure_running
+    /// at every spawn and reap.
+    pub(crate) fn commit_run_port(&mut self, port: Option<u16>) {
+        self.committed_port = port;
+    }
+
+    /// record a status that another log line already announced in full
+    fn set_status(&mut self, status: TorStatus) {
+        self.settled = Some(status.clone());
+        self.status = status;
+    }
+
+    /// publish a status and say WHY, once per change. The lane runs every
+    /// ~15s and these branches used to return in silence: on sami-pc the
+    /// system tor was adopted under a live run (2026-11-28) and nothing in
+    /// the log said so for two hours.
+    fn publish(&mut self, status: TorStatus, why: &str) -> TorStatus {
+        if self.settled.as_ref() != Some(&status) {
+            self.tlog(&format!("tor: {why} [now: {}]", status.label()));
+        }
+        self.set_status(status.clone());
+        status
+    }
+
+    /// (2026-11-28, sami-pc port drift) last resort when the bundled tor
+    /// cannot be brought back for a run that dials the pinned port: the
+    /// system tor, if it answers — anything but a silently dead port. The
+    /// node supervisor sees the changed port and respawns the run onto it.
+    fn fall_back_to_system(&mut self, why: &str) -> Option<TorStatus> {
+        if !socks_endpoint_answers("127.0.0.1", self.system_probe_port) {
+            return None;
+        }
+        let port = self.system_probe_port;
+        self.socks_port = Some(port);
+        Some(self.publish(TorStatus::System(port), why))
     }
 
     /// pid of the tracked bundled tor child (test observability)
@@ -271,10 +345,14 @@ impl TorSupervisor {
                 // LISTENER pid is the child's pid. Where the listener cannot
                 // be resolved (non-Windows hosts — which ship no bundled
                 // payload at all), the real handshake remains the fallback.
-                let resolved =
-                    Self::resolve_listener(self.listener_resolver.as_deref(), p);
-                let owned = socks_endpoint_answers("127.0.0.1", p)
-                    && match resolved {
+                let handshake = socks_endpoint_answers("127.0.0.1", p);
+                let mut resolved = if handshake {
+                    Self::resolve_listener(self.listener_resolver.as_deref(), p)
+                } else {
+                    None
+                };
+                let owned = handshake
+                    && match &resolved {
                         Some(_) => Self::listener_pid_is(&resolved, child_pid),
                         // (2026-11-21, sami-pc) TRUST-THE-SPAWN: AVG's
                         // behavior sandbox virtualizes the spawned tor's
@@ -297,26 +375,77 @@ impl TorSupervisor {
                         None => true,
                     };
                 if owned {
-                    self.status = TorStatus::Bundled(p);
+                    self.health_fail_streak = 0;
+                    self.set_status(TorStatus::Bundled(p));
                     return self.status.clone();
                 }
-                self.tlog(
-                    "tor: child alive but the pinned SOCKS port is NOT answered by our child — restarting",
-                );
+                // (2026-11-28, sami-pc "stuck finding peers") ONE FAILED CHECK
+                // IS NOT A VERDICT. This is where the child used to be killed
+                // outright: the tor had relayed a handshake one second earlier
+                // and merely missed one 750ms probe while the node booted.
+                // Re-check first; restart only on consecutive failures, and
+                // name what actually failed either way.
+                if resolved.is_none() {
+                    // the handshake failed — was anyone holding the port?
+                    resolved = Self::resolve_listener(self.listener_resolver.as_deref(), p);
+                }
+                let listener = match &resolved {
+                    Some((lpid, lpath)) => format!("pid={lpid} path={lpath}"),
+                    None => "none (nothing listening, or the table did not resolve it)".to_string(),
+                };
+                self.health_fail_streak = self.health_fail_streak.saturating_add(1);
+                if self.health_fail_streak < self.fails_before_restart {
+                    if self.health_fail_streak == 1 {
+                        self.tlog(&format!(
+                            "tor: SOCKS 127.0.0.1:{p} did not answer our child on this check \
+                             (socks5 handshake={handshake}, listener={listener}, child pid {child_pid:?}) \
+                             — re-checking, nothing restarted yet ({} more failed check(s) before a restart)",
+                            self.fails_before_restart - 1
+                        ));
+                    }
+                    self.set_status(TorStatus::Bundled(p));
+                    return self.status.clone();
+                }
+                self.health_fail_streak = 0;
+                self.tlog(&format!(
+                    "tor: child alive but the pinned SOCKS port is NOT answered by our child — restarting \
+                     ({} consecutive failed checks; last: socks5 handshake={handshake}, listener={listener}, \
+                     child pid {child_pid:?})",
+                    self.fails_before_restart
+                ));
             }
         }
         self.kill_child(); // exited — or alive without OUR socks; restart
+        // 3. the bundled exe path — resolved first: needed by the
+        //    process-bound orphan adoption, the same-port respawn (1b) and
+        //    the spawn path below
+        let exe = Self::bundled_tor_exe(node_dir);
+        // 1b. (2026-11-28, sami-pc port drift) THE RUN DIALLS THE PORT IT WAS
+        //     SPAWNED WITH. The node argv and conf carry exactly one SOCKS
+        //     port, fixed at spawn, and nothing revisits it. When a LIVE run
+        //     dials the pinned bundled port, a lost child must come back on
+        //     THAT port: the already-answer rule below would otherwise adopt
+        //     the system tor on a DIFFERENT port and return — which is what
+        //     happened at 04:33:51Z. The node kept dialling the closed 58033
+        //     for two hours while the status bar said "Tor: system (9050)".
+        let same_port_first = self.committed_port == Some(self.bundled_probe_port)
+            && allow_spawn
+            && !self.spawn_gave_up
+            && exe.is_some();
         // 2. already-answer rule: a user's own system tor wins outright —
-        //    use it and never spawn (a tracked bundled child is redundant)
-        if socks_endpoint_answers("127.0.0.1", self.system_probe_port) {
+        //    use it and never spawn (a tracked bundled child is redundant).
+        //    Skipped only by 1b, for a run that needs the pinned port back.
+        if !same_port_first && socks_endpoint_answers("127.0.0.1", self.system_probe_port) {
             let port = self.system_probe_port;
             self.socks_port = Some(port);
-            self.status = TorStatus::System(port);
-            return self.status.clone();
+            return self.publish(
+                TorStatus::System(port),
+                &format!(
+                    "using the system tor on 127.0.0.1:{port} (already-answer rule — nothing spawned); \
+                     a node run that was dialling another SOCKS port is moved onto this one"
+                ),
+            );
         }
-        // 3. the bundled exe path — needed by BOTH the process-bound orphan
-        //    adoption and the spawn path below
-        let exe = Self::bundled_tor_exe(node_dir);
         // 4. adopt a surviving ORPHAN of a previous session on the PINNED
         //    bundled port — PROCESS-BOUND identity (judge r3): the port's
         //    LISTENER pid executable path must BE our bundled tor.exe, the
@@ -335,7 +464,7 @@ impl TorSupervisor {
             {
                 let port = self.bundled_probe_port;
                 self.socks_port = Some(port);
-                self.status = TorStatus::Bundled(port);
+                self.set_status(TorStatus::Bundled(port));
                 self.tlog(&format!(
                     "tor: adopted wallet-owned orphan — SOCKS 127.0.0.1:{port} (listener pid {:?}, exe-path match)",
                     resolved.map(|(pid, _)| pid)
@@ -345,20 +474,24 @@ impl TorSupervisor {
         }
         // 5. no spawn this session (latched failure, or attach mode)
         if self.spawn_gave_up || !allow_spawn {
-            self.status = TorStatus::Unavailable;
             self.socks_port = None;
-            return self.status.clone();
+            return self.publish(
+                TorStatus::Unavailable,
+                "no tor this session (the bundled spawn failed earlier, or attach mode) — the wallet continues WITHOUT tor",
+            );
         }
         // 6. the bundled tor.exe payload (Windows payloads; Linux/macOS ship
         //    none → system tor stays the path there)
         let Some(exe) = exe else {
-            self.spawn_gave_up = true;
-            self.tlog(
-                "tor: bundled tor.exe not found next to the wallet — running WITHOUT tor \
-                 (a system tor on 9050 is picked up automatically)",
+            // (2026-11-28) NOT latched any more. Setting spawn_gave_up here
+            // made ONE flaked probe of the system port final for the whole
+            // session on any host without a bundled payload: the wallet ran
+            // torless while a working system tor sat on the well-known port.
+            // Re-probed on every check; logged once.
+            return self.publish(
+                TorStatus::Unavailable,
+                "bundled tor.exe not found next to the wallet and no system tor answers — running WITHOUT tor (a system tor on 9050 is picked up on a later check)",
             );
-            self.status = TorStatus::Unavailable;
-            return self.status.clone();
         };
         // 5. generated client-only torrc in the node state dir
         let state = node_dir.join("state");
@@ -375,7 +508,15 @@ impl TorSupervisor {
                 "tor: torrc write failed ({}) — wallet continues WITHOUT tor",
                 e
             ));
-            self.status = TorStatus::Unavailable;
+            if same_port_first {
+                if let Some(st) = self.fall_back_to_system(&format!(
+                    "the torrc write failed ({e}) so the bundled tor could not be brought back on \
+                     127.0.0.1:{port} for the running node — falling back to the system tor"
+                )) {
+                    return st;
+                }
+            }
+            self.set_status(TorStatus::Unavailable);
             return self.status.clone();
         }
         // 7. spawn + bounded SOCKS wait, with ONE stale-image retry on
@@ -435,13 +576,26 @@ impl TorSupervisor {
             self.socks_port = Some(port);
             self.torrc_path = Some(torrc);
             self.child = child;
-            self.status = TorStatus::Bundled(port);
+            self.set_status(TorStatus::Bundled(port));
         } else {
             self.spawn_gave_up = true;
+            // (2026-11-28, sami-pc port drift) under a LIVE run that dials
+            // the pinned port, "unavailable" is a lie by omission: the run
+            // keeps dialling a closed port. The system tor is the one
+            // endpoint left that answers — name it, and the node supervisor
+            // moves the run onto it (0d).
+            if same_port_first {
+                if let Some(st) = self.fall_back_to_system(&format!(
+                    "bundled tor NOT usable ({why}) and it could not be brought back on 127.0.0.1:{port} \
+                     for the running node — falling back to the system tor"
+                )) {
+                    return st;
+                }
+            }
             self.tlog(&format!(
-                "tor: NOT usable ({why}) — wallet continues WITHOUT tor (clearnet bootstrap only)"
+                "tor: NOT usable ({why}) — wallet continues WITHOUT tor (i2p peers only; the wallet never uses clearnet)"
             ));
-            self.status = TorStatus::Unavailable;
+            self.set_status(TorStatus::Unavailable);
         }
         self.status.clone()
     }
@@ -994,7 +1148,8 @@ pub enum I2pStatus {
     /// running
     Bundled(u16),
     /// no usable i2pd this session — the wallet continues WITHOUT i2p
-    /// (tor/clearnet bootstrap still work); i2p never blocks the wallet
+    /// (tor peers still work; the wallet never falls back to clearnet —
+    /// the network has no clearnet P2P); i2p never blocks the wallet
     Unavailable,
 }
 
@@ -1816,6 +1971,14 @@ fn free_port() -> u16 {
 /// spawn failed (cold index builds are slow — retry window is generous)
 const RPC_WAIT: Duration = Duration::from_secs(25);
 const MAX_RESTARTS: u32 = 5;
+/// (2026-11-28, sami-pc port drift) how many CONSECUTIVE ensure_running calls
+/// must see tor answering on a port other than the one the live run dials
+/// before the run is asked to stop and respawn onto it. Two: one flaked probe
+/// must not restart the node (a respawn costs a wallet reseed).
+const TOR_DRIFT_ENSURES_BEFORE_RESPAWN: u32 = 2;
+/// …and how many times per session a tor port change may respawn the node: a
+/// tor that flaps between endpoints must not respawn-loop it.
+const MAX_TOR_RESPAWNS: u32 = 2;
 /// base delay for the exponential restart backoff (5s, 10s, 20s, 40s, 80s,
 /// capped at 120s) — a crashing node must not relaunch in a tight loop
 const RESTART_BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -1923,6 +2086,20 @@ pub struct EmbeddedNode {
     /// respawn (not by an operator RPC `stop`) — the reap must not label it
     /// as an operator stop
     respawn_for_inbound: bool,
+    /// (2026-11-28, sami-pc port drift) the SOCKS port the CURRENT run dials
+    /// — fixed in its argv and conf at spawn. None while no run is dialling
+    /// (a torless spawn, or the run was reaped).
+    run_tor_port: Option<u16>,
+    /// consecutive ensure_running calls that saw tor answering on a port
+    /// other than `run_tor_port`
+    tor_drift_streak: u32,
+    /// tor-driven respawns of the node this session (MAX_TOR_RESPAWNS)
+    tor_respawns: u32,
+    /// the limit was hit and said so once
+    tor_respawn_limit_logged: bool,
+    /// the pending cooperative stop was requested by US to move the run onto
+    /// a different tor port (not an operator `stop`, not the i2p respawn)
+    respawn_for_tor: bool,
     log_path: PathBuf,
     /// the in-process node thread (run_embedded)
     node_thread: Option<JoinHandle<()>>,
@@ -1961,6 +2138,11 @@ impl EmbeddedNode {
             spawn_without_listen: false,
             inbound_respawn_done: false,
             respawn_for_inbound: false,
+            run_tor_port: None,
+            tor_drift_streak: 0,
+            tor_respawns: 0,
+            tor_respawn_limit_logged: false,
+            respawn_for_tor: false,
             log_path: log_path.clone(),
             node_thread: None,
             node_finished: Arc::new(AtomicBool::new(false)),
@@ -2320,6 +2502,64 @@ impl EmbeddedNode {
                  (intentional, not counted against MAX_RESTARTS)",
             );
         }
+        // 0d. (2026-11-28, sami-pc port drift) THE RUN DIALLS THE SOCKS PORT IT
+        //     WAS SPAWNED WITH — it is fixed in the argv and the conf at
+        //     spawn, and nothing else revisits it. When tor moves to ANOTHER
+        //     port (the bundled child died and the system tor answered
+        //     instead; or tor first answered after a torless spawn) the run
+        //     keeps dialling a closed port for the rest of the session while
+        //     the status bar says "Tor: system" — exactly the two hours of
+        //     "finding peers" on sami-pc. Ask THIS run to stop cooperatively,
+        //     as 0c does; the next spawn carries the port that answers.
+        //     Debounced (one flaked probe must not restart the node) and
+        //     bounded (a flapping tor must not respawn-loop it). A run with
+        //     no tor that still has none is left alone: a respawn would buy
+        //     nothing.
+        let run_dialling =
+            self.node_thread.is_some() && !self.node_finished.load(Ordering::SeqCst);
+        let drift = run_dialling
+            && match (self.run_tor_port, tor_port) {
+                (Some(before), Some(now)) => before != now,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+        self.tor_drift_streak = if drift {
+            self.tor_drift_streak.saturating_add(1)
+        } else {
+            0
+        };
+        if drift
+            && self.tor_drift_streak >= TOR_DRIFT_ENSURES_BEFORE_RESPAWN
+            && !self.respawn_for_tor
+        {
+            let before = self
+                .run_tor_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "nothing".to_string());
+            let now = tor_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "nothing".to_string());
+            if self.tor_respawns < MAX_TOR_RESPAWNS {
+                self.tor_respawns += 1;
+                self.tor_drift_streak = 0;
+                self.respawn_for_tor = true;
+                crate::shutdown::request();
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: tor now answers on 127.0.0.1:{now} but this run dials 127.0.0.1:{before} — \
+                     requesting one clean stop to respawn onto the port that answers \
+                     (intentional, not counted against MAX_RESTARTS; tor respawn {}/{})",
+                    self.tor_respawns,
+                    MAX_TOR_RESPAWNS
+                ));
+            } else if !self.tor_respawn_limit_logged {
+                self.tor_respawn_limit_logged = true;
+                self.tor_drift_streak = 0;
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: tor now answers on 127.0.0.1:{now} but this run dials 127.0.0.1:{before} — \
+                     the per-session limit of {MAX_TOR_RESPAWNS} tor respawns is used up; the run is left as it is"
+                ));
+            }
+        }
         // 1. already answering? (ours in-process, or a fleet node — either is
         //    fine)
         let step1 = crate::gui::rpc_client::rpc_call(
@@ -2427,10 +2667,21 @@ impl EmbeddedNode {
             let code = self.node_exit_code.load(Ordering::SeqCst);
             // (exit-attribution) the reaper must name what it reaped — eight
             // overnight restarts (2026-11-17, sami-pc) left no trace here
+            // (2026-11-28) the label names the branch, not a number that the
+            // classification right below contradicts: an INTENTIONAL stop
+            // (i2p inbound respawn, tor port change, operator `stop`) was
+            // logged as "restart #1" and then as "not counted" — two lines
+            // disagreeing about one event.
+            let intentional = self.respawn_for_inbound
+                || self.respawn_for_tor
+                || crate::shutdown::rpc_stopped();
             crate::node_embedded::embedded_log(&format!(
-                "supervisor: reaping node run (exit code {}), restart #{}",
-                code,
-                self.restarts + 1
+                "supervisor: reaping node run (exit code {code}), {}",
+                if intentional {
+                    "an intentional stop — not counted as a restart".to_string()
+                } else {
+                    format!("restart #{}", self.restarts + 1)
+                }
             ));
             // ...and in the GUI's own refresh log, where the 2026-11-25
             // wedge left nothing but step1_ok lines: name the exit and the
@@ -2439,28 +2690,41 @@ impl EmbeddedNode {
                 &diag_path,
                 &format!(
                     "ensure: reaped node run exit_code={code} inbound_respawn={} rpc_stop={} \
-                     restarts_before={}\n",
+                     restarts_before={} tor_respawn={}\n",
                     self.respawn_for_inbound,
                     crate::shutdown::rpc_stopped(),
-                    self.restarts
+                    self.restarts,
+                    self.respawn_for_tor
                 ),
             );
             self.node_thread = None; // reap
+            // (2026-11-28, sami-pc port drift) no run is dialling any port now
+            self.run_tor_port = None;
+            self.tor.commit_run_port(None);
             // (TRI7-RPC-02) / (TRI7-I2P-02) an INTENTIONAL stop is not a
             // restart. Either the supervisor asked for one (the i2p inbound
-            // respawn) or an operator's RPC `stop` set the shared flag: the
-            // run exited on purpose, state is persisted, and counting it
-            // against MAX_RESTARTS burned all five restarts on one `stop`.
-            if self.respawn_for_inbound {
+            // respawn, or a tor port change — 0d) or an operator's RPC `stop`
+            // set the shared flag: the run exited on purpose, state is
+            // persisted, and counting it against MAX_RESTARTS burned all
+            // five restarts on one `stop`.
+            if self.respawn_for_inbound || self.respawn_for_tor {
+                let why = if self.respawn_for_tor {
+                    "the tor SOCKS port change"
+                } else {
+                    "the i2p inbound respawn"
+                };
+                // BOTH flags are cleared: the one that was not the reason must
+                // not label a later, unintended exit as intentional
                 self.respawn_for_inbound = false;
+                self.respawn_for_tor = false;
                 self.healthy_since = None;
                 // the stop we just honoured is OURS: clear the sticky flag
                 // before the respawn or the new run exits on its first loop
                 crate::shutdown::reset();
-                crate::node_embedded::embedded_log(
-                    "supervisor: node stopped for the i2p inbound respawn (intentional) — \
-                     not counted against MAX_RESTARTS",
-                );
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: node stopped for {why} (intentional) — \
+                     not counted against MAX_RESTARTS"
+                ));
             } else if crate::shutdown::rpc_stopped() {
                 self.healthy_since = None;
                 // clear the sticky flags before the respawn (the run resets
@@ -2596,6 +2860,13 @@ impl EmbeddedNode {
         // with — the flag is what lets a destination that first appears
         // mid-run trigger exactly one respawn with the listener enabled.
         self.spawn_without_listen = !listen_inbound;
+        // (2026-11-28, sami-pc port drift) record the SOCKS port THIS run
+        // dials — the one in the argv above and the conf — so 0d can tell
+        // when tor has moved off it; the lane learns it too, to bring a lost
+        // child back on this same port first.
+        self.run_tor_port = tor_port;
+        self.tor.commit_run_port(tor_port);
+        self.tor_drift_streak = 0;
         // the node keeps its own block store in the node state dir: full
         // function (staking/smsg/balance live view) needs bodies, not
         // headers-only (Sami laptop: ops engine never warmed without it)
@@ -3994,6 +4265,15 @@ mod tests {
         let dead_port = free_dead_port();
         sup.socks_port = Some(dead_port);
         sup.status = TorStatus::Bundled(dead_port);
+        // (2026-11-28) one failed check is no longer a verdict: the restart
+        // comes on the Nth CONSECUTIVE failed check (TOR_FAILS_BEFORE_RESTART).
+        // Until then the child is left alone and nothing is spawned.
+        for seen in 1..sup.fails_before_restart {
+            let st = sup.ensure(&dir, true);
+            assert_eq!(kills.load(Ordering::SeqCst), 0, "check {seen}: nothing killed yet");
+            assert_eq!(spawns.load(Ordering::SeqCst), 0, "check {seen}: nothing spawned yet");
+            assert!(matches!(&st, TorStatus::Bundled(p) if *p == dead_port), "{st:?}");
+        }
         let st = sup.ensure(&dir, true);
         assert_eq!(
             kills.load(Ordering::SeqCst),
@@ -5604,6 +5884,544 @@ mod tests {
         assert!(!n.run_hung(), "inside the confirm window a silent run is not hung");
 
         release.store(true, Ordering::SeqCst);
+        stop_and_reset(&mut n);
+    }
+
+    /// a bundled-tor stand-in whose SOCKS port STALLS while the shared
+    /// `stall_left` counter is non-zero: it accepts the probe and holds the
+    /// connection without a word, so the supervisor's 750ms read times out.
+    /// That is the 04:33:51Z shape — a healthy tor too busy to answer ONE
+    /// probe. Each listener thread serves at most `budget` stalled probes and
+    /// then lets the port go (a real kill frees it; a stub thread cannot see
+    /// the kill), and a fresh thread retries the bind until the old one has.
+    fn stalling_tor_spawn(
+        req: TorSpawnRequest,
+        registry: &Arc<std::sync::Mutex<Option<u32>>>,
+        stall_left: Arc<AtomicUsize>,
+        budget: usize,
+    ) -> Result<Child, String> {
+        let child = long_lived_child();
+        *registry.lock().unwrap() = Some(child.id());
+        let port = req.socks_port;
+        std::thread::spawn(move || {
+            let bind_deadline = Instant::now() + Duration::from_secs(5);
+            let listener = loop {
+                if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    break l;
+                }
+                if Instant::now() > bind_deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            let _ = listener.set_nonblocking(true);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut served = 0usize;
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        if stall_left.load(Ordering::SeqCst) > 0 {
+                            stall_left.fetch_sub(1, Ordering::SeqCst);
+                            served += 1;
+                            // hold the connection open, saying nothing
+                            std::thread::sleep(Duration::from_millis(900));
+                            if served >= budget {
+                                break;
+                            }
+                        } else {
+                            let _ = std::io::Write::write_all(&mut sock, &[0x05, 0x00]);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(child)
+    }
+
+    /// a system-tor stand-in the TEST switches on and off. Bound before it
+    /// returns (no thread-start race); answers the SOCKS5 greeting while
+    /// `answers` is set and drops the connection unanswered while it is not,
+    /// until `stop` is set. Returns (port, answers, stop).
+    fn socks_switch() -> (u16, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind switch port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let _ = listener.set_nonblocking(true);
+        let answers = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (a, s) = (Arc::clone(&answers), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        if a.load(Ordering::SeqCst) {
+                            let _ = std::io::Write::write_all(&mut sock, &[0x05, 0x00]);
+                        }
+                        // off: the connection is dropped without a word
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, answers, stop)
+    }
+
+    /// harness for the port-drift tests: a supervised run over a canned RPC
+    /// surface, a switchable system tor and — with `bundle` — the bundled
+    /// payload stub. Returns the node, its dir and wallet, the argv log of
+    /// every run, and the system-tor switch (port, answers, stop).
+    #[allow(clippy::type_complexity)]
+    fn drift_harness(
+        tag: &str,
+        bundle: bool,
+    ) -> (
+        EmbeddedNode,
+        // the RAII test dir — kept alive by the caller for the whole test
+        crate::testsupport::TestDir,
+        std::path::PathBuf,
+        Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        u16,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+    ) {
+        let port = free_dead_port();
+        let dir = crate::testsupport::test_dir(tag);
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let (sys, answers, stop) = socks_switch();
+        if bundle {
+            fake_bundle_exe(&dir);
+        }
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        n.restart_backoff_base = Duration::ZERO;
+        n.tor.system_probe_port = sys;
+        n.tor.bundled_probe_port = free_port();
+        let (pid_reg, resolver) =
+            child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        n.tor.listener_resolver = Some(resolver);
+        let reg = Arc::clone(&pid_reg);
+        n.tor.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
+            stub_tor_spawn(req, Some(&reg))
+        }));
+        // every RPC the supervisor completes counts as fresh (the engine's
+        // clock is replaced, as in the hang-witness test)
+        n.liveness_probe = Some(Arc::new(|| Some(Duration::ZERO)));
+        let argvs = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let av = Arc::clone(&argvs);
+        n.runner_override = Some(Arc::new(move |argv: &[String]| {
+            av.lock().unwrap().push(argv.to_vec());
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let safety_deadline = Instant::now() + Duration::from_secs(30);
+            answer_loop(
+                listener,
+                7,
+                || crate::shutdown::requested() || Instant::now() > safety_deadline,
+            );
+            Ok(0)
+        }));
+        (n, dir, wallet, argvs, sys, answers, stop)
+    }
+
+    /// the `--socks` endpoint of a run, if it dials one
+    fn socks_arg(argv: &[String]) -> Option<String> {
+        argv.iter()
+            .position(|a| a == "--socks")
+            .map(|i| argv[i + 1].clone())
+    }
+
+    /// (2026-11-28, sami-pc "stuck finding peers") ONE STALLED PROBE IS NOT A
+    /// VERDICT. At 04:33:51Z the wallet's tor had relayed a handshake one
+    /// second earlier, then failed one 750ms health probe — and the supervisor
+    /// killed it. A healthy child that fails a check is re-checked, not
+    /// restarted; only CONSECUTIVE failures restart it, and one success
+    /// forgets the streak.
+    #[test]
+    fn tor_one_stalled_probe_never_restarts_a_healthy_child() {
+        let probe = free_dead_port();
+        let dir = crate::testsupport::test_dir("torstall");
+        fake_bundle_exe(&dir);
+        let mut sup = tor_supervisor(&dir, probe);
+        let pinned = sup.bundled_probe_port;
+        let need = sup.fails_before_restart;
+        assert!(need >= 2, "the fix IS the second look: {need}");
+        let kills = sup.kills_handle();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let stall_left = Arc::new(AtomicUsize::new(0));
+        let (pid_reg, resolver) =
+            child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup.listener_resolver = Some(resolver);
+        {
+            let (sc, reg, sl) = (Arc::clone(&spawns), Arc::clone(&pid_reg), Arc::clone(&stall_left));
+            sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
+                sc.fetch_add(1, Ordering::SeqCst);
+                stalling_tor_spawn(req, &reg, Arc::clone(&sl), need as usize + 1)
+            }));
+        }
+        let st = sup.ensure(&dir, true);
+        assert!(
+            matches!(&st, TorStatus::Bundled(p) if *p == pinned),
+            "spawned and answering: {st:?}"
+        );
+        let pid = sup.tor_pid();
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+
+        // 1. the probe stalls ONCE
+        stall_left.store(1, Ordering::SeqCst);
+        let st = sup.ensure(&dir, true);
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            0,
+            "one stalled probe must not restart a healthy tor"
+        );
+        assert_eq!(sup.tor_pid(), pid, "the same child — nothing was killed");
+        assert!(matches!(&st, TorStatus::Bundled(p) if *p == pinned), "{st:?}");
+
+        // 2. it answers again: the streak is forgotten…
+        sup.ensure(&dir, true);
+        // …so `need - 1` stalled checks in a row STILL restart nothing
+        stall_left.store(need as usize - 1, Ordering::SeqCst);
+        for seen in 1..need {
+            sup.ensure(&dir, true);
+            assert_eq!(kills.load(Ordering::SeqCst), 0, "check {seen} of a fresh streak");
+            assert_eq!(sup.tor_pid(), pid);
+        }
+
+        // 3. `need` CONSECUTIVE stalled checks restart it — on the pinned port
+        stall_left.store(1, Ordering::SeqCst);
+        let st = sup.ensure(&dir, true);
+        assert_eq!(kills.load(Ordering::SeqCst), 1, "confirmed silence does restart");
+        assert_eq!(spawns.load(Ordering::SeqCst), 2, "and respawns");
+        assert!(
+            matches!(&st, TorStatus::Bundled(p) if *p == pinned),
+            "back on the pinned port: {st:?}"
+        );
+
+        // the log says what happened at each step
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap();
+        assert!(
+            log.contains("re-checking, nothing restarted yet"),
+            "the first failure is logged as a re-check:\n{log}"
+        );
+        assert!(
+            log.contains("consecutive failed checks"),
+            "the restart names its evidence:\n{log}"
+        );
+        drop(sup);
+    }
+
+    /// (2026-11-28, sami-pc port drift) the second defect of the same
+    /// incident. After the kill the supervisor fell through to the
+    /// already-answer rule, found the machine's OLD standalone tor on 9050,
+    /// adopted it SILENTLY and returned. The running node went on dialling
+    /// the port it was spawned with — closed — for two hours. When a LIVE
+    /// node run dials the pinned port, a lost child is brought back on THAT
+    /// port before any other tor is even looked at.
+    #[test]
+    fn tor_lost_child_of_a_live_run_is_respawned_on_the_same_port_first() {
+        let (sys, answers, _stop) = socks_switch();
+        answers.store(true, Ordering::SeqCst); // an old system tor IS answering
+        let dir = crate::testsupport::test_dir("tordrift1");
+        fake_bundle_exe(&dir);
+        let mut sup = tor_supervisor(&dir, sys);
+        let pinned = sup.bundled_probe_port;
+        let kills = sup.kills_handle();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let (pid_reg, resolver) =
+            child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
+        sup.listener_resolver = Some(resolver);
+        {
+            let (sc, reg) = (Arc::clone(&spawns), Arc::clone(&pid_reg));
+            sup.spawn_override = Some(Arc::new(move |req: TorSpawnRequest| {
+                sc.fetch_add(1, Ordering::SeqCst);
+                stub_tor_spawn(req, Some(&reg))
+            }));
+        }
+        // the node supervisor's bookkeeping: the LIVE run dials the pinned port
+        sup.commit_run_port(Some(pinned));
+        // …and a live child whose listener has died on that port
+        sup.child = Some(long_lived_child());
+        sup.socks_port = Some(pinned);
+        sup.status = TorStatus::Bundled(pinned);
+
+        for seen in 1..sup.fails_before_restart {
+            let st = sup.ensure(&dir, true);
+            assert_eq!(kills.load(Ordering::SeqCst), 0, "check {seen}: still re-checking");
+            assert_ne!(st, TorStatus::System(sys), "not while the child may still answer");
+        }
+        let st = sup.ensure(&dir, true);
+        assert_eq!(kills.load(Ordering::SeqCst), 1, "confirmed dead listener → restarted");
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "the bundled tor is brought back");
+        assert!(
+            matches!(&st, TorStatus::Bundled(p) if *p == pinned),
+            "same port, so the run keeps dialling it: {st:?}"
+        );
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap();
+        assert!(log.contains("bundled tor up"), "{log}");
+        assert!(
+            !log.contains("system tor"),
+            "the system tor was never adopted:\n{log}"
+        );
+        drop(sup);
+    }
+
+    /// (2026-11-28) and when the same-port respawn FAILS, the one endpoint
+    /// that still answers is named — not a silent "unavailable" that leaves
+    /// the run dialling a closed port.
+    #[test]
+    fn tor_lost_child_of_a_live_run_falls_back_to_the_system_tor_when_the_same_port_respawn_fails() {
+        let (sys, answers, _stop) = socks_switch();
+        answers.store(true, Ordering::SeqCst);
+        let dir = crate::testsupport::test_dir("tordrift2");
+        fake_bundle_exe(&dir);
+        let mut sup = tor_supervisor(&dir, sys);
+        let pinned = sup.bundled_probe_port;
+        let kills = sup.kills_handle();
+        sup.spawn_override = Some(Arc::new(
+            |_req: TorSpawnRequest| -> Result<Child, String> {
+                Err("bind: the port is still held".into())
+            },
+        ));
+        sup.commit_run_port(Some(pinned));
+        sup.child = Some(long_lived_child());
+        sup.socks_port = Some(pinned);
+        sup.status = TorStatus::Bundled(pinned);
+
+        for _ in 0..sup.fails_before_restart {
+            let _ = sup.ensure(&dir, true);
+        }
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sup.status(),
+            TorStatus::System(sys),
+            "the answering endpoint is what the lane reports"
+        );
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap();
+        assert!(log.contains("falling back to the system tor"), "{log}");
+        // and it stays that way on later checks
+        assert_eq!(sup.ensure(&dir, true), TorStatus::System(sys));
+        assert_eq!(kills.load(Ordering::SeqCst), 1, "no second kill, no respawn storm");
+    }
+
+    /// (2026-11-28) the twin of the latch: with no bundled tor.exe
+    /// (Linux/macOS, or a payload that did not ship) ONE flaked probe of the
+    /// system port used to latch "gave up" for the whole session — the wallet
+    /// ran torless while a working system tor sat on the well-known port.
+    #[test]
+    fn tor_without_a_bundled_exe_picks_the_system_tor_up_again() {
+        let (sys, answers, _stop) = socks_switch();
+        let dir = crate::testsupport::test_dir("torrelatch");
+        // NO bundle here — the dev-box (Linux/macOS CI) path
+        let mut sup = tor_supervisor(&dir, sys);
+        sup.spawn_override = Some(Arc::new(
+            |_req: TorSpawnRequest| -> Result<Child, String> {
+                panic!("no payload → never spawn");
+            },
+        ));
+        assert_eq!(
+            sup.ensure(&dir, true),
+            TorStatus::Unavailable,
+            "nothing answers yet"
+        );
+        assert_eq!(sup.ensure(&dir, true), TorStatus::Unavailable);
+        answers.store(true, Ordering::SeqCst);
+        assert_eq!(
+            sup.ensure(&dir, true),
+            TorStatus::System(sys),
+            "a system tor that answers again is used again"
+        );
+        // said ONCE, not on every check
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap();
+        assert_eq!(log.matches("bundled tor.exe not found").count(), 1, "{log}");
+    }
+
+    /// (2026-11-28) the same silent switch with NO watchdog involved at all:
+    /// a bundled tor that exits on its own used to be replaced by the system
+    /// tor without one line in the log.
+    #[test]
+    fn tor_a_child_that_died_on_its_own_makes_the_switch_to_the_system_tor_visible() {
+        let (sys, answers, _stop) = socks_switch();
+        answers.store(true, Ordering::SeqCst);
+        let dir = crate::testsupport::test_dir("torsilent");
+        // no bundled payload in this dir → the system tor is what is left
+        let mut sup = tor_supervisor(&dir, sys);
+        sup.commit_run_port(Some(sup.bundled_probe_port));
+        sup.child = Some(exiting_child().expect("exiting child"));
+        sup.socks_port = Some(sup.bundled_probe_port);
+        sup.status = TorStatus::Bundled(sup.bundled_probe_port);
+        let exited = wait_until(Duration::from_secs(5), || {
+            sup.child
+                .as_mut()
+                .map(|c| matches!(c.try_wait(), Ok(Some(_))))
+                .unwrap_or(false)
+        });
+        assert!(exited, "the stand-in child never exited");
+        assert_eq!(sup.ensure(&dir, true), TorStatus::System(sys));
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap();
+        assert!(log.contains("using the system tor"), "the switch is in the log:\n{log}");
+    }
+
+    /// (2026-11-28, sami-pc port drift) THE SAFETY NET. Whatever the tor lane
+    /// does, a live run dials the port it was spawned with. When tor moves to
+    /// another port — here the system tor goes away and the bundled one takes
+    /// over — the run must be moved: one cooperative stop, not counted as a
+    /// restart, and the next spawn carries the port that answers. Debounced:
+    /// a single check of drift restarts nothing.
+    #[test]
+    fn tor_port_drift_under_a_live_run_respawns_the_run_onto_the_port_that_answers() {
+        let _flag_guard = lock_shutdown_flags();
+        let (mut n, dir, wallet, argvs, sys, answers, sys_stop) =
+            drift_harness("ns-tor-drift", true);
+        let pinned = n.tor.bundled_probe_port;
+
+        // 1. up on the SYSTEM tor
+        answers.store(true, Ordering::SeqCst);
+        n.ensure_running(&wallet, &dir, &[])
+            .expect("tor never errors the node supervisor");
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(n.rpc_port) == Some(7)),
+            "the stub node never came up"
+        );
+        assert_eq!(n.tor_status(), TorStatus::System(sys));
+        assert_eq!(n.run_tor_port, Some(sys));
+        assert_eq!(
+            socks_arg(&argvs.lock().unwrap()[0]),
+            Some(format!("127.0.0.1:{sys}"))
+        );
+
+        // 2. the system tor goes away; the bundled tor takes over on ITS port
+        answers.store(false, Ordering::SeqCst);
+        n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert_eq!(n.tor_status(), TorStatus::Bundled(pinned), "the bundled tor took over");
+        assert!(!crate::shutdown::requested(), "one check of drift is no reason to restart the node");
+        assert!(!n.respawn_for_tor);
+        assert_eq!(n.tor_drift_streak, 1);
+
+        // 3. still drifted on the next check → ONE clean stop. The stub run
+        //    exits at once, so the SAME call can already reap it and spawn
+        //    the successor; which call does it is an implementation detail.
+        //    The end state is the contract:
+        let moved = wait_until(Duration::from_secs(10), || {
+            if argvs.lock().unwrap().len() == 2 {
+                return true;
+            }
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            false
+        });
+        assert!(moved, "the run was never respawned onto the port that answers");
+        assert_eq!(n.restarts, 0, "a tor port change is not a crash");
+        assert!(
+            !n.respawn_for_tor && !crate::shutdown::requested(),
+            "the stop was consumed as ours — nothing is left pending"
+        );
+        assert_eq!(n.run_tor_port, Some(pinned));
+        assert_eq!(n.tor_status(), TorStatus::Bundled(pinned));
+        {
+            let argvs = argvs.lock().unwrap();
+            assert_eq!(argvs.len(), 2, "exactly one respawn");
+            assert_eq!(
+                socks_arg(&argvs[1]),
+                Some(format!("127.0.0.1:{pinned}")),
+                "the new run dials the port that answers"
+            );
+        }
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(n.rpc_port) == Some(7)),
+            "the respawned stub never came up"
+        );
+        let conf = std::fs::read_to_string(dir.join("triangles.conf")).unwrap();
+        assert!(
+            conf.contains(&format!("socks=127.0.0.1:{pinned}")),
+            "the conf follows: {conf}"
+        );
+
+        // 5. no drift any more → nothing further is asked
+        n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(!n.respawn_for_tor && !crate::shutdown::requested());
+        assert_eq!(argvs.lock().unwrap().len(), 2, "still exactly one respawn");
+        assert_eq!(n.tor_respawns, 1);
+
+        // and the GUI's own refresh log names the reap AND its reason — once.
+        // (the `supervisor:` lines themselves go to the embedded node log,
+        // not to the lane log in the test dir.)
+        let diag = std::fs::read_to_string(dir.join("state").join("gui-refresh.log")).unwrap();
+        assert!(
+            diag.contains(
+                "ensure: reaped node run exit_code=0 inbound_respawn=false rpc_stop=false restarts_before=0 tor_respawn=true"
+            ),
+            "the reap is attributed to the tor port change: {diag}"
+        );
+        assert_eq!(
+            diag.matches("reaped node run").count(),
+            1,
+            "one reap, not a loop:\n{diag}"
+        );
+
+        sys_stop.store(true, Ordering::SeqCst);
+        stop_and_reset(&mut n);
+    }
+
+    /// (2026-11-28) the other direction of the same rule: a run spawned
+    /// WITHOUT tor (none answered at the time) is moved onto the tor that
+    /// answers later — the wallet heals itself instead of staying torless for
+    /// the rest of the session.
+    #[test]
+    fn tor_appearing_after_a_torless_spawn_moves_the_run_onto_it() {
+        let _flag_guard = lock_shutdown_flags();
+        let (mut n, dir, wallet, argvs, sys, answers, sys_stop) =
+            drift_harness("ns-tor-appear", false);
+
+        // 1. nothing answers → a torless spawn
+        n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(n.rpc_port) == Some(7)),
+            "the stub node never came up"
+        );
+        assert_eq!(n.run_tor_port, None);
+        assert_eq!(socks_arg(&argvs.lock().unwrap()[0]), None, "no tor → no --socks");
+
+        // 2. a system tor appears: seen once, nothing happens yet
+        answers.store(true, Ordering::SeqCst);
+        n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert_eq!(n.tor_status(), TorStatus::System(sys));
+        assert!(!crate::shutdown::requested(), "debounced");
+
+        // 3. seen twice → one clean stop, and the run comes back on it (the
+        //    stub exits at once, so the same call can reap and respawn)
+        let moved = wait_until(Duration::from_secs(10), || {
+            if argvs.lock().unwrap().len() == 2 {
+                return true;
+            }
+            let _ = n.ensure_running(&wallet, &dir, &[]);
+            false
+        });
+        assert!(moved, "the run was never moved onto the tor that appeared");
+        assert_eq!(n.restarts, 0, "not a crash");
+        assert!(!n.respawn_for_tor && !crate::shutdown::requested());
+        assert_eq!(n.run_tor_port, Some(sys));
+        {
+            let argvs = argvs.lock().unwrap();
+            assert_eq!(argvs.len(), 2, "exactly one respawn");
+            assert_eq!(
+                socks_arg(&argvs[1]),
+                Some(format!("127.0.0.1:{sys}")),
+                "the new run dials the tor that appeared"
+            );
+        }
+        let conf = std::fs::read_to_string(dir.join("triangles.conf")).unwrap();
+        assert!(
+            conf.contains(&format!("socks=127.0.0.1:{sys}")),
+            "the conf follows: {conf}"
+        );
+        assert_eq!(n.tor_respawns, 1);
+
+        sys_stop.store(true, Ordering::SeqCst);
         stop_and_reset(&mut n);
     }
 }

@@ -864,8 +864,8 @@ impl Tri7App {
                         None => (
                             "Tor: unavailable".to_string(),
                             th::WARNING,
-                            "tor is not running — onion peers unreachable this session \
-                             (clearnet bootstrap only)"
+                            "tor is not running — onion peers unreachable this session. \
+                             The wallet never falls back to clearnet"
                                 .to_string(),
                         ),
                     };
@@ -908,8 +908,8 @@ impl Tri7App {
                         None => (
                             "I2P: unavailable".to_string(),
                             th::WARNING,
-                            "i2pd is not running — i2p peers unreachable this session \
-                             (tor/clearnet bootstrap only)"
+                            "i2pd is not running — i2p peers unreachable this session. \
+                             The wallet never falls back to clearnet"
                                 .to_string(),
                         ),
                     };
