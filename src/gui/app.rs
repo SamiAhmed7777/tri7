@@ -233,7 +233,9 @@ pub struct Tri7App {
     poll_ticker: u32,
     /// embedded node supervisor — the wallet works INDIVIDUALLY (Sami): one
     /// app spawns and manages its own node; balance/history/staking read it
-    node: Option<crate::gui::node_supervisor::EmbeddedNode>,
+    /// the node runs on its OWN thread (NodeWorker): the UI must paint
+    /// immediately and never wait on tor/i2p/node bootstrap
+    node: Option<crate::gui::node_supervisor::NodeWorker>,
     /// true after the first successful ensure_running attempt this session
     node_bootstrapped: bool,
     /// first-run logic (remembered wallet / auto-generate) ran once
@@ -419,8 +421,8 @@ impl Tri7App {
     /// kill the children — and only then does the process end.
     fn ordered_exit(&mut self) -> ! {
         if let Some(mut node) = self.node.take() {
-            node.shutdown(std::time::Duration::from_secs(3));
-            drop(node);
+            // the worker stops the node cooperatively, then reaps tor/i2pd
+            node.stop_and_join(std::time::Duration::from_secs(5));
         }
         crate::node_embedded::embedded_log(
             "gui: ordered exit — node stopped, tor/i2p children reaped",
@@ -836,7 +838,7 @@ impl Tri7App {
                     // the bundled child running, the user's own system tor on
                     // 9050, or unavailable. NEVER a phantom "tor on": amber
                     // means onion peers are unreachable this session.)
-                    let tor = self.node.as_ref().map(|n| n.tor_status());
+                    let tor = self.node.as_ref().map(|n| n.status().tor);
                     let (tor_label, tor_color, tor_hover) = match &tor {
                         Some(t) => {
                             let hover = match t.socks_port() {
@@ -880,7 +882,7 @@ impl Tri7App {
                     // user's own system i2pd on the pinned 4447, or
                     // unavailable. NEVER a phantom "i2p on": amber means
                     // .b32.i2p peers are unreachable this session.
-                    let i2p = self.node.as_ref().map(|n| n.i2p_status());
+                    let i2p = self.node.as_ref().map(|n| n.status().i2p);
                     let (i2p_label, i2p_color, i2p_hover) = match &i2p {
                         Some(s) => {
                             let hover = match s.socks_port() {
@@ -2103,50 +2105,45 @@ impl eframe::App for Tri7App {
                 if self.st.cfg.rpc_addr.is_none() && !self.st.cfg.attach_external {
                     self.st.cfg.rpc_addr = Some(format!("127.0.0.1:{port}"));
                 }
-                self.node = Some(crate::gui::node_supervisor::EmbeddedNode::new(
+                // ONE cheap call: the worker owns tor/i2p/the node and its
+                // snapshot build on its own thread. The first frame paints
+                // immediately; the status bar shows progress.
+                self.node = Some(crate::gui::node_supervisor::NodeWorker::start(
                     port,
                     node_dir.join("node.log"),
                     self.st.cfg.attach_external,
+                    PathBuf::from(&self.st.cfg.wallet_path),
+                    node_dir.clone(),
+                    vec![
+                        crate::gui::node_supervisor::DEFAULT_PEER.to_string(),
+                        crate::gui::node_supervisor::FALLBACK_PEER.to_string(),
+                    ],
                 ));
             }
-            if let Some(n) = &mut self.node {
+            if let Some(n) = &self.node {
+                // read-only status snapshot (never blocks)
+                let snap = n.status();
+                if let Some(e) = snap.last_error {
+                    if self
+                        .st
+                        .status_log
+                        .last()
+                        .map(|l| !l.contains(&e))
+                        .unwrap_or(true)
+                    {
+                        self.st.status_log.push(format!("starting the wallet's network: {}", e));
+                    }
+                }
+                // explorer/rich-list read the node's snapshots, not the
+                // (absent) profile-dir copy — a cheap existence check per tick
                 let wallet = self.st.cfg.wallet_path.clone();
                 let node_dir = Path::new(&wallet)
                     .parent()
                     .map(|p| p.join("node"))
                     .unwrap_or_else(|| PathBuf::from("node"));
-                // re-arm only every ~15s (a failed spawn cycle is expensive)
-                if self.poll_ticker % 30 == 0 {
-                    match n.ensure_running(
-                        Path::new(&wallet),
-                        &node_dir,
-                        &[crate::gui::node_supervisor::DEFAULT_PEER, crate::gui::node_supervisor::FALLBACK_PEER],
-                    ) {
-                        Ok(_) => {
-                            // first-sync finished? generate the wallet
-                            // snapshots in the node's own state dir so
-                            // balance/history show without manual tooling
-                            let _ = n.ensure_snapshots(Path::new(&wallet), &node_dir);
-                            // explorer/rich-list read the node's snapshots,
-                            // not the (absent) profile-dir copy
-                            let node_bal = node_dir.join("state").join("balances.json");
-                            if node_bal.exists() {
-                                self.st.cfg.balances_path = node_bal.display().to_string();
-                            }
-                        }
-                        Err(e) => {
-                            // surface once; don't spam every tick
-                            if self
-                                .st
-                                .status_log
-                                .last()
-                                .map(|l| !l.contains(&e))
-                                .unwrap_or(true)
-                            {
-                                self.st.status_log.push(format!("embedded node: {}", e));
-                            }
-                        }
-                    }
+                let node_bal = node_dir.join("state").join("balances.json");
+                if node_bal.exists() {
+                    self.st.cfg.balances_path = node_bal.display().to_string();
                 }
             }
         }

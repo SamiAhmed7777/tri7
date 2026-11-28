@@ -1,0 +1,42 @@
+[grade=A urn=urn:ump:lvdawwkzhsevudcwrzejmxrpbhx2mgmfzcxf7oidh2y7z25gpenq] gui: the window never waits on the node
+
+Why: on sami-pc the wallet ran 16.7 h with no window while its node synced and
+staked. The window's own thread had used 42,275 s of CPU: 40 of 60 samples were
+parked on the wallet live-view mutex and 11 were inside hash160, all under
+node_embedded::local_rpc reached from overview_wallet_actions. Since 2026-11-23
+every GUI read runs the in-process dispatcher on the render thread, and the
+whole bootstrap runs inside the first frame. One refresh in 15 minutes;
+MainWindowHandle = 0.
+
+What:
+- NodeWorker (node_supervisor.rs): the supervisor and the bootstrap run on
+  their own thread; the UI reads a NodeStatusView snapshot. A worker that
+  cannot start is reported; one that does not stop in time is logged.
+- app.rs: the node is a NodeWorker; update() no longer boots tor/i2p/node.
+- rpc_client.rs: embedded calls go to a bounded pool of short-lived workers.
+  A READ waits at most 400 ms and otherwise shows the previous answer; an
+  ACTION always runs once and waits for its own result (30 s). Answers are
+  keyed by the exact parameter text. A panicking worker releases only its own
+  callers.
+- tests.rs: state() returns (TestDir, AppState) so the guard outlives the
+  state (the passphrase-dialog tests did not compile); one NodeWorker test.
+- Five engine tests: previous answer instead of waiting, action waits for its
+  own result, panicking worker releases callers, pool is bounded, different
+  calls keep their own answers.
+
+Verified on the exact commit tree in a separate worktree (fresh target dir):
+cargo check 0 errors; targeted 18 passed; cargo test --features gui --lib
+996 passed, 0 failed, 2 ignored.
+
+Not in this change: the node's answers are still expensive (now off the UI
+thread); on-screen wording ("daemon", "tri7d", "RPC") is unchanged; nothing is
+deployed. src/node_embedded.rs belongs to another work item and is not staged.
+
+Judged by the GLM stand-in (Codex quota-walled until 2026-11-29 13:40; the
+primary wrapper round returned "malformed JSON from Codex",
+urn:ump:nwx4hqjjs5xhr2p6vigburz47aqk6amb4ifgogqgyfhzpp3oa72q - infrastructure,
+not a grade). Stand-in round 1: B,
+urn:ump:ododqs3zeabqucdgnleks57n6svo6pp6uymffhwnye2hqf56ix7q (three of four
+polish suggestions applied, the fourth declined with reason in the brief).
+Round 2: A, zero blockers.
+Evidence: .gate/gui-ui-never-blocks-2026-11-27/

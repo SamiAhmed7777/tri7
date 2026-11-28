@@ -1,0 +1,40 @@
+The exact tree that will be committed, built on its own (round 2, after the three polish fixes).
+Worktree /root/tri7-lab/wt-ui-never-blocks = HEAD 50bab5d + the four changed files copied in; NO other working-tree edits (the other agent's uncommitted src/node_embedded.rs is absent here). Fresh target directory (hard-linked from the main one).
+
+### CMD: cd /root/tri7-lab/wt-ui-never-blocks && git rev-parse HEAD && git status --short
+50bab5df27ced8f6e37950adf76dd7c65bdcd26f
+ M src/gui/app.rs
+ M src/gui/node_supervisor.rs
+ M src/gui/rpc_client.rs
+ M src/gui/tests.rs
+
+### CMD: cargo check --features gui --bin tri7_wallet_gui
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.32s
+CHECK_EXIT=0
+error lines: 0
+
+### CMD: cargo test --features gui --lib -- rpc_client:: gui::tests::node_worker gui::tests::passphrase
+test gui::rpc_client::tests::humanize_error_leads_with_plain_language ... ok
+test gui::rpc_client::tests::different_calls_keep_their_own_answers ... ok
+test gui::rpc_client::tests::action_always_runs_and_waits_for_its_own_result ... ok
+test gui::rpc_client::tests::non_loopback_rpc_addr_is_refused_before_io ... ok
+test gui::rpc_client::tests::a_panicking_worker_releases_its_callers ... ok
+test gui::rpc_client::tests::read_shows_the_previous_answer_instead_of_waiting ... ok
+test gui::rpc_client::tests::rpc_call_parses_canned_response_and_enforces_allowlist ... ok
+test gui::rpc_client::tests::rpc_call_routes_in_process_when_the_embedded_dispatcher_is_live ... ok
+test gui::rpc_client::tests::rpc_call_sends_the_real_bearer_token ... ok
+test gui::rpc_client::tests::rpc_call_unreachable_is_clean_error ... ok
+test gui::tests::passphrase_dialog::change_needs_both_old_and_new ... ok
+test gui::tests::passphrase_dialog::encrypt_requires_matching_new_passphrase ... ok
+test gui::tests::passphrase_dialog::no_dialog_pending_is_an_error_not_a_silent_noop ... ok
+test gui::tests::passphrase_dialog::decrypt_needs_only_the_current_passphrase ... ok
+test gui::tests::passphrase_dialog::encrypt_refuses_short_passphrase ... ok
+test gui::tests::passphrase_dialog::unlock_needs_only_the_current_passphrase_and_a_duration ... ok
+test gui::tests::node_worker_start_returns_immediately_and_stops_promptly ... ok
+test gui::rpc_client::tests::worker_pool_is_bounded ... ok
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 980 filtered out; finished in 24.34s
+TEST_EXIT=0
+
+### CMD: cargo test --features gui --lib   (the whole suite on the exact tree that lands)
+test result: ok. 996 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 124.03s
+FULL_EXIT=0

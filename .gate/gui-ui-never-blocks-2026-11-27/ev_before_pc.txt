@@ -1,0 +1,28 @@
+BEFORE — sami-pc, the wallet as deployed on 2026-11-27 (exe a06ca5ee…, the 2026-11-23 build)
+Sampled 2026-11-27 15:37 local PC time, while the node was synced and staking (tip h22208xx).
+
+### CMD: ssh sami-pc powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\hello\cpu.ps1
+PID 16376 responding=True total_cpu_s=59751
+  thread 38256 state=Running cpu_s=42275.1        <- the window's own thread (the UI)
+  thread 13940 state=Wait cpu_s=16081.6           <- the embedded node
+  thread 39372 state=Wait cpu_s=1092.2
+  thread 9336 state=Wait cpu_s=133.8
+  thread 7352 state=Wait cpu_s=14
+file gui-refresh.log dir=E:\Coins\TRI\node\state len=232304 mtime=15:22:26
+file gui-refresh.log dir=E:\Coins\TRI\node len=157 mtime=15:37:34
+file node.log dir=E:\Coins\TRI\node len=6864932 mtime=15:37:41
+now=15:37:42
+
+### CMD: ssh sami-pc powershell -NoProfile -Command "$p=Get-Process tri7_wallet_gui; …"
+pid=16376 start=2026-11-26T22:56:23 uptime_s=60081 cpu_s=59,754 avg_core=8% hwnd=0 ws_MB=466
+
+Reading:
+- uptime 60,081 s (16.7 h); process CPU 59,754 s = 99 % of one core, every second since launch.
+- the UI thread alone burned 42,275 s (70 % of a core) — a window thread that paints a
+  wallet has no work of that size; it was running the node's RPC handlers.
+- `state\gui-refresh.log` was last written 15:22:26 while the clock said 15:37:42: the GUI
+  managed ONE refresh in 15 minutes.
+- hwnd=0: Windows has no visible top-level window for the process — the user sees nothing.
+- A 60-sample stack walk of that thread (ev_stack_rootcause.txt) puts 40 samples on the
+  wallet live-view mutex inside node_embedded::OpsAdapter::call, reached from
+  Tri7App::overview_wallet_actions, and 11 more inside hash160 under rpc::native_call.

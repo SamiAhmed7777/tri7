@@ -3372,9 +3372,10 @@ mod passphrase_dialog {
     use crate::gui::app_state::{AppState, PassphraseDialog, PassphraseMode};
     use crate::gui::state::UiConfig;
 
-    /// (state, guarded dir) — bind the guard first: `let (_dir, mut st) = state();`
+    /// (guarded dir, state) — bind the guard first: `let (_dir, mut st) = state();`
     /// (item 45: the dir must outlive the AppState that may write into it).
-    fn state() -> (AppState, crate::testsupport::TestDir) {
+    fn state() -> (crate::testsupport::TestDir, AppState) {
+
         let dir = crate::testsupport::test_dir("tri7-ppdlg");
         let cfg = UiConfig {
             wallet_path: dir.join("wallet.dat").display().to_string(),
@@ -3385,7 +3386,7 @@ mod passphrase_dialog {
             profile_dir: dir.join("profile").display().to_string(),
             ..Default::default()
         };
-        (AppState::new(cfg), dir)
+        (dir, AppState::new(cfg))
     }
 
     fn with(state: &mut AppState, d: PassphraseDialog) -> PassphraseDialog {
@@ -5050,4 +5051,45 @@ fn first_run_welcome_flag_defaults_off() {
     // an app that already knows its wallet must never show the welcome menu.
     let (st, _dir) = options_state_with_unreachable_node("first-run-flag");
     assert!(!st.first_run_welcome);
+}
+
+// ---------------------------------------------------------------------------
+// NodeWorker — the node must never block the UI thread (2026-11-27).
+// The GUI's first frame used to run the whole bootstrap; on a wallet whose
+// store needs rebuilding the window never painted at all. These tests pin the
+// two guarantees the fix relies on: start() returns immediately, and the
+// worker stops on request without hanging the caller.
+// ---------------------------------------------------------------------------
+#[test]
+fn node_worker_start_returns_immediately_and_stops_promptly() {
+    use std::time::{Duration, Instant};
+    let dir = crate::testsupport::test_dir("tri7gui_nodeworker");
+    let wallet = dir.join("wallet.dat");
+    std::fs::write(&wallet, b"not-a-real-wallet").unwrap();
+    let node_dir = dir.join("node");
+    std::fs::create_dir_all(&node_dir).unwrap();
+    let t0 = Instant::now();
+    let mut w = crate::gui::node_supervisor::NodeWorker::start(
+        19997,
+        node_dir.join("node.log"),
+        true, // attach mode: never spawns tor/i2p/a node
+        wallet,
+        node_dir,
+        vec![],
+    );
+    assert!(
+        t0.elapsed() < Duration::from_millis(500),
+        "NodeWorker::start must not block the caller (took {:?})",
+        t0.elapsed()
+    );
+    let s = w.status();
+    assert!(!s.running, "attach mode with no node must report not running");
+    assert!(s.last_error.is_none());
+    let t1 = Instant::now();
+    w.stop_and_join(Duration::from_secs(3));
+    assert!(
+        t1.elapsed() < Duration::from_secs(3),
+        "stop_and_join must respect its deadline (took {:?})",
+        t1.elapsed()
+    );
 }

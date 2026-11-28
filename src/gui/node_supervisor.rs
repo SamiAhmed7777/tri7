@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -2765,6 +2765,11 @@ impl EmbeddedNode {
         }
     }
 
+    /// restart counter (read by the GUI worker for its status snapshot)
+    pub fn restarts(&self) -> u32 {
+        self.restarts
+    }
+
     pub fn running(&mut self) -> bool {
         // in-process mode: the node thread is alive until it finishes
         if self.node_thread.is_some() {
@@ -5434,5 +5439,147 @@ mod tests {
         );
         // supervisor drop kills the tracked i2pd child
         drop(n);
+    }
+}
+
+// ===========================================================================
+// NodeWorker — the embedded node OFF the UI thread (2026-11-27)
+// ===========================================================================
+
+/// What the GUI is allowed to know about the node. Published by the worker;
+/// the UI never touches the supervisor itself.
+#[derive(Clone, Debug)]
+pub struct NodeStatusView {
+    pub tor: TorStatus,
+    pub i2p: I2pStatus,
+    pub running: bool,
+    pub restarts: u32,
+    pub last_error: Option<String>,
+}
+
+/// Owns an `EmbeddedNode` on a dedicated thread.
+///
+/// The GUI used to run the entire bootstrap — tor ensure, i2p ensure, node
+/// spawn, snapshot build — inside its FIRST `update()` frame. Nothing painted
+/// until that finished, so on a wallet whose store needs rebuilding the window
+/// simply never appeared: indistinguishable from a dead app, and precisely the
+/// "nobody should ever notice the node" bar failing. The worker ticks the
+/// supervisor in the background and publishes a status snapshot the UI renders.
+pub struct NodeWorker {
+    status: Arc<Mutex<NodeStatusView>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NodeWorker {
+    pub fn start(
+        rpc_port: u16,
+        log_path: PathBuf,
+        attach_external: bool,
+        wallet: PathBuf,
+        node_dir: PathBuf,
+        peers: Vec<String>,
+    ) -> Self {
+        let status = Arc::new(Mutex::new(NodeStatusView {
+            tor: TorStatus::Unavailable,
+            i2p: I2pStatus::Unavailable,
+            running: false,
+            restarts: 0,
+            last_error: None,
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let st = status.clone();
+        let sp = stop.clone();
+        let handle = match std::thread::Builder::new()
+            .name("tri7-node-worker".into())
+            .spawn(move || {
+                let mut node = EmbeddedNode::new(rpc_port, log_path, attach_external);
+                let peer_refs: Vec<&str> = peers.iter().map(|p| p.as_str()).collect();
+                while !sp.load(Ordering::SeqCst) {
+                    let mut err: Option<String> = None;
+                    let mut up = false;
+                    match node.ensure_running(&wallet, &node_dir, &peer_refs) {
+                        Ok(running) => {
+                            up = running;
+                            // snapshot build stays here too: it spawns a child
+                            // and returns immediately, but it must never run on
+                            // the UI thread.
+                            let _ = node.ensure_snapshots(&wallet, &node_dir);
+                        }
+                        Err(e) => err = Some(e),
+                    }
+                    if let Ok(mut s) = st.lock() {
+                        s.tor = node.tor_status();
+                        s.i2p = node.i2p_status();
+                        s.running = up;
+                        s.restarts = node.restarts();
+                        // an error is shown until the next clean cycle, so a
+                        // later recurrence of the same failure is shown again
+                        s.last_error = err;
+                    }
+                    // the supervisor is re-armed about every 15 s, exactly as
+                    // the UI-thread tick did (a failed spawn cycle is
+                    // expensive); stop stays responsive: 60 x 250 ms
+                    for _ in 0..60 {
+                        if sp.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+                node.shutdown(Duration::from_secs(3));
+                crate::node_embedded::embedded_log(
+                    "supervisor: node worker stopped (state persisted)",
+                );
+            })
+            {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    // the node would silently never start; say so instead
+                    if let Ok(mut s) = status.lock() {
+                        s.last_error = Some(format!("could not start the node's worker thread: {e}"));
+                    }
+                    None
+                }
+            };
+        NodeWorker { status, stop, handle }
+    }
+
+    pub fn status(&self) -> NodeStatusView {
+        match self.status.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => NodeStatusView {
+                tor: TorStatus::Unavailable,
+                i2p: I2pStatus::Unavailable,
+                running: false,
+                restarts: 0,
+                last_error: Some("node status unavailable".into()),
+            },
+        }
+    }
+
+    pub fn stop_and_join(&mut self, timeout: Duration) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let deadline = Instant::now() + timeout;
+            while !h.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            } else {
+                // said out loud rather than silent: the node keeps running in
+                // the background until its own stop completes
+                crate::node_embedded::embedded_log(
+                    "supervisor: node worker did not stop in time; it keeps stopping in the background",
+                );
+            }
+        }
+    }
+}
+
+impl Drop for NodeWorker {
+    fn drop(&mut self) {
+        self.stop_and_join(Duration::from_secs(2));
     }
 }

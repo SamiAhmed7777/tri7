@@ -1,0 +1,166 @@
+What changed between the round-1 graded diff and the diff submitted now (diff of the two diffs).
+
+--- graded-by-round-1
++++ now
+@@ -124,5 +124,5 @@
+          }
+ diff --git a/src/gui/node_supervisor.rs b/src/gui/node_supervisor.rs
+-index 8720cbb..2d79c91 100644
++index 8720cbb..162bb2f 100644
+ --- a/src/gui/node_supervisor.rs
+ +++ b/src/gui/node_supervisor.rs
+@@ -148,5 +148,5 @@
+          // in-process mode: the node thread is alive until it finishes
+          if self.node_thread.is_some() {
+-@@ -5436,3 +5441,139 @@ mod tests {
++@@ -5436,3 +5441,145 @@ mod tests {
+          drop(n);
+      }
+@@ -278,4 +278,10 @@
+ +            if h.is_finished() {
+ +                let _ = h.join();
+++            } else {
+++                // said out loud rather than silent: the node keeps running in
+++                // the background until its own stop completes
+++                crate::node_embedded::embedded_log(
+++                    "supervisor: node worker did not stop in time; it keeps stopping in the background",
+++                );
+ +            }
+ +        }
+@@ -289,5 +295,5 @@
+ +}
+ diff --git a/src/gui/rpc_client.rs b/src/gui/rpc_client.rs
+-index 4ae779d..ab16430 100644
++index 4ae779d..a9ce883 100644
+ --- a/src/gui/rpc_client.rs
+ +++ b/src/gui/rpc_client.rs
+@@ -306,5 +312,5 @@
+  /// Methods the GUI may call. Mirrors the NATIVE read surface (HANDOFF 5b)
+  /// plus the phase-7 milestone-2 wallet-owned operations the GUI drives on the
+-@@ -173,6 +176,390 @@ pub fn rpc_token_is_set() -> bool {
++@@ -173,6 +176,389 @@ pub fn rpc_token_is_set() -> bool {
+      rpc_token().is_some()
+  }
+@@ -442,13 +448,10 @@
+ +}
+ +
+-+/// Distinguishes calls; params can be large (raw hex), so only a digest is kept.
+++/// Distinguishes calls. The key is the exact parameter text, not a digest of
+++/// it: two different calls that shared a digest would be handed each other's
+++/// answers, and in a wallet that must be impossible rather than improbable.
+ +fn cache_key(method: &str, params: &[Value]) -> String {
+ +    let text = serde_json::to_string(params).unwrap_or_default();
+-+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+-+    for b in text.bytes() {
+-+        h ^= u64::from(b);
+-+        h = h.wrapping_mul(0x100_0000_01b3);
+-+    }
+-+    format!("{method}:{h:016x}:{}", text.len())
+++    format!("{method}:{text}")
+ +}
+ +
+@@ -557,9 +560,11 @@
+ +        Err(_) => return Err(()),
+ +    };
+-+    if ACTIVE_WORKERS.load(AtomicOrdering::SeqCst) >= WORKER_CAP {
+++    // take a slot first, then look: two callers that both checked before taking
+++    // could both pass the check and overshoot the cap
+++    if ACTIVE_WORKERS.fetch_add(1, AtomicOrdering::SeqCst) >= WORKER_CAP {
+++        ACTIVE_WORKERS.fetch_sub(1, AtomicOrdering::SeqCst);
+ +        abandon(key, began);
+ +        return Err(());
+ +    }
+-+    ACTIVE_WORKERS.fetch_add(1, AtomicOrdering::SeqCst);
+ +    let k = key.to_string();
+ +    let spawned = std::thread::Builder::new()
+@@ -697,5 +702,5 @@
+      if !is_allowed(method) {
+          return Err(format!(
+-@@ -190,7 +577,7 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
++@@ -190,7 +576,7 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
+      // the warmup never handed over, while the daemon served getbalance
+      // 250.0 externally).
+@@ -706,5 +711,5 @@
+      // loopback-only (TRI7-RPC-05): never send wallet verbs to a remote host
+      if !is_loopback_addr(addr) {
+-@@ -265,6 +652,7 @@ mod tests {
++@@ -265,6 +651,7 @@ mod tests {
+  
+      #[test]
+@@ -714,5 +719,5 @@
+          assert!(!is_allowed("sendtoaddress"));
+          assert!(!is_allowed("dumpprivkey"));
+-@@ -300,6 +688,7 @@ mod tests {
++@@ -300,6 +687,7 @@ mod tests {
+  
+      #[test]
+@@ -722,5 +727,5 @@
+          assert!(err.contains("connect"), "unexpected error: {}", err);
+      }
+-@@ -311,6 +700,7 @@ mod tests {
++@@ -311,6 +699,7 @@ mod tests {
+      /// "Not connected yet" + 0.000 TRI freeze).
+      #[test]
+@@ -730,5 +735,5 @@
+              Ok(serde_json::json!({
+                  "via": "in-process",
+-@@ -324,7 +714,9 @@ mod tests {
++@@ -324,7 +713,9 @@ mod tests {
+          let v = r.expect("the in-process dispatcher answers without a socket");
+          assert_eq!(v["via"], "in-process");
+@@ -741,5 +746,5 @@
+              Err("rpc error: {\"code\":-1,\"message\":\"nope\"}".to_string())
+          }));
+-@@ -339,6 +731,7 @@ mod tests {
++@@ -339,6 +730,7 @@ mod tests {
+      /// whole daemon poll depends on these bytes being exact.
+      #[test]
+@@ -749,5 +754,5 @@
+          let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+          let port = listener.local_addr().unwrap().port();
+-@@ -377,6 +770,7 @@ mod tests {
++@@ -377,6 +769,7 @@ mod tests {
+      /// rpc_addr is refused BEFORE any connection attempt (no DNS, no wire).
+      #[test]
+@@ -757,5 +762,5 @@
+              "127.0.0.1:19114",
+              "localhost:19114",
+-@@ -432,4 +826,117 @@ mod tests {
++@@ -432,4 +825,133 @@ mod tests {
+          let e = humanize_error("resolve localhost: boom".into());
+          assert_eq!(e, "resolve localhost: boom");
+@@ -873,4 +878,20 @@
+ +        std::thread::sleep(Duration::from_millis(600));
+ +        assert_eq!(ACTIVE_WORKERS.load(AtomicOrdering::SeqCst), 0, "workers must all come home");
+++    }
+++
+++    /// The same verb with two different arguments: each gets its own answer,
+++    /// never the other's (the key is the exact text, so nothing can collide).
+++    #[test]
+++    fn different_calls_keep_their_own_answers() {
+++        let _serial = serial();
+++        for (text, answer) in [("one", 1), ("two", 2)] {
+++            let key = cache_key("getbalance", &[serde_json::json!([text])]);
+++            let got = cached_call(key, false, slow(answer, 50));
+++            assert_eq!(val(&got), answer, "handed another call's answer");
+++        }
+++        assert_ne!(
+++            cache_key("sendtoaddress", &[serde_json::json!(["one"])]),
+++            cache_key("sendtoaddress", &[serde_json::json!(["two"])])
+++        );
+ +    }
+  }
+
+Grep proof against the live files (expected: 1, 0, 1, 0, 1, 1):
+### CMD: grep -c 'ACTIVE_WORKERS.fetch_add(1, AtomicOrdering::SeqCst) >= WORKER_CAP' src/gui/rpc_client.rs
+1
+### CMD: grep -c 'ACTIVE_WORKERS.load(AtomicOrdering::SeqCst) >= WORKER_CAP' src/gui/rpc_client.rs
+0
+### CMD: grep -c 'format!("{method}:{text}")' src/gui/rpc_client.rs
+1
+### CMD: grep -c '0xcbf2_9ce4_8422_2325' src/gui/rpc_client.rs
+0
+### CMD: grep -c 'did not stop in time' src/gui/node_supervisor.rs
+1
+### CMD: grep -c 'fn different_calls_keep_their_own_answers' src/gui/rpc_client.rs
+1

@@ -1,0 +1,9 @@
+GRADE=A urn=urn:ump:lvdawwkzhsevudcwrzejmxrpbhx2mgmfzcxf7oidh2y7z25gpenq
+{
+  "blocking": [],
+  "polish": [
+    "evict() is O(n) over the order vec per eviction and order can briefly hold stale keys; fine at ANSWER_CAP=48 but worth a note.",
+    "cache_key stores full parameter text (raw tx hex can be large) in up to 48 entries \u2014 memory is bounded but a per-key size cap could be added later.",
+    "NodeWorker polls stop in 250 ms slices; an event-based (Condvar/pipe) wake would make shutdown snappier."
+  ]
+}

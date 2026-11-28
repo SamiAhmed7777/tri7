@@ -1,0 +1,10 @@
+GRADE=B urn=urn:ump:ododqs3zeabqucdgnleks57n6svo6pp6uymffhwnye2hqf56ix7q
+{
+  "blocking": [],
+  "polish": [
+    "Make the WORKER_CAP check-and-increment atomic (fetch_add and check result) to avoid transiently exceeding the cap under contention",
+    "Use a keyed hash (e.g. SipHash) or store params digest more defensively in cache_key \u2014 a hash collision across distinct calls would serve a wrong answer, which matters in a wallet",
+    "Consider a queue-based persistent worker pool instead of a thread per call to reduce spawn churn on frame-heavy pages",
+    "stop_and_join could log/record when it times out instead of silently detaching the worker thread"
+  ]
+}

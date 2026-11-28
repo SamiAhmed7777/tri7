@@ -1,0 +1,16 @@
+### CMD: git rev-parse HEAD
+50bab5df27ced8f6e37950adf76dd7c65bdcd26f
+
+### CMD: git branch --show-current
+master
+
+### CMD: git diff --stat -- src/gui/app.rs src/gui/node_supervisor.rs src/gui/rpc_client.rs src/gui/tests.rs
+4 files changed, 754 insertions(+), 46 deletions(-)
+### CMD: git status --short -- src/
+ M src/gui/app.rs
+ M src/gui/node_supervisor.rs
+ M src/gui/rpc_client.rs
+ M src/gui/tests.rs
+ M src/node_embedded.rs
+
+NOTE: src/node_embedded.rs in the working tree carries ANOTHER agent's uncommitted work (item 54). It is NOT part of this change: the commit stages exactly the four files above.

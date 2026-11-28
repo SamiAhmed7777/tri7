@@ -1,0 +1,206 @@
+Where the UI thread was — 60 samples of tri7_wallet_gui's main thread
+(sami-pc, 2026-11-27 15:02 local; deployed exe a06ca5ee, the 2026-11-23 build).
+Symbolised offline on DNS2 against the fetched exe (objdump -t) and the PC's ntdll exports.
+
+Sampled frames: 60
+
+Instruction pointer (outermost first = what the thread is executing right now):
+   40/60  ntdll.dll+0x16A054                 -> ntdll ZwWaitForAlertByThreadId+0x13
+    2/60  tri7_wallet_gui.exe+0x24B182       -> exe _RNvNtNtCsjPrtMcWKI2M_4sha26sha2563x8613digest_blocks+0x391
+    1/60  tri7_wallet_gui.exe+0x4E6703       -> exe _RNvNtCskqAIh4y2LdM_9tri7_core7address7hash160+0x122
+    1/60  tri7_wallet_gui.exe+0x4E6832       -> exe _RNvNtCskqAIh4y2LdM_9tri7_core7address7hash160+0x251
+    1/60  msvcrt.dll+0x7B2E1                 -> msvcrt.dll+0x7B2E1
+    1/60  tri7_wallet_gui.exe+0x1B668D       -> exe _RNvNtCs74a6ERGAD9N_6ripemd4c1608compress+0x3fc
+    1/60  tri7_wallet_gui.exe+0x1B64DE       -> exe _RNvNtCs74a6ERGAD9N_6ripemd4c1608compress+0x24d
+    1/60  tri7_wallet_gui.exe+0x1B6C79       -> exe _RNvNtCs74a6ERGAD9N_6ripemd4c1608compress+0x9e8
+
+Distinct call chains (same chain collapsed; stale slots between live frames are possible):
+  x40:
+      ntdll RtlWaitOnAddress+0x211
+      exe register_frame_ctor+0x2068ad
+      exe _RNvMNtNtNtNtCs9qcQDiGWtgW_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended+0x75
+      exe _RNvMs5_NtNtNtCs9qcQDiGWtgW_3std4sync6poison5mutexINtB5_5MutexINtNtCs2Ja4erDm0Jl_4core6option6OptionNtNtCskqAIh4y2LdM_9tri7_core13node_embedded10WalletLiveEE4lockB1D_+0x4f
+      exe _RNvXsi_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_10OpsAdapterNtNtB7_3rpc7NodeOps4call+0x21d2
+      exe _RNvMs3_NtCsiqhX8UezqMg_4egui2uiNtB5_2Ui17allocate_response+0x1a0
+      exe _RNvMs3_NtCsiqhX8UezqMg_4egui2uiNtB5_2Ui19allocate_exact_size+0x53
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12will_discard+0x134
+      exe _RNvXs1_NtNtCsiqhX8UezqMg_4egui7widgets5imageNtB5_5ImageNtB7_6Widget2ui+0x2e7
+      exe register_frame_ctor+0x1f5e36
+      exe register_frame_ctor+0x21a6a4
+      exe register_frame_ctor+0x1f8516
+      exe _RNSNvYNCNCNvMs0_NtNtCskqAIh4y2LdM_9tri7_core3gui3appNtBe_7Tri7App23overview_wallet_actions00INtNtNtCs2Ja4erDm0Jl_4core3ops8function6FnOnceTQNtNtCsiqhX8UezqMg_4egui2ui2UiEE9call_once6vtableBi_+0x925
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x1bc2
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlAllocateHeap+0xab9
+      exe register_frame_ctor+0x2068ad
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x1bc2
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlAllocateHeap+0xab9
+      ntdll SbSelectProcedure+0x1d2
+      ntdll RtlDeleteBoundaryDescriptor+0x46c
+      ntdll memset+0x127e
+      ntdll SbSelectProcedure+0x1d2
+      ntdll RtlFreeHeap+0x1e3
+      exe _RNvMs8_NtNtNtCs9qcQDiGWtgW_3std3sys2fs7windowsNtB5_4File9file_attr+0x32
+      ntdll SbSelectProcedure+0x1d2
+      exe _RNvNtNtNtCs9qcQDiGWtgW_3std3sys2fs7windows8metadata+0x16e
+      ntdll RtlSizeHeap+0x1f3f
+      exe register_frame_ctor+0x1df42e
+      ntdll RtlAllocateHeap+0xab9
+      exe register_frame_ctor+0x1df42e
+
+  x11:
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core7address7hash160+0x24c
+      ntdll RtlAllocateHeap+0xab9
+      exe register_frame_ctor+0x26102e
+      ntdll RtlFreeHeap+0x1e3
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core5spend11solver_type+0x85
+      exe _RINvNvMs2_NtCsinMxvmwVKXS_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECskqAIh4y2LdM_9tri7_core+0x58
+      exe register_frame_ctor+0x263cce
+      exe _RNvMsd_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_10WalletLive4owns+0xeb
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider17live_wallet_total+0x30b
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider8coverage+0x1b4
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc12wallet_total+0x638
+      exe _RNvNtNtNtCs9qcQDiGWtgW_3std3sys5alloc7windows18process_heap_alloc+0x14
+      exe register_frame_ctor+0x263cce
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc11native_call+0x7088
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvXsa_NtCsiqhX8UezqMg_4egui2uiNtB5_2UiNtNtNtCs2Ja4erDm0Jl_4core3ops4drop4Drop4drop+0xe7
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      ntdll RtlFreeHeap+0x1e3
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvMsn_NtCsinMxvmwVKXS_5alloc4syncINtB5_3ArcNtNtCsiqhX8UezqMg_4egui8ui_stack7UiStackE9drop_slowBK_+0x40
+      exe register_frame_ctor+0x21699e
+      exe register_frame_ctor+0x1f3ede
+      exe _RINvMs3_NtCsiqhX8UezqMg_4egui2uiNtB6_2Ui19allocate_new_ui_dynuECskqAIh4y2LdM_9tri7_core+0x1c3
+      exe register_frame_ctor+0x1f3ede
+      ntdll RtlSizeHeap+0x300d
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x2360
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x1bc2
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlFreeHeap+0x1e3
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlAllocateHeap+0xab9
+      ntdll RtlSizeHeap+0x7d92
+      ntdll RtlSizeHeap+0x1f3f
+      exe _RNvMsi_NtNtNtCsinMxvmwVKXS_5alloc11collections5btree3mapINtB5_8BTreeMapNtNtBb_6string6StringNtNtCsfG9e1CcVDmq_10serde_json5value5ValueE6insertCskqAIh4y2LdM_9tri7_core+0x91
+
+  x4:
+      exe register_frame_ctor+0x263cce
+      exe _RNvYINtNtNtCs6qkYwcR9ORC_6digest8core_api7wrapper11CoreWrapperINtNtB7_11ct_variable21CtVariableCoreWrapperNtNtCsjPrtMcWKI2M_4sha28core_api13Sha256VarCoreINtNtCs9LhZh7jtGaC_7typenum4uint4UIntIB2s_IB2s_IB2s_IB2s_IB2s_NtB2u_5UTermNtNtB2w_3bit2B1ENtB3F_2B0EB3T_EB3T_EB3T_EB3T_ENtB1K_9OidSha256EENtB9_11FixedOutput14finalize_fixedCskqAIh4y2LdM_9tri7_core.16999+0x116
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core7address7hash160+0xe2
+      ntdll RtlAllocateHeap+0xab9
+      exe register_frame_ctor+0x26102e
+      ntdll RtlFreeHeap+0x1e3
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core5spend11solver_type+0x85
+      exe _RINvNvMs2_NtCsinMxvmwVKXS_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECskqAIh4y2LdM_9tri7_core+0x58
+      exe register_frame_ctor+0x263cce
+      exe _RNvMsd_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_10WalletLive4owns+0xeb
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider17live_wallet_total+0x30b
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider8coverage+0x1b4
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc12wallet_total+0x638
+      exe _RNvNtNtNtCs9qcQDiGWtgW_3std3sys5alloc7windows18process_heap_alloc+0x14
+      exe register_frame_ctor+0x263cce
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc11native_call+0x7088
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvXsa_NtCsiqhX8UezqMg_4egui2uiNtB5_2UiNtNtNtCs2Ja4erDm0Jl_4core3ops4drop4Drop4drop+0xe7
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      ntdll RtlFreeHeap+0x1e3
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvMsn_NtCsinMxvmwVKXS_5alloc4syncINtB5_3ArcNtNtCsiqhX8UezqMg_4egui8ui_stack7UiStackE9drop_slowBK_+0x40
+      exe register_frame_ctor+0x21699e
+      exe register_frame_ctor+0x1f3ede
+      exe _RINvMs3_NtCsiqhX8UezqMg_4egui2uiNtB6_2Ui19allocate_new_ui_dynuECskqAIh4y2LdM_9tri7_core+0x1c3
+      exe register_frame_ctor+0x1f3ede
+      ntdll RtlSizeHeap+0x300d
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x2360
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x1bc2
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlFreeHeap+0x1e3
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlAllocateHeap+0xab9
+      ntdll RtlSizeHeap+0x7d92
+
+  x2:
+      ntdll RtlAllocateHeap+0xab9
+      exe register_frame_ctor+0x26102e
+      ntdll RtlFreeHeap+0x1e3
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core5spend11solver_type+0x85
+      exe _RINvNvMs2_NtCsinMxvmwVKXS_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECskqAIh4y2LdM_9tri7_core+0x58
+      exe register_frame_ctor+0x263cce
+      exe _RNvMsd_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_10WalletLive4owns+0xeb
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider17live_wallet_total+0x30b
+      exe _RNvXsg_NtCskqAIh4y2LdM_9tri7_core13node_embeddedNtB5_18LiveWalletProviderNtNtB7_3rpc14WalletProvider8coverage+0x1b4
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc12wallet_total+0x638
+      exe _RNvNtNtNtCs9qcQDiGWtgW_3std3sys5alloc7windows18process_heap_alloc+0x14
+      exe register_frame_ctor+0x263cce
+      exe register_frame_ctor+0x1df42e
+      exe _RNvNtCskqAIh4y2LdM_9tri7_core3rpc11native_call+0x7088
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvXsa_NtCsiqhX8UezqMg_4egui2uiNtB5_2UiNtNtNtCs2Ja4erDm0Jl_4core3ops4drop4Drop4drop+0xe7
+      exe _RNvMsb_NtCsiqhX8UezqMg_4egui7contextNtB5_7Context12get_response+0x38d
+      ntdll RtlFreeHeap+0x1e3
+      exe register_frame_ctor+0x1f3ede
+      exe register_frame_ctor+0x21699e
+      exe _RNvMsn_NtCsinMxvmwVKXS_5alloc4syncINtB5_3ArcNtNtCsiqhX8UezqMg_4egui8ui_stack7UiStackE9drop_slowBK_+0x40
+      exe register_frame_ctor+0x21699e
+      exe register_frame_ctor+0x1f3ede
+      exe _RINvMs3_NtCsiqhX8UezqMg_4egui2uiNtB6_2Ui19allocate_new_ui_dynuECskqAIh4y2LdM_9tri7_core+0x1c3
+      exe register_frame_ctor+0x1f3ede
+      ntdll RtlSizeHeap+0x300d
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x2360
+      ntdll RtlDosApplyFileIsolationRedirection_Ustr+0x1bc2
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlFreeHeap+0x1e3
+      ntdll RtlSizeHeap+0x1f3f
+      ntdll RtlAllocateHeap+0xab9
+      ntdll RtlSizeHeap+0x7d92
+      ntdll RtlSizeHeap+0x1f3f
+      exe _RNvMsi_NtNtNtCsinMxvmwVKXS_5alloc11collections5btree3mapINtB5_8BTreeMapNtNtBb_6string6StringNtNtCsfG9e1CcVDmq_10serde_json5value5ValueE6insertCskqAIh4y2LdM_9tri7_core+0x91
+      ntdll RtlAllocateHeap+0xab9
+
+Demangled exe symbols seen in the chains:
+  <egui[d69894c606839d62]::ui::Ui>::allocate_new_ui_dyn::<()>
+  <alloc[d62006e3236e62f2]::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc[d62006e3236e62f2]::alloc::Global>
+  <<tri7_core[edf2b6cf27320ae4]::gui::app::Tri7App>::overview_wallet_actions::{closure#0}::{closure#0} as core[1fc797e270de88dd]::ops::function::FnOnce<(&mut egui[d69894c606839d62]::ui::Ui,)>>::call_onc
+  <std[6dc08216e95b97e0]::sys::sync::mutex::futex::Mutex>::lock_contended
+  <egui[d69894c606839d62]::ui::Ui>::allocate_response
+  <egui[d69894c606839d62]::ui::Ui>::allocate_exact_size
+  <std[6dc08216e95b97e0]::sync::poison::mutex::Mutex<core[1fc797e270de88dd]::option::Option<tri7_core[edf2b6cf27320ae4]::node_embedded::WalletLive>>>::lock
+  <std[6dc08216e95b97e0]::sys::fs::windows::File>::file_attr
+  <egui[d69894c606839d62]::context::Context>::get_response
+  <egui[d69894c606839d62]::context::Context>::will_discard
+  <tri7_core[edf2b6cf27320ae4]::node_embedded::WalletLive>::owns
+  <alloc[d62006e3236e62f2]::collections::btree::map::BTreeMap<alloc[d62006e3236e62f2]::string::String, serde_json[b6a1ef30a31b8684]::value::Value>>::insert
+  <alloc[d62006e3236e62f2]::sync::Arc<egui[d69894c606839d62]::ui_stack::UiStack>>::drop_slow
+  ripemd[5250bf0a10e14bdd]::c160::compress
+  tri7_core[edf2b6cf27320ae4]::rpc::native_call
+  tri7_core[edf2b6cf27320ae4]::rpc::wallet_total
+  tri7_core[edf2b6cf27320ae4]::spend::solver_type
+  tri7_core[edf2b6cf27320ae4]::address::hash160
+  sha2[e6f8188c2eae6e8e]::sha256::x86::digest_blocks
+  std[6dc08216e95b97e0]::sys::fs::windows::metadata
+  std[6dc08216e95b97e0]::sys::alloc::windows::process_heap_alloc
+  <egui[d69894c606839d62]::widgets::image::Image as egui[d69894c606839d62]::widgets::Widget>::ui
+  <egui[d69894c606839d62]::ui::Ui as core[1fc797e270de88dd]::ops::drop::Drop>::drop
+  <tri7_core[edf2b6cf27320ae4]::node_embedded::LiveWalletProvider as tri7_core[edf2b6cf27320ae4]::rpc::WalletProvider>::live_wallet_total
+  <tri7_core[edf2b6cf27320ae4]::node_embedded::LiveWalletProvider as tri7_core[edf2b6cf27320ae4]::rpc::WalletProvider>::coverage
+  <tri7_core[edf2b6cf27320ae4]::node_embedded::OpsAdapter as tri7_core[edf2b6cf27320ae4]::rpc::NodeOps>::call
+  <digest[4ad57100079b224e]::core_api::wrapper::CoreWrapper<digest[4ad57100079b224e]::core_api::ct_variable::CtVariableCoreWrapper<sha2[e6f8188c2eae6e8e]::core_api::Sha256VarCore, typenum[71b674be61c560
+  register_frame_ctor
