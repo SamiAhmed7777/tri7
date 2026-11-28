@@ -1888,9 +1888,14 @@ enum DeferredAdoption {
 /// handler (the `if let Some(pending) = pending_adoption_for(...)` arm of the
 /// non-tip-linking body path): record lookup + TTL expiry, fork-ancestor
 /// ancestry check, the live:false probe against the truncated window, the
-/// rollback loop, and the reorg credit. Behavior is unchanged line for line;
-/// only the three `return Ok(())` exits became Stop/Completed decisions for
-/// the handler to react to.
+/// rollback loop, and the reorg credit. Behavior was unchanged line for line
+/// when this moved out of the handler; only the three `return Ok(())` exits
+/// became Stop/Completed decisions for the handler to react to.
+///
+/// (item 54 F1) Since then the probe has a SECOND gate: after validate_block
+/// the first body must also pass `item54_probe_dup_tx_guard` (the item-41
+/// rules against the records AS OF THE FORK). The live:false probe alone let
+/// a first body that double-spends a coin buy the rollback.
 fn consume_deferred_adoption(
     st: &mut ChainState,
     rpc: &Rpc,
@@ -1929,7 +1934,13 @@ fn consume_deferred_adoption(
             prev_entry,
             live: false,
         },
-    );
+    )
+    // (item 54 F1) the second gate before any rollback: the item-41
+    // double-spend guard against the records AS OF THE FORK — see
+    // `item54_probe_dup_tx_guard`. The live:false probe above cannot run
+    // it (the guard is live-only), and a first body that double-spends a
+    // coin used to buy the rollback here (live 2026-11-27/28).
+    .and_then(|_| item54_probe_dup_tx_guard(st, stats, b, pending.fork_h));
     match probe {
         Ok(_) => {
             let mut rolled = true;
@@ -4271,6 +4282,11 @@ struct Stats {
     gap_rollback: bool,      // phantom-tip rollback fired (branch b)
     // ---- (item 41) live duplicate-tx / double-spend guard ----
     dup_tx_refused: u64, // live blocks refused: dup txid (in-block/canonical), dup prevout, or records-proven double-spend
+    dup_tx_probe_refused: u64, // (item 54 F1) competing branches whose first body the fork-choice probe refused — before any rollback
+    wallet_view_blocks_applied: u64, // (item 54 F2) chain bodies the wallet live view applied while following the chain (own mints excluded)
+    wallet_view_unapplied: u64, // (item 54 F2) blocks the view un-applied because the chain no longer holds them
+    wallet_view_follow_busy: u64, // (item 54 F2) block-path follow passes skipped: the view was taken (the next stake tick catches up)
+    wallet_view_follow_refused: u64, // (item 54 F2) follow passes whose un-apply was refused (the full-reseed fallback stands)
     dup_tx_peer_kept: u64, // refused relayed bodies where the peer was NOT demoted (race-lost duplicate class)
     dup_tx_spentness_unprovable: u64, // inputs whose spentness this node cannot prove (created below the records horizon / outside the window map)
     dup_tx_store_unprovable: u64, // store-source probes that could not decide (index not ready / canonicality unprovable)
@@ -4292,7 +4308,7 @@ impl Stats {
 }
 
 fn stats_json(s: &Stats) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "sent": s.sent,
         "recv": s.recv,
         "headers_processed": s.headers_processed,
@@ -4332,7 +4348,23 @@ fn stats_json(s: &Stats) -> serde_json::Value {
         "dup_tx_peer_kept": s.dup_tx_peer_kept,
         "dup_tx_spentness_unprovable": s.dup_tx_spentness_unprovable,
         "dup_tx_store_unprovable": s.dup_tx_store_unprovable,
-    })
+    });
+    // (item 54 F1/F2) the item-54 counters are appended here and not written
+    // in the macro: `json!` recurses once per key, and the map above already
+    // sits at the compiler's recursion limit.
+    if let Some(out) = v.as_object_mut() {
+        let extra = [
+            ("dup_tx_probe_refused", s.dup_tx_probe_refused),
+            ("wallet_view_blocks_applied", s.wallet_view_blocks_applied),
+            ("wallet_view_unapplied", s.wallet_view_unapplied),
+            ("wallet_view_follow_busy", s.wallet_view_follow_busy),
+            ("wallet_view_follow_refused", s.wallet_view_follow_refused),
+        ];
+        for (k, n) in extra {
+            out.insert(k.to_string(), serde_json::Value::from(n));
+        }
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -5369,17 +5401,122 @@ fn is_dup_tx_race_refusal(e: &str) -> bool {
 /// feeds the item-43+ spentness work. An unready store index (boot
 /// rebuild) degrades the older-history source to the window sources.
 /// Refusals themselves bump stats.dup_tx_refused in validate_block.
+///
+/// (item 54 F1) This is the LIVE lane of one core. The fork-choice probe
+/// runs the very same rules against the chain AS OF THE FORK ANCESTOR
+/// through `item54_probe_dup_tx_guard` — see `DupGuardHorizon` for why.
 fn item41_dup_tx_guard(
     st: &ChainState,
     stats: &mut Stats,
     block: &Block,
     h: u64,
 ) -> Result<(), String> {
+    dup_tx_guard(st, stats, block, h, DupGuardHorizon::Live)
+}
+
+/// (item 54 F1) How much chain history one duplicate-transaction guard
+/// pass may use as evidence against a body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DupGuardHorizon {
+    /// The live path (validate_block step 4c): everything the node holds —
+    /// every record, every kernel-map entry, every canonical store frame
+    /// below the block. Behaviour is the pre-F1 guard, unchanged.
+    Live,
+    /// The fork-choice probe: the FIRST body of a competing branch, judged
+    /// against the chain AS OF THE FORK ANCESTOR at `fork_h`. Only the
+    /// records at or below `fork_h`, only kernel-map outputs created at or
+    /// below `fork_h`, only store frames at or below `fork_h` count: the
+    /// heights above the fork are the branch the adoption would ABANDON,
+    /// and what that branch spent or created is no evidence against the
+    /// challenger.
+    AsOfFork { fork_h: u64 },
+}
+
+/// (item 54 F1) The item-41 rules for the fork-choice probe — the first
+/// body of a competing branch — against the chain AS OF THE FORK ANCESTOR
+/// `fork_h` (the body's own height is `fork_h + 1`).
+///
+/// WHY (live 2026-11-27/28, Pi / DNS3 / DNS2): the probe ran validate_block
+/// with live=false and the item-41 guard is live-only, so a branch whose
+/// first body DOUBLE-SPENDS a coin our chain had already spent at or below
+/// the fork PASSED the probe. The rollback ran, the node's own blocks were
+/// un-applied and their coins restored to the wallet live view, and only
+/// then did live validation refuse the body (Pi: 124 rollbacks each
+/// followed within 3 s by that refusal; the stale view then refused 841 of
+/// its own stake ticks). The T7-03 rule — a branch costs us nothing until
+/// its first body is validated — did not hold for this body.
+///
+/// Shares the item-41 rules (in-block duplicate txid / prevout, canonical
+/// txid, records-proven double-spend, canonical store frame) through ONE
+/// core, so the probe and the live path can never disagree about a coin at
+/// or below the fork — a refusal here is exactly what live validation would
+/// refuse after the rollback.
+///
+/// GATED: a fork that lies below the records era has no records evidence as
+/// of the fork, so there the history rules are skipped and only the two
+/// in-block rules run. The documented history tolerance (h2217719 stays
+/// accepted as history) is untouched, and a deep fork keeps the pre-F1
+/// behaviour (the live guard still runs after an adoption).
+///
+/// A refusal bumps `stats.dup_tx_probe_refused`. Nothing is mutated.
+fn item54_probe_dup_tx_guard(
+    st: &ChainState,
+    stats: &mut Stats,
+    block: &Block,
+    fork_h: u64,
+) -> Result<(), String> {
+    let r = dup_tx_guard(
+        st,
+        stats,
+        block,
+        fork_h + 1,
+        DupGuardHorizon::AsOfFork { fork_h },
+    );
+    if r.is_err() {
+        stats.dup_tx_probe_refused += 1;
+    }
+    r
+}
+
+/// The one item-41 guard core (live lane and fork-choice probe lane).
+fn dup_tx_guard(
+    st: &ChainState,
+    stats: &mut Stats,
+    block: &Block,
+    h: u64,
+    horizon: DupGuardHorizon,
+) -> Result<(), String> {
     let display = tri7_core::p2p::internal_to_display;
+
+    // (item 54 F1) the evidence ceiling: nothing ABOVE this height is used
+    // against the body. Live = the height below the block (records, map
+    // entries and canonical frames all sit at or below the tip); the probe
+    // = the fork ancestor.
+    let (ceiling, probe) = match horizon {
+        DupGuardHorizon::Live => (h.saturating_sub(1), None),
+        DupGuardHorizon::AsOfFork { fork_h } => (fork_h, Some(fork_h)),
+    };
+    // records are ordered by height: the evidence set is the prefix at or
+    // below the ceiling
+    let records = &st.records[..st.records.partition_point(|r| r.height <= ceiling)];
+    // (item 54 F1) THE GATE. The probe judges history only when the fork
+    // ancestor lies inside the records era (the truncated records are not
+    // empty). The live lane always judges history, exactly as before.
+    let history = probe.map_or(true, |_| !records.is_empty());
+    // (item 54 F1) a probe refusal says so in its own words — a reader must
+    // be able to tell "refused BEFORE any rollback" from a live refusal.
+    // The live lane keeps its exact pre-F1 message text.
+    let lane = match probe {
+        Some(f) => format!(
+            " before any rollback (fork-choice probe, records as of the fork ancestor h{})",
+            f
+        ),
+        None => String::new(),
+    };
+
     // records floor as a WINDOW-RELATIVE height (the map stores relative
     // creation heights): everything the records provably cover.
-    let floor_rel = st
-        .records
+    let floor_rel = records
         .first()
         .map(|r| (r.height - st.base) as usize)
         .unwrap_or(usize::MAX);
@@ -5387,26 +5524,30 @@ fn item41_dup_tx_guard(
     let mut seen_prevouts: std::collections::HashSet<(Hash, u32)> =
         std::collections::HashSet::new();
     // window sources, built once per block
-    let rec_txids: std::collections::HashSet<String> = st
-        .records
+    let rec_txids: std::collections::HashSet<String> = records
         .iter()
         .flat_map(|r| r.outs.iter().map(|o| o.0.clone()))
         .collect();
-    let rec_spends: std::collections::HashSet<(String, u32)> = st
-        .records
+    let rec_spends: std::collections::HashSet<(String, u32)> = records
         .iter()
         .flat_map(|r| r.spends.iter().map(|s| (s.0.clone(), s.1)))
         .collect();
-    let map_txids: std::collections::HashSet<Hash> =
-        st.utxo.map.keys().map(|(t, _)| *t).collect();
+    // (item 54 F1) only outputs CREATED at or below the ceiling
+    let map_txids: std::collections::HashSet<Hash> = st
+        .utxo
+        .map
+        .iter()
+        .filter(|(_, m)| history && st.base + m.height as u64 <= ceiling)
+        .map(|((t, _), _)| *t)
+        .collect();
     for tx in block.vtx.iter().skip(1) {
         let txid = tx.hash();
         let txid_d = display(&txid);
         // (a) duplicate txid within the block
         if !seen_txids.insert(txid) {
             return Err(format!(
-                "h{}: DUP-TX-GUARD: duplicate txid WITHIN the block ({}) — refused",
-                h, txid_d
+                "h{}: DUP-TX-GUARD: duplicate txid WITHIN the block ({}) — refused{}",
+                h, txid_d, lane
             ));
         }
         // (c) window/records sources: the txid is already canonical. The
@@ -5414,8 +5555,8 @@ fn item41_dup_tx_guard(
         // when a competing block won elsewhere (peer-kept lane).
         if map_txids.contains(&txid) || rec_txids.contains(&txid_d) {
             return Err(format!(
-                "h{}: DUP-TX-GUARD-RACE: txid {} is already held by the canonical chain (window map/records) — refused",
-                h, txid_d
+                "h{}: DUP-TX-GUARD-RACE: txid {} is already held by the canonical chain (window map/records) — refused{}",
+                h, txid_d, lane
             ));
         }
         for vin in &tx.vin {
@@ -5423,16 +5564,16 @@ fn item41_dup_tx_guard(
             // (b) duplicate prevout within the block — invalid body
             if !seen_prevouts.insert((vin.prev_hash, vin.prev_n)) {
                 return Err(format!(
-                    "h{}: DUP-TX-GUARD: prevout {}:{} spent twice WITHIN the block, invalid body — refused",
-                    h, prev_d, vin.prev_n
+                    "h{}: DUP-TX-GUARD: prevout {}:{} spent twice WITHIN the block, invalid body — refused{}",
+                    h, prev_d, vin.prev_n, lane
                 ));
             }
             // (d) records-proven double-spend (invalid body — the true
             // double-spend close inside the records horizon)
             if rec_spends.contains(&(prev_d.clone(), vin.prev_n)) {
                 return Err(format!(
-                    "h{}: DUP-TX-GUARD: DOUBLE-SPEND — prevout {}:{} is already spent by a canonical block inside the records horizon — refused",
-                    h, prev_d, vin.prev_n
+                    "h{}: DUP-TX-GUARD: DOUBLE-SPEND — prevout {}:{} is already spent by a canonical block inside the records horizon — refused{}",
+                    h, prev_d, vin.prev_n, lane
                 ));
             }
             // INCOMPLETE MITIGATION (judge round 1, blocker 1), counted:
@@ -5458,7 +5599,11 @@ fn item41_dup_tx_guard(
                 .get(&(vin.prev_hash, vin.prev_n))
                 .map(|m| m.height >= floor_rel)
                 .unwrap_or(false);
-            if !creation_covered_by_records {
+            // (item 54 F1) the honest-gap counter describes the LIVE lane's
+            // production (how much the node itself cannot prove about a
+            // body it is accepting). A probe neither produces a block nor
+            // owns an unspent set, so it does not count there.
+            if !creation_covered_by_records && probe.is_none() {
                 stats.dup_tx_spentness_unprovable += 1;
                 if stats.dup_tx_spentness_unprovable % 10_000 == 1 {
                     log(&format!(
@@ -5477,7 +5622,12 @@ fn item41_dup_tx_guard(
     // (tx_frames_by_id) — a txid can sit in both a canonical and an
     // abandoned-branch frame, and a first-hit-only lookup can miss the
     // canonical occurrence entirely.
-    if let Some(store) = live_store() {
+    //
+    // (item 54 F1) the store is the OLDER-history source: it runs wherever
+    // the history rules run (always on the live lane; in the probe only
+    // when the fork ancestor lies inside the records era).
+    let store = if history { live_store() } else { None };
+    if let Some(store) = store {
         for tx in block.vtx.iter().skip(1) {
             let txid = tx.hash();
             let hits = match store.tx_frames_by_id(&txid) {
@@ -5496,8 +5646,13 @@ fn item41_dup_tx_guard(
                     stats.dup_tx_store_unprovable += 1;
                     continue;
                 };
-                if bh >= h {
-                    continue; // future/raced frame — decisively not canonical
+                if bh > ceiling {
+                    // (item 54 F1) live: a future/raced frame (bh >= h) —
+                    // decisively not canonical. Probe: a frame of the
+                    // branch ABOVE the fork — the branch the adoption would
+                    // abandon; what it holds is not evidence against the
+                    // challenger.
+                    continue;
                 }
                 // canonicality at bh: the window entry when we have one,
                 // else the store's own height map (canonical oracle).
@@ -5524,10 +5679,11 @@ fn item41_dup_tx_guard(
                 };
                 if canonical {
                     return Err(format!(
-                        "h{}: DUP-TX-GUARD: txid {} is already held by the canonical chain (store index, h{}) — refused",
+                        "h{}: DUP-TX-GUARD: txid {} is already held by the canonical chain (store index, h{}) — refused{}",
                         h,
                         display(&txid),
-                        bh
+                        bh,
+                        lane
                     ));
                 }
             }
@@ -8673,8 +8829,9 @@ struct WalletLive {
     /// is a no-op and the snapshot would keep listing a coin that no longer
     /// exists. This map is what tells the merge that the coin is gone.
     spent: HashMap<(Hash, u32), u64>,
-    /// (item 54) LIFO journal of the blocks THIS process applied to `live`
-    /// (own mints — peer bodies are not applied to this view). Each record
+    /// (item 54) LIFO journal of the blocks THIS process applied to `live`.
+    /// Until item 54 F2 only own mints were applied; since then every
+    /// accepted body is (see `wallet_live_follow`). Each record
     /// carries exactly what `apply_block` changed, so a fork adoption can
     /// un-apply the replaced branch incrementally instead of paying a full
     /// h0 reseed. A missing/short/mismatched journal is NEVER guessed at:
@@ -8746,11 +8903,13 @@ struct UndoSpend {
     prior_spent: Option<u64>,
 }
 
-/// (item 54) How deep the un-apply journal reaches. Own mints are the only
-/// appliers of this view, so this covers far more than any observed fork
-/// (DNS2 2026-11-26: one-block losing forks). A rollback deeper than the
-/// journal is refused, never approximated.
-const UNDO_DEPTH: usize = 32;
+/// (item 54) How deep the un-apply journal reaches. A rollback deeper than
+/// the journal is refused, never approximated. 32 was ample while only own
+/// mints were applied (DNS2 2026-11-26: one-block losing forks). Since item
+/// 54 F2 EVERY accepted body is applied to the view, so the journal counts
+/// chain blocks: 512 covers hours of this chain against the deepest fork
+/// ever observed (one block).
+const UNDO_DEPTH: usize = 512;
 
 /// (item 54) Outcome of a successful incremental un-apply (for the log line).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -9348,9 +9507,11 @@ impl WalletLive {
     /// LIFO. `heights` is the replaced range in DESCENDING order (old tip
     /// first) with the hash the CHAIN held at each height.
     ///
-    /// A height with no journal record was never applied to this view (a peer
-    /// body: only own mints and reseeds touch `live`) and is skipped — the
-    /// view is provably unchanged there.
+    /// A height with no journal record was never applied to this view (a
+    /// height below the seed, or a body that landed while the view was not
+    /// yet following the chain) and is skipped — above `undo_from` the
+    /// journal is the complete record of applies, so the view is provably
+    /// unchanged there.
     ///
     /// FAIL-CLOSED, ATOMIC: the whole range is validated before the first
     /// mutation, so a refusal leaves the view EXACTLY as it was and the
@@ -9478,8 +9639,8 @@ impl WalletLive {
     /// boot seed was replaying. The seed walks h0..seed_tip for ~70 s at
     /// full history with NO view published, so nothing applies the blocks
     /// that land in the meantime: own-mint applies skip on
-    /// "live_view_not_ready", and the follow loop never applies peer bodies
-    /// to this view. A coin our own pre-restart mints spent inside that gap
+    /// "live_view_not_ready", and (until item 54 F2) the follow loop never
+    /// applied peer bodies to this view. A coin our own pre-restart mints spent inside that gap
     /// therefore stayed "live" for the whole run of a solo staker —
     /// sami-pc 2026-11-27: seeded to h2220810 with bodies through h2220813
     /// already landing; two coinstake inputs spent in h2220811/812 were
@@ -9510,6 +9671,45 @@ impl WalletLive {
             applied += 1;
         }
         (height, applied)
+    }
+
+    /// (item 54 F2) The height through which this view has applied the
+    /// chain: the newest journal record, or — while the journal is empty
+    /// (a fresh seed/reseed, or every record un-applied) — the height just
+    /// below the provable floor.
+    fn applied_through(&self) -> u64 {
+        self.undo
+            .back()
+            .map(|r| r.height)
+            .unwrap_or(self.undo_from.saturating_sub(1))
+    }
+
+    /// (item 54 F2) Drop the outputs this view no longer needs, so that
+    /// following every block does not grow `live` without bound (before F2
+    /// only own mints added rows; the view held roughly one window). A row
+    /// goes when ALL hold:
+    ///
+    /// * it is NOT payable to the wallet (wallet coins stay whatever their
+    ///   age, so `balance` means the same before and after);
+    /// * it was created below the chain's window base (it cannot resolve in
+    ///   the kernel index and never stakes through this loop — the boot seed
+    ///   would not have listed it either);
+    /// * it lies below the undo floor (no journal record can still
+    ///   reference it, so an un-apply is never refused over a pruned row).
+    ///
+    /// Returns the number of rows dropped.
+    fn prune_aged(&mut self, chain_base: u64) -> usize {
+        let floor = chain_base.min(self.undo_from);
+        let drop: Vec<(Hash, u32)> = self
+            .live
+            .iter()
+            .filter(|(_, o)| o.height < floor && !self.owns(o))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &drop {
+            self.live.remove(k);
+        }
+        drop.len()
     }
 
     fn key_by_pubkey(&self) -> HashMap<Vec<u8>, &tri7_core::wallet::WalletKey> {
@@ -11150,6 +11350,12 @@ fn stake_tick(
     let Some(tip_entry) = stg.entry_abs(tip_height).cloned() else {
         return Err("tip entry missing".into());
     };
+    // (item 54 F2) THE VIEW FOLLOWS THE CHAIN BEFORE IT IS READ. Candidates
+    // are picked from the wallet live view, so the view is brought up to
+    // this tip first: un-applied is every block the chain no longer holds,
+    // applied is every chain body a block-path pass could not (a busy view).
+    // A view that already matches the chain costs two comparisons here.
+    wallet_live_follow(wl, stg, recent, store, stats);
     stake_st.last_search_utc = Some(now_iso());
     // EVIDENCE RESOLUTION BEFORE EVERY EARLY RETURN (round-1 judge blocker):
     // the locked-wallet and below-reserve gates used to return BEFORE the
@@ -14062,6 +14268,161 @@ fn unwind_wallet_live_after_rollback(
     }
 }
 
+/// (item 54 F2) What one wallet-view follow pass did (log line, stats, tests).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FollowStats {
+    /// journaled blocks the chain no longer holds at their height —
+    /// un-applied first, newest first
+    unapplied: usize,
+    /// chain bodies applied to the view (the accepted body plus anything an
+    /// earlier pass missed)
+    applied: usize,
+    /// the first height whose body the recent cache and the store could not
+    /// serve — the pass stopped there and the next one resumes
+    stopped_at: Option<u64>,
+}
+
+/// (item 54 F2) Bring the wallet live view up to the chain, exactly and
+/// idempotently.
+///
+/// WHY (live 2026-11-27/28, Pi / DNS3 / DNS2): the view was maintained ONLY
+/// by this node's own mints (and by the boot seed) — peer bodies were never
+/// applied to it. So after a fork adoption un-applied the node's own blocks
+/// (restoring their coins) and the fleet then handed those very blocks back
+/// as PEER blocks, the chain had spent those coins again while the view
+/// still listed them as unspent, and the staker kept building coinstakes on
+/// them for its own double-spend guard to refuse (Pi: 841 refused own ticks;
+/// DNS3: 1041). The STALE detector never fired: every such coin still
+/// resolved cleanly in the kernel map, so nothing contradicted it.
+///
+/// Two steps, both keyed on what the CHAIN holds (`st.entry_abs`), never on
+/// a caller's or a peer's claim:
+///
+/// 1. STALE TAIL. Every journal record at the top that the chain no longer
+///    holds at its height is an abandoned block: un-apply it, newest first,
+///    through the fail-closed `unwind_blocks`. A refusal leaves the view
+///    exactly as it was — the STALE -> AUTOHEAL full reseed stays the remedy.
+/// 2. CATCH-UP. Apply every chain body above the view's last applied height,
+///    taken from the recent cache or the store, stopping at the first body
+///    that cannot be served (the next pass resumes there).
+///
+/// Idempotent: a body is applied only above `applied_through()`, so a pass
+/// that finds the view current does nothing at all — the common case is two
+/// comparisons. The bodies are this node's own accepted and indexed blocks;
+/// nothing here trusts what a peer says.
+fn wallet_live_follow(
+    view: &mut WalletLive,
+    st: &ChainState,
+    recent: &RecentBlocks,
+    store: &BlockStore,
+    stats: &mut Stats,
+) -> FollowStats {
+    let mut out = FollowStats::default();
+    // ---- 1. stale tail: the chain moved off blocks the view still holds
+    let mut stale: Vec<(u64, Hash)> = Vec::new();
+    for r in view.undo.iter().rev() {
+        match st.entry_abs(r.height) {
+            Some(e) if e.hash == r.hash => break,
+            _ => stale.push((r.height, r.hash)),
+        }
+    }
+    if !stale.is_empty() {
+        match view.unwind_blocks(&stale) {
+            Ok(s) => {
+                out.unapplied = s.blocks;
+                stats.wallet_view_unapplied += s.blocks as u64;
+                log(&format!(
+                    "wallet live: FOLLOW — {} block(s) the chain no longer holds un-applied from the view (h{}..h{}) — {} coin(s) dropped, {} restored",
+                    s.blocks,
+                    stale.last().map(|x| x.0).unwrap_or(0),
+                    stale.first().map(|x| x.0).unwrap_or(0),
+                    s.coins_removed,
+                    s.coins_restored
+                ));
+            }
+            Err(e) => {
+                stats.wallet_view_follow_refused += 1;
+                log(&format!(
+                    "wallet live: FOLLOW — the view still holds {} block(s) the chain no longer has at their height, and the incremental un-apply was REFUSED — {e}; the view is unchanged and the STALE -> AUTOHEAL full reseed remains the remedy",
+                    stale.len()
+                ));
+                return out;
+            }
+        }
+    }
+    // ---- 2. catch-up: apply what the chain holds above the view
+    let mut h = view.applied_through().saturating_add(1);
+    while h <= st.tip_height {
+        let served = st.entry_abs(h).and_then(|e| {
+            recent
+                .get(&e.hash)
+                .and_then(|(_rh, raw)| Block::read(&mut Reader::new(raw)).ok())
+                .or_else(|| {
+                    store
+                        .block_by_hash(&e.hash)
+                        .ok()
+                        .flatten()
+                        .map(|hit| hit.block)
+                })
+                .filter(|b| b.hash() == e.hash)
+        });
+        match served {
+            Some(b) => {
+                view.apply_block(&b, h);
+                out.applied += 1;
+                h += 1;
+            }
+            None => {
+                out.stopped_at = Some(h);
+                break;
+            }
+        }
+    }
+    if out.applied > 0 {
+        stats.wallet_view_blocks_applied += out.applied as u64;
+        log(&format!(
+            "wallet live: FOLLOW — chain h{}..h{} applied to the wallet view ({} block(s))",
+            h - out.applied as u64,
+            h - 1,
+            out.applied
+        ));
+        if st.base > view.base {
+            let dropped = view.prune_aged(st.base);
+            if dropped > 0 {
+                log(&format!(
+                    "wallet live: FOLLOW — {} output(s) below the window base that pay no wallet key dropped from the view",
+                    dropped
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// (item 54 F2) The block path's entry to `wallet_live_follow`. NEVER blocks
+/// the follow loop on the view (item 54 E lock order: wallet-live is last,
+/// and an RPC thread may hold it for a moment): a busy view skips this pass
+/// and the next stake tick brings the view up to the chain itself.
+fn wallet_live_follow_shared(
+    wl: &SharedWalletLive,
+    st: &ChainState,
+    recent: &RecentBlocks,
+    store: &BlockStore,
+    stats: &mut Stats,
+) {
+    let mut guard = match wl.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            stats.wallet_view_follow_busy += 1;
+            return;
+        }
+    };
+    let Some(view) = guard.as_mut() else {
+        return; // no live view yet (boot seed / rebuild in progress)
+    };
+    wallet_live_follow(view, st, recent, store, stats);
+}
+
 fn handle_message(
     peer: &mut Peer,
     st: &mut ChainState,
@@ -14512,7 +14873,15 @@ fn handle_message(
                     if let Some(ah) = ancestor_h {
                         if let Some(prev_entry) = st.entry_abs(ah).cloned() {
                             let header = st.pending_headers.get(&hash).cloned();
-                            if let Err(e) = validate_block(
+                            // (item 54 F1) TWO gates, both before any rollback:
+                            // (1) the body must be a valid block for h{ah+1}
+                            //     as of the fork ancestor;
+                            // (2) it must pass the item-41 double-spend
+                            //     guard against the records AS OF THE FORK.
+                            // (1) alone let a first body that double-spends a
+                            // coin buy the rollback (live 2026-11-27/28); live
+                            // validation refused it only afterwards.
+                            let probe = validate_block(
                                 &*st,
                                 rpc,
                                 stats,
@@ -14523,7 +14892,9 @@ fn handle_message(
                                     prev_entry,
                                     live: false,
                                 },
-                            ) {
+                            )
+                            .and_then(|_| item54_probe_dup_tx_guard(&*st, stats, &b, ah));
+                            if let Err(e) = probe {
                                 body_ok = false;
                                 log(&format!(
                                     "fork choice: competing body for h{} REFUSED before rollback — {} (our tip h{} stands)",
@@ -14798,6 +15169,17 @@ fn handle_message(
                     peer.sess.shutdown();
                     return Ok(());
                 }
+                // (item 54 F2) THE WALLET VIEW FOLLOWS THE CHAIN. Every body
+                // the chain just accepted — minted here or taken from a peer
+                // — has its spends (and its wallet-payable outputs) applied
+                // to the wallet live view NOW. Until this, only our own mints
+                // touched the view: a fork adoption restored the coins our
+                // abandoned blocks had spent, and when the fleet handed those
+                // very blocks back as peer blocks the chain spent them again
+                // while the view still listed them as unspent (live
+                // 2026-11-27/28: Pi / DNS3 refused hundreds of their own
+                // ticks on exactly such coins).
+                wallet_live_follow_shared(wl, st, recent, store, stats);
                 // (item 54 B-i) the chain's bodies for an index gap come from
                 // this node's own store; the store is read with no index lock
                 // held (see addrindex::apply_live_block)
@@ -32140,10 +32522,19 @@ addnode=host:notaport
     /// synthetic-history artifact, not a real violation.
     fn item41_solve_block(stg: &ChainState, extra: &[Tx]) -> Block {
         let n = stg.entries.len();
-        let tip_rel = n - 1;
+        item41_solve_block_at(stg, n - 1, extra)
+    }
+
+    /// (item 54 F1 tests) `item41_solve_block` on an arbitrary in-window
+    /// ancestor — the body a competing branch carries at `tip_rel + 1`, on
+    /// the target its OWN ancestors imply (not the live tip's).
+    fn item41_solve_block_at(stg: &ChainState, tip_rel: usize, extra: &[Tx]) -> Block {
         let (secret, pubkey_vec) = tri7_core::spend::synthetic_key("item41-staker");
-        let bits = tri7_core::difficulty::get_next_target_required(&stg.rel_index(), true);
-        let rewrite_floor = scan_modifier_chain(&stg).rewrite_start;
+        let bits = tri7_core::difficulty::get_next_target_required(
+            &stg.rel_index_to(stg.base + tip_rel as u64),
+            true,
+        );
+        let rewrite_floor = scan_modifier_chain(stg).rewrite_start;
         let mut cands: Vec<tri7_core::stake::StakeCandidate> = Vec::new();
         for rc in (rewrite_floor + 40)..(tip_rel - 70) {
             if rc == 0 || rc % 17 == 15 {
@@ -32496,6 +32887,862 @@ addnode=host:notaport
                 .expect("a repeated empty coinbase vtx[0] alone stays accepted");
             assert_eq!(stats.dup_tx_refused, 0);
         }
+    }
+
+    // ---- item 54 F1: THE DOUBLE-SPEND GUARD IN THE FORK-CHOICE PROBE ------
+
+    /// (item 54 F1 tests) a PoW body on `prev`, as the T7-03 harness builds
+    /// it, carrying `extra` regular txs after the coinbase.
+    fn item54_body_block(prev: Hash, merkle_seed: u8, bits: u32, time: u32, extra: &[Tx]) -> Block {
+        let mut b = mk_body_block(prev, merkle_seed, bits, time);
+        b.vtx.extend_from_slice(extra);
+        b.merkle_root = b.merkle_root();
+        let (target, neg, ovf) = set_compact(bits);
+        assert!(!neg && !ovf && !target.is_zero());
+        b.nonce = 0;
+        while U256::from_little_endian(&b.hash()) > target {
+            b.nonce = b.nonce.wrapping_add(1);
+        }
+        b
+    }
+
+    /// (item 54 F1 tests) chain h100..=h105 plus a 3-block PoW branch forking
+    /// at h104 (strictly heavier by header work), run through recon_intake,
+    /// and the branch's FIRST body fed to the deferred-adoption consumption
+    /// path — the real path a header-selected branch takes. `records_spent_at`
+    /// places a records-proven spend of `coin:0` at that height.
+    /// Returns (decision, chain, stats, our tip hash, branch).
+    fn item54_consume_first_body(
+        records_spent_at: Option<u64>,
+        first_extra: &[Tx],
+        coin_d: &str,
+        seed: u8,
+    ) -> (DeferredAdoption, ChainState, Stats, Hash, Vec<Block>) {
+        clear_pending_adoption();
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut stg = synthetic_chain(100, 105);
+        let our_tip = stg.tip_hash;
+        let fork_hash = stg.entry_abs(104).unwrap().hash;
+        if let Some(h) = records_spent_at {
+            stg.records.push(BlockRec {
+                height: h,
+                spends: vec![(coin_d.to_string(), 0)],
+                outs: vec![],
+            });
+        }
+        let mut prev = fork_hash;
+        let mut branch: Vec<Block> = Vec::new();
+        for i in 0..3u8 {
+            let time = 1_700_000_000u32 + ((105 + i as u64) * 600) as u32;
+            let extra: Vec<Tx> = if i == 0 { first_extra.to_vec() } else { Vec::new() };
+            let hdr = item54_body_block(prev, seed.wrapping_add(i), 0x2000_ffff, time, &extra);
+            prev = hdr.hash();
+            branch.push(hdr);
+        }
+        let mut recon = ReconAcc::default();
+        let mut pend: VecDeque<(Hash, u64)> = VecDeque::new();
+        let mut stats = Stats::default();
+        match recon_intake(&mut stg, &branch, &mut recon, &mut pend, &mut stats) {
+            ReconOutcome::Switched { fork, adopted } => {
+                assert_eq!((fork, adopted), (104, 3));
+            }
+            other => panic!("expected Switched, got {:?}", other),
+        }
+        let (fh, fht) = pend[0];
+        assert_eq!((fh, fht), (branch[0].hash(), 105));
+        let mut stats = Stats::default();
+        let decision = consume_deferred_adoption(&mut stg, &rpc, &mut stats, &fh, &branch[0]);
+        (decision, stg, stats, our_tip, branch)
+    }
+
+    /// (item 54 F1, spec tests 1/2/6) THE PROBE GUARD AGAINST RECORDS
+    /// TRUNCATED AT THE FORK. A body that re-spends a coin the records show
+    /// spent AT OR BELOW the fork ancestor is refused as a double-spend,
+    /// before any rollback: nothing moves, the refusal is counted in the
+    /// probe lane alone, and its message says it happened before any
+    /// rollback. The live guard, on the same evidence, keeps its own
+    /// message — one core, two lanes.
+    #[test]
+    fn item54_probe_guard_refuses_a_records_proven_double_spend_as_of_the_fork() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut stg = item25_fixture(base, n);
+        let tip_rel = n - 1;
+        let fork_rel = tip_rel - 1; // the branch forks one block below the tip
+        let fork_h = base + fork_rel as u64;
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-probe-sender");
+        let coin: Hash = tri7_core::legacy::sha256d(b"item54 probe coin");
+        let coin_d = tri7_core::p2p::internal_to_display(&coin);
+        // the body a competing branch carries at fork_h + 1: T re-spends coin:0
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (coin, 0), 2_000_000);
+        let body = item41_solve_block_at(&stg, fork_rel, &[t.clone()]);
+
+        // (1) the PRE-F1 probe passed this body: validate_block(live = false)
+        //     judges shape only — that is the gap
+        validate_block(
+            &stg,
+            &rpc,
+            &mut Stats::default(),
+            &body,
+            &BlockCtx {
+                height_abs: fork_h + 1,
+                header: None,
+                prev_entry: stg.entries[fork_rel].clone(),
+                live: false,
+            },
+        )
+        .expect("a well-formed double-spend body passes the shape gate (the pre-F1 probe)");
+
+        // (2) nothing at or below the fork proves a double-spend: passes
+        let mut stats = Stats::default();
+        item54_probe_dup_tx_guard(&stg, &mut stats, &body, fork_h)
+            .expect("an input nothing proves spent is not a double-spend");
+        assert_eq!(stats.dup_tx_probe_refused, 0);
+        assert_eq!(stats.dup_tx_spentness_unprovable, 0, "the probe lane counts nothing in the live counters");
+
+        // (3) the chain spent coin:0 AT the fork ancestor: refused, nothing moves
+        stg.records[fork_rel].spends.push((coin_d, 0));
+        let before = (stg.tip_height, stg.tip_hash, stg.records.len(), stg.utxo.map.len());
+        let err = item54_probe_dup_tx_guard(&stg, &mut stats, &body, fork_h)
+            .err()
+            .expect("a records-proven double-spend is refused");
+        assert!(is_dup_tx_refusal(&err), "classified as a double-spend refusal: {err}");
+        assert!(err.contains("DOUBLE-SPEND"), "names the rule: {err}");
+        assert!(
+            err.contains("fork-choice probe") && err.contains(&format!("fork ancestor h{fork_h}")),
+            "names the lane and the fork: {err}"
+        );
+        assert_eq!(stats.dup_tx_probe_refused, 1);
+        assert_eq!(stats.dup_tx_refused, 0, "the probe never counts a live refusal");
+        assert_eq!(
+            (stg.tip_height, stg.tip_hash, stg.records.len(), stg.utxo.map.len()),
+            before,
+            "a probe mutates nothing"
+        );
+
+        // (4) the LIVE guard, on the same evidence, refuses with its own message
+        let mut live_stats = Stats::default();
+        let live_err = item41_dup_tx_guard(&stg, &mut live_stats, &body, fork_h + 1)
+            .err()
+            .expect("the live guard sees the same records");
+        assert!(live_err.contains("DOUBLE-SPEND"), "the live rule is unchanged: {live_err}");
+        assert!(!live_err.contains("fork-choice probe"), "the live message is unchanged: {live_err}");
+        assert_eq!(live_stats.dup_tx_probe_refused, 0);
+    }
+
+    /// (item 54 F1, spec tests 3/4/5) WHAT THE FORK CANNOT SEE. A spend the
+    /// records place ABOVE the fork is not evidence at the fork, and an
+    /// output the kernel map places above the fork is not the body's own:
+    /// the probe guard passes both (what the abandoned branch spent and
+    /// created must not convict the branch that replaces it). The same map
+    /// output AT the fork ancestor is the body's own — refused.
+    #[test]
+    fn item54_probe_guard_ignores_what_the_abandoned_branch_did_above_the_fork() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64;
+        let n = 420usize;
+        let mut stg = item25_fixture(base, n);
+        let tip_rel = n - 1;
+        let fork_rel = tip_rel - 1;
+        let fork_h = base + fork_rel as u64;
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-probe-sender");
+        let coin: Hash = tri7_core::legacy::sha256d(b"item54 probe coin");
+        let coin_d = tri7_core::p2p::internal_to_display(&coin);
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (coin, 0), 2_000_000);
+        let t_d = tri7_core::p2p::internal_to_display(&t.hash());
+        let body = item41_solve_block_at(&stg, fork_rel, &[t.clone()]);
+
+        // the branch that will be abandoned spent coin:0 at OUR TIP (above
+        // the fork) and created T's outputs there
+        stg.records[tip_rel].spends.push((coin_d, 0));
+        stg.records[tip_rel].outs.push((t_d.clone(), 0, 2_000_000, 1_700_000_100, 100));
+        stg.utxo.map.insert(
+            (t.hash(), 0),
+            crate::kernel::UtxoMeta {
+                height: tip_rel,
+                tx_offset: 100,
+                tx_time: 1_700_000_100,
+                value: 2_000_000,
+            },
+        );
+        let mut stats = Stats::default();
+        item54_probe_dup_tx_guard(&stg, &mut stats, &body, fork_h)
+            .expect("nothing at or below the fork proves a double-spend");
+        assert_eq!(stats.dup_tx_probe_refused, 0);
+
+        // control: the same output created AT the fork ancestor is the
+        // body's own (canonical rule c)
+        stg.utxo.map.get_mut(&(t.hash(), 0)).unwrap().height = fork_rel;
+        stg.records[tip_rel].outs.clear();
+        stg.records[fork_rel]
+            .outs
+            .push((t_d, 0, 2_000_000, 1_700_000_100, 100));
+        let err = item54_probe_dup_tx_guard(&stg, &mut stats, &body, fork_h)
+            .err()
+            .expect("refused: the txid is already canonical at the fork");
+        assert!(is_dup_tx_refusal(&err), "{err}");
+        assert_eq!(stats.dup_tx_probe_refused, 1);
+    }
+
+    /// (item 54 F1, spec test 7) BELOW THE RECORDS ERA the probe has no
+    /// records evidence as of the fork: the history rules are skipped (the
+    /// documented history tolerance is untouched), and the two in-block
+    /// rules still run — with the probe's own message.
+    #[test]
+    fn item54_probe_guard_below_the_records_era_keeps_the_in_block_rules() {
+        let _live_store_serial = lock_live_store_tests();
+        let mut stg = synthetic_chain(100, 105); // no records: pre-records era
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-probe-sender");
+        let coin: Hash = tri7_core::legacy::sha256d(b"item54 probe coin");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (coin, 0), 2_000_000);
+        let fork_hash = stg.entry_abs(104).unwrap().hash;
+        let mut stats = Stats::default();
+
+        // one copy: no history to judge it against — passes, even though the
+        // kernel map holds an output of the very same txid AT the fork (a
+        // map hit alone is not history evidence where the records do not reach)
+        let clean = item54_body_block(fork_hash, 0x21, 0x2000_ffff, 1_700_063_000, &[t.clone()]);
+        stg.utxo.map.insert(
+            (t.hash(), 0),
+            crate::kernel::UtxoMeta {
+                height: 4, // h104 == the fork ancestor
+                tx_offset: 100,
+                tx_time: 1_700_000_100,
+                value: 2_000_000,
+            },
+        );
+        item54_probe_dup_tx_guard(&stg, &mut stats, &clean, 104)
+            .expect("no records evidence as of the fork");
+        assert_eq!(stats.dup_tx_probe_refused, 0);
+
+        // the same tx twice inside the body: the in-block rule still refuses
+        let twice = item54_body_block(
+            fork_hash,
+            0x22,
+            0x2000_ffff,
+            1_700_063_000,
+            &[t.clone(), t.clone()],
+        );
+        let err = item54_probe_dup_tx_guard(&stg, &mut stats, &twice, 104)
+            .err()
+            .expect("refused");
+        assert!(err.contains("WITHIN the block") && err.contains("fork-choice probe"), "{err}");
+        assert_eq!(stats.dup_tx_probe_refused, 1);
+    }
+
+    /// (item 54 F1, THE LIVE SHAPE, consumption path) A branch selected on
+    /// headers whose FIRST body re-spends a coin the records show spent at
+    /// the fork ancestor is refused by the deferred adoption BEFORE any
+    /// rollback: the tip stands and the refusal is counted in the probe
+    /// lane. Two controls: the same branch with a clean first body is
+    /// adopted (T7-03 unchanged), and a spend the records place ABOVE the
+    /// fork — on the branch that would be abandoned — does not block it.
+    #[test]
+    fn item54_deferred_adoption_refuses_a_double_spending_first_body_before_any_rollback() {
+        let _live_store_serial = lock_live_store_tests();
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-probe-sender");
+        let coin: Hash = tri7_core::legacy::sha256d(b"item54 deferred coin");
+        let coin_d = tri7_core::p2p::internal_to_display(&coin);
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (coin, 0), 2_000_000);
+
+        // (1) the records show coin:0 spent AT the fork ancestor (h104) and
+        //     the branch's first body re-spends it
+        let (decision, stg, stats, our_tip, branch) =
+            item54_consume_first_body(Some(104), &[t.clone()], &coin_d, 0x5D);
+        assert_eq!(decision, DeferredAdoption::Stop, "refused before any rollback");
+        assert_eq!((stg.tip_height, stg.tip_hash), (105, our_tip), "the tip stands");
+        assert_eq!(stats.reorgs, 0, "no rollback ran");
+        assert_eq!(stats.dup_tx_probe_refused, 1, "counted in the probe lane");
+        assert_eq!(stats.dup_tx_refused, 0, "not a live refusal");
+        assert!(
+            !pending_adoption_live(Instant::now()),
+            "the pending record is consumed"
+        );
+        assert!(stg.entry_by_hash(&branch[0].hash()).is_none(), "the body was not applied");
+
+        // (2) CONTROL (T7-03 unchanged): a clean first body is adopted
+        let (decision, stg, stats, _our_tip, _branch) =
+            item54_consume_first_body(Some(104), &[], &coin_d, 0x6D);
+        assert_eq!(decision, DeferredAdoption::Completed);
+        assert_eq!(stg.tip_height, 104, "rolled back onto the fork point");
+        assert_eq!(stats.dup_tx_probe_refused, 0);
+
+        // (3) CONTROL (truncation): the records place the spend ABOVE the
+        //     fork, at our own tip — the branch the adoption would abandon.
+        //     As of the fork nothing proves a double-spend: adopted.
+        let (decision, stg, stats, _our_tip, _branch) =
+            item54_consume_first_body(Some(105), &[t.clone()], &coin_d, 0x7D);
+        assert_eq!(
+            decision,
+            DeferredAdoption::Completed,
+            "what the abandoned branch spent is no evidence at the fork"
+        );
+        assert_eq!(stg.tip_height, 104);
+        assert_eq!(stats.dup_tx_probe_refused, 0);
+        clear_pending_adoption();
+    }
+
+    /// (item 54 F1, competing-body arm) THE LIVE 09:04:59Z SHAPE, driven
+    /// through the block handler: an unsolicited competing body, forking one
+    /// block below our tip and carrying MORE WORK than our block there,
+    /// whose body re-spends a coin the records show spent at the fork.
+    /// Before F1 the probe passed it, the node rolled back, and live
+    /// validation refused the body only afterwards — the tip was lost to
+    /// h104 and the wallet view got its own coins back. Now the refusal
+    /// comes first and the tip never moves.
+    #[test]
+    fn item54_competing_body_double_spend_is_refused_before_rollback_through_the_handler() {
+        let _live_store_serial = lock_live_store_tests();
+        clear_pending_adoption();
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut cfg = gate_test_cfg();
+        let state_dir = crate::testsupport::test_dir("tri7-item54-probe");
+        cfg.state_dir = state_dir.path().to_path_buf();
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-probe-sender");
+        let coin: Hash = tri7_core::legacy::sha256d(b"item54 deferred coin");
+        let coin_d = tri7_core::p2p::internal_to_display(&coin);
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (coin, 0), 2_000_000);
+
+        // our chain: tip h105; the records show coin:0 spent at h104
+        let mut stg = synthetic_chain(100, 105);
+        let our_tip = stg.tip_hash;
+        stg.records.push(BlockRec {
+            height: 104,
+            spends: vec![(coin_d, 0)],
+            outs: vec![],
+        });
+        // the competing body: forks at h104, a HARDER target than our
+        // h105 block (0x20007fff vs 0x2000ffff — twice the work), carrying T
+        let fork_hash = stg.entry_abs(104).unwrap().hash;
+        let body = item54_body_block(fork_hash, 0x5D, 0x2000_7fff, 1_700_063_000, &[t.clone()]);
+        assert_ne!(body.hash(), our_tip);
+        assert!(
+            tri7_core::forkchoice::work_of(body.bits)
+                > tri7_core::forkchoice::work_of(stg.entries.last().unwrap().bits),
+            "the fixture: the competing branch IS the heavier one (work alone would have switched)"
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _holder = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item54-peer".into(),
+            outbound: true,
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+            advertised: None,
+        };
+        let msg = tri7_core::p2p::RawMessage {
+            command: "block".into(),
+            payload: body.serialize(),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let res = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(res.is_ok(), "the refusal is contained: {:?}", res.err());
+        assert_eq!(
+            (stg.tip_height, stg.tip_hash),
+            (105, our_tip),
+            "refused BEFORE any rollback — the tip stands"
+        );
+        assert_eq!(stats.reorgs, 0, "no FORK CHOICE rollback ran");
+        assert_eq!(stats.dup_tx_probe_refused, 1, "counted in the probe lane");
+        assert_eq!(stats.dup_tx_refused, 0, "no live refusal: the body never got that far");
+        assert!(!peer.dead, "a double-spending body is contained, not a protocol crime");
+        assert!(stg.entry_by_hash(&body.hash()).is_none(), "the body was not applied");
+        clear_pending_adoption();
+    }
+
+    // ---- item 54 F2: THE WALLET LIVE VIEW FOLLOWS THE CHAIN ----------------
+
+    /// (item 54 F2 tests) the replay fixture: a window with a wallet coin the
+    /// view holds, seeded through the tip. Returns (chain, view, rpc, the
+    /// regular tx that spends the coin, the coin's outpoint).
+    #[allow(clippy::type_complexity)]
+    fn item54_view_fixture(
+    ) -> (ChainState, WalletLive, Rpc, Tx, (Hash, u32), Vec<u8>) {
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let stg = item25_fixture(base, n);
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-sender");
+        let funding_prevout: Hash = tri7_core::legacy::sha256d(b"item54 funding prevout");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding_prevout, 0), 2_000_000);
+        let mut wl = wallet_live_with(
+            &[send_pubkey.clone()],
+            vec![(
+                (funding_prevout, 0),
+                window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+            )],
+        );
+        wl.undo_from = stg.tip_height + 1; // seeded through the tip
+        (stg, wl, rpc, t, (funding_prevout, 0), send_pubkey)
+    }
+
+    /// (item 54 F2, spec test 1) A PEER body's spend reaches the wallet live
+    /// view. Before F2 only this node's own mints were applied to the view;
+    /// a block taken from a peer spent its inputs on the chain while the
+    /// view kept listing them. The follow applies the accepted body exactly
+    /// (spend removed, `spent` marked at the chain height, wallet-payable
+    /// outputs added, balance value-correct) and is idempotent.
+    #[test]
+    fn item54_follow_applies_a_peer_blocks_spend_to_the_wallet_view() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        assert!(wl.owns(&wl.live[&coin]), "the fixture: the coin is the wallet's");
+        let wallet_share: i64 = t
+            .vout
+            .iter()
+            .filter(|o| wl.owns(&window_out(0, 0, o.value, o.script_pubkey.clone())))
+            .map(|o| o.value)
+            .sum();
+        assert!(wallet_share > 0, "T pays the wallet (the self-send shape)");
+        let before = wl.balance();
+
+        // a PEER block: validated live and applied to the CHAIN, never to the
+        // view — the pre-F2 path
+        let mut stats = Stats::default();
+        let peer_block = item41_solve_block(&stg, &[t.clone()]);
+        let outcome = validate_block(&stg, &rpc, &mut stats, &peer_block, &item41_live_ctx(&stg))
+            .expect("the peer block is valid on our tip");
+        advance_with_block(&mut stg, &rpc, &mut stats, &peer_block, &outcome)
+            .expect("applied to the chain");
+        assert_eq!(stg.tip_height, tip_h + 1);
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        recent.insert(peer_block.hash(), tip_h + 1, &peer_block.serialize());
+        assert!(
+            wl.live.contains_key(&coin),
+            "pre-F2: the view never saw the peer body — the coin still looks unspent"
+        );
+
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out.applied, out.unapplied), (1, 0));
+        assert_eq!(stats.wallet_view_blocks_applied, 1);
+        assert!(!wl.live.contains_key(&coin), "the peer body's spend reached the view");
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+        assert_eq!(wl.undo.back().map(|r| (r.height, r.hash)), Some((tip_h + 1, peer_block.hash())));
+        assert_eq!(wl.applied_through(), tip_h + 1);
+        assert_eq!(wl.balance(), before - 2_000_000 + wallet_share, "value-correct");
+
+        // idempotent: the chain has not moved, nothing is applied twice
+        let out2 = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out2.applied, out2.unapplied), (0, 0));
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+        assert_eq!(stats.wallet_view_blocks_applied, 1);
+    }
+
+    /// (item 54 F2, spec tests 2/3 — THE LIVE SHAPE) The 09:04:59Z → 09:05:30Z
+    /// → 09:05:39Z sequence on the Pi, replayed: our own block spends a
+    /// wallet coin (applied to the view); a heavier peer branch replaces it
+    /// (rollback: the coin returns to the view); that branch is replaced in
+    /// turn and OUR former block comes back as a PEER body. Pre-F2 nothing
+    /// re-applied it, so the view still listed the coin as unspent while the
+    /// chain had spent it — and the staker's own ticks were refused. The
+    /// follow heals the view from what the CHAIN holds.
+    #[test]
+    fn item54_follow_heals_the_stale_view_a_fork_adoption_left_behind() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let mut stats = Stats::default();
+        // the peer branch's block, built on the same tip (a different body)
+        let theirs = item41_solve_block(&stg, &[]);
+
+        // 1. OUR block at tip_h + 1 spends the coin — the own-mint path
+        //    applies it to the view
+        let ours = item41_solve_block(&stg, &[t.clone()]);
+        assert_ne!(ours.hash(), theirs.hash());
+        let outcome = validate_block(&stg, &rpc, &mut stats, &ours, &item41_live_ctx(&stg))
+            .expect("our block is valid on our tip");
+        advance_with_block(&mut stg, &rpc, &mut stats, &ours, &outcome).expect("applied");
+        wl.apply_block(&ours, tip_h + 1);
+        recent.insert(ours.hash(), tip_h + 1, &ours.serialize());
+        assert!(!wl.live.contains_key(&coin));
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+
+        // 2. a heavier peer branch replaces it: rollback, the view unwound,
+        //    the peer body applied to the chain
+        rollback_tip(&mut stg).expect("rollback");
+        wl.unwind_blocks(&[(tip_h + 1, ours.hash())])
+            .expect("the incremental un-apply");
+        assert!(wl.live.contains_key(&coin), "the replaced block's spend is undone");
+        assert!(wl.spent.get(&coin).is_none());
+        let outcome = validate_block(&stg, &rpc, &mut stats, &theirs, &item41_live_ctx(&stg))
+            .expect("the peer block is valid on the fork point");
+        advance_with_block(&mut stg, &rpc, &mut stats, &theirs, &outcome).expect("applied");
+        recent.insert(theirs.hash(), tip_h + 1, &theirs.serialize());
+
+        // 3. the peer branch loses in turn and OUR former block returns as a
+        //    PEER body: valid again on the fork point, spent on the chain
+        rollback_tip(&mut stg).expect("rollback");
+        let outcome = validate_block(&stg, &rpc, &mut stats, &ours, &item41_live_ctx(&stg))
+            .expect("our former block is valid again on the fork point");
+        advance_with_block(&mut stg, &rpc, &mut stats, &ours, &outcome).expect("applied");
+        assert_eq!(stg.tip_height, tip_h + 1);
+        assert!(
+            wl.live.contains_key(&coin),
+            "pre-F2 state: the chain spent the coin, the view still lists it (the stale view)"
+        );
+
+        // THE FIX: the follow applies the chain's body — the stale coin leaves
+        // the view in the same pass
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out.applied, out.unapplied), (1, 0));
+        assert!(!wl.live.contains_key(&coin), "healed: the chain's spend reached the view");
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+        assert_eq!(wl.applied_through(), tip_h + 1);
+    }
+
+    /// (item 54 F2, spec test 2b) THE FIRST HALF of the same sequence, on its
+    /// own: the adoption's incremental un-apply ran (the coin returned to the
+    /// view), the view was NOT brought to the chain by any pass, and then the
+    /// fleet hands our former block back. The follow — here called when the
+    /// peer body is already on the chain — removes the coin again.
+    #[test]
+    fn item54_follow_removes_a_restored_coin_the_chain_has_respent() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let mut stats = Stats::default();
+        let theirs = item41_solve_block(&stg, &[]);
+        let ours = item41_solve_block(&stg, &[t.clone()]);
+        let outcome = validate_block(&stg, &rpc, &mut stats, &ours, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &ours, &outcome).expect("applied");
+        wl.apply_block(&ours, tip_h + 1);
+        recent.insert(ours.hash(), tip_h + 1, &ours.serialize());
+        rollback_tip(&mut stg).expect("rollback");
+        wl.unwind_blocks(&[(tip_h + 1, ours.hash())])
+            .expect("unwind");
+        let outcome = validate_block(&stg, &rpc, &mut stats, &theirs, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &theirs, &outcome).expect("applied");
+        recent.insert(theirs.hash(), tip_h + 1, &theirs.serialize());
+        assert!(wl.live.contains_key(&coin), "restored by the un-apply");
+        // (the view was current with `theirs` when it landed)
+        let _ = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert!(wl.live.contains_key(&coin), "theirs does not spend it: still listed, correctly");
+        // the peer branch loses and our former block returns as a PEER body
+        rollback_tip(&mut stg).expect("rollback");
+        let outcome = validate_block(&stg, &rpc, &mut stats, &ours, &item41_live_ctx(&stg))
+            .expect("valid again");
+        advance_with_block(&mut stg, &rpc, &mut stats, &ours, &outcome).expect("applied");
+        assert!(wl.live.contains_key(&coin), "stale again");
+        // (the stale `theirs` record is un-applied first, then ours applied)
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out.applied, out.unapplied), (1, 1));
+        assert!(!wl.live.contains_key(&coin), "the re-spent coin left the view");
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+    }
+
+    /// (item 54 F2, spec test 4) A STALE TAIL: an adoption whose incremental
+    /// un-apply did not run leaves journal records for blocks the chain no
+    /// longer holds. The follow un-applies them first (fail-closed unwind),
+    /// then applies the branch the chain holds instead.
+    #[test]
+    fn item54_follow_unapplies_a_tail_the_chain_no_longer_holds() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let mut stats = Stats::default();
+        let theirs = item41_solve_block(&stg, &[]);
+        let ours = item41_solve_block(&stg, &[t.clone()]);
+
+        // 1. our block applied to the chain AND the view
+        let outcome = validate_block(&stg, &rpc, &mut stats, &ours, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &ours, &outcome).expect("applied");
+        wl.apply_block(&ours, tip_h + 1);
+        recent.insert(ours.hash(), tip_h + 1, &ours.serialize());
+
+        // 2. the chain adopts the peer branch, the view is left holding ours
+        //    at tip_h + 1 (the un-apply was skipped: busy view / evicted)
+        rollback_tip(&mut stg).expect("rollback");
+        let outcome = validate_block(&stg, &rpc, &mut stats, &theirs, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &theirs, &outcome).expect("applied");
+        recent.insert(theirs.hash(), tip_h + 1, &theirs.serialize());
+        assert_eq!(wl.undo.back().unwrap().hash, ours.hash(), "the stale tail");
+        assert!(!wl.live.contains_key(&coin));
+
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out.unapplied, out.applied), (1, 1));
+        assert_eq!(stats.wallet_view_unapplied, 1);
+        assert_eq!(stats.wallet_view_blocks_applied, 1);
+        assert!(wl.live.contains_key(&coin), "ours was un-applied; theirs does not spend the coin");
+        assert!(wl.spent.get(&coin).is_none());
+        assert_eq!(wl.undo.back().map(|r| r.hash), Some(theirs.hash()));
+        assert_eq!(wl.applied_through(), tip_h + 1);
+    }
+
+    /// (item 54 F2, spec test 5) A body the recent cache and the store cannot
+    /// serve stops the catch-up there (reported), and the view is left
+    /// exactly as it was — never advanced past a height it did not apply.
+    #[test]
+    fn item54_follow_stops_at_a_body_it_cannot_serve() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        let mut stats = Stats::default();
+        let peer_block = item41_solve_block(&stg, &[t.clone()]);
+        let outcome = validate_block(&stg, &rpc, &mut stats, &peer_block, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &peer_block, &outcome).expect("applied");
+
+        // nothing can serve the body: no recent entry, no store
+        let store = BlockStore::new(None, None);
+        let recent = RecentBlocks::new();
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!((out.applied, out.unapplied), (0, 0));
+        assert_eq!(out.stopped_at, Some(tip_h + 1));
+        assert!(wl.live.contains_key(&coin), "the view is unchanged");
+        assert_eq!(stats.wallet_view_blocks_applied, 0);
+
+        // the body arrives in the recent cache: the next pass resumes there
+        let mut recent = RecentBlocks::new();
+        recent.insert(peer_block.hash(), tip_h + 1, &peer_block.serialize());
+        let out = wallet_live_follow(&mut wl, &stg, &recent, &store, &mut stats);
+        assert_eq!(out.applied, 1);
+        assert!(!wl.live.contains_key(&coin));
+    }
+
+    /// (item 54 F2, spec test 6) `prune_aged` drops ONLY outputs that are old,
+    /// below the undo floor AND payable to no wallet key. A wallet coin of
+    /// the same age stays (balance means the same before and after), and a
+    /// non-wallet output inside the window stays (it can still resolve).
+    #[test]
+    fn item54_prune_aged_drops_only_old_non_wallet_outputs() {
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-prune");
+        let _ = send_secret;
+        let mut wl = wallet_live_with(
+            &[send_pubkey.clone()],
+            vec![(
+                (tri7_core::legacy::sha256d(b"item54 prune wallet"), 0),
+                window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+            )],
+        );
+        let old_other = (tri7_core::legacy::sha256d(b"item54 prune old other"), 0);
+        let new_other = (tri7_core::legacy::sha256d(b"item54 prune new other"), 1);
+        wl.live.insert(old_other, window_out(100, 1_700_000_000, 5, vec![0x51]));
+        wl.live.insert(new_other, window_out(140, 1_700_000_000, 6, vec![0x51]));
+        wl.undo_from = 1_000;
+        wl.base = 0;
+        let wallet_coin = (tri7_core::legacy::sha256d(b"item54 prune wallet"), 0);
+        assert_eq!(wl.live.len(), 3);
+
+        // the chain's window base moved to 120: only the old non-wallet row goes
+        assert_eq!(wl.prune_aged(120), 1);
+        assert!(!wl.live.contains_key(&old_other), "old + non-wallet: dropped");
+        assert!(wl.live.contains_key(&new_other), "inside the window: kept (it can still resolve)");
+        assert!(wl.live.contains_key(&wallet_coin), "a wallet coin is never pruned");
+        assert_eq!(wl.prune_aged(120), 0, "idempotent");
+    }
+
+    /// (item 54 F2, block handler call site) An accepted PEER body applied by
+    /// the block handler reaches the wallet live view in the same call — the
+    /// view never holds a coin the chain has just spent.
+    #[test]
+    fn item54_handler_applies_an_accepted_peer_body_to_the_wallet_view() {
+        let _live_store_serial = lock_live_store_tests();
+        let base = 2_204_000u64; // above CHECKPOINT_HORIZON: kernels enforced
+        let n = 420usize;
+        let rpc = Rpc::new("127.0.0.1", 1, "", ""); // dead port — no oracle
+        let mut cfg = gate_test_cfg();
+        let state_dir = crate::testsupport::test_dir("tri7-item54-view");
+        cfg.state_dir = state_dir.path().to_path_buf();
+        let (send_secret, send_pubkey) = tri7_core::spend::synthetic_key("item54-sender");
+        let funding_prevout: Hash = tri7_core::legacy::sha256d(b"item54 funding prevout");
+        let t = item40_signed_regular_tx(&send_secret, &send_pubkey, (funding_prevout, 0), 2_000_000);
+        let mut view = wallet_live_with(
+            &[send_pubkey.clone()],
+            vec![(
+                (funding_prevout, 0),
+                window_out(100, 1_700_000_000, 2_000_000, p2pkh_script(&send_pubkey)),
+            )],
+        );
+        view.undo_from = base + n as u64; // seeded through the tip
+        let wl: SharedWalletLive = std::sync::Arc::new(std::sync::Mutex::new(Some(view)));
+        let mut stg = item25_fixture(base, n);
+        let block = item41_solve_block(&stg, &[t.clone()]);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _holder = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        let sess = Session::connect(&format!("127.0.0.1:{}", addr.port()))
+            .expect("loopback session");
+        let mut peer = Peer {
+            label: "item54-view-peer".into(),
+            outbound: true,
+            sess,
+            last_traffic: Instant::now(),
+            connected_at: Instant::now(),
+            buffered: VecDeque::new(),
+            dead: false,
+            transport: Transport::Clearnet,
+            version: 0,
+            subver: "test".into(),
+            start_height: 0,
+            claimed_tip: None,
+            msgs_in: 0,
+            msgs_out: 0,
+            connected_utc: now_iso(),
+            advertised: None,
+        };
+        let msg = tri7_core::p2p::RawMessage {
+            command: "block".into(),
+            payload: block.serialize(),
+        };
+        let mut outstanding: HashMap<Hash, u64> = HashMap::new();
+        let mut body_tries: HashMap<Hash, BodyTries> = HashMap::new();
+        let mut reinject: Vec<tri7_core::p2p::RawMessage> = Vec::new();
+        let mut pending_from_headers: VecDeque<(Hash, u64)> = VecDeque::new();
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        let gap = std::sync::Arc::new(std::sync::Mutex::new(GapState::default()));
+        let no_smsg: Option<std::sync::Arc<tri7_core::smsg_net::SmsgEngine>> = None;
+        let announce: TxAnnounce =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut pending_tx_getdata: HashMap<Hash, (Instant, String)> = HashMap::new();
+        let mut recon = ReconAcc::default();
+        let mut stats = Stats::default();
+        let mut pool = tri7_core::txpool::TxPool::new(1000, 600);
+
+        let res = handle_message(
+            &mut peer,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &cfg,
+            msg,
+            &mut outstanding,
+            &mut body_tries,
+            &mut reinject,
+            &mut pending_from_headers,
+            &store,
+            &mut recent,
+            &gap,
+            &no_smsg,
+            &mut pool,
+            &wl,
+            &announce,
+            &mut pending_tx_getdata,
+            &mut recon,
+        );
+        assert!(res.is_ok(), "{:?}", res.err());
+        assert_eq!(stg.tip_height, base + n as u64, "the peer block was accepted");
+        assert_eq!(stats.wallet_view_blocks_applied, 1, "the body reached the view in the same call");
+        {
+            let g = wl.lock().unwrap();
+            let v = g.as_ref().unwrap();
+            assert!(!v.live.contains_key(&(funding_prevout, 0)), "the spent coin left the view");
+            assert_eq!(v.spent.get(&(funding_prevout, 0)), Some(&(base + n as u64)));
+            assert_eq!(v.applied_through(), base + n as u64);
+        }
+        assert!(!peer.dead);
+    }
+
+    /// (item 54 F2, stake-tick call site — THE GUARANTEE) A stale view is
+    /// healed BEFORE the tick reads it: whatever the block path could not
+    /// apply (busy view, a body that arrived between ticks), the tick that
+    /// would have staked on the stale coin finds it gone.
+    #[test]
+    fn item54_stake_tick_brings_a_stale_view_up_to_the_chain_before_staking() {
+        let _live_store_serial = lock_live_store_tests();
+        let (mut stg, mut wl, rpc, t, coin, _pk) = item54_view_fixture();
+        let tip_h = stg.tip_height;
+        let cfg = gate_test_cfg();
+        let mut stats = Stats::default();
+        let peer_block = item41_solve_block(&stg, &[t.clone()]);
+        let outcome = validate_block(&stg, &rpc, &mut stats, &peer_block, &item41_live_ctx(&stg))
+            .expect("valid");
+        advance_with_block(&mut stg, &rpc, &mut stats, &peer_block, &outcome).expect("applied");
+        let store = BlockStore::new(None, None);
+        let mut recent = RecentBlocks::new();
+        recent.insert(peer_block.hash(), tip_h + 1, &peer_block.serialize());
+        assert!(wl.live.contains_key(&coin), "the stale view the tick would have read");
+
+        let mut pool = tri7_core::txpool::TxPool::new(4, 3600);
+        let mut stake_st = gate_stake_state();
+        let mut peers: Vec<Peer> = Vec::new();
+        let _tick = stake_tick(
+            &cfg,
+            &mut stg,
+            &rpc,
+            &mut stats,
+            &mut wl,
+            &mut pool,
+            &mut stake_st,
+            &store,
+            &mut peers[..],
+            &mut recent,
+        );
+        assert_eq!(stats.wallet_view_blocks_applied, 1, "the tick applied the chain's body first");
+        assert!(!wl.live.contains_key(&coin), "healed before the candidates were read");
+        assert_eq!(wl.spent.get(&coin), Some(&(tip_h + 1)));
+        assert_eq!(wl.applied_through(), tip_h + 1);
     }
 
     /// (item 41, spec test 2) IN-BLOCK duplicates: the same txid twice, and
