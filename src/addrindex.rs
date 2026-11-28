@@ -224,6 +224,30 @@ pub type BlockTx = (Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>);
 /// One block in the shape every writer hands the index.
 pub type BlockTxs = Vec<BlockTx>;
 
+/// A block's transactions in the shape the index stores them.
+fn block_txs(block: &crate::legacy::Block) -> BlockTxs {
+    block
+        .vtx
+        .iter()
+        .map(|tx| {
+            let txid = tx.hash().to_vec();
+            let outs: Vec<(u32, i64, Vec<u8>)> = tx
+                .vout
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
+                .collect();
+            let ins: Vec<(Vec<u8>, u32)> = tx
+                .vin
+                .iter()
+                .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
+                .map(|v| (v.prev_hash.to_vec(), v.prev_n))
+                .collect();
+            (txid, outs, ins)
+        })
+        .collect()
+}
+
 /// What `apply_block` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {
@@ -421,8 +445,67 @@ fn reconcile(
     to: u64,
     rep: &mut RepairReport,
 ) -> Result<(), String> {
-    use std::collections::{HashMap, HashSet};
     let tx = c.transaction().map_err(|e| format!("repair begin: {e}"))?;
+    reconcile_on(&tx, chain, from, to, rep)?;
+    tx.commit().map_err(|e| format!("repair commit: {e}"))
+}
+
+/// What one reconcile READ from the index for a range — every row edit it
+/// decided — before any write (item 54 B-iii).
+///
+/// The catch-up builder takes it on its own transaction and applies it on
+/// the same one, exactly as it always repaired. The daemon's tail repair
+/// takes it on a READ-ONLY connection with no index lock held — the scan
+/// is the whole `out` table (0.7 to 7 s warm, 48 to 170 s cold on DNS2's
+/// 1.47 GB index; two read-only runs, 2026-11-28) and `gettxout` shares
+/// that lock — and
+/// applies it under the lock in milliseconds. Every edit names its row by
+/// key AND by the value the scan saw, so one applied onto rows a catch-up
+/// run already fixed touches nothing and counts nothing.
+#[derive(Debug, Default)]
+struct RepairScan {
+    /// outputs no canonical block created: (addr, txid, n, height)
+    gone: Vec<(String, Vec<u8>, i64, i64)>,
+    /// outputs standing where their canonical block is not:
+    /// (addr, txid, n, here, canonical)
+    moved: Vec<(String, Vec<u8>, i64, i64, i64)>,
+    /// spend markings the chain does not make, and the one it does (None:
+    /// none): (addr, txid, n, marked, want)
+    marks: Vec<(String, Vec<u8>, i64, Option<i64>, Option<i64>)>,
+    /// history rows of transactions no canonical block in the range holds:
+    /// (txid, addr, height)
+    history_gone: Vec<(Vec<u8>, String, i64)>,
+    /// history rows standing where their transaction is not:
+    /// (txid, addr, here, canonical)
+    history_moved: Vec<(Vec<u8>, String, i64, i64)>,
+}
+
+/// Where a transaction's canonical block is, when it is not at this height.
+fn elsewhere(
+    chain: &dyn CanonicalChain,
+    locations: &std::collections::HashMap<Vec<u8>, Vec<u64>>,
+    txid: &[u8],
+) -> Result<Option<u64>, String> {
+    if let Some(hs) = locations.get(txid) {
+        return Ok(hs.first().copied());
+    }
+    let id: [u8; 32] = txid[..]
+        .try_into()
+        .map_err(|_| "a txid is 32 bytes".to_string())?;
+    chain.tx_height(&id)
+}
+
+/// The read half of a reconcile: what the index holds for `from..=to`
+/// against the chain, as row edits. Reads only — safe on a connection
+/// that cannot write.
+fn reconcile_scan(
+    c: &Connection,
+    chain: &dyn CanonicalChain,
+    from: u64,
+    to: u64,
+) -> Result<RepairScan, String> {
+    use std::collections::{HashMap, HashSet};
+    let mut scan = RepairScan::default();
     // Pass 1 — the canonical content of every height in the range.
     let span = (to - from + 1) as usize;
     let mut txids_at: Vec<HashSet<Vec<u8>>> = Vec::with_capacity(span);
@@ -447,11 +530,11 @@ fn reconcile(
         txids_at.push(ids);
     }
     // Pass 2 — every index row the range can touch.
-    let mut rows: Vec<(i64, Vec<u8>, i64, i64, Option<i64>)> = Vec::new();
+    let mut rows: Vec<(i64, String, Vec<u8>, i64, i64, Option<i64>)> = Vec::new();
     {
-        let mut st = tx
+        let mut st = c
             .prepare(
-                "SELECT rowid, txid, n, height, spent_height FROM out \
+                "SELECT rowid, addr, txid, n, height, spent_height FROM out \
                  WHERE height BETWEEN ?1 AND ?2 OR spent_height BETWEEN ?1 AND ?2",
             )
             .map_err(|e| format!("repair scan: {e}"))?;
@@ -459,10 +542,11 @@ fn reconcile(
             .query_map(params![from as i64, to as i64], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
                     r.get::<_, i64>(3)?,
-                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
                 ))
             })
             .map_err(|e| format!("repair scan: {e}"))?;
@@ -471,44 +555,25 @@ fn reconcile(
         }
     }
     let mut gone: HashSet<i64> = HashSet::new();
-    // Where a transaction's canonical block is, when it is not at this height.
-    fn elsewhere(
-        chain: &dyn CanonicalChain,
-        locations: &HashMap<Vec<u8>, Vec<u64>>,
-        txid: &[u8],
-    ) -> Result<Option<u64>, String> {
-        if let Some(hs) = locations.get(txid) {
-            return Ok(hs.first().copied());
-        }
-        let id: [u8; 32] = txid[..]
-            .try_into()
-            .map_err(|_| "a txid is 32 bytes".to_string())?;
-        chain.tx_height(&id)
-    }
     // Pass 3 — outputs: a row stands only where a canonical block created it.
-    for (rowid, txid, _n, height, _spent) in &rows {
+    for (rowid, addr, txid, n, height, _spent) in &rows {
         let h = *height as u64;
         if h < from || h > to || txids_at[(h - from) as usize].contains(txid) {
             continue;
         }
         match elsewhere(chain, &locations, txid)? {
             Some(canonical) => {
-                tx.execute("UPDATE out SET height=?2 WHERE rowid=?1", params![rowid, canonical as i64])
-                    .map_err(|e| format!("repair out height: {e}"))?;
-                tx.execute("UPDATE tx_addr SET height=?2 WHERE txid=?1", params![txid, canonical as i64])
-                    .map_err(|e| format!("repair history height: {e}"))?;
-                rep.reheighted += 1;
+                scan.moved
+                    .push((addr.clone(), txid.clone(), *n, *height, canonical as i64))
             }
             None => {
-                tx.execute("DELETE FROM out WHERE rowid=?1", [rowid])
-                    .map_err(|e| format!("repair out delete: {e}"))?;
+                scan.gone.push((addr.clone(), txid.clone(), *n, *height));
                 gone.insert(*rowid);
-                rep.phantom_outputs += 1;
             }
         }
     }
     // Pass 4 — spend markings: only a canonical block's spend marks a coin.
-    for (rowid, txid, n, _height, spent) in &rows {
+    for (rowid, addr, txid, n, _height, spent) in &rows {
         if gone.contains(rowid) {
             continue;
         }
@@ -522,44 +587,115 @@ fn reconcile(
         if want == Some(s as u64) {
             continue;
         }
-        tx.execute(
-            "UPDATE out SET spent_height=?2 WHERE rowid=?1",
-            params![rowid, want.map(|w| w as i64)],
-        )
-        .map_err(|e| format!("repair marking: {e}"))?;
-        rep.markings_fixed += 1;
+        scan.marks.push((
+            addr.clone(),
+            txid.clone(),
+            *n,
+            Some(s),
+            want.map(|w| w as i64),
+        ));
     }
     // Pass 5 — history rows (getaddresstxids) name canonical transactions only.
-    let mut history: Vec<(i64, Vec<u8>, i64)> = Vec::new();
     {
-        let mut st = tx
-            .prepare("SELECT rowid, txid, height FROM tx_addr WHERE height BETWEEN ?1 AND ?2")
+        let mut st = c
+            .prepare("SELECT txid, addr, height FROM tx_addr WHERE height BETWEEN ?1 AND ?2")
             .map_err(|e| format!("repair history scan: {e}"))?;
         let got = st
             .query_map(params![from as i64, to as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
             .map_err(|e| format!("repair history scan: {e}"))?;
         for r in got {
-            history.push(r.map_err(|e| format!("repair history row: {e}"))?);
+            let (txid, addr, height) = r.map_err(|e| format!("repair history row: {e}"))?;
+            let h = height as u64;
+            if h < from || h > to || txids_at[(h - from) as usize].contains(&txid) {
+                continue;
+            }
+            match elsewhere(chain, &locations, &txid)? {
+                Some(canonical) => scan
+                    .history_moved
+                    .push((txid, addr, height, canonical as i64)),
+                None => scan.history_gone.push((txid, addr, height)),
+            }
         }
     }
-    for (rowid, txid, height) in history {
-        let h = height as u64;
-        if h < from || h > to || txids_at[(h - from) as usize].contains(&txid) {
+    Ok(scan)
+}
+
+/// The write half of a reconcile, on the CALLER's transaction: the edits a
+/// [`reconcile_scan`] decided — each only onto the row it saw — then every
+/// canonical block the range lacked, and the record of each height.
+fn reconcile_apply(
+    tx: &rusqlite::Transaction<'_>,
+    chain: &dyn CanonicalChain,
+    from: u64,
+    to: u64,
+    scan: &RepairScan,
+    rep: &mut RepairReport,
+) -> Result<(), String> {
+    for (addr, txid, n, height) in &scan.gone {
+        let changed = tx
+            .execute(
+                "DELETE FROM out WHERE addr=?1 AND txid=?2 AND n=?3 AND height=?4",
+                params![addr, txid, n, height],
+            )
+            .map_err(|e| format!("repair out delete: {e}"))?;
+        if changed == 1 {
+            rep.phantom_outputs += 1;
+        }
+    }
+    for (addr, txid, n, here, canonical) in &scan.moved {
+        let changed = tx
+            .execute(
+                "UPDATE out SET height=?5 WHERE addr=?1 AND txid=?2 AND n=?3 AND height=?4",
+                params![addr, txid, n, here, canonical],
+            )
+            .map_err(|e| format!("repair out height: {e}"))?;
+        if changed != 1 {
             continue;
         }
-        match elsewhere(chain, &locations, &txid)? {
-            Some(canonical) => {
-                tx.execute("UPDATE tx_addr SET height=?2 WHERE rowid=?1", params![rowid, canonical as i64])
-                    .map_err(|e| format!("repair history move: {e}"))?;
-                rep.tx_rows_moved += 1;
-            }
-            None => {
-                tx.execute("DELETE FROM tx_addr WHERE rowid=?1", [rowid])
-                    .map_err(|e| format!("repair history delete: {e}"))?;
-                rep.tx_rows_removed += 1;
-            }
+        tx.execute(
+            "UPDATE tx_addr SET height=?2 WHERE txid=?1",
+            params![txid, canonical],
+        )
+        .map_err(|e| format!("repair history height: {e}"))?;
+        rep.reheighted += 1;
+    }
+    for (addr, txid, n, marked, want) in &scan.marks {
+        let changed = tx
+            .execute(
+                "UPDATE out SET spent_height=?5 WHERE addr=?1 AND txid=?2 AND n=?3 AND spent_height IS ?4",
+                params![addr, txid, n, marked, want],
+            )
+            .map_err(|e| format!("repair marking: {e}"))?;
+        if changed == 1 {
+            rep.markings_fixed += 1;
+        }
+    }
+    for (txid, addr, height) in &scan.history_gone {
+        let changed = tx
+            .execute(
+                "DELETE FROM tx_addr WHERE txid=?1 AND addr=?2 AND height=?3",
+                params![txid, addr, height],
+            )
+            .map_err(|e| format!("repair history delete: {e}"))?;
+        if changed == 1 {
+            rep.tx_rows_removed += 1;
+        }
+    }
+    for (txid, addr, here, canonical) in &scan.history_moved {
+        let changed = tx
+            .execute(
+                "UPDATE tx_addr SET height=?4 WHERE txid=?1 AND addr=?2 AND height=?3",
+                params![txid, addr, here, canonical],
+            )
+            .map_err(|e| format!("repair history move: {e}"))?;
+        if changed == 1 {
+            rep.tx_rows_moved += 1;
         }
     }
     // Pass 6 — write every canonical block whose rows were not there, and
@@ -568,16 +704,31 @@ fn reconcile(
         let Some(hash) = chain.hash_at(h) else {
             continue;
         };
-        if block_at(&tx, h)? != Some(hash) {
+        if block_at(tx, h)? != Some(hash) {
             let Some(txs) = chain.block(h) else {
                 return Err(format!("the canonical block h{h} cannot be read"));
             };
-            insert_block(&tx, h, &txs)?;
+            insert_block(tx, h, &txs)?;
             rep.blocks_reapplied += 1;
         }
-        record_block(&tx, h, &hash)?;
+        record_block(tx, h, &hash)?;
     }
-    tx.commit().map_err(|e| format!("repair commit: {e}"))
+    Ok(())
+}
+
+/// The repair itself, on the CALLER's transaction: the scan and its edits
+/// on one snapshot. The catch-up builder's verify wraps it in one of its
+/// own; the daemon's tail repair does not come through here at all (its
+/// scan is taken off the lock — see `TailRepairJob::run`).
+fn reconcile_on(
+    tx: &rusqlite::Transaction<'_>,
+    chain: &dyn CanonicalChain,
+    from: u64,
+    to: u64,
+    rep: &mut RepairReport,
+) -> Result<(), String> {
+    let scan = reconcile_scan(tx, chain, from, to)?;
+    reconcile_apply(tx, chain, from, to, &scan, rep)
 }
 
 /// What one deep repair of a wallet's rows found and did.
@@ -1258,11 +1409,13 @@ pub fn txids(c: &Connection, addrs: &[String]) -> Result<Vec<[u8; 32]>, String> 
 /// writing a block out of order, because a missing output row would make a
 /// later spend unmarkable and the balance would drift. The catch-up builder
 /// closes any such gap — and (item 54 B-i) so does the daemon itself through
-/// [`LiveIndex::catch_up_range`] + [`LiveIndex::apply_after_catchup`] when the
-/// store holds the canonical bodies in between.
+/// [`apply_live_block`] (range, then bodies, then write) when the store holds
+/// the canonical bodies in between.
 pub struct LiveIndex {
     conn: Connection,
     next_height: u64,
+    /// the index file — a tail repair's scan opens it read-only (item 54 B-iii)
+    db: std::path::PathBuf,
 }
 
 /// (item 54 B-i) The most blocks one in-process catch-up applies. DNS2's
@@ -1294,6 +1447,7 @@ impl LiveIndex {
         Some(LiveIndex {
             conn,
             next_height: next,
+            db: db_path(state_dir),
         })
     }
 
@@ -1336,11 +1490,12 @@ impl LiveIndex {
         }
     }
 
-    /// The daemon's per-block write for a caller that applies every block in
-    /// order (tests, tools). The daemon itself uses
-    /// [`Self::catch_up_range`] + [`Self::apply_after_catchup`].
+    /// A per-block write for a caller that applies every block in order
+    /// (tests, tools): no catch-up and no tail repair — a refusal comes back
+    /// as its text. The daemon itself goes through [`apply_live_block`].
     pub fn apply(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {
-        self.apply_after_catchup(block, height, &[])
+        self.write_after_catchup(block, height, &[])
+            .map_err(|r| r.to_string())
     }
 
     /// (item 54 B-i) The applied height as the database holds it right now.
@@ -1372,22 +1527,16 @@ impl LiveIndex {
         })
     }
 
-    /// (item 54 B-i) The daemon's per-block write: `block` accepted at
-    /// `height`, preceded by `missed` — the chain's blocks for the heights
-    /// [`Self::catch_up_range`] named, oldest first.
-    ///
-    /// The cursor is re-read from the database first, so a builder run
-    /// between the two calls can only shrink the gap. The whole gap must be
-    /// in hand BEFORE anything is written: a missing body refuses the write
-    /// outright and leaves the index exactly as it was (the builder catches
-    /// up). Every block still passes the parent check, so a catch-up can
-    /// never climb over an orphan the builder has not rewound yet.
-    pub fn apply_after_catchup(
+    /// [`Self::apply`] with the refusal kept in a shape a
+    /// caller can judge: [`apply_live_block`] repairs the tail on the three
+    /// structural shapes (item 54 B-iii) and returns every other failure as
+    /// it stands.
+    fn write_after_catchup(
         &mut self,
         block: &crate::legacy::Block,
         height: u64,
         missed: &[(u64, crate::legacy::Block)],
-    ) -> Result<(), String> {
+    ) -> Result<(), Refused> {
         self.next_height = stored_height(&self.conn)? + 1;
         if height > self.next_height {
             let from = self.next_height;
@@ -1404,10 +1553,11 @@ impl LiveIndex {
                 at += 1;
             }
             if at != height {
-                return Err(format!(
-                    "index is at h{}, block is h{height} — the chain's body at h{at} is not in hand (builder will catch up)",
-                    from - 1
-                ));
+                return Err(Refused::Gap {
+                    index: from - 1,
+                    block: height,
+                    at,
+                });
             }
             // a write that fails part-way keeps the blocks already written
             // (each one canonical and parent-checked); the rest is refused
@@ -1419,31 +1569,14 @@ impl LiveIndex {
     }
 
     /// One block, only directly above the index's applied height.
-    fn apply_in_order(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), String> {
+    fn apply_in_order(&mut self, block: &crate::legacy::Block, height: u64) -> Result<(), Refused> {
         if height != self.next_height {
-            return Err(format!(
-                "index is at h{}, block is h{} (builder will catch up)",
-                self.next_height.saturating_sub(1),
-                height
-            ));
+            return Err(Refused::Behind {
+                index: self.next_height.saturating_sub(1),
+                block: height,
+            });
         }
-        let mut txs: Vec<(Vec<u8>, Vec<(u32, i64, Vec<u8>)>, Vec<(Vec<u8>, u32)>)> = Vec::new();
-        for tx in &block.vtx {
-            let txid = tx.hash().to_vec();
-            let outs: Vec<(u32, i64, Vec<u8>)> = tx
-                .vout
-                .iter()
-                .enumerate()
-                .map(|(i, o)| (i as u32, o.value, o.script_pubkey.clone()))
-                .collect();
-            let ins: Vec<(Vec<u8>, u32)> = tx
-                .vin
-                .iter()
-                .filter(|v| !v.prev_hash.iter().all(|b| *b == 0))
-                .map(|v| (v.prev_hash.to_vec(), v.prev_n))
-                .collect();
-            txs.push((txid, outs, ins));
-        }
+        let txs = block_txs(block);
         // Record the hash of the block this index has applied: the height
         // alone does not prove the index is on the SAME chain the node is
         // serving. The hash does.
@@ -1456,7 +1589,9 @@ impl LiveIndex {
         // coverage height the chain does vouch for (item 52). The builder
         // now verifies and repairs at the start of every run; this is the
         // same rule for the daemon's own writes: the block the index holds
-        // just below must be this block's parent.
+        // just below must be this block's parent. (A refusal here is what
+        // lets `apply_live_block` repair the tail — the write itself never
+        // climbs over an orphan, with or without the repair.)
         match appendable(&self.conn, height, &block.prev_hash, &block_hash)? {
             Appendable::Yes => {}
             Appendable::AlreadyApplied => {
@@ -1465,16 +1600,13 @@ impl LiveIndex {
                 return Ok(());
             }
             Appendable::Held(other) => {
-                return Err(format!(
-                    "index already holds block {} at h{height} — not adding a second one",
-                    txid_hex(&other)
-                ));
+                return Err(Refused::Held {
+                    at: height,
+                    held: other,
+                });
             }
             Appendable::Orphaned { at, held } => {
-                return Err(format!(
-                    "index holds orphaned block {} at h{at}, not this block's parent — the catch-up builder rewinds it",
-                    txid_hex(&held)
-                ));
+                return Err(Refused::Orphaned { at, held });
             }
         }
 
@@ -1505,7 +1637,7 @@ impl LiveIndex {
                 }
             }
         }
-        Err(last)
+        Err(Refused::Other(last))
     }
 
     /// One all-or-nothing write of a block: every output, spend marking, meta
@@ -1544,6 +1676,82 @@ impl LiveIndex {
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(())
     }
+
+    /// (item 54 B-iii) The top of the index — its applied height and the
+    /// hash stamped for it — as it stands under the caller's lock window.
+    fn tail_snapshot(&self) -> Result<TailSnapshot, String> {
+        Ok(TailSnapshot {
+            height: stored_height(&self.conn)?,
+            tip: index_tip_hash(&self.conn),
+        })
+    }
+
+    /// (item 54 B-iii) The blocks the index recorded for `lo..=hi`: what the
+    /// walk down from an accepted block compares the chain against. No index
+    /// lock is held across a store read, so the records travel with the plan.
+    fn tail_records(&self, lo: u64, hi: u64) -> Result<TailRecords, String> {
+        let mut st = self
+            .conn
+            .prepare("SELECT height, hash FROM blk WHERE height BETWEEN ?1 AND ?2")
+            .map_err(|e| format!("blk rows h{lo}..h{hi}: {e}"))?;
+        let rows = st
+            .query_map(params![lo as i64, hi as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| format!("blk rows h{lo}..h{hi}: {e}"))?;
+        let mut out = TailRecords::new();
+        for row in rows {
+            let (h, v) = row.map_err(|e| format!("blk row: {e}"))?;
+            if v.len() == 32 {
+                let mut b = [0u8; 32];
+                b.copy_from_slice(&v);
+                out.insert(h as u64, b);
+            }
+        }
+        Ok(out)
+    }
+
+    /// (item 54 B-iii) Write a repair's edits, and stamp the coverage pair,
+    /// in ONE transaction — and only onto an index that still stands exactly
+    /// where the job was planned (a catch-up run in between moved it:
+    /// nothing is written here). The edits were read before the lock, so
+    /// the lock is held for the writes alone.
+    fn apply_tail_repair(
+        &mut self,
+        planned: &TailSnapshot,
+        plan: TailPlan,
+        scan: &RepairScan,
+    ) -> Result<TailRepair, String> {
+        let now = self.tail_snapshot()?;
+        if now != *planned {
+            return Err(format!(
+                "the index moved beneath the repair (now h{}) — nothing written",
+                now.height
+            ));
+        }
+        let run = LinkedRun::new(plan.fork, &plan.blocks);
+        let mut report = RepairReport::default();
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| format!("repair begin: {e}"))?;
+        reconcile_apply(&tx, &run, plan.fork, plan.top, scan, &mut report)?;
+        // THE STAMP — the pair the content now proves: the top height and
+        // the chain's block at it. Rows that are the chain's under a stamp
+        // that still names the lost block fail the same-chain proof
+        // (authority_with_lag) and serve nobody; a stamp that names a height
+        // whose rows are not there would serve rows that do not exist. One
+        // transaction, so neither is ever seen.
+        set_tip_hash(&tx, &plan.blocks[plan.blocks.len() - 1].hash())?;
+        finish(&tx, plan.top)?;
+        tx.commit().map_err(|e| format!("repair commit: {e}"))?;
+        self.next_height = plan.top + 1;
+        Ok(TailRepair {
+            fork: plan.fork,
+            top: plan.top,
+            report,
+        })
+    }
 }
 
 /// (item 54 B-i) The daemon's index write, in two lock windows.
@@ -1554,19 +1762,52 @@ impl LiveIndex {
 ///    the block store (`by_height`). The store has its own lock; the two are
 ///    never nested here, so no RPC reader that holds one can wait on the
 ///    other;
-/// 3. under the index lock again: [`LiveIndex::apply_after_catchup`] — the
-///    gap, then the block, after re-reading the applied height (a builder
-///    run in between can only shrink the gap).
+/// 3. under the index lock again: the gap, then the block, written after
+///    re-reading the applied height (a builder run in between can only
+///    shrink the gap).
+///
+/// (item 54 B-iii) When that write is refused because the index holds other
+/// blocks than the chain does — an orphan the catch-up builder has not
+/// rewound yet, a foreign block at the height, or an index standing above
+/// the accepted block — the same call PLANS the repair and hands it back
+/// as a [`TailRepairJob`], to be run off the accept path (the daemon runs
+/// it on a thread of its own). The scan that finds the lost rows is the
+/// whole `out` table — 0.7 to 7 s warm, 48 to 170 s cold on DNS2's 1.47 GB
+/// index; two read-only runs, 2026-11-28 — and the accept path and
+/// `gettxout` share the
+/// index lock it must not hold for that long. The plan itself is cheap,
+/// in two more steps that keep the one-lock-at-a-time rule:
+///
+/// 4. the second window closes by reading the plan's facts under its lock:
+///    where the index stands (applied height, stamped hash), the blocks it
+///    recorded near its top, and the index file's path;
+/// 5. with NO index lock held: the walk. Down from the accepted block every
+///    body is read from the store and must LINK — the hash of the block at
+///    h-1 is the parent the block at h names — until the first height whose
+///    recorded block IS the chain's (the common ancestor, which is not
+///    touched) or the first the index applied without a record (an older
+///    writer's ground: the builder's audit reads it). Above the accepted
+///    block, up to the top of the index, the same proof. A body the store
+///    serves at a height without the chain's slot — a raced body, the node's
+///    own lost block — fails the link: the index is only ever reconciled
+///    against a proven run of the chain.
+///
+/// What the job then does is [`TailRepairJob::run`].
 ///
 /// Returns how many blocks below `height` the call wrote, and the write's
-/// own result for the caller's log. Without `by_height` (tests, tools) or
-/// with nothing to fetch this is exactly the old single-window write.
+/// own result for the caller's log: `Ok(None)` for a plain write,
+/// `Ok(Some(job))` when the tail can be repaired — the write is STILL
+/// refused until the job lands — the refusal's text when nothing is
+/// planned. Without `by_height` (tests, tools) or with nothing to fetch
+/// this is exactly the old single-window write; a refusal that is not
+/// structural (a gap the store could not fill, a failed database) goes
+/// back as it stands.
 pub fn apply_live_block<G>(
     lock: &dyn Fn() -> Option<G>,
     block: &crate::legacy::Block,
     height: u64,
     by_height: Option<&dyn Fn(u64) -> Option<crate::legacy::Block>>,
-) -> (usize, Result<(), String>)
+) -> (usize, Result<Option<TailRepairJob>, String>)
 where
     G: std::ops::DerefMut<Target = Option<LiveIndex>>,
 {
@@ -1590,13 +1831,338 @@ where
         return (0, Err("live index absent".to_string()));
     };
     let from = ix.applied_height().saturating_add(1);
-    let r = ix.apply_after_catchup(block, height, &missed);
-    let caught_up = match &r {
+    let refused = match ix.write_after_catchup(block, height, &missed) {
         // only the blocks below `height` that were still missing count
-        Ok(()) => missed.iter().filter(|(h, _)| *h >= from).count(),
-        Err(_) => 0,
+        Ok(()) => return (missed.iter().filter(|(h, _)| *h >= from).count(), Ok(None)),
+        Err(r) => r,
     };
-    (caught_up, r)
+    // (item 54 B-iii) A refusal that says the index holds other blocks than
+    // the chain does is repairable. Anything else — a gap the store could
+    // not fill, a failed database — goes back exactly as before.
+    let Some(by_height) = by_height.filter(|_| refused.structural()) else {
+        return (0, Err(refused.to_string()));
+    };
+    // 4. the plan's facts close the second window, under its lock
+    let lo = height.saturating_sub(LIVE_CATCHUP_MAX);
+    let planned = ix.tail_snapshot().and_then(|s| {
+        ix.tail_records(lo, s.height.max(height))
+            .map(|r| (s, r, ix.db.clone(), refused.to_string()))
+    });
+    // the lock is RELEASED: step 5 is store reads (see the lock-order rule)
+    drop(g);
+    // 5. the walk — with NO index lock held
+    let (snap, records, db, refusal) = match planned {
+        Ok(x) => x,
+        Err(e) => return (0, Err(format!("{refused}; tail repair not planned: {e}"))),
+    };
+    match plan_tail_repair(&snap, &records, block, height, by_height) {
+        Ok(plan) => (
+            0,
+            Ok(Some(TailRepairJob {
+                db,
+                snap,
+                plan,
+                why: refusal,
+            })),
+        ),
+        Err(why) => (0, Err(format!("{refused}; tail repair not taken: {why}"))),
+    }
+}
+
+/// (item 54 B-iii) A tail repair, planned on the accept path, to be RUN off
+/// it. It reads the store not at all — the chain's blocks are in hand. It
+/// scans the index, then writes the edits.
+///
+/// The scan is the whole `out` table: 0.7 to 7 s warm and 48 to 170 s cold
+/// on DNS2's 1.47 GB index (two read-only runs, 2026-11-28).
+/// [`apply_live_block`] must
+/// not wait that long on the accept path, and the index lock must not be
+/// held that long — `gettxout` takes the same one — so the job reads on a
+/// connection of its own, read-only, and takes the lock for the writes
+/// alone. The write lands only onto the index the plan was made for.
+#[derive(Debug)]
+pub struct TailRepairJob {
+    /// the index file, for the read-only scan
+    db: std::path::PathBuf,
+    /// where the index stood when the plan was made
+    snap: TailSnapshot,
+    /// the fork and the chain's proven run for it
+    plan: TailPlan,
+    /// the write's own refusal, for the caller's log
+    why: String,
+}
+
+impl TailRepairJob {
+    /// The write this job was planned for refused, as its text.
+    pub fn refusal(&self) -> &str {
+        &self.why
+    }
+
+    /// The repair. Holds NO index lock for the scan (step a); takes it for
+    /// the writes and the stamp (step b), onto the index the plan was made
+    /// for — if a builder run moved it, nothing is written.
+    pub fn run<G>(self, lock: &dyn Fn() -> Option<G>) -> Result<TailRepair, String>
+    where
+        G: std::ops::DerefMut<Target = Option<LiveIndex>>,
+    {
+        let run = LinkedRun::new(self.plan.fork, &self.plan.blocks);
+        // (a) the scan — a read-only snapshot; no index lock is held
+        let scan = {
+            let ro = open_readonly(&self.db)?;
+            let snap = ro
+                .unchecked_transaction()
+                .map_err(|e| format!("repair read begin: {e}"))?;
+            let scan = reconcile_scan(&snap, &run, self.plan.fork, self.plan.top)?;
+            drop(snap);
+            scan
+        };
+        // (b) the writes and the stamp, under the lock
+        let Some(mut g) = lock() else {
+            return Err("live index lock unavailable".to_string());
+        };
+        let Some(ix) = g.as_mut() else {
+            return Err("live index absent".to_string());
+        };
+        ix.apply_tail_repair(&self.snap, self.plan, &scan)
+    }
+}
+
+/// (item 54 B-iii) A read-only connection to the index for a tail repair's
+/// scan. In WAL a reader stands on its own snapshot and blocks no writer;
+/// in any other journal mode it would hold every writer behind the scan, so
+/// that is refused and the catch-up builder's run does the repair.
+fn open_readonly(path: &Path) -> Result<Connection, String> {
+    let c = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| {
+        format!(
+            "the index cannot be opened read-only ({}): {e}",
+            path.display()
+        )
+    })?;
+    c.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| format!("busy_timeout {}: {e}", path.display()))?;
+    let mode: String = c
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(|e| format!("journal_mode {}: {e}", path.display()))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!(
+            "the index is in {mode} journal mode, not WAL — a scan here would hold every writer behind it (the catch-up builder repairs)"
+        ));
+    }
+    Ok(c)
+}
+
+/// (item 54 B-iii) What an in-process tail repair did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailRepair {
+    /// the first height that held a block the chain does not
+    pub fork: u64,
+    /// the last height brought in line — the index's applied height after
+    pub top: u64,
+    /// what the reconcile found and wrote (the catch-up builder's own report)
+    pub report: RepairReport,
+}
+
+/// One line, in the shape a journal search counts:
+/// `fork at h11: tail repaired in-process — 3 block(s), 3 output row(s),
+/// 2 spend marking(s), 2 history row(s); index at h13`.
+impl std::fmt::Display for TailRepair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fork at h{}: tail repaired in-process — {} block(s), {} output row(s), {} spend marking(s), {} history row(s); index at h{}",
+            self.fork,
+            self.report.blocks_reapplied,
+            self.report.phantom_outputs + self.report.reheighted,
+            self.report.markings_fixed,
+            self.report.tx_rows_removed + self.report.tx_rows_moved,
+            self.top
+        )
+    }
+}
+
+/// (item 54 B-iii) The top of the index at the moment a repair was planned.
+/// The repair writes only onto an index that still stands exactly there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TailSnapshot {
+    height: u64,
+    tip: Option<[u8; 32]>,
+}
+
+/// The blocks the index recorded, by height.
+type TailRecords = std::collections::HashMap<u64, [u8; 32]>;
+
+/// (item 54 B-iii) The block the index recorded at `height`: the `blk` row
+/// or — at the applied height of an index built before that table — the
+/// stamped coverage pair, the same fallback `appendable` trusts. None:
+/// nothing recorded.
+fn recorded(records: &TailRecords, snap: &TailSnapshot, height: u64) -> Option<[u8; 32]> {
+    records.get(&height).copied().or_else(|| {
+        if height == snap.height {
+            snap.tip
+        } else {
+            None
+        }
+    })
+}
+
+/// (item 54 B-iii) A proven run of the chain: heights `fork..=top`, oldest
+/// first — `fork` is the first height the index holds a foreign block at, so
+/// nothing below it is touched.
+#[derive(Debug)]
+struct TailPlan {
+    fork: u64,
+    top: u64,
+    blocks: Vec<crate::legacy::Block>,
+}
+
+/// (item 54 B-iii) Find the fork and gather the chain's blocks for the
+/// repair. Called with NO index lock held: every body is a store read.
+///
+/// `anchor` is the block the daemon just accepted at `anchor_h` — the
+/// chain's block at that height by construction. Every other body comes from
+/// the store (`by_height`) and must LINK to it: the hash of the block at h-1
+/// is the parent the block at h names. Downward that proof runs to the
+/// common ancestor — the first height whose recorded block IS the chain's —
+/// or to the first height the index applied without a record (an older
+/// writer's ground: the builder's audit reads it, a blind repair does not).
+/// Upward it runs to the top of the index when that stands above the
+/// accepted block. A body the store serves at a height without the chain's
+/// slot — a raced body, the node's own lost block — fails the link and
+/// nothing is repaired: the index is only ever reconciled against a proven
+/// run of the chain. The range is bounded by [`LIVE_CATCHUP_MAX`] blocks, as
+/// the catch-up's gap is: a fork at the limit is repaired, one deeper is left
+/// to the builder.
+fn plan_tail_repair(
+    snap: &TailSnapshot,
+    records: &TailRecords,
+    anchor: &crate::legacy::Block,
+    anchor_h: u64,
+    by_height: &dyn Fn(u64) -> Option<crate::legacy::Block>,
+) -> Result<TailPlan, String> {
+    let top = snap.height.max(anchor_h);
+    if top - anchor_h >= LIVE_CATCHUP_MAX {
+        return Err(format!(
+            "the index stands more than {LIVE_CATCHUP_MAX} blocks above the accepted block — the catch-up builder rewinds it"
+        ));
+    }
+    // above the accepted block, up to the top of the index
+    let mut above = Vec::new();
+    let mut head = anchor.hash();
+    for h in (anchor_h + 1)..=top {
+        let Some(b) = by_height(h) else {
+            return Err(format!(
+                "the index stands at h{} and the chain has no block above the accepted h{anchor_h} yet — the repair waits for the chain to reach it",
+                snap.height
+            ));
+        };
+        if b.prev_hash != head {
+            return Err(format!(
+                "the store's body at h{h} is not a child of the chain's h{} — not repairing against it",
+                h - 1
+            ));
+        }
+        head = b.hash();
+        above.push(b);
+    }
+    // below it, down to the common ancestor
+    let mut below: Vec<crate::legacy::Block> = Vec::new();
+    let mut parent = anchor.prev_hash;
+    let mut h = anchor_h;
+    let fork = loop {
+        if h == 0 {
+            break 0;
+        }
+        let ph = h - 1;
+        let Some(b) = by_height(ph) else {
+            return Err(format!(
+                "the chain's body at h{ph} is not in the store — not repairing against a chain the store cannot show (the catch-up builder rewinds it)"
+            ));
+        };
+        if b.hash() != parent {
+            return Err(format!(
+                "the store's body at h{ph} is not the parent the chain's h{h} names — not repairing against it"
+            ));
+        }
+        // Above the index's applied height nothing is recorded and nothing
+        // needs to be: keep walking — the lost blocks may sit lower.
+        if ph <= snap.height {
+            match recorded(records, snap, ph) {
+                // the chain's own block: the common ancestor
+                Some(r) if r == b.hash() => break h,
+                // the index applied this height and left no record: an
+                // older writer's ground
+                None => break h,
+                Some(_) => {}
+            }
+        }
+        // This height is in the range too. The bound is a count of blocks
+        // REPAIRED, as it is for the catch-up's gap: a fork AT the limit is
+        // repaired, one block deeper is the builder's.
+        if top - ph >= LIVE_CATCHUP_MAX {
+            return Err(format!(
+                "the fork reaches below h{ph}, more than {LIVE_CATCHUP_MAX} blocks — the catch-up builder rewinds it"
+            ));
+        }
+        parent = b.prev_hash;
+        below.push(b);
+        h = ph;
+    };
+    let mut blocks = below;
+    blocks.reverse();
+    blocks.push(anchor.clone());
+    blocks.extend(above);
+    Ok(TailPlan { fork, top, blocks })
+}
+
+/// (item 54 B-iii) The chain as a linked run of real blocks — what
+/// `reconcile` needs over the blocks `plan_tail_repair` proved.
+struct LinkedRun {
+    fork: u64,
+    top: u64,
+    hashes: Vec<[u8; 32]>,
+    txs: Vec<BlockTxs>,
+}
+
+impl LinkedRun {
+    fn new(fork: u64, blocks: &[crate::legacy::Block]) -> LinkedRun {
+        LinkedRun {
+            fork,
+            top: fork + blocks.len() as u64 - 1,
+            hashes: blocks.iter().map(|b| b.hash()).collect(),
+            txs: blocks.iter().map(block_txs).collect(),
+        }
+    }
+}
+
+impl CanonicalChain for LinkedRun {
+    fn base(&self) -> u64 {
+        self.fork
+    }
+    fn tip(&self) -> u64 {
+        self.top
+    }
+    fn hash_at(&self, height: u64) -> Option<[u8; 32]> {
+        self.hashes
+            .get(height.checked_sub(self.fork)? as usize)
+            .copied()
+    }
+    fn block(&self, height: u64) -> Option<BlockTxs> {
+        self.txs
+            .get(height.checked_sub(self.fork)? as usize)
+            .cloned()
+    }
+    /// Not answered — the daemon holds no transaction lookup here, and the
+    /// consequence is deliberate: an output row of the range whose
+    /// transaction is in none of the range's canonical blocks is removed. If
+    /// the chain mines that transaction above the range, its row is written
+    /// when that block arrives — exactly when it becomes the chain's.
+    fn tx_height(&self, _txid: &[u8; 32]) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
 }
 
 /// Whether a block may be appended at `height`. Read-only; `apply_once`
@@ -1610,6 +2176,70 @@ enum Appendable {
     /// the block just below is not this block's parent: an orphan the
     /// catch-up builder has not rewound yet
     Orphaned { at: u64, held: [u8; 32] },
+}
+
+/// (item 54 B-iii) Why an in-order write did not happen. Three shapes are
+/// STRUCTURAL — the index holds other blocks than the chain does, or stands
+/// where the accepted block is not — and those are what the in-process tail
+/// repair may judge. A gap the store could not fill and a failure of the
+/// database itself are not: nothing there is repaired and the text goes back
+/// exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Refused {
+    /// the block is at or below the index's applied height
+    Behind { index: u64, block: u64 },
+    /// a different block already holds the height
+    Held { at: u64, held: [u8; 32] },
+    /// the block just below is not this block's parent: an orphan the
+    /// catch-up builder has not rewound yet
+    Orphaned { at: u64, held: [u8; 32] },
+    /// a gap the store could not fill: no body in hand at `at`
+    Gap { index: u64, block: u64, at: u64 },
+    /// the database itself failed (still busy after the retries, I/O)
+    Other(String),
+}
+
+impl From<String> for Refused {
+    fn from(e: String) -> Self {
+        Refused::Other(e)
+    }
+}
+
+impl Refused {
+    /// The index holds other blocks than the chain does — a tail the daemon
+    /// may repair itself.
+    fn structural(&self) -> bool {
+        matches!(
+            self,
+            Refused::Behind { .. } | Refused::Held { .. } | Refused::Orphaned { .. }
+        )
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Behind { index, block } => write!(
+                f,
+                "index is at h{index}, block is h{block} (builder will catch up)"
+            ),
+            Refused::Held { at, held } => write!(
+                f,
+                "index already holds block {} at h{at} — not adding a second one",
+                txid_hex(held)
+            ),
+            Refused::Orphaned { at, held } => write!(
+                f,
+                "index holds orphaned block {} at h{at}, not this block's parent — the catch-up builder rewinds it",
+                txid_hex(held)
+            ),
+            Refused::Gap { index, block, at } => write!(
+                f,
+                "index is at h{index}, block is h{block} — the chain's body at h{at} is not in hand (builder will catch up)"
+            ),
+            Refused::Other(e) => f.write_str(e),
+        }
+    }
 }
 
 /// (item 54 B-i) The applied height as the DATABASE holds it right now —
@@ -2829,12 +3459,24 @@ mod tests {
         s: &LagScene,
         height: u64,
         by_height: Option<&dyn Fn(u64) -> Option<crate::legacy::Block>>,
-    ) -> (usize, Result<(), String>) {
-        apply_live_block(
+    ) -> (usize, Result<Option<TailRepair>, String>) {
+        // the daemon runs the job on a thread of its own; here it runs at once
+        let (n, r) = apply_live_block(
             &|| s.cell.lock().ok(),
             &s.chain[(height - 1) as usize],
             height,
             by_height,
+        );
+        (
+            n,
+            match r {
+                Ok(Some(job)) => job
+                    .run(&|| s.cell.lock().ok())
+                    .map(Some)
+                    .map_err(|why| format!("tail repair not written: {why}")),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            },
         )
     }
 
@@ -3045,30 +3687,45 @@ mod tests {
 
     /// The gap is still the daemon's own write path: a catch-up can never
     /// climb over an orphan the builder has not rewound. The index holds an
-    /// orphan at h11 (the node's own mint, while it was the tip); the
-    /// canonical chain's h12 is refused exactly as before.
+    /// orphan at h11 (the node's own mint, while it was the tip) and the
+    /// chain's bodies are NOT in hand: the canonical h13 is refused exactly
+    /// as before, nothing is written above the orphan, and nothing is
+    /// repaired — a repair needs the chain's bodies (item 54 B-iii).
     #[test]
     fn a_catch_up_never_climbs_over_an_orphan() {
         let mut s = lag_scene("lag-orphan");
         let script = p2pkh(0xA1);
         let ten = s.chain[9].hash();
-        let mint = real_block(ten, 0xC1, &[600, 420], vec![(s.chain[4].vtx[0].hash(), 0u32)], &script);
+        let mint = real_block(
+            ten,
+            0xC1,
+            &[600, 420],
+            vec![(s.chain[4].vtx[0].hash(), 0u32)],
+            &script,
+        );
         {
             let mut g = s.cell.lock().unwrap();
-            g.as_mut().unwrap().apply(&mint, 11).expect("the mint, while it is the tip");
+            g.as_mut()
+                .unwrap()
+                .apply(&mint, 11)
+                .expect("the mint, while it is the tip");
         }
-        // the builder rewound nothing; the node accepted the canonical h13
-        // whose parent (h12) the index does not hold
-        let by_height = store_of(s.chain.clone());
-        let (caught_up, r) = daemon_write(&s, 13, Some(&by_height));
+        let (caught_up, r) = daemon_write(&s, 13, None);
         let e = r.expect_err("never above an orphan");
-        assert!(e.contains("orphaned") || e.contains("not adding a second one"), "{e}");
+        assert!(
+            e.contains("builder will catch up") && !e.contains("tail repair"),
+            "{e}"
+        );
         assert_eq!(caught_up, 0);
         assert_eq!(index_height(&s.c), 11);
         assert_eq!(block_at(&s.c, 12).unwrap(), None, "nothing written above the orphan");
-        // the builder repairs; the daemon's SAME handle (no restart) then
-        // closes what the repair rewound and writes the next block — the
-        // cursor follows the database
+        assert_eq!(spendable(&mut s.c), (11, 9 * 1000 + 1020));
+        assert_eq!(
+            index_tip_hash(&s.c),
+            Some(mint.hash()),
+            "the stamp is left as it stands"
+        );
+        // the builder repairs
         let mut chain = Chain::new(1, 14);
         for (i, b) in s.chain.iter().enumerate() {
             chain.set(i as u64 + 1, b.hash(), real_txs(b));
@@ -3082,9 +3739,684 @@ mod tests {
         // the daemon's SAME handle (no restart) then closes what the repair
         // did not reach and writes the next block — the cursor follows the
         // database
+        let by_height = store_of(s.chain.clone());
         let (caught_up, r) = daemon_write(&s, 14, Some(&by_height));
         r.expect("the repaired index is appended to by the old handle");
         assert_eq!(caught_up, 2, "h12 and h13: the repair had already written h11");
         assert_fully_indexed(&mut s);
+    }
+
+    // ---- item 54 B-iii: the daemon repairs the index tail itself ---------
+
+    /// (item 54 B-iii) THE DEFECT, DNS2 2026-11-27: the index holds the
+    /// blocks of a branch that LOST. The node minted C1 at h11 (re-stakes
+    /// coin 5) and C2 at h12 (spends coin 6) — both indexed while they were
+    /// the tip — and then the chain went the other way: D0 pays 500 at h11,
+    /// D1 re-stakes coin 5 at h12, D2 pays 500 at h13. The chain never
+    /// spends coin 6. Until the catch-up builder's next run every live write
+    /// was refused and the wallet served its unspent list from the replay
+    /// snapshot: 62.7 minutes across 5 windows in 12.3 hours of journal.
+    struct ForkScene {
+        dir: crate::testsupport::TestDir,
+        /// the daemon's handle, behind the same lock shape the daemon uses
+        cell: std::sync::Mutex<Option<LiveIndex>>,
+        c: Connection,
+        /// h1 … h13: the ten base blocks, then the chain's branch above the
+        /// common h10
+        chain: Vec<crate::legacy::Block>,
+        /// the lost branch: C1 at h11, C2 at h12
+        lost: [crate::legacy::Block; 2],
+    }
+    /// eight untouched coins + C1's 600 and 420 + C2's 900
+    const FORK_DEFECT: (usize, i64) = (11, 8 * 1000 + 1020 + 900);
+    /// nine untouched coins — coin 6 among them: the chain never spends it
+    /// — + 500 + 600 + 420 + 500
+    const FORK_TRUTH: (usize, i64) = (13, 9 * 1000 + 500 + 1020 + 500);
+
+    fn fork_scene(tag: &str) -> ForkScene {
+        let dir = tmpdir(tag);
+        let (c, _) = begin(dir.path()).expect("begin");
+        set_complete(&c, true).expect("a built index, as on the fleet");
+        let script = p2pkh(0xA1);
+        let mut chain = Vec::new();
+        let mut prev = hash_of(0);
+        for h in 1..=10u64 {
+            let b = real_block(prev, h as u8, &[1000], vec![], &script);
+            prev = b.hash();
+            chain.push(b);
+        }
+        let ten = prev;
+        let coin5 = (chain[4].vtx[0].hash(), 0u32);
+        let coin6 = (chain[5].vtx[0].hash(), 0u32);
+        let c1 = real_block(ten, 0xC1, &[600, 420], vec![coin5], &script);
+        let c2 = real_block(c1.hash(), 0xC2, &[900], vec![coin6], &script);
+        let c11 = real_block(ten, 0xD0, &[500], vec![], &script);
+        let c12 = real_block(c11.hash(), 0xD1, &[600, 420], vec![coin5], &script);
+        let c13 = real_block(c12.hash(), 0xD2, &[500], vec![], &script);
+        chain.extend([c11, c12, c13]);
+        let mut live = LiveIndex::open_if_built(dir.path()).expect("live index");
+        for (i, b) in chain.iter().take(10).enumerate() {
+            live.apply(b, i as u64 + 1)
+                .expect("the daemon appends in order");
+        }
+        // the node's own mints ARE the tip for a while: indexed
+        live.apply(&c1, 11).expect("C1, while it is the tip");
+        live.apply(&c2, 12).expect("C2, while it is the tip");
+        ForkScene {
+            dir,
+            cell: std::sync::Mutex::new(Some(live)),
+            c,
+            chain,
+            lost: [c1, c2],
+        }
+    }
+
+    /// The daemon's accept-path write for the chain's block at `height`.
+    fn fork_write(
+        s: &ForkScene,
+        height: u64,
+        by_height: Option<&dyn Fn(u64) -> Option<crate::legacy::Block>>,
+    ) -> (usize, Result<Option<TailRepair>, String>) {
+        // the daemon runs the job on a thread of its own; here it runs at once
+        let (n, r) = apply_live_block(
+            &|| s.cell.lock().ok(),
+            &s.chain[(height - 1) as usize],
+            height,
+            by_height,
+        );
+        (
+            n,
+            match r {
+                Ok(Some(job)) => job
+                    .run(&|| s.cell.lock().ok())
+                    .map(Some)
+                    .map_err(|why| format!("tail repair not written: {why}")),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            },
+        )
+    }
+
+    /// A coin as the index holds it: (height, the height that spent it).
+    fn coin_state(c: &Connection, txid: &[u8; 32]) -> (i64, Option<i64>) {
+        c.query_row(
+            "SELECT height, spent_height FROM out WHERE txid=?1 AND n=0",
+            [txid.to_vec()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// Output rows the index holds for a transaction (0: none).
+    fn tx_rows(c: &Connection, txid: &[u8; 32]) -> usize {
+        c.query_row(
+            "SELECT COUNT(*) FROM out WHERE txid=?1",
+            [txid.to_vec()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The chain as the builder's audit reads it.
+    fn memory_chain(blocks: &[crate::legacy::Block]) -> Chain {
+        let mut chain = Chain::new(1, blocks.len() as u64);
+        for (i, b) in blocks.iter().enumerate() {
+            chain.set(i as u64 + 1, b.hash(), real_txs(b));
+        }
+        chain
+    }
+
+    /// The defect state, asserted whole: the index at h12 on the lost branch,
+    /// serving nobody.
+    fn assert_lost_branch(s: &mut ForkScene) {
+        assert_eq!(index_height(&s.c), 12);
+        for (i, b) in s.lost.iter().enumerate() {
+            assert_eq!(block_at(&s.c, 11 + i as u64).unwrap(), Some(b.hash()));
+        }
+        assert_eq!(
+            index_tip_hash(&s.c),
+            Some(s.lost[1].hash()),
+            "the stamp still names the lost block"
+        );
+        assert_eq!(spendable(&mut s.c), FORK_DEFECT);
+        let (c1, c2) = (&s.lost[0].vtx[0].hash(), &s.lost[1].vtx[0].hash());
+        assert_eq!(
+            (tx_rows(&s.c, c1), tx_rows(&s.c, c2)),
+            (2, 1),
+            "the lost branch's rows are all there"
+        );
+        assert_eq!(coin_state(&s.c, &s.chain[4].vtx[0].hash()), (5, Some(11)));
+        assert_eq!(coin_state(&s.c, &s.chain[5].vtx[0].hash()), (6, Some(12)));
+        // the chain's h12 is not the block the index stamps
+        assert!(
+            !authority_with_lag(facts(&s.c), 13, Some(s.chain[11].hash()), MAX_INDEX_LAG)
+                .authoritative,
+            "this index serves nobody"
+        );
+    }
+
+    /// (item 54 B-iii) The node accepted the chain's h13 while the index
+    /// stood on the lost branch at h12. The in-order write lands on the
+    /// orphan and is refused — and the same call hands back the repair,
+    /// which run repairs the tail: the lost
+    /// branch's rows are gone, the chain's spend is marked where the chain
+    /// spends and the lost branch's spend is unmarked, the coverage stamp
+    /// names the chain's block at the top, the builder's own audit finds
+    /// nothing left, and the same-chain proof holds at once.
+    #[test]
+    fn a_refused_write_above_an_orphan_repairs_the_tail_in_process() {
+        let mut s = fork_scene("tail-repaired");
+        assert_lost_branch(&mut s);
+        let by_height = store_of(s.chain.clone());
+        let (caught_up, r) = fork_write(&s, 13, Some(&by_height));
+        assert_eq!(
+            caught_up, 0,
+            "nothing was written by the catch-up's own path"
+        );
+        let rep = r
+            .expect("the tail can be repaired")
+            .expect("a repair, not a plain write");
+        assert_eq!((rep.fork, rep.top), (11, 13));
+        let got = (
+            rep.report.blocks_reapplied,
+            rep.report.phantom_outputs,
+            rep.report.reheighted,
+            rep.report.markings_fixed,
+            rep.report.tx_rows_removed + rep.report.tx_rows_moved,
+        );
+        assert_eq!(got, (3, 3, 0, 2, 2), "D0, D1, D2 written; C1's two rows and C2's one removed; coin 5 re-marked, coin 6 unmarked; two history rows removed");
+        // one line, in the shape a journal search counts
+        assert_eq!(
+            rep.to_string(),
+            "fork at h11: tail repaired in-process — 3 block(s), 3 output row(s), 2 spend marking(s), 2 history row(s); index at h13"
+        );
+        // the index top holds the chain's blocks, and only those
+        assert_eq!(index_height(&s.c), 13);
+        for h in 11..=13 {
+            assert_eq!(
+                block_at(&s.c, h).unwrap(),
+                Some(s.chain[(h - 1) as usize].hash())
+            );
+        }
+        assert_eq!(
+            index_tip_hash(&s.c),
+            Some(s.chain[12].hash()),
+            "THE STAMP names the chain's block at the top"
+        );
+        let (c1, c2) = (&s.lost[0].vtx[0].hash(), &s.lost[1].vtx[0].hash());
+        assert_eq!(
+            (tx_rows(&s.c, c1), tx_rows(&s.c, c2)),
+            (0, 0),
+            "the lost branch's output rows are gone"
+        );
+        assert_eq!(
+            coin_state(&s.c, &s.chain[4].vtx[0].hash()),
+            (5, Some(12)),
+            "the branch's spend of coin 5 is marked"
+        );
+        assert_eq!(
+            coin_state(&s.c, &s.chain[5].vtx[0].hash()),
+            (6, None),
+            "the lost branch's spend of coin 6 is unmarked"
+        );
+        assert_eq!(spendable(&mut s.c), FORK_TRUTH);
+        // the builder's own audit finds nothing left to do
+        let report = verify_and_repair(&mut s.c, &memory_chain(&s.chain)).expect("verify");
+        assert!(report.clean, "{report:?}");
+        // the same-chain proof holds: the verdict is authoritative at once
+        assert!(
+            authority_with_lag(facts(&s.c), 13, Some(s.chain[12].hash()), MAX_INDEX_LAG)
+                .authoritative
+        );
+        // the same handle (no restart) goes on writing on its own
+        let c14 = real_block(s.chain[12].hash(), 0xD4, &[800], vec![], &p2pkh(0xA1));
+        let (caught_up, r) = apply_live_block(&|| s.cell.lock().ok(), &c14, 14, Some(&by_height));
+        assert_eq!(caught_up, 0);
+        assert!(r.unwrap().is_none(), "a plain write");
+        assert_eq!(spendable(&mut s.c), (14, 9 * 1000 + 500 + 1020 + 500 + 800));
+        assert_eq!(index_tip_hash(&s.c), Some(c14.hash()));
+    }
+
+    /// (item 54 B-iii) The index stands at h11 with the orphan and NOTHING
+    /// recorded above it; the chain's h13 arrives with h12 in hand. The walk
+    /// does not stop at the first unrecorded height — the lost block sits
+    /// lower, and is found.
+    #[test]
+    fn a_tail_repair_walks_past_unrecorded_heights_above_the_index_top() {
+        let mut s = lag_scene("tail-unrecorded-above");
+        let script = p2pkh(0xA1);
+        let ten = s.chain[9].hash();
+        let mint = real_block(
+            ten,
+            0xC1,
+            &[600, 420],
+            vec![(s.chain[4].vtx[0].hash(), 0u32)],
+            &script,
+        );
+        {
+            let mut g = s.cell.lock().unwrap();
+            g.as_mut()
+                .unwrap()
+                .apply(&mint, 11)
+                .expect("the mint, while it is the tip");
+        }
+        assert_eq!(
+            (index_height(&s.c), block_at(&s.c, 12).unwrap()),
+            (11, None)
+        );
+        let by_height = store_of(s.chain.clone());
+        let (caught_up, r) = daemon_write(&s, 13, Some(&by_height));
+        let rep = r.expect("repaired").expect("a repair");
+        assert_eq!((caught_up, rep.fork, rep.top), (0, 11, 13));
+        assert_eq!(
+            (rep.report.phantom_outputs, rep.report.markings_fixed),
+            (2, 1),
+            "the mint's two rows removed; coin 5's marking moved to the chain's h12"
+        );
+        for h in 11..=13 {
+            assert_eq!(
+                block_at(&s.c, h).unwrap(),
+                Some(s.chain[(h - 1) as usize].hash())
+            );
+        }
+        assert_eq!(index_tip_hash(&s.c), Some(s.chain[12].hash()));
+        // nine coins (all but coin 5) + 500 + 600 + 420 + 500
+        assert_eq!(spendable(&mut s.c), (13, 9 * 1000 + 500 + 1020 + 500));
+        let report = verify_and_repair(&mut s.c, &memory_chain(&s.chain)).expect("verify");
+        assert!(report.clean, "{report:?}");
+    }
+
+    /// (item 54 B-iii) A repair is only ever made against a PROVEN run of
+    /// the chain. The store served h12 for the catch-up; by the walk the
+    /// chain's slot at h11 is gone: nothing is written — the index, its rows
+    /// and its stamp are exactly as they stood — and the refusal says why.
+    #[test]
+    fn a_tail_repair_writes_nothing_when_a_body_is_missing() {
+        let mut s = fork_scene("tail-missing-body");
+        let chain = s.chain.clone();
+        // the catch-up's read of h12 is the store's first ask; every later
+        // one is the walk's
+        let asked = std::cell::Cell::new(0);
+        let by_height = move |h: u64| {
+            let n = asked.get() + 1;
+            asked.set(n);
+            if n >= 2 && h == 11 {
+                return None; // the slot is gone by the walk
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = fork_write(&s, 13, Some(&by_height));
+        let e = r.expect_err("no repair against a chain the store cannot show");
+        assert!(
+            e.starts_with("index holds orphaned block")
+                && e.contains("at h12, not this block's parent")
+                && e.ends_with(
+                    "tail repair not taken: the chain's body at h11 is not in the store — not repairing against a chain the store cannot show (the catch-up builder rewinds it)"
+                ),
+            "{e}"
+        );
+        assert_eq!(caught_up, 0);
+        assert_lost_branch(&mut s);
+    }
+
+    /// (item 54 B-iii) The store serves a body the chain's block does not
+    /// name as its parent — the node's own lost block, out of the store's
+    /// appendix, at a height whose chain slot was dropped. It fails the
+    /// link: nothing is written.
+    #[test]
+    fn a_tail_repair_writes_nothing_against_a_body_that_does_not_link() {
+        let mut s = fork_scene("tail-unlinked-body");
+        let chain = s.chain.clone();
+        let lost = s.lost[0].clone();
+        let asked = std::cell::Cell::new(0);
+        let by_height = move |h: u64| {
+            let n = asked.get() + 1;
+            asked.set(n);
+            if n >= 2 && h == 11 {
+                return Some(lost.clone()); // the raced body
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = fork_write(&s, 13, Some(&by_height));
+        let e = r.expect_err("no repair against a body that does not link");
+        assert!(
+            e.ends_with(
+                "tail repair not taken: the store's body at h11 is not the parent the chain's h12 names — not repairing against it"
+            ),
+            "{e}"
+        );
+        assert_eq!(caught_up, 0);
+        assert_lost_branch(&mut s);
+    }
+
+    /// (item 54 B-iii) The repair writes only onto the index it planned
+    /// for. A catch-up run lands while the walk reads the store and moves
+    /// the index: nothing is written by the repair — not a row, not the
+    /// stamp — and the refusal says so.
+    #[test]
+    fn a_tail_repair_writes_nothing_when_the_index_moved_under_it() {
+        let mut s = fork_scene("tail-index-moved");
+        let chain = s.chain.clone();
+        let builder = open(&db_path(s.dir.path())).expect("builder connection");
+        let asked = std::cell::Cell::new(0);
+        let by_height = move |h: u64| {
+            let n = asked.get() + 1;
+            asked.set(n);
+            if n == 2 {
+                // the walk's first read: the 10-minute run lands now and
+                // writes the accepted block itself
+                builder_write(&builder, &chain, 13, 13);
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = fork_write(&s, 13, Some(&by_height));
+        let e = r.expect_err("the index the plan was made for is gone");
+        assert!(
+            e.ends_with(
+                "tail repair not written: the index moved beneath the repair (now h13) — nothing written"
+            ),
+            "{e}"
+        );
+        assert_eq!(caught_up, 0);
+        // exactly what the builder's run left: its block at h13 on top of
+        // the lost branch, and the lost branch's stamp untouched
+        assert_eq!(index_height(&s.c), 13);
+        assert_eq!(block_at(&s.c, 13).unwrap(), Some(s.chain[12].hash()));
+        for (i, b) in s.lost.iter().enumerate() {
+            assert_eq!(block_at(&s.c, 11 + i as u64).unwrap(), Some(b.hash()));
+        }
+        assert_eq!(
+            index_tip_hash(&s.c),
+            Some(s.lost[1].hash()),
+            "the repair did not stamp"
+        );
+        assert_eq!(spendable(&mut s.c), (12, FORK_DEFECT.1 + 500));
+        // the builder's audit is what repairs this one
+        let report = verify_and_repair(&mut s.c, &memory_chain(&s.chain)).expect("verify");
+        assert!(!report.clean, "the audit finds the lost branch");
+        assert_eq!(spendable(&mut s.c), FORK_TRUTH);
+    }
+
+    /// (item 54 B-iii) The first shape DNS2's journal showed: a chain block
+    /// arrives BELOW the index's top. The index stands at h12 on the lost
+    /// branch and the chain's h11 arrives — refused, and NOT repaired: the
+    /// chain has nothing above h11 yet, so the walk cannot reach the index
+    /// top. Nothing is written. When the chain reaches h12 the same refusal
+    /// IS repaired, the index is served again under the lag rule, and h13 is
+    /// then a plain write.
+    #[test]
+    fn a_chain_block_below_the_index_top_waits_for_the_chain() {
+        let mut s = fork_scene("tail-below-top");
+        let chain = s.chain.clone();
+        // the store serves nothing above the chain's live tip
+        let tip = std::rc::Rc::new(std::cell::Cell::new(11u64));
+        let tip_in = tip.clone();
+        let by_height = move |h: u64| {
+            if h <= tip_in.get() {
+                Some(chain[(h - 1) as usize].clone())
+            } else {
+                None
+            }
+        };
+        let (caught_up, r) = fork_write(&s, 11, Some(&by_height));
+        let e = r.expect_err("behind the index top, with nothing above to prove");
+        assert!(
+            e.ends_with(
+                "index is at h12, block is h11 (builder will catch up); tail repair not taken: the index stands at h12 and the chain has no block above the accepted h11 yet — the repair waits for the chain to reach it"
+            ),
+            "{e}"
+        );
+        assert_eq!(caught_up, 0);
+        assert_lost_branch(&mut s);
+        // the chain reaches the index's top: refused for the same reason —
+        // and repaired
+        tip.set(12);
+        let (caught_up, r) = fork_write(&s, 12, Some(&by_height));
+        let rep = r.expect("repaired").expect("a repair");
+        assert_eq!((caught_up, rep.fork, rep.top), (0, 11, 12));
+        // nine coins — coin 6's lost-branch spend is unmarked — + 500 + 600 + 420
+        assert_eq!(spendable(&mut s.c), (12, 9 * 1000 + 500 + 1020));
+        assert!(
+            authority_with_lag(facts(&s.c), 13, Some(s.chain[11].hash()), MAX_INDEX_LAG)
+                .authoritative,
+            "level with the chain's h12, one behind its tip: served under the lag rule"
+        );
+        // and the next block is a plain write
+        let (caught_up, r) = fork_write(&s, 13, Some(&by_height));
+        assert_eq!(caught_up, 0);
+        assert!(r.unwrap().is_none(), "a plain write");
+        assert_eq!(spendable(&mut s.c), FORK_TRUTH);
+        let report = verify_and_repair(&mut s.c, &memory_chain(&s.chain)).expect("verify");
+        assert!(report.clean, "{report:?}");
+    }
+
+    /// (item 54 B-iii) Lock discipline on the repair path: three index-lock
+    /// windows — the range, the refused write (which ends by reading the
+    /// plan's facts), the job's writes — the scan takes none, and the
+    /// store is read in none of them.
+    #[test]
+    fn the_tail_repair_reads_the_store_outside_the_index_lock() {
+        let s = fork_scene("tail-lock-windows");
+        let chain = s.chain.clone();
+        let locks = std::sync::atomic::AtomicUsize::new(0);
+        let read_under_lock = std::sync::atomic::AtomicBool::new(false);
+        let cell = &s.cell;
+        let lock = || {
+            locks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            cell.lock().ok()
+        };
+        // The probe catches the one case that can happen on this single
+        // thread: a store read made while the caller still holds the index
+        // lock (try_lock refuses a lock this thread already holds). It is the
+        // same probe the lock-window test of the plain write uses.
+        let by_height = |h: u64| {
+            if cell.try_lock().is_err() {
+                read_under_lock.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            chain.get(h as usize - 1).cloned()
+        };
+        let (caught_up, r) = apply_live_block(&lock, &s.chain[12], 13, Some(&by_height));
+        let job = r
+            .expect("a repair is planned")
+            .expect("a job, not a plain write");
+        assert_eq!(caught_up, 0);
+        assert!(
+            job.refusal().starts_with("index holds orphaned block"),
+            "{}",
+            job.refusal()
+        );
+        let rep = job.run(&lock).expect("the job writes");
+        assert_eq!((rep.fork, rep.top), (11, 13));
+        assert_eq!(
+            locks.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "three lock windows"
+        );
+        assert!(
+            !read_under_lock.load(std::sync::atomic::Ordering::SeqCst),
+            "the store was read under the index lock"
+        );
+    }
+
+    /// (item 54 B-iii) The bound: a fork AT LIVE_CATCHUP_MAX blocks below
+    /// the accepted block is repaired; one block deeper is the builder's.
+    #[test]
+    fn a_fork_at_the_bound_is_repaired_and_one_deeper_is_the_builders() {
+        let script = p2pkh(0xA1);
+        let mut chain = Vec::new();
+        let mut prev = hash_of(0);
+        // tag + value together keep every transaction's bytes distinct
+        for h in 1..=(10 + LIVE_CATCHUP_MAX + 20) {
+            let b = real_block(
+                prev,
+                (h % 250) as u8 + 1,
+                &[(h / 250) as i64 + 1],
+                vec![],
+                &script,
+            );
+            prev = b.hash();
+            chain.push(b);
+        }
+        let anchor_h = 10 + LIVE_CATCHUP_MAX;
+        let anchor = &chain[(anchor_h - 1) as usize];
+        let snap = TailSnapshot {
+            height: anchor_h,
+            tip: Some([0xEE; 32]),
+        };
+        let by_height = store_of(chain.clone());
+        // the index recorded a foreign block at every height from h11 up,
+        // and the chain's own at h10: LIVE_CATCHUP_MAX blocks to repair
+        let records: TailRecords = (11..anchor_h)
+            .map(|h| (h, [0xEE; 32]))
+            .chain((1..=10).map(|h| (h, chain[(h - 1) as usize].hash())))
+            .collect();
+        let plan = plan_tail_repair(&snap, &records, anchor, anchor_h, &by_height)
+            .expect("a fork at the limit is repaired");
+        assert_eq!(
+            (plan.fork, plan.top, plan.blocks.len() as u64),
+            (11, anchor_h, LIVE_CATCHUP_MAX)
+        );
+        for (i, b) in plan.blocks.iter().enumerate() {
+            assert_eq!(
+                b.hash(),
+                chain[10 + i].hash(),
+                "oldest first, the chain's own"
+            );
+        }
+        // one block deeper: the foreign record reaches h10 too
+        let mut deeper = records.clone();
+        deeper.insert(10, [0xEE; 32]);
+        let e = plan_tail_repair(&snap, &deeper, anchor, anchor_h, &by_height)
+            .expect_err("one deeper is the builder's");
+        assert!(
+            e.contains(&format!(
+                "the fork reaches below h10, more than {LIVE_CATCHUP_MAX} blocks"
+            )),
+            "{e}"
+        );
+    }
+
+    /// (item 54 B-iii) The job's scan is taken on a connection that cannot
+    /// write and holds no index lock: the whole `out` table is read while
+    /// `gettxout` and the accept path keep theirs, and the lock is taken
+    /// once — for the writes.
+    #[test]
+    fn the_scan_is_read_only_and_takes_no_index_lock() {
+        use std::sync::atomic::Ordering;
+        let mut s = fork_scene("tail-scan-readonly");
+        assert_lost_branch(&mut s);
+        let ro = open_readonly(&db_path(s.dir.path())).expect("a read-only connection");
+        let e = ro
+            .execute("INSERT INTO meta(k,v) VALUES('probe','x')", [])
+            .expect_err("a read-only connection cannot write");
+        assert!(e.to_string().contains("readonly"), "{e}");
+        let by_height = store_of(s.chain.clone());
+        let locks = std::sync::atomic::AtomicUsize::new(0);
+        let cell = &s.cell;
+        let lock = || {
+            locks.fetch_add(1, Ordering::SeqCst);
+            cell.lock().ok()
+        };
+        let (n, r) = apply_live_block(&lock, &s.chain[12], 13, Some(&by_height));
+        let job = r.expect("a repair is planned").expect("a job");
+        assert_eq!(n, 0);
+        assert_eq!(
+            locks.load(Ordering::SeqCst),
+            2,
+            "the plan took two lock windows"
+        );
+        let rep = job.run(&lock).expect("the job writes");
+        assert_eq!((rep.fork, rep.top), (11, 13));
+        assert_eq!(
+            locks.load(Ordering::SeqCst),
+            3,
+            "the job took ONE lock window — the writes; the scan took none"
+        );
+        assert_eq!(spendable(&mut s.c), FORK_TRUTH);
+    }
+
+    /// (item 54 B-iii) A scan is a snapshot. When the catch-up builder
+    /// repairs the same range between the scan and the write, every edit
+    /// finds its row already gone or already fixed: nothing is touched,
+    /// nothing is counted, and the index is the builder's — with the stamp
+    /// the job came to write.
+    #[test]
+    fn a_scan_applied_after_a_builder_run_touches_nothing() {
+        let mut s = fork_scene("tail-scan-stale");
+        assert_lost_branch(&mut s);
+        let by_height = store_of(s.chain.clone());
+        let (snap, plan) = {
+            let mut g = s.cell.lock().unwrap();
+            let ix = g.as_mut().unwrap();
+            let snap = ix.tail_snapshot().unwrap();
+            let records = ix.tail_records(1, snap.height).unwrap();
+            let plan = plan_tail_repair(&snap, &records, &s.chain[11], 12, &by_height)
+                .expect("planned to the chain's h12");
+            (snap, plan)
+        };
+        assert_eq!((plan.fork, plan.top), (11, 12));
+        let run = LinkedRun::new(plan.fork, &plan.blocks);
+        let scan = {
+            let ro = open_readonly(&db_path(s.dir.path())).expect("read-only");
+            let snap = ro.unchecked_transaction().expect("read begin");
+            reconcile_scan(&snap, &run, plan.fork, plan.top).expect("scan")
+        };
+        assert!(
+            !scan.gone.is_empty() && !scan.marks.is_empty(),
+            "the scan saw the lost branch: {scan:?}"
+        );
+        // the 10-minute run lands now and repairs the range itself
+        {
+            let tx = s.c.transaction().expect("builder begin");
+            let mut report = RepairReport::default();
+            reconcile_on(
+                &tx,
+                &memory_chain(&s.chain),
+                plan.fork,
+                plan.top,
+                &mut report,
+            )
+            .expect("builder reconcile");
+            tx.commit().expect("builder commit");
+            assert!(report.phantom_outputs >= 3, "{report:?}");
+        }
+        let after_builder = (12, 9 * 1000 + 500 + 1020);
+        assert_eq!(spendable(&mut s.c), after_builder);
+        // the stale scan, applied onto the builder's index
+        let rep = {
+            let mut g = s.cell.lock().unwrap();
+            let ix = g.as_mut().unwrap();
+            ix.apply_tail_repair(&snap, plan, &scan)
+                .expect("written onto the builder's index")
+        };
+        assert_eq!((rep.fork, rep.top), (11, 12));
+        assert_eq!(
+            (
+                rep.report.blocks_reapplied,
+                rep.report.phantom_outputs,
+                rep.report.reheighted,
+                rep.report.markings_fixed,
+                rep.report.tx_rows_removed + rep.report.tx_rows_moved
+            ),
+            (0, 0, 0, 0, 0),
+            "every edit found its row already fixed"
+        );
+        assert_eq!(
+            spendable(&mut s.c),
+            after_builder,
+            "the builder's rows, untouched"
+        );
+        assert_eq!(
+            index_tip_hash(&s.c),
+            Some(s.chain[11].hash()),
+            "THE STAMP is the job's to write"
+        );
+        // and the same handle goes on writing on its own: h13 is a plain write
+        let (n, r) = fork_write(&s, 13, Some(&by_height));
+        assert_eq!(n, 0);
+        assert!(r.unwrap().is_none(), "a plain write");
+        assert_eq!(spendable(&mut s.c), FORK_TRUTH);
+        let report = verify_and_repair(&mut s.c, &memory_chain(&s.chain)).expect("verify");
+        assert!(report.clean, "{report:?}");
     }
 }

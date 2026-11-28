@@ -11793,6 +11793,17 @@ fn init_addrindex(state_dir: &std::path::Path) {
 /// writes, so after the first out-of-step block EVERY later block was
 /// refused ("index is at h2219657, block is h2220420" for 16 hours on DNS2)
 /// and the index moved only when the 10-minute builder ran.
+///
+/// (item 54 B-iii) When the index holds a block the chain has replaced, the
+/// same call hands the repair back as a job. It is RUN ON A THREAD OF ITS
+/// OWN, never on the accept path: its scan is the whole `out` table (0.7 to
+/// 7 s warm, 48 to 170 s cold on DNS2's 1.47 GB index; two read-only runs,
+/// 2026-11-28), and the
+/// index lock it must not hold that long is `gettxout`'s too. Each outcome
+/// is logged in ONE line a journal search can count. Before this the write
+/// was refused until the builder's next run — 62.7 minutes across 5 windows
+/// in 12.3 hours of DNS2's journal — and the wallet served its unspent list
+/// from the replay snapshot meanwhile.
 fn addrindex_apply(
     block: &tri7_core::legacy::Block,
     height: u64,
@@ -11802,14 +11813,102 @@ fn addrindex_apply(
     let (caught_up, r) =
         tri7_core::addrindex::apply_live_block(&|| cell.lock().ok(), block, height, by_height);
     match r {
-        Ok(()) => {
+        Ok(None) => {
             if caught_up > 0 {
                 log(&format!(
                     "addrindex: caught up in-process — {caught_up} block(s) beneath h{height}"
                 ));
             }
         }
+        Ok(Some(job)) => spawn_tail_repair(job, height),
         Err(e) => log(&format!("addrindex: h{height} skipped: {e}")),
+    }
+}
+
+/// (item 54 B-iii) One tail repair at a time. Every block that arrives on a
+/// stuck tail plans a repair of its own; while one runs the others are
+/// dropped — the running one brings the index in line, and the next block's
+/// catch-up writes the gap.
+static TAIL_REPAIR_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// (item 54 B-iii) When the last tail repair that wrote nothing ended. A
+/// repair that fails has scanned the whole index to fail the same way, so
+/// none is started for [`TAIL_REPAIR_COOLDOWN`] after one — the builder's
+/// ten-minute run covers the wait. One that landed clears it: a second fork
+/// right after it is repaired at once.
+static TAIL_REPAIR_FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// (item 54 B-iii) The pause after a tail repair that wrote nothing.
+const TAIL_REPAIR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// (item 54 B-iii) Clears [`TAIL_REPAIR_RUNNING`] however the thread ends —
+/// a panic in the repair must not leave every later one dropped.
+struct RunningGuard;
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        TAIL_REPAIR_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// (item 54 B-iii) Run a planned tail repair off the accept path and log
+/// its outcome. The accept path is never delayed by it and never holds the
+/// index lock for its scan (`TailRepairJob::run`).
+fn spawn_tail_repair(job: tri7_core::addrindex::TailRepairJob, height: u64) {
+    use std::sync::atomic::Ordering;
+    if let Some(t) = TAIL_REPAIR_FAILED_AT.lock().ok().and_then(|g| *g) {
+        if t.elapsed() < TAIL_REPAIR_COOLDOWN {
+            log(&format!(
+                "addrindex: h{height} skipped: {}; tail repair on cooldown after one that wrote nothing",
+                job.refusal()
+            ));
+            return;
+        }
+    }
+    if TAIL_REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
+        log(&format!(
+            "addrindex: h{height} skipped: {}; a tail repair is already running",
+            job.refusal()
+        ));
+        return;
+    }
+    let Some(cell) = LIVE_ADDRINDEX.get() else {
+        TAIL_REPAIR_RUNNING.store(false, Ordering::SeqCst);
+        return;
+    };
+    log(&format!(
+        "addrindex: h{height} skipped: {}; tail repair started off the accept path",
+        job.refusal()
+    ));
+    let spawned = std::thread::Builder::new()
+        .name("addrindex-tail-repair".into())
+        .spawn(move || {
+            let _guard = RunningGuard;
+            let landed = match job.run(&|| cell.lock().ok()) {
+                Ok(rep) => {
+                    log(&format!("addrindex: {rep} (for the write at h{height})"));
+                    true
+                }
+                Err(why) => {
+                    log(&format!(
+                        "addrindex: tail repair not written: {why} (for the write at h{height})"
+                    ));
+                    false
+                }
+            };
+            if let Ok(mut g) = TAIL_REPAIR_FAILED_AT.lock() {
+                *g = if landed {
+                    None
+                } else {
+                    Some(std::time::Instant::now())
+                };
+            }
+        });
+    if let Err(e) = spawned {
+        TAIL_REPAIR_RUNNING.store(false, Ordering::SeqCst);
+        log(&format!("addrindex: tail repair thread not started: {e}"));
     }
 }
 
