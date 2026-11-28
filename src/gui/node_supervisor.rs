@@ -3151,12 +3151,51 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     /// bind :0 to learn a free loopback port, then drop the socket so the
-    /// port is dead (nothing listening)
+    /// port is dead (nothing listening).
+    ///
+    /// (2026-11-28, macOS CI) NEVER THE SAME NUMBER TWICE IN ONE TEST PROCESS.
+    /// The OS may hand a just-released number to the very next caller, and the
+    /// lib tests run in parallel: two tests then share one RPC port, the
+    /// supervisor of the one adopts the other's stub node at step 1 ("a node
+    /// already answers") and never spawns a run of its own —
+    /// `tor_port_drift_under_a_live_run_...` failed exactly that way on a
+    /// macOS runner (1005 passed, 1 failed; `run_tor_port` was `None`). Every
+    /// number handed out is remembered; a duplicate's listener is held bound
+    /// until a fresh one is found so it cannot be handed out again. Bounded:
+    /// if the OS keeps returning numbers already handed out, the last one is
+    /// returned as before (a collision is possible again, a hang is not).
     fn free_dead_port() -> u16 {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
+        use std::collections::HashSet;
+        static HANDED_OUT: std::sync::Mutex<Option<HashSet<u16>>> = std::sync::Mutex::new(None);
+        let mut held = Vec::new();
+        let mut port = 0;
+        for _ in 0..200 {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            port = l.local_addr().unwrap().port();
+            let fresh = HANDED_OUT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(HashSet::new)
+                .insert(port);
+            if fresh {
+                return port; // `l` is dropped here: the port is dead, and ours alone
+            }
+            held.push(l);
+        }
         port
+    }
+
+    #[test]
+    fn free_dead_port_never_hands_out_the_same_number_twice() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for _ in 0..300 {
+            let p = free_dead_port();
+            assert!(
+                seen.insert(p),
+                "port {p} was handed out twice in one process"
+            );
+        }
     }
 
     /// Tests that write/read the PROCESS-GLOBAL shutdown flags must not run
@@ -6289,7 +6328,12 @@ mod tests {
             "the stub node never came up"
         );
         assert_eq!(n.tor_status(), TorStatus::System(sys));
-        assert_eq!(n.run_tor_port, Some(sys));
+        assert_eq!(
+            n.run_tor_port,
+            Some(sys),
+            "no run of ours is dialling anything: the supervisor found another node answering on the RPC \
+             port (step 1 adopts it) and spawned nothing — a port shared with another test"
+        );
         assert_eq!(
             socks_arg(&argvs.lock().unwrap()[0]),
             Some(format!("127.0.0.1:{sys}"))
