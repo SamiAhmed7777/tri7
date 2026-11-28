@@ -6186,13 +6186,76 @@ static FULL_VALIDATE: AtomicBool = AtomicBool::new(false);
 
 static SIGINT_SEEN: AtomicBool = AtomicBool::new(false);
 
+/// (item 54 H) the signal `tri7_on_signal` saw last: 0 = none, else its
+/// number. Read for the exit line only. The stop itself runs on
+/// `tri7_core::shutdown::requested()` — the flag the RPC `stop` and the follow
+/// loop already share.
+static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
 #[cfg(unix)]
-extern "C" fn tri7_on_signal(_sig: i32) {
+extern "C" fn tri7_on_signal(sig: i32) {
     SIGINT_SEEN.store(true, Ordering::Relaxed);
+    LAST_SIGNAL.store(sig, Ordering::Relaxed);
+    // (item 54 H) a signal ends the run exactly like the RPC `stop`. Until
+    // this line the handler set SIGINT_SEEN only, which just the from-zero
+    // walk reads; the follow loop — the steady state of every fleet node —
+    // reads shutdown::requested(), which no signal set. So SIGTERM left the
+    // run going (it kept staking) until systemd's SIGKILL 90 s later, and
+    // every stop was a kill. Plain atomic stores: async-signal-safe.
+    tri7_core::shutdown::request();
 }
 
-/// Install SIGINT/SIGTERM handlers that only set a flag: the sync loop checks
-/// it, persists tipstate + stops — the sync is RESUMABLE across restarts.
+/// (item 54 H) why a stop is pending, for the log line: the signal that asked
+/// for it, else the RPC `stop`.
+#[cfg(unix)]
+fn stop_reason() -> &'static str {
+    match LAST_SIGNAL.load(Ordering::Relaxed) {
+        libc::SIGINT => "SIGINT",
+        libc::SIGTERM => "SIGTERM",
+        _ => "RPC stop",
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_reason() -> &'static str {
+    "RPC stop"
+}
+
+/// (item 54 H) sleep in short slices so a stop is honoured within one slice
+/// instead of after the whole wait. Returns true when a stop is pending.
+fn sleep_unless_stopped(total: Duration) -> bool {
+    const SLICE: Duration = Duration::from_millis(200);
+    let mut left = total;
+    loop {
+        if tri7_core::shutdown::requested() {
+            return true;
+        }
+        if left.is_zero() {
+            return false;
+        }
+        let step = left.min(SLICE);
+        std::thread::sleep(step);
+        left -= step;
+    }
+}
+
+/// (item 54 H) a stop that arrives while the boot is still parked (no chain
+/// state loaded yet): there is nothing to flush, so exit 0 at once. Before
+/// this the two park loops slept on and systemd's stop ended in a SIGKILL —
+/// on a fresh install, or on any node whose transports were down.
+fn stop_before_state(phase: &str) -> ! {
+    let line = format!(
+        "shutdown requested ({}) during boot ({phase}): no chain state loaded, nothing to flush — exiting 0",
+        stop_reason()
+    );
+    log(&line);
+    node_exit(0)
+}
+
+/// Install SIGINT/SIGTERM handlers that only set flags — no allocation, no
+/// lock: the shared stop flag, polled by every loop since item 54 H, and
+/// `SIGINT_SEEN`, read by the from-zero walk. A loop that sees the flag
+/// persists tipstate + stops — the sync is RESUMABLE across restarts.
 #[cfg(unix)]
 fn install_signal_handlers() {
     unsafe {
@@ -16107,6 +16170,11 @@ pub fn main_args(argv: &[String]) -> i32 {
     // previous run's stop in the single-exe GUI. Clear it BEFORE anything
     // reads it, so an RPC `stop` ends exactly the run it was issued against.
     tri7_core::shutdown::reset();
+    // (item 54 H) the signal flags are process-global too: clear them with the
+    // stop flag, or a respawned run (the GUI supervisor) would read the last
+    // run's SIGINT and end its from-zero walk at the first height
+    SIGINT_SEEN.store(false, Ordering::Relaxed);
+    LAST_SIGNAL.store(0, Ordering::Relaxed);
     FULL_VALIDATE.store(cfg.full_validate, Ordering::Relaxed);
     if cfg.status {
         status_exit(&cfg); // early: no conf read, no network
@@ -16217,6 +16285,11 @@ pub fn main_args(argv: &[String]) -> i32 {
         // dial connects. Zero configured targets still means genuinely
         // headless (nothing to park for).
         loop {
+            // (item 54 H) a signal that arrived during boot is honoured here
+            // too, before the first dial
+            if tri7_core::shutdown::requested() {
+                stop_before_state("attach");
+            }
             match try_connect(&cfg, &mut stats, 0, 0) {
                 Some((p, idx)) => {
                     outbound_start = (idx + 1) % cfg.peers.len();
@@ -16237,7 +16310,10 @@ pub fn main_args(argv: &[String]) -> i32 {
                          down, redialing in 20s (the supervisor respawns tor/i2p under us)",
                         cfg.peers.len()
                     ));
-                    std::thread::sleep(Duration::from_secs(20));
+                    // (item 54 H) a stop ends the park within one slice
+                    if sleep_unless_stopped(Duration::from_secs(20)) {
+                        stop_before_state("attach, parked: transports down");
+                    }
                 }
             }
         }
@@ -16309,6 +16385,11 @@ pub fn main_args(argv: &[String]) -> i32 {
         // wedge-looping. PARK instead: stay in the run, redial on a fixed
         // cadence; the GUI respawns transports under us every ~15s.
         let gen = loop {
+            // (item 54 H) a signal that arrived during boot is honoured here
+            // too, before the next genesis fetch
+            if tri7_core::shutdown::requested() {
+                stop_before_state("from-zero genesis fetch");
+            }
             let fetch = peers
                 .first_mut()
                 .map(|p| fetch_genesis_block(&mut p.sess, &mut stats));
@@ -16322,7 +16403,10 @@ pub fn main_args(argv: &[String]) -> i32 {
                      keeps respawning tor/i2p; retrying the dial in 20s",
                 ),
             }
-            std::thread::sleep(Duration::from_secs(20));
+            // (item 54 H) a stop ends the park within one slice
+            if sleep_unless_stopped(Duration::from_secs(20)) {
+                stop_before_state("from-zero genesis fetch, parked: transports down");
+            }
             peers.clear();
             if let Some((p, _idx)) = try_connect(&cfg, &mut stats, 0, 0) {
                 peers.push(p);
@@ -17584,7 +17668,12 @@ pub fn main_args(argv: &[String]) -> i32 {
         // RPC `stop` and SIGTERM share this exit: the block is already
         // applied + persisted, so leaving here is a clean, resumable stop.
         if tri7_core::shutdown::requested() {
-            log("shutdown requested (RPC stop) — exiting with state persisted");
+            // (item 54 H) the line names what asked: SIGTERM / SIGINT (the
+            // handler sets this same flag since item 54 H) or the RPC `stop`
+            log(&format!(
+                "shutdown requested ({}) — exiting with state persisted",
+                stop_reason()
+            ));
             break;
         }
 
@@ -18926,7 +19015,14 @@ pub fn main_args(argv: &[String]) -> i32 {
     write_state_atomic(&cfg, &file)
         .unwrap_or_else(|e| die(EXIT_VALIDATE, &format!("write state: {}", e)));
     let st = st_shared.lock().unwrap();
-    finish(&cfg, &st, &stats, &rpc, 0, "run complete");
+    // (item 54 H) say in the journal what ended the run: a deadline, the RPC
+    // `stop`, or the signal that asked for it
+    let note = if tri7_core::shutdown::requested() {
+        format!("run complete (stopped by {})", stop_reason())
+    } else {
+        "run complete".to_string()
+    };
+    finish(&cfg, &st, &stats, &rpc, 0, &note);
 }
 
 impl Peer {
@@ -20691,6 +20787,115 @@ mod tests {
             )),
             "the release must be logged to node.log; got:\n{logged}"
         );
+    }
+
+    /// (item 54 H) a real SIGTERM ends the run through the flag the follow
+    /// loop polls, and the exit line names the signal.
+    ///
+    /// Before item 54 H the handler set SIGINT_SEEN only — which just the
+    /// from-zero walk reads — and nothing set shutdown::requested(). A node
+    /// in its follow loop (the steady state of every fleet node) therefore
+    /// ran on after a SIGTERM until systemd's SIGKILL 90 s later.
+    ///
+    /// Pinned in a child process: the handlers and the flags are
+    /// process-global. The signal is RAISED, not the handler called by hand:
+    /// with no handler installed the default action ends the child, and the
+    /// parent fails the test on its exit status.
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_sets_the_flag_the_follow_loop_polls_and_is_named() {
+        if crate::testsupport::child_process(
+            "item54h_sigterm",
+            "node_embedded::tests::sigterm_sets_the_flag_the_follow_loop_polls_and_is_named",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
+        install_signal_handlers();
+        // a clean run start
+        tri7_core::shutdown::reset();
+        SIGINT_SEEN.store(false, Ordering::Relaxed);
+        LAST_SIGNAL.store(0, Ordering::Relaxed);
+        assert!(!tri7_core::shutdown::requested());
+        assert_eq!(
+            stop_reason(),
+            "RPC stop",
+            "only the RPC `stop` can have asked so far"
+        );
+
+        // (the signal is raised in-process; the handler runs before raise returns)
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        assert!(
+            SIGINT_SEEN.load(Ordering::Relaxed),
+            "the from-zero walk reads this flag"
+        );
+        assert!(
+            tri7_core::shutdown::requested(),
+            "the follow loop polls this flag: without it a SIGTERM never ends a running node"
+        );
+        assert!(
+            !tri7_core::shutdown::rpc_stopped(),
+            "a signal is not an operator stop (TRI7-RPC-02)"
+        );
+        assert_eq!(stop_reason(), "SIGTERM");
+
+        // the next run starts clean, and SIGINT is told apart from SIGTERM
+        tri7_core::shutdown::reset();
+        SIGINT_SEEN.store(false, Ordering::Relaxed);
+        LAST_SIGNAL.store(0, Ordering::Relaxed);
+        assert!(!SIGINT_SEEN.load(Ordering::Relaxed));
+        assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+        assert!(tri7_core::shutdown::requested());
+        assert_eq!(stop_reason(), "SIGINT");
+
+        // leave the process-global flags as the next run finds them
+        tri7_core::shutdown::reset();
+        SIGINT_SEEN.store(false, Ordering::Relaxed);
+        LAST_SIGNAL.store(0, Ordering::Relaxed);
+    }
+
+    /// (item 54 H) a parked boot honours a stop within one slice, not after
+    /// the whole wait — and sleeps the whole time when nothing asks.
+    ///
+    /// Pinned in a child process: the stop flag is process-global.
+    #[cfg(unix)]
+    #[test]
+    fn parked_sleep_ends_within_one_slice_of_a_stop() {
+        if crate::testsupport::child_process(
+            "item54h_parksleep",
+            "node_embedded::tests::parked_sleep_ends_within_one_slice_of_a_stop",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
+        tri7_core::shutdown::reset();
+        // a stop 500 ms into a 30 s park: the park must end at once
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            tri7_core::shutdown::request();
+        });
+        let t0 = Instant::now();
+        let stopped = sleep_unless_stopped(Duration::from_secs(30));
+        let waited = t0.elapsed();
+        assert!(stopped, "a pending stop must end the park");
+        assert!(
+            waited >= Duration::from_millis(400) && waited < Duration::from_secs(10),
+            "the park must end shortly after the stop, not after the whole wait: {waited:?}"
+        );
+
+        // nothing asks: the whole time is slept, and the park reports no stop
+        tri7_core::shutdown::reset();
+        let t1 = Instant::now();
+        let stopped = sleep_unless_stopped(Duration::from_millis(700));
+        let waited = t1.elapsed();
+        assert!(!stopped, "no stop was requested");
+        assert!(
+            waited >= Duration::from_millis(700),
+            "the whole wait was slept: {waited:?}"
+        );
+        tri7_core::shutdown::reset();
     }
 
     /// (item 44c) DNS3-style self-proxy: a node started without --no-proxy
