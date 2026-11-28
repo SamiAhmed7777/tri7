@@ -741,8 +741,19 @@ mod tests {
     /// the closure — no socket, no capability token, so a port NOTHING
     /// listens on still answers (this is the branch that ends the 401
     /// "Not connected yet" + 0.000 TRI freeze).
+    ///
+    /// Pinned in a child process: the stub below is the run's every-address
+    /// registration, which is process-global (`node_embedded::set_local_rpc`).
     #[test]
     fn rpc_call_routes_in_process_when_the_embedded_dispatcher_is_live() {
+        if crate::testsupport::child_process(
+            "rpc-routes-in-process",
+            "gui::rpc_client::tests::rpc_call_routes_in_process_when_the_embedded_dispatcher_is_live",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
         let _serial = serial();
         crate::node_embedded::set_local_rpc(Box::new(|method, params| {
             Ok(serde_json::json!({
@@ -1006,8 +1017,19 @@ mod tests {
 
     /// A run counts as answering only while completions keep coming; a run
     /// that has completed nothing yet (its first seed) is never "answering".
+    ///
+    /// Pinned in a child process: the stub below is the run's every-address
+    /// registration, which is process-global (`node_embedded::set_local_rpc`).
     #[test]
     fn only_a_completed_call_counts_as_the_node_answering() {
+        if crate::testsupport::child_process(
+            "liveness-completed-call",
+            "gui::rpc_client::tests::only_a_completed_call_counts_as_the_node_answering",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
         let _serial = serial();
         crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
         // dispatcher up, nothing completed yet
@@ -1028,8 +1050,22 @@ mod tests {
     /// The hang this exists for: a call that went into the node and never came
     /// back. The caller is shown the previous answer, so rpc_call is `Ok` —
     /// and the liveness stamp must not move, or a deadlocked node looks alive.
+    ///
+    /// Pinned in a child process: the stub below is the run's every-address
+    /// registration, which is process-global (`node_embedded::set_local_rpc`),
+    /// and it is held for this test's whole length. In the child no other
+    /// test can refresh the stamp either, so the retry loop below normally
+    /// ends on its first attempt.
     #[test]
     fn a_call_that_never_comes_back_does_not_count_as_answering() {
+        if crate::testsupport::child_process(
+            "liveness-stuck-call",
+            "gui::rpc_client::tests::a_call_that_never_comes_back_does_not_count_as_answering",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
         let _serial = serial();
         // a run is live for the whole test: with no dispatcher no run is
         // answering and last_answer_age is rightly None (see the test below)
@@ -1100,8 +1136,19 @@ mod tests {
     /// The socket path means no in-process run is answering: it starts the
     /// liveness clock over, so a respawn's first seed is never measured
     /// against the previous run's answers.
+    ///
+    /// Pinned in a child process: the stubs below are the run's every-address
+    /// registration, which is process-global (`node_embedded::set_local_rpc`).
     #[test]
     fn a_down_dispatcher_starts_the_liveness_clock_over() {
+        if crate::testsupport::child_process(
+            "liveness-clock-over",
+            "gui::rpc_client::tests::a_down_dispatcher_starts_the_liveness_clock_over",
+        )
+        .is_some()
+        {
+            return; // the child ran the body below and passed
+        }
         let _serial = serial();
         crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
         let _ = cached_call(cache_key("getblockcount", &[]), false, slow(7, 30));

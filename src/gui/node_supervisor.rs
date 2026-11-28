@@ -1958,15 +1958,6 @@ fn socks_endpoint_answers(host: &str, port: u16) -> bool {
         .unwrap_or(false)
 }
 
-/// bind :0 to learn a free loopback port, then drop the socket so a test's
-/// stub child can bind it (the production spawn port is PINNED —
-/// BUNDLED_TOR_SOCKS_PORT for tor, the 4447 probe port for i2pd)
-#[allow(dead_code)]
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
-    l.local_addr().expect("local_addr").port()
-}
-
 /// how long the supervisor waits for the node's RPC before considering a
 /// spawn failed (cold index builds are slow — retry window is generous)
 const RPC_WAIT: Duration = Duration::from_secs(25);
@@ -3150,39 +3141,104 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::sync::atomic::AtomicUsize;
 
-    /// bind :0 to learn a free loopback port, then drop the socket so the
-    /// port is dead (nothing listening).
+    /// The range every port a test hands to a supervisor under test comes
+    /// from: 25000..27000 — above every well-known service and below the
+    /// dynamic range of Linux (32768..60999), macOS and Windows
+    /// (49152..65535). No literal port in the suite falls inside it.
+    const TEST_PORT_LO: u16 = 25000;
+    const TEST_PORT_HI: u16 = 27000;
+
+    /// A loopback port nothing listens on, for this test alone.
     ///
-    /// (2026-11-28, macOS CI) NEVER THE SAME NUMBER TWICE IN ONE TEST PROCESS.
-    /// The OS may hand a just-released number to the very next caller, and the
-    /// lib tests run in parallel: two tests then share one RPC port, the
-    /// supervisor of the one adopts the other's stub node at step 1 ("a node
-    /// already answers") and never spawns a run of its own —
-    /// `tor_port_drift_under_a_live_run_...` failed exactly that way on a
-    /// macOS runner (1005 passed, 1 failed; `run_tor_port` was `None`). Every
-    /// number handed out is remembered; a duplicate's listener is held bound
-    /// until a fresh one is found so it cannot be handed out again. Bounded:
-    /// if the OS keeps returning numbers already handed out, the last one is
-    /// returned as before (a collision is possible again, a hang is not).
+    /// ALWAYS FROM `TEST_PORT_LO..TEST_PORT_HI`, NEVER FROM THE OS. A dead
+    /// port is a free number, and the OS hands free numbers to whoever asks
+    /// for one: asked with `:0`, every port handed out here sat in the OS's
+    /// dynamic range, where a plain `bind("127.0.0.1:0")` anywhere in the
+    /// suite can be handed the very same number (twenty-odd tests keep such
+    /// a listener). Measured on 2026-11-28: 560 of 20000 direct zero-binds
+    /// landed on one of 200 ports handed out as dead. In this range the OS
+    /// never allocates, so no listener can appear on a test's port uninvited
+    /// — unless a SECOND test process on the same host is handed the same
+    /// number: the set of handed-out numbers is per process, so run one
+    /// suite per host at a time (CI gives each job its own runner).
+    /// `a_direct_zero_bind_can_never_land_on_a_handed_out_port` holds it.
+    ///
+    /// NEVER THE SAME NUMBER TWICE IN ONE TEST PROCESS. The tests run in
+    /// parallel; two supervisors on one RPC port adopt each other's stub at
+    /// step 1 and one of them never spawns. Every number handed out is
+    /// remembered, and each call starts its walk at the next number of the
+    /// range, so a call is one bind unless its number is already taken.
+    ///
+    /// (A macOS CI runner failed `tor_port_drift_under_a_live_run_...` on
+    /// 2026-11-28 with the signature this rule was written for —
+    /// `run_tor_port == None` — and Linux CI run 46142612741 failed the
+    /// same way WITH this rule already in place. The cause traced there was
+    /// not a shared port: a sibling test held the run's process-wide RPC
+    /// dispatcher, which answered every probe in the process. That
+    /// registration is now confined to child processes
+    /// (`node_embedded::set_local_rpc`). Both doors are shut; neither alone
+    /// was enough.)
     fn free_dead_port() -> u16 {
         use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         static HANDED_OUT: std::sync::Mutex<Option<HashSet<u16>>> = std::sync::Mutex::new(None);
-        let mut held = Vec::new();
-        let mut port = 0;
-        for _ in 0..200 {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            port = l.local_addr().unwrap().port();
+        // every call starts its walk at the next number of the range, so
+        // parallel callers rarely meet (a usize: it cannot wrap in a run)
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let span = usize::from(TEST_PORT_HI - TEST_PORT_LO);
+        let start = CALLS.fetch_add(1, AtomicOrdering::SeqCst) % span;
+        for i in 0..span {
+            let want = TEST_PORT_LO + ((start + i) % span) as u16;
+            // something real lives there: never ours, so it is skipped
+            let Ok(_held) = std::net::TcpListener::bind(("127.0.0.1", want)) else {
+                continue;
+            };
             let fresh = HANDED_OUT
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get_or_insert_with(HashSet::new)
-                .insert(port);
+                .insert(want);
             if fresh {
-                return port; // `l` is dropped here: the port is dead, and ours alone
+                return want; // `_held` is dropped here: the port is dead, and ours alone
             }
-            held.push(l);
         }
-        port
+        panic!("no port left in {TEST_PORT_LO}..{TEST_PORT_HI}: every one is handed out or occupied");
+    }
+
+    /// The contract `free_dead_port` rests on: the OS's dynamic range and
+    /// the test range never meet, so a `bind :0` can never produce a
+    /// listener on a test port. Read from the live kernel where it is
+    /// published cheaply (Linux, macOS); on other systems the 20000-bind
+    /// test below is the proof.
+    #[test]
+    fn test_ports_are_outside_the_os_dynamic_range() {
+        let os: Option<(u16, u16)> = if cfg!(target_os = "linux") {
+            std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+                .ok()
+                .and_then(|s| {
+                    let mut it = s.split_whitespace();
+                    let lo: u16 = it.next()?.parse().ok()?;
+                    let hi: u16 = it.next()?.parse().ok()?;
+                    Some((lo, hi))
+                })
+        } else if cfg!(target_os = "macos") {
+            std::process::Command::new("sysctl")
+                .args(["-n", "net.inet.ip.portrange.first"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok()?.trim().parse::<u16>().ok())
+                .map(|lo| (lo, u16::MAX))
+        } else {
+            None
+        };
+        let Some((lo, hi)) = os else {
+            return; // not published here: the zero-bind test covers it
+        };
+        assert!(
+            hi < TEST_PORT_LO || lo > TEST_PORT_HI,
+            "the OS dynamic range {lo}..{hi} overlaps the test ports {TEST_PORT_LO}..{TEST_PORT_HI}: \
+             a `bind :0` could land on a test port"
+        );
     }
 
     #[test]
@@ -3196,6 +3252,42 @@ mod tests {
                 "port {p} was handed out twice in one process"
             );
         }
+    }
+
+    /// (2026-11-28, Linux CI run 46142612741) THE HOLE THE GUARD ABOVE LEFT
+    /// OPEN. `free_dead_port` asked the OS for a number, so every port it
+    /// handed out sat inside the OS's dynamic range — where a plain
+    /// `bind :0` anywhere in the suite (twenty-odd tests keep such a
+    /// listener) can be handed the very same number. That listener then
+    /// squats on another test's "dead" RPC port; if it answers, the
+    /// supervisor adopts it at step 1 and never spawns a run of its own —
+    /// `tor_port_drift_under_a_live_run_...` failed exactly that way
+    /// (`run_tor_port` was `None`). A test port now comes from a range the
+    /// OS never hands to `:0`; this holds the line: every number handed
+    /// out, against twenty thousand direct zero-binds.
+    #[test]
+    fn a_direct_zero_bind_can_never_land_on_a_handed_out_port() {
+        let handed: Vec<u16> = (0..200).map(|_| free_dead_port()).collect();
+        let mut landed = Vec::new();
+        // held in small batches so the OS has to move on to other numbers
+        // (and the suite's other tests keep their file descriptors)
+        for _ in 0..100 {
+            let batch: Vec<_> = (0..200)
+                .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+                .collect();
+            for l in &batch {
+                let p = l.local_addr().unwrap().port();
+                if handed.contains(&p) {
+                    landed.push(p);
+                }
+            }
+        }
+        assert!(
+            landed.is_empty(),
+            "{} of 20000 direct :0 binds landed on a port handed out as dead: {:?}",
+            landed.len(),
+            landed
+        );
     }
 
     /// Tests that write/read the PROCESS-GLOBAL shutdown flags must not run
@@ -4187,7 +4279,7 @@ mod tests {
     fn tor_supervisor(dir: &Path, probe_port: u16) -> TorSupervisor {
         let mut sup = TorSupervisor::new(dir.join("node.log"));
         sup.system_probe_port = probe_port;
-        sup.bundled_probe_port = free_port();
+        sup.bundled_probe_port = free_dead_port();
         sup
     }
 
@@ -5002,7 +5094,7 @@ mod tests {
         // the Linux ephemeral range, and a parallel test's stub can transiently
         // hold it — the orphan-adoption probe would then adopt a FOREIGN test
         // socket and skip the spawn this test asserts (live-caught: 767/1).
-        n.tor.bundled_probe_port = free_port();
+        n.tor.bundled_probe_port = free_dead_port();
         let kills = n.tor.kills_handle();
         let spawns = Arc::new(AtomicUsize::new(0));
         let sc = Arc::clone(&spawns);
@@ -6065,7 +6157,7 @@ mod tests {
         let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
         n.restart_backoff_base = Duration::ZERO;
         n.tor.system_probe_port = sys;
-        n.tor.bundled_probe_port = free_port();
+        n.tor.bundled_probe_port = free_dead_port();
         let (pid_reg, resolver) =
             child_identity_pair(dir.join("tor").join("tor.exe").to_string_lossy().to_string());
         n.tor.listener_resolver = Some(resolver);
@@ -6345,6 +6437,22 @@ mod tests {
 
         // 1. up on the SYSTEM tor
         answers.store(true, Ordering::SeqCst);
+        // The precondition of everything below: NOTHING answers on the test's
+        // own rpc port until the run under test is spawned. Step 1 of
+        // ensure_running adopts whatever answers there and then spawns
+        // nothing, and the `== Some(7)` wait below cannot tell its own stub
+        // from an impostor — every stub in the suite answers 7, and so did
+        // a sibling test's process-wide RPC dispatcher (2026-11-28, Linux CI
+        // run 46142612741: `run_tor_port` was `None`). Both ways in are
+        // shut — the run's dispatcher can no longer be registered in the
+        // shared test process (`node_embedded::set_local_rpc`) and test
+        // ports come from a range the OS never hands out — and this says so
+        // if either reopens.
+        assert!(
+            answering_tip(n.rpc_port).is_none(),
+            "something already answers on the test's own rpc port {} before any run was spawned",
+            n.rpc_port
+        );
         n.ensure_running(&wallet, &dir, &[])
             .expect("tor never errors the node supervisor");
         assert!(
@@ -6355,8 +6463,8 @@ mod tests {
         assert_eq!(
             n.run_tor_port,
             Some(sys),
-            "no run of ours is dialling anything: the supervisor found another node answering on the RPC \
-             port (step 1 adopts it) and spawned nothing — a port shared with another test"
+            "no run of ours is dialling anything: the supervisor adopted whatever answered on the RPC \
+             port (step 1) and spawned nothing — see the precondition above"
         );
         assert_eq!(
             socks_arg(&argvs.lock().unwrap()[0]),

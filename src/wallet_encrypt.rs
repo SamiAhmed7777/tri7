@@ -669,9 +669,21 @@ mod tests {
             *pubkey
         );
 
-        // a wrong passphrase is rejected (the pubkey cross-check proves it)
+        // a wrong passphrase is rejected. The master key carries no checksum
+        // (the ckeys do — walletcrypto.rs:98), so rejection rides AES-CBC
+        // padding validation, which passes on uniform garbage roughly once in
+        // 256. BOTH rejection messages are correct: "wrong passphrase (the
+        // master key did not decrypt)" when the padding faults, or "mkey:
+        // master key is N bytes" on the lucky pass (N in 33..=47 for the
+        // 48-byte stored ciphertext: probed with the crate's own decrypt, a
+        // wrong key passed with a 47-byte "key"). One live hit: a full-suite
+        // run on 2026-11-28 failed this assertion with exactly
+        // "mkey: master key is 47 bytes".
         let err = decrypt_wallet(&path, "wrong passphrase").unwrap_err();
-        assert!(err.contains("wrong passphrase"), "{err}");
+        assert!(
+            err.contains("wrong passphrase") || err.starts_with("mkey: master key is"),
+            "a wrong passphrase must be rejected, however it is rejected: {err}"
+        );
 
     }
 
@@ -824,6 +836,12 @@ mod uncompressed_tests {
         assert_eq!(keys[0].1, [0x2Au8; 32], "secret matches");
         assert_eq!(keys[0].0.len(), 65, "uncompressed pubkey preserved");
         let err = decrypt_wallet(&path, "wrong").unwrap_err();
-        assert!(err.contains("wrong passphrase"), "{err}");
+        // the same two-valued rejection as in
+        // encrypted_wallet_roundtrip_and_strict_refusal (CBC padding luck,
+        // ~1-in-256, both messages a correct rejection)
+        assert!(
+            err.contains("wrong passphrase") || err.starts_with("mkey: master key is"),
+            "a wrong passphrase must be rejected, however it is rejected: {err}"
+        );
     }
 }

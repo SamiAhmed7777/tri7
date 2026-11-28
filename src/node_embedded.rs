@@ -186,7 +186,29 @@ static LOCAL_RPC: std::sync::RwLock<Option<LocalRpcFn>> = std::sync::RwLock::new
 
 /// Register the in-process dispatch closure (the node startup calls this
 /// once; tests register stubs to pin the routing).
+///
+/// In a test build this may be called ONLY inside a child process started
+/// by `testsupport::child_process`. The registration is PROCESS-GLOBAL and
+/// answers EVERY `rpc_call` in the process, whatever address is dialled —
+/// right for the wallet, which dials its one run and nothing else. The
+/// library tests share one process, so a test's stub answered every
+/// sibling's call for as long as it was held: the node supervisor's probe
+/// of a sibling's DEAD rpc port came back `Ok(7)`, it adopted a node that
+/// did not exist and never spawned the run under test
+/// (`tor_port_drift_under_a_live_run_...`, `run_tor_port == None`; Linux
+/// CI run 46142612741, 2026-11-28, after a macOS runner had failed with
+/// the same signature). The liveness tests held such a stub for seconds at
+/// a time.
+#[cfg_attr(test, track_caller)]
 pub fn set_local_rpc(f: LocalRpcFn) {
+    #[cfg(test)]
+    assert!(
+        std::env::var_os(crate::testsupport::CHILD_MARK).is_some(),
+        "set_local_rpc registers a dispatcher for EVERY address in this process, and the library \
+         tests run in parallel in one process: every sibling's rpc_call would be answered here. \
+         Pin the test in a child process first — crate::testsupport::child_process(tag, <this \
+         test's full name>), as run_surface_dies_with_the_run_and_frees_its_port does"
+    );
     if let Ok(mut g) = LOCAL_RPC.write() {
         *g = Some(f);
     }
@@ -34671,5 +34693,39 @@ mod live_bridge_tests {
         // an empty bridge (node seeding) reads as None — the GUI falls back
         LIVE_BRIDGE.lock().unwrap().take();
         assert!(live_bridge_snapshot().is_none());
+    }
+}
+
+/// The guard on `set_local_rpc`, checked where it applies: in the SHARED
+/// test process (this one).
+#[cfg(test)]
+mod set_local_rpc_tripwire_tests {
+    use super::*;
+
+    /// The run's every-address registration is refused here, with the
+    /// reason, and registers nothing. This is what keeps a stub from
+    /// answering every sibling's rpc_call (`run_tor_port == None`, Linux CI
+    /// run 46142612741); without a test on it the guard could be deleted to
+    /// "fix" a failing test and nothing would object.
+    #[test]
+    fn the_every_address_registration_is_refused_outside_a_child_process() {
+        assert!(
+            std::env::var_os(crate::testsupport::CHILD_MARK).is_none(),
+            "this test belongs in the shared test process"
+        );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(1))));
+        }))
+        .expect_err("set_local_rpc must refuse outside a child process");
+        // had the call gone through, nothing of it may outlive this test
+        clear_local_rpc();
+        // assert! with a literal message panics with a &str, with arguments
+        // with a String: accept either
+        let msg = match refused.downcast_ref::<String>() {
+            Some(s) => s.clone(),
+            None => refused.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default(),
+        };
+        assert!(msg.contains("Pin the test in a child process"), "{msg}");
+        assert!(!local_rpc_ready(), "the refused call registered nothing");
     }
 }

@@ -104,6 +104,12 @@ pub fn test_dir(tag: &str) -> TestDir {
     TestDir(path)
 }
 
+/// The environment mark `child_process` sets in the child it starts. The
+/// node's RPC bridge looks for it (`node_embedded::set_local_rpc`): a
+/// process-global dispatcher may be registered in a test process only
+/// inside such a child.
+pub const CHILD_MARK: &str = "TRI7_TEST_CHILD";
+
 /// Run the calling test's body in a FRESH COPY of this test binary.
 ///
 /// Returns `None` in the child (run the body here) and `Some(child output)`
@@ -115,14 +121,13 @@ pub fn test_dir(tag: &str) -> TestDir {
 /// process could register its own stub at any moment. In the child that
 /// state starts clean and no sibling can touch it.
 pub fn child_process(tag: &str, test: &str) -> Option<std::process::Output> {
-    const MARK: &str = "TRI7_TEST_CHILD";
-    if std::env::var(MARK).as_deref() == Ok(tag) {
+    if std::env::var(CHILD_MARK).as_deref() == Ok(tag) {
         return None;
     }
     let exe = std::env::current_exe().expect("test binary path");
     let mut child = std::process::Command::new(exe)
         .args(["--exact", test, "--test-threads=1", "--include-ignored"])
-        .env(MARK, tag)
+        .env(CHILD_MARK, tag)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
