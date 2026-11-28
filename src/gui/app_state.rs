@@ -612,6 +612,14 @@ pub struct AppState {
     /// new stakes appear by themselves (Sami: "no noticeable updates" - the
     /// only refresh trigger was the manual button).
     pub last_auto_refresh: Option<std::time::Instant>,
+    /// (2026-11-28) TIME-based cadence stamps for the two live polls that
+    /// reach the node (staking panel, peers list). They used to fire once per
+    /// ten FRAMES, and the frame rate is whatever is animating — about 120 ms
+    /// while the staking pulse is on — so the node was asked for staking info
+    /// about every 1.2 s. Each ask takes the same node locks a chain rewind
+    /// needs; five seconds is plenty for a panel.
+    pub last_staking_poll: Option<std::time::Instant>,
+    pub last_peers_poll: Option<std::time::Instant>,
 
     /// last time the full wallet history was pulled (multi-MB payload —
     /// fetched at most every 30 s, not on every status tick)
@@ -628,6 +636,10 @@ pub struct AppState {
     // ---- phase 7 milestone 2 ----
     pub staking_live: StakingLive,
     pub peers_live: PeersLive,
+    /// (2026-11-28) the node supervisor's hang witness (NodeStatusView::hung),
+    /// re-read every frame. True = the node inside the wallet is alive but has
+    /// stopped answering, and nothing can restart it in place.
+    pub node_hung: bool,
     pub messages: MessagesState,
     pub broadcast: BroadcastState,
     /// stake/payment watcher: last daemon balance observed (sats). When the
@@ -757,12 +769,15 @@ impl AppState {
             debug_info: None,
             last_history_fetch: None,
             last_auto_refresh: None,
+            last_staking_poll: None,
+            last_peers_poll: None,
             dialogs: Dialogs::default(),
             status_log,
             explorer,
             wallet_rw: None,
             allow_wallet_writes: true,
             staking_live: StakingLive::default(),
+            node_hung: false,
             peers_live: PeersLive::default(),
             notify_last_balance_sats: None,
             notify_flash: None,
@@ -2812,6 +2827,43 @@ impl AppState {
         }
     }
 
+    /// (2026-11-28) how often the staking panel and the peers list may ask
+    /// the node. Was: once per ten frames, i.e. about 1.2 s with the staking
+    /// pulse animating and 20 s idle — a cadence that depended on repaints.
+    pub const LIVE_POLL_EVERY_SECS: f32 = 5.0;
+
+    /// (2026-11-28) what the header and the status bar say while the node
+    /// inside the wallet is hung: alive, and silent past the supervisor's
+    /// confirm window. Plain words, and the one thing the user can do.
+    pub const HUNG_LABEL: &str =
+        "The wallet's network part has stopped responding. Close the wallet and open it again.";
+
+    /// (2026-11-28) pure cadence decision shared by both live polls: due when
+    /// never polled, or LIVE_POLL_EVERY_SECS after the last one.
+    pub(crate) fn live_poll_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+        last.map(|t| now.saturating_duration_since(t).as_secs_f32() >= Self::LIVE_POLL_EVERY_SECS)
+            .unwrap_or(true)
+    }
+
+    /// (2026-11-28) staking panel poll, by TIME. True when the caller should
+    /// run staking_poll_action now; stamps the clock either way it is due.
+    pub fn maybe_staking_poll(&mut self) -> bool {
+        if !Self::live_poll_due(self.last_staking_poll, std::time::Instant::now()) {
+            return false;
+        }
+        self.last_staking_poll = Some(std::time::Instant::now());
+        true
+    }
+
+    /// (2026-11-28) peers list poll, by TIME. True when due.
+    pub fn maybe_peers_poll(&mut self) -> bool {
+        if !Self::live_poll_due(self.last_peers_poll, std::time::Instant::now()) {
+            return false;
+        }
+        self.last_peers_poll = Some(std::time::Instant::now());
+        true
+    }
+
     pub fn refresh_debug_info_action(&mut self) {
         // (fused30) The embedded node's RPC stack now answers rpc_call
         // IN-PROCESS (gui::rpc_client routes through node_embedded::local_rpc
@@ -3616,8 +3668,19 @@ impl AppState {
     ///   no daemon            → 0.0, "Starting your node…" — the local
     ///                          snapshot is never resurrected as a fallback;
     ///                          unreachable-after-polling says the node
-    ///                          stopped and is restarting (UX audit HIGH-1)
+    ///                          stopped and is restarting (UX audit HIGH-1);
+    ///                          with the hang witness set it instead says the
+    ///                          node has stopped responding, and to reopen
+    ///                          (2026-11-28)
     pub fn daemon_sync_display(&self) -> (f32, String) {
+        // (2026-11-28) THE HANG WITNESS OUTRANKS A CACHED ANSWER. While the
+        // node is hung the answer engine keeps serving the last good answer, so
+        // `reachable` below stays true and the height on screen simply stops
+        // moving. Say what happened and the one thing the user can do;
+        // "restarting it…" would be a promise nothing keeps.
+        if self.node_hung {
+            return (0.0, Self::HUNG_LABEL.into());
+        }
         if let Some(di) = &self.debug_info {
             if di.reachable {
                 // GuiSync is the daemon's LIVE answer: syncing:true = mid-walk
@@ -3642,7 +3705,9 @@ impl AppState {
             }
             // reachable=false after having polled before: the node died and
             // the supervisor restarts it automatically (UX audit HIGH-1:
-            // "no tri7d RPC" could not distinguish starting from broken)
+            // "no tri7d RPC" could not distinguish starting from broken).
+            // (A hung run never reaches this arm: the witness at the top of
+            // the function speaks first, 2026-11-28.)
             return (0.0, "The node stopped — restarting it…".into());
         }
         // never polled yet: first launch / node still coming up

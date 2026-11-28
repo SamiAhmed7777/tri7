@@ -5093,3 +5093,126 @@ fn node_worker_start_returns_immediately_and_stops_promptly() {
         t1.elapsed()
     );
 }
+
+// ---------------------------------------------------------------------------
+// (2026-11-28) hang witness + time-based live polls
+// ---------------------------------------------------------------------------
+
+/// the two pure decisions behind the hang witness. They read ONE fact: how
+/// long ago the embedded node last completed a call. None (no dispatcher, or a
+/// run that has completed nothing since it started) is a first boot — starting,
+/// never hung, however long the seed takes.
+#[test]
+fn hang_witness_needs_a_run_that_answered_and_then_went_silent() {
+    use crate::gui::node_supervisor::{answered_lately, hang_confirmed, RPC_HANG_CONFIRM};
+    use std::time::Duration;
+
+    // the window is the generous one this was designed around: a long reseed
+    // can tie every handler up for over a minute and must not be called hung
+    assert_eq!(RPC_HANG_CONFIRM, Duration::from_secs(180));
+
+    // a run that has not completed a call: neither answering nor hung
+    assert!(!answered_lately(None, RPC_HANG_CONFIRM));
+    assert!(!hang_confirmed(None, RPC_HANG_CONFIRM));
+
+    // a run that has: exactly one of the two holds, and the edge is the window
+    for secs in [0u64, 60, 179, 180, 181, 3600] {
+        let age = Some(Duration::from_secs(secs));
+        let (a, h) = (answered_lately(age, RPC_HANG_CONFIRM), hang_confirmed(age, RPC_HANG_CONFIRM));
+        assert_ne!(a, h, "at {secs}s exactly one decision must hold");
+        assert_eq!(h, secs >= 180, "at {secs}s");
+    }
+    assert!(!hang_confirmed(Some(RPC_HANG_CONFIRM - Duration::from_millis(1)), RPC_HANG_CONFIRM));
+    assert!(hang_confirmed(Some(RPC_HANG_CONFIRM), RPC_HANG_CONFIRM));
+    // the window is a parameter: a test may shrink it
+    assert!(hang_confirmed(Some(Duration::from_millis(300)), Duration::from_millis(300)));
+    assert!(!hang_confirmed(Some(Duration::from_millis(299)), Duration::from_millis(300)));
+}
+
+/// the staking and peers polls are gated by TIME, with separate clocks
+#[test]
+fn live_polls_are_due_by_time_not_by_frame_count() {
+    use crate::gui::app_state::AppState;
+    use crate::gui::state as gs;
+    use std::time::{Duration, Instant};
+    let mut st = AppState::new(gs::UiConfig::default());
+
+    // never polled: due at once
+    assert!(st.maybe_staking_poll(), "first staking poll is due immediately");
+    assert!(st.maybe_peers_poll(), "first peers poll is due immediately");
+    // just polled: not due
+    assert!(!st.maybe_staking_poll());
+    assert!(!st.maybe_peers_poll());
+
+    // the pure rule at its edges
+    let now = Instant::now();
+    assert!(AppState::live_poll_due(None, now));
+    assert!(!AppState::live_poll_due(Some(now), now));
+    assert!(!AppState::live_poll_due(Some(now - Duration::from_millis(4_900)), now));
+    assert!(AppState::live_poll_due(Some(now - Duration::from_millis(5_100)), now));
+    assert!(!AppState::live_poll_due(Some(now + Duration::from_secs(60)), now));
+    assert_eq!(AppState::LIVE_POLL_EVERY_SECS, 5.0);
+
+    // two independent clocks: staking overdue, peers fresh
+    st.last_staking_poll = Some(Instant::now() - Duration::from_secs(6));
+    st.last_peers_poll = Some(Instant::now() - Duration::from_secs(1));
+    assert!(st.maybe_staking_poll());
+    assert!(!st.maybe_peers_poll());
+}
+
+/// the header must not promise a restart that cannot happen. The witness
+/// outranks even a "reachable" state, because a hung node leaves the last good
+/// answer on screen; without the witness the supervisor really is restarting,
+/// and the old line stands.
+#[test]
+fn header_is_honest_about_a_hung_node() {
+    use crate::gui::app_state::{AppState, DebugInfo};
+    use crate::gui::state as gs;
+    let mut st = AppState::new(gs::UiConfig::default());
+
+    // not hung, unreachable: the supervisor is really restarting it
+    st.node_hung = false;
+    st.debug_info = Some(DebugInfo {
+        reachable: false,
+        ..DebugInfo::default()
+    });
+    assert_eq!(
+        st.daemon_sync_display(),
+        (0.0, "The node stopped — restarting it…".to_string())
+    );
+
+    // hung while STILL "reachable" with the last good answer on screen — the
+    // shape a real hang has, since the answer engine serves the previous answer
+    st.node_hung = true;
+    st.debug_info = Some(DebugInfo {
+        reachable: true,
+        blocks: Some(2_220_935),
+        ..DebugInfo::default()
+    });
+    assert_eq!(st.daemon_sync_display(), (0.0, AppState::HUNG_LABEL.to_string()));
+    assert!(!AppState::HUNG_LABEL.to_lowercase().contains("restarting"), "the header must not promise a restart: {}", AppState::HUNG_LABEL);
+    assert!(!AppState::HUNG_LABEL.contains("2220935"), "a frozen height must not be shown as current");
+    // the status bar shows the same words
+    assert_eq!(st.status_blocks_label(), AppState::HUNG_LABEL);
+
+    // hung and unreachable: the same words, never the old promise
+    st.debug_info = Some(DebugInfo {
+        reachable: false,
+        ..DebugInfo::default()
+    });
+    assert_eq!(st.daemon_sync_display(), (0.0, AppState::HUNG_LABEL.to_string()));
+
+    // the witness clears the moment the node answers again
+    st.node_hung = false;
+    st.debug_info = Some(DebugInfo {
+        reachable: true,
+        blocks: Some(2_220_935),
+        ..DebugInfo::default()
+    });
+    assert_eq!(
+        st.daemon_sync_display(),
+        (1.0, "Up to date (block 2220935)".to_string())
+    );
+    st.debug_info = None;
+    assert_eq!(st.daemon_sync_display(), (0.0, "Starting your node…".to_string()));
+}

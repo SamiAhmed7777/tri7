@@ -2055,10 +2055,17 @@ impl eframe::App for Tri7App {
         // interacted, which is exactly the "GUI doesn't match the daemon"
         // class. A 2s repaint keeps every cadence live in the background.
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
-        // live-panel polling: staking + peers every ~5s (cheap loopback RPCs)
         self.poll_ticker = self.poll_ticker.wrapping_add(1);
-        if self.poll_ticker % 10 == 0 {
+        // live-panel polling: staking + peers — by TIME, at least 5 s apart
+        // (2026-11-28). This was `poll_ticker % 10 == 0`, once per ten frames,
+        // and the frame rate is whatever is animating: about 120 ms with the
+        // staking pulse on, so the node was asked for staking info roughly
+        // every 1.2 s. Every ask takes the same two node locks a chain rewind
+        // needs (tri7 item 54-E), so this is not only a wasted call.
+        if self.st.maybe_staking_poll() {
             self.st.staking_poll_action();
+        }
+        if self.st.maybe_peers_poll() {
             self.st.peers_poll_action();
         }
         // live sync progress: poll getsyncinfo every ~5s so the status bar
@@ -2123,6 +2130,9 @@ impl eframe::App for Tri7App {
             if let Some(n) = &self.node {
                 // read-only status snapshot (never blocks)
                 let snap = n.status();
+                // (2026-11-28) the hang witness, every frame: the header and
+                // the status bar read it through st.node_hung
+                self.st.node_hung = snap.hung;
                 if let Some(e) = snap.last_error {
                     if self
                         .st

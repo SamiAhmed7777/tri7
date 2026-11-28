@@ -1822,6 +1822,29 @@ const RESTART_BACKOFF_BASE: Duration = Duration::from_secs(5);
 /// a run that stays up (RPC answering) this long proves the failure was
 /// transient: the restart counter is reset so the cap never latches forever
 const HEALTHY_RESET_WINDOW: Duration = Duration::from_secs(600);
+
+/// (2026-11-28) how long a run that has ALREADY answered RPC this run may stay
+/// silent before it is called hung. Generous on purpose: a long reseed can tie
+/// up every RPC handler for over a minute, and "hung" said about a node that is
+/// merely busy would be a false message of its own. A real hang is permanent,
+/// so three minutes costs nothing.
+pub(crate) const RPC_HANG_CONFIRM: Duration = Duration::from_secs(180);
+
+/// (2026-11-28) pure decision for an ALIVE run: is it hung? The only fact it
+/// needs is how long ago the embedded node last COMPLETED a call
+/// (`rpc_client::last_answer_age`). None means no run is answering — the
+/// dispatcher is down, or the run has completed nothing since it started — and
+/// a run still on its first seed is starting, never hung, however long that
+/// takes. Some(age) younger than `confirm` is answering; at or past it is a
+/// hang: alive, and silent for the whole window. The two decisions partition
+/// the ages of a run that has answered, and neither holds for one that has not.
+pub(crate) fn answered_lately(last_answer_age: Option<Duration>, confirm: Duration) -> bool {
+    matches!(last_answer_age, Some(age) if age < confirm)
+}
+
+pub(crate) fn hang_confirmed(last_answer_age: Option<Duration>, confirm: Duration) -> bool {
+    matches!(last_answer_age, Some(age) if age >= confirm)
+}
 const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(120);
 
 /// 5s * 2^(n-1), capped at 120s (n = the restart number, 1-based)
@@ -1874,6 +1897,20 @@ pub struct EmbeddedNode {
     /// transient, so the restart counter is reset and the cap does not latch
     /// for the rest of the session
     healthy_since: Option<Instant>,
+    /// (2026-11-28) HANG WITNESS: true once the CURRENT run — alive — went
+    /// `hang_confirm` without completing a call, after having answered
+    /// earlier in the run. Published to the header, which must not promise a
+    /// restart that cannot happen: an in-process thread cannot be killed or
+    /// restarted in place.
+    run_hung: AtomicBool,
+    /// (2026-11-28) how long a run that has answered may go without completing
+    /// a call before it is called hung. Production RPC_HANG_CONFIRM; tests
+    /// shrink it, as with restart_backoff_base.
+    hang_confirm: Duration,
+    /// test hook ONLY: None in production, where the witness reads
+    /// rpc_client::last_answer_age. A test that stubs the node over a socket
+    /// has no in-process dispatcher, so it supplies the clock itself.
+    liveness_probe: Option<Arc<dyn Fn() -> Option<Duration> + Send + Sync>>,
     /// (TRI7-I2P-02) the CURRENT run was spawned with --no-listen because no
     /// i2p destination existed yet. The listener argv is fixed at spawn time,
     /// so a destination that first appears mid-run needs one fresh spawn with
@@ -1918,6 +1955,9 @@ impl EmbeddedNode {
             restart_backoff_until: None,
             restart_backoff_base: RESTART_BACKOFF_BASE,
             healthy_since: None,
+            run_hung: AtomicBool::new(false),
+            hang_confirm: RPC_HANG_CONFIRM,
+            liveness_probe: None,
             spawn_without_listen: false,
             inbound_respawn_done: false,
             respawn_for_inbound: false,
@@ -2312,16 +2352,28 @@ impl EmbeddedNode {
         // vouch for it.
         let our_run_finished =
             self.node_thread.is_some() && self.node_finished.load(Ordering::SeqCst);
-        if step1.is_ok() && !our_run_finished {
+        // (2026-11-28) LIVENESS IS A FRESH ANSWER, NOT AN `Ok`. step1 goes
+        // through the answer engine, whose rule is "show the previous answer
+        // rather than wait" — so for a HUNG node step1 is `Ok` forever. This
+        // arm then said "already answering" forever and the witness below was
+        // never reached. In embedded mode only a call the node COMPLETED
+        // within RPC_HANG_CONFIRM counts. Attach mode has no engine: its
+        // socket answer is real, and that path is unchanged.
+        let answering = step1.is_ok()
+            && (self.attach_external || answered_lately(self.last_answer_age(), self.hang_confirm));
+        if answering && !our_run_finished {
             // health witness: start the "has this run stayed up?" clock the
             // first time OUR thread answers RPC (a run that survives
             // HEALTHY_RESET_WINDOW resets the restart counter when it ends)
             if self.node_thread.is_some() && self.healthy_since.is_none() {
                 self.healthy_since = Some(Instant::now());
             }
+            self.run_hung.store(false, Ordering::SeqCst);
             return Ok(true);
         }
-        if let Ok(v) = &step1 {
+        // (only a finished run may get here with a real answer; a cached one
+        // from a hung run must not be reported as "our run has finished")
+        if let (Ok(v), true) = (&step1, our_run_finished) {
             // our_run_finished is the only way to get here with an answer
             let code = self.node_exit_code.load(Ordering::SeqCst);
             crate::node_embedded::embedded_log(&format!(
@@ -2346,10 +2398,32 @@ impl EmbeddedNode {
         }
         // 3. our in-process node thread finished? count a restart exactly
         //    like the old child path did
-        if let Some(_t) = &self.node_thread {
-            if !self.node_finished.load(Ordering::SeqCst) {
-                return Ok(true); // still starting
+        // (2026-11-28) ALIVE. This arm used to be `return Ok(true); // still
+        // starting` with no time bound, so a deadlocked run (the wallet-live /
+        // txpool lock-order inversion, tri7 item 54-E) was reported as running
+        // forever while the header promised "restarting it…". An in-process
+        // thread cannot be killed or restarted in place, so the honest outcome
+        // is a published HUNG flag that the header words truthfully. A run
+        // that has not completed a call yet is starting, never hung, however
+        // long its first seed takes (hang_confirmed).
+        // Computed before the `if let` below because this arm mutates self.
+        let run_alive = self.node_thread.is_some() && !self.node_finished.load(Ordering::SeqCst);
+        if run_alive {
+            let age = self.last_answer_age();
+            let hung = hang_confirmed(age, self.hang_confirm);
+            let was_hung = self.run_hung.swap(hung, Ordering::SeqCst);
+            if hung && !was_hung {
+                let secs = age.map(|a| a.as_secs()).unwrap_or(0);
+                crate::node_embedded::embedded_log(&format!(
+                    "supervisor: node run is alive but has not completed a call for {secs}s after \
+                     answering earlier this run — HUNG; an in-process run cannot be restarted in \
+                     place, the wallet must be reopened"
+                ));
+                refresh_diag(&diag_path, &format!("ensure: run_hung=1 silent_s={secs}s\n"));
             }
+            return Ok(true);
+        }
+        if let Some(_t) = &self.node_thread {
             let code = self.node_exit_code.load(Ordering::SeqCst);
             // (exit-attribution) the reaper must name what it reaped — eight
             // overnight restarts (2026-11-17, sami-pc) left no trace here
@@ -2768,6 +2842,22 @@ impl EmbeddedNode {
     /// restart counter (read by the GUI worker for its status snapshot)
     pub fn restarts(&self) -> u32 {
         self.restarts
+    }
+
+    /// (2026-11-28) HANG WITNESS for the status snapshot: true once the
+    /// CURRENT run stayed silent past RPC_HANG_CONFIRM after having answered.
+    pub fn run_hung(&self) -> bool {
+        self.run_hung.load(Ordering::SeqCst)
+    }
+
+    /// (2026-11-28) the hang witness's one fact: how long ago the embedded
+    /// node last completed a call (rpc_client::last_answer_age). A test that
+    /// stubs the node over a socket supplies its own clock instead.
+    fn last_answer_age(&self) -> Option<Duration> {
+        match &self.liveness_probe {
+            Some(probe) => probe(),
+            None => crate::gui::rpc_client::last_answer_age(),
+        }
     }
 
     pub fn running(&mut self) -> bool {
@@ -5440,6 +5530,82 @@ mod tests {
         // supervisor drop kills the tracked i2pd child
         drop(n);
     }
+
+    /// (2026-11-28) THE WIRING, end to end through ensure_running. Its step-1
+    /// probe can be `Ok` while the node is deadlocked — the answer engine shows
+    /// the previous answer — so "step1 is Ok" is not liveness. The first version
+    /// of the hang witness tested `step1.is_ok()` first and was dead code for
+    /// exactly that reason: this is the test it would have failed.
+    #[test]
+    fn a_live_run_that_stopped_answering_is_flagged_hung_until_it_answers_again() {
+        let _flag_guard = lock_shutdown_flags();
+        let port = free_dead_port();
+        let dir = crate::testsupport::test_dir("ns-hung-witness");
+        let wallet = dir.join("wallet.dat");
+        std::fs::write(&wallet, b"").unwrap();
+        let mut n = EmbeddedNode::new(port, dir.join("node.log"), false);
+        n.restart_backoff_base = Duration::ZERO;
+        n.hang_confirm = Duration::from_millis(300);
+        // the node's liveness clock, owned by the TEST: when did it last
+        // complete a call? (production reads this from the answer engine)
+        let last: Arc<std::sync::Mutex<Option<Instant>>> = Arc::new(std::sync::Mutex::new(None));
+        let clock = Arc::clone(&last);
+        n.liveness_probe = Some(Arc::new(move || {
+            clock.lock().unwrap_or_else(|p| p.into_inner()).map(|t| t.elapsed())
+        }));
+        // a canned loopback RPC surface that keeps answering for the whole
+        // test (30 s hang-safety net), like every other stub here
+        let release = Arc::new(AtomicBool::new(false));
+        let rel = Arc::clone(&release);
+        n.runner_override = Some(Arc::new(move |_argv: &[String]| {
+            // this runner is Fn (the supervisor may start it more than once):
+            // the flag is cloned per run, never moved out of the closure
+            let rel = Arc::clone(&rel);
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let safety_deadline = Instant::now() + Duration::from_secs(30);
+            answer_loop(listener, 7, move || {
+                rel.load(Ordering::SeqCst) || Instant::now() > safety_deadline
+            });
+            Ok(0)
+        }));
+        let set_last = |ago: Option<Duration>| {
+            *last.lock().unwrap_or_else(|p| p.into_inner()) = ago.map(|a| Instant::now() - a);
+        };
+
+        // 1. first boot: the node has completed nothing yet — starting, never hung
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(
+            wait_until(Duration::from_secs(5), || answering_tip(port) == Some(7)),
+            "the stub node never came up"
+        );
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(!n.run_hung(), "a run that has not answered yet is starting, not hung");
+
+        // 2. it answered 10 s ago and nothing since. step1 is STILL `Ok` (the
+        //    stub answers; in production the engine replays the old answer) and
+        //    the run is alive — the trap. It must be flagged.
+        set_last(Some(Duration::from_secs(10)));
+        assert_eq!(answering_tip(port), Some(7), "step1 is Ok while the node is silent");
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(n.run_hung(), "alive + silent past the window = hung, whatever step1 says");
+        assert_eq!(n.restarts(), 0, "a hung run is not restarted — nothing can restart it in place");
+        // and the flag is what the UI's snapshot carries
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(n.run_hung(), "hung is stable across ticks while the silence lasts");
+
+        // 3. a call completed just now: the flag lifts
+        set_last(Some(Duration::ZERO));
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(!n.run_hung(), "an answered run is not hung");
+
+        // 4. silent for 100 ms of a 300 ms window: still given the benefit of the doubt
+        set_last(Some(Duration::from_millis(100)));
+        let _ = n.ensure_running(&wallet, &dir, &[]).unwrap();
+        assert!(!n.run_hung(), "inside the confirm window a silent run is not hung");
+
+        release.store(true, Ordering::SeqCst);
+        stop_and_reset(&mut n);
+    }
 }
 
 // ===========================================================================
@@ -5454,6 +5620,10 @@ pub struct NodeStatusView {
     pub i2p: I2pStatus,
     pub running: bool,
     pub restarts: u32,
+    /// (2026-11-28) the current run is alive, had answered RPC, and has been
+    /// silent past RPC_HANG_CONFIRM. NOT "stopped": nothing can restart it in
+    /// place, so the header must not say that it is being restarted.
+    pub hung: bool,
     pub last_error: Option<String>,
 }
 
@@ -5485,6 +5655,7 @@ impl NodeWorker {
             i2p: I2pStatus::Unavailable,
             running: false,
             restarts: 0,
+            hung: false,
             last_error: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -5512,6 +5683,7 @@ impl NodeWorker {
                         s.tor = node.tor_status();
                         s.i2p = node.i2p_status();
                         s.running = up;
+                        s.hung = node.run_hung();
                         s.restarts = node.restarts();
                         // an error is shown until the next clean cycle, so a
                         // later recurrence of the same failure is shown again
@@ -5553,6 +5725,7 @@ impl NodeWorker {
                 i2p: I2pStatus::Unavailable,
                 running: false,
                 restarts: 0,
+                hung: false,
                 last_error: Some("node status unavailable".into()),
             },
         }

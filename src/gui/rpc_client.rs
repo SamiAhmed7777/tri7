@@ -264,6 +264,13 @@ struct AnswerCache {
 static ANSWERS: Mutex<Option<AnswerCache>> = Mutex::new(None);
 /// signalled whenever any call publishes an answer
 static CHANGED: Condvar = Condvar::new();
+/// (2026-11-28) when the embedded node last COMPLETED a call for the GUI.
+/// Set in `finish` only — the one place a call's result is ever published.
+/// The UI thread never waits for the node, so a caller can be shown the
+/// PREVIOUS answer while its worker is still inside the node: `rpc_call`
+/// returning `Ok` therefore says nothing about whether the node is answering.
+/// A deadlocked node answers `Ok` forever. This stamp is the liveness fact.
+static LAST_ANSWER_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Test seam: the engine keeps answers between calls by design, so a test
 /// that swaps the dispatcher must start from an empty cache.
@@ -272,7 +279,16 @@ pub(crate) fn reset_answers_for_tests() {
     if let Ok(mut g) = ANSWERS.lock() {
         *g = None;
     }
+    forget_last_answer();
     CHANGED.notify_all();
+}
+
+/// Test seam: pretend the last completion was `ago` in the past.
+#[cfg(test)]
+pub(crate) fn backdate_last_answer_for_tests(ago: Duration) {
+    if let Ok(mut g) = LAST_ANSWER_AT.lock() {
+        *g = Some(Instant::now() - ago);
+    }
 }
 
 /// Forget every finished answer: an ACTION may change what they describe.
@@ -284,6 +300,27 @@ fn forget_settled_answers() {
         }
     }
     CHANGED.notify_all();
+}
+
+/// (2026-11-28) how long ago the embedded node last completed a call.
+/// None means no run is answering: the dispatcher is not live, or nothing has
+/// completed since the liveness clock was last started over — a run that is
+/// still on its first seed. Read by the node supervisor as its hang witness.
+pub(crate) fn last_answer_age() -> Option<Duration> {
+    if !crate::node_embedded::local_rpc_ready() {
+        return None;
+    }
+    LAST_ANSWER_AT.lock().ok().and_then(|g| g.map(|t| t.elapsed()))
+}
+
+/// (2026-11-28) start the liveness clock over. Called when `rpc_call` finds
+/// no in-process dispatcher: a run ended and its successor has answered
+/// nothing yet. Without this a respawn's long first seed would be measured
+/// against the previous run's answers and called a hang.
+fn forget_last_answer() {
+    if let Ok(mut g) = LAST_ANSWER_AT.lock() {
+        *g = None;
+    }
 }
 
 /// What a caller sees when it starts waiting.
@@ -365,6 +402,11 @@ fn finish(key: &str, answer: RpcAnswer) {
         e.gen += 1;
         e.inflight = None;
         evict(c);
+    }
+    // (2026-11-28) a call completed — outside the ANSWERS lock, so the two
+    // locks are never held together
+    if let Ok(mut s) = LAST_ANSWER_AT.lock() {
+        *s = Some(Instant::now());
     }
     CHANGED.notify_all();
 }
@@ -578,6 +620,8 @@ pub fn rpc_call(addr: &str, method: &str, params: &[Value]) -> Result<Value, Str
     if crate::node_embedded::local_rpc_ready() {
         return embedded_call(method, params);
     }
+    // (2026-11-28) no in-process dispatcher: no embedded run is answering.
+    forget_last_answer();
     // loopback-only (TRI7-RPC-05): never send wallet verbs to a remote host
     if !is_loopback_addr(addr) {
         let msg = format!(
@@ -953,5 +997,96 @@ mod tests {
             cache_key("sendtoaddress", &[serde_json::json!(["one"])]),
             cache_key("sendtoaddress", &[serde_json::json!(["two"])])
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // (2026-11-28) liveness = a COMPLETED call. The UI thread never waits, so
+    // rpc_call returning Ok says nothing about whether the node is answering.
+    // -----------------------------------------------------------------------
+
+    /// A run counts as answering only while completions keep coming; a run
+    /// that has completed nothing yet (its first seed) is never "answering".
+    #[test]
+    fn only_a_completed_call_counts_as_the_node_answering() {
+        let _serial = serial();
+        crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
+        // dispatcher up, nothing completed yet
+        assert_eq!(last_answer_age(), None);
+        assert!(!crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
+        let got = cached_call(cache_key("getblockcount", &[]), false, slow(7, 30));
+        assert_eq!(val(&got), 7);
+        // Read the liveness facts WHILE this dispatcher is installed. With no
+        // dispatcher no run is answering and `last_answer_age()` is rightly
+        // None, so reading it after `clear_local_rpc()` passed only when an
+        // unrelated parallel test happened to hold the global dispatcher.
+        let age = last_answer_age().expect("a completed call is recorded");
+        assert!(age < Duration::from_secs(30), "{age:?}");
+        assert!(crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
+        crate::node_embedded::clear_local_rpc();
+    }
+
+    /// The hang this exists for: a call that went into the node and never came
+    /// back. The caller is shown the previous answer, so rpc_call is `Ok` —
+    /// and the liveness stamp must not move, or a deadlocked node looks alive.
+    #[test]
+    fn a_call_that_never_comes_back_does_not_count_as_answering() {
+        let _serial = serial();
+        // a run is live for the whole test: with no dispatcher no run is
+        // answering and last_answer_age is rightly None (see the test below)
+        crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
+        let key = cache_key("getblockcount", &[]);
+        assert_eq!(val(&cached_call(key.clone(), false, slow(7, 30))), 7);
+        // the last completion was four minutes ago
+        backdate_last_answer_for_tests(Duration::from_secs(240));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        // a Run must be Send + Sync and a Receiver is not Sync: it rides in a Mutex
+        let rx = std::sync::Mutex::new(rx);
+        let stuck: Run = Arc::new(move || {
+            let _ = rx.lock().unwrap_or_else(|p| p.into_inner()).recv(); // until released
+            Ok(serde_json::json!(9))
+        });
+        // past READ_COALESCE, so this call really starts a flight
+        std::thread::sleep(READ_COALESCE + Duration::from_millis(60));
+        let shown = cached_call(key.clone(), false, stuck);
+        assert_eq!(val(&shown), 7, "the caller is shown the previous answer");
+        assert!(shown.is_ok(), "and rpc_call reports Ok — while the node has not answered");
+        std::thread::sleep(Duration::from_millis(200));
+        let age = last_answer_age().expect("the earlier completion still counts");
+        assert!(
+            age >= Duration::from_secs(239),
+            "the stamp moved on a call that never completed: {age:?}"
+        );
+        assert!(!crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
+        // release it: the call completes and the node answers again
+        tx.send(()).expect("release the stuck worker");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !stored(&key).map(|a| val(&a) == 9).unwrap_or(false) {
+            assert!(Instant::now() < deadline, "the released worker never published");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
+        crate::node_embedded::clear_local_rpc();
+    }
+
+    /// The socket path means no in-process run is answering: it starts the
+    /// liveness clock over, so a respawn's first seed is never measured
+    /// against the previous run's answers.
+    #[test]
+    fn a_down_dispatcher_starts_the_liveness_clock_over() {
+        let _serial = serial();
+        crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
+        let _ = cached_call(cache_key("getblockcount", &[]), false, slow(7, 30));
+        assert!(last_answer_age().is_some());
+        crate::node_embedded::clear_local_rpc();
+        // nothing listens on 127.0.0.1:1 — refused at once
+        assert!(rpc_call("127.0.0.1:1", "getblockcount", &[]).is_err());
+        crate::node_embedded::set_local_rpc(Box::new(|_m, _p| Ok(serde_json::json!(7))));
+        assert_eq!(
+            last_answer_age(),
+            None,
+            "the previous run's answer must not vouch for this one"
+        );
+        assert!(!crate::gui::node_supervisor::answered_lately(last_answer_age(), Duration::from_secs(180)));
+        crate::node_embedded::clear_local_rpc();
     }
 }
