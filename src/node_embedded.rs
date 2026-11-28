@@ -9474,6 +9474,44 @@ impl WalletLive {
         self.undo_from = replay_tip.saturating_add(1);
     }
 
+    /// (2026-11-28 SEED CATCH-UP) Apply the bodies that landed WHILE the
+    /// boot seed was replaying. The seed walks h0..seed_tip for ~70 s at
+    /// full history with NO view published, so nothing applies the blocks
+    /// that land in the meantime: own-mint applies skip on
+    /// "live_view_not_ready", and the follow loop never applies peer bodies
+    /// to this view. A coin our own pre-restart mints spent inside that gap
+    /// therefore stayed "live" for the whole run of a solo staker —
+    /// sami-pc 2026-11-27: seeded to h2220810 with bodies through h2220813
+    /// already landing; two coinstake inputs spent in h2220811/812 were
+    /// staked AGAIN at 07:06Z and 07:44Z, and the unguarded build minted
+    /// both — a private chain with two double-spends that every guarded
+    /// peer refused.
+    ///
+    /// Walks `seeded_tip + 1..`, applies every body that LINKS onto the one
+    /// before it, and stops at the first gap or seam. A body that does not
+    /// link is another branch's block at that height: it is never applied
+    /// (it would spend coins of a chain we are not on). Returns (last height
+    /// the view covers, blocks applied).
+    fn catch_up_after_seed(&mut self, lookup: &dyn Fn(u64) -> Option<Block>, seeded_tip: u64) -> (u64, usize) {
+        let Some(anchor) = lookup(seeded_tip) else {
+            // nothing to link onto: the view stays exactly as seeded
+            return (seeded_tip, 0);
+        };
+        let mut prev_hash = anchor.hash();
+        let mut height = seeded_tip;
+        let mut applied = 0usize;
+        while let Some(block) = lookup(height + 1) {
+            if block.prev_hash != prev_hash {
+                break;
+            }
+            self.apply_block(&block, height + 1);
+            prev_hash = block.hash();
+            height += 1;
+            applied += 1;
+        }
+        (height, applied)
+    }
+
     fn key_by_pubkey(&self) -> HashMap<Vec<u8>, &tri7_core::wallet::WalletKey> {
         self.wallet.keys.iter().map(|k| (k.pubkey.clone(), k)).collect()
     }
@@ -16579,6 +16617,33 @@ pub fn main_args(argv: &[String]) -> i32 {
                 let keys = start_keys.clone();
                 match WalletLive::seed(&store2, keys, base, seed_tip) {
                     Ok(mut w) => {
+                        // (2026-11-28 SEED CATCH-UP) the replay above took ~70 s
+                        // at full history and bodies kept landing: apply the
+                        // linked ones now, BEFORE the view is published, so a
+                        // coin our own earlier mints spent in that gap cannot
+                        // be staked again (see WalletLive::catch_up_after_seed).
+                        // Bounded loop: each pass only walks what is already
+                        // stored. 8 is only an upper bound — bodies keep landing
+                        // while a pass runs, so a later pass can find more; on a
+                        // quiet store the FIRST pass applies what is there and
+                        // the second applies nothing and ends it.
+                        let lookup = |h: u64| store2.block_by_height(h).ok().flatten().map(|hit| hit.block);
+                        // a store that has walked back under the seed tip is its
+                        // own condition: say so, instead of reporting "caught up 0"
+                        if store2.block_by_height(seed_tip).ok().flatten().is_none() {
+                            log(&format!(
+                                "seed catch-up: no anchor body at h{seed_tip} — the view stays exactly as seeded"
+                            ));
+                        }
+                        let (mut view_tip, mut caught_up) = (seed_tip, 0usize);
+                        for _ in 0..8 {
+                            let (tip_now, n) = w.catch_up_after_seed(&lookup, view_tip);
+                            view_tip = tip_now;
+                            caught_up += n;
+                            if n == 0 {
+                                break;
+                            }
+                        }
                         if locked_at_start {
                             w.locked = true;
                         }
@@ -16594,19 +16659,32 @@ pub fn main_args(argv: &[String]) -> i32 {
                         // (fused18) LIVE BRIDGE initial publish — see the
                         // static's docs at the top of this file.
                         publish_live_bridge(LiveBridge {
-                            tip: seed_tip as u64,
+                            tip: view_tip as u64,
                             balance_sats: bal as u64,
                             owned: owned_n,
                             peers: 0,
                             locked: locked_at_start,
                         });
+                        // the caught-up range is seed_tip + 1..view_tip exactly:
+                        // the walk is contiguous by construction (it stops at the
+                        // first gap or at a body from another branch)
                         log(&format!(
-                            "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats{}",
+                            "wallet live view ready: window h{}..h{} — {} outputs ({} owned) balance {} sats{}{}",
                             base,
-                            seed_tip,
+                            view_tip,
                             funded_n,
                             owned_n,
                             bal,
+                            if caught_up > 0 {
+                                format!(
+                                    " — caught up {} block(s) that landed during the seed (h{}..h{})",
+                                    caught_up,
+                                    seed_tip + 1,
+                                    view_tip
+                                )
+                            } else {
+                                String::new()
+                            },
                             if locked_at_start {
                                 format!(" [LOCKED: {} keys, public only]", nkeys)
                             } else {
@@ -27160,6 +27238,117 @@ addnode=host:notaport
         let (cands, _, _, _) = wl.candidates();
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].txid, fund_hash);
+    }
+
+    /// (2026-11-28 SEED CATCH-UP) THE SHAPE THAT FORKED sami-pc: the view is
+    /// seeded to h101, and our own earlier mints at h102/h103 — which spent
+    /// coins the seed still lists — had already landed while the replay ran.
+    /// Without the catch-up those coins stay "live" and get staked again.
+    #[test]
+    fn seed_catch_up_removes_coins_spent_while_the_seed_replayed() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[55u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+
+        let fund = fund_block([7u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        // the seed's replay of h0..h101 credits the funded coin, and the
+        // seeded map is the undo baseline (what WalletLive::seed leaves)
+        wl.apply_block(&fund, 101);
+        wl.reset_undo_after_reseed(101);
+
+        // our pre-restart mints: h102 spends the funded coin, h103 spends
+        // h102's output — both landed during the replay
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_400, script.clone());
+        let mint_hash = mint.vtx[1].hash();
+        let mint2 = stake_block(mint.hash(), 1_700_000_300, (mint_hash, 0), 3_000_800, script.clone());
+        let store = |h: u64| match h {
+            101 => Some(fund.clone()),
+            102 => Some(mint.clone()),
+            103 => Some(mint2.clone()),
+            _ => None,
+        };
+        // the view as the old code published it: the spent coin still stakable
+        let live_outpoints = |w: &WalletLive| -> Vec<(Hash, u32)> {
+            let (c, _, _, _) = w.candidates();
+            c.iter().map(|c| (c.txid, c.n)).collect()
+        };
+        assert!(live_outpoints(&wl).contains(&(fund_hash, 0)));
+        assert_eq!(wl.balance(), 3_000_000);
+
+        let (tip, applied) = wl.catch_up_after_seed(&store, 101);
+        assert_eq!((tip, applied), (103, 2));
+        assert_eq!(live_outpoints(&wl), vec![(mint2.vtx[1].hash(), 0)]);
+        assert_eq!(wl.spent.get(&(fund_hash, 0)), Some(&102));
+        assert_eq!(wl.spent.get(&(mint_hash, 0)), Some(&103));
+        assert_eq!(wl.balance(), 3_000_800, "only the newest coinstake output is live");
+
+        // the caught-up blocks are journaled like any applied block: a fork
+        // that abandons h103 can still un-apply it incrementally
+        let stats = wl.unwind_blocks(&[(103, mint2.hash())]).expect("caught-up block is in the journal");
+        assert_eq!(stats.blocks, 1);
+        assert_eq!(live_outpoints(&wl), vec![(mint_hash, 0)]);
+        assert_eq!(wl.balance(), 3_000_400);
+    }
+
+    /// (2026-11-28 SEED CATCH-UP) A body at the next height that does NOT
+    /// link onto the seed's tip is another branch's block — it spends coins
+    /// of a chain we are not on. Never applied, and the walk stops there.
+    #[test]
+    fn seed_catch_up_never_applies_a_block_that_does_not_link() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[56u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([7u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        wl.reset_undo_after_reseed(101);
+
+        // h102 on ANOTHER branch (different parent) spending the same coin,
+        // with a properly linked h103 after it
+        let rival = stake_block([9u8; 32], 1_700_000_200, (fund_hash, 0), 9_000_000, script.clone());
+        let rival_hash = rival.vtx[1].hash();
+        let rival2 = stake_block(rival.hash(), 1_700_000_300, (rival_hash, 0), 9_000_400, script.clone());
+        let store = move |h: u64| match h {
+            101 => Some(fund.clone()),
+            102 => Some(rival.clone()),
+            103 => Some(rival2.clone()),
+            _ => None,
+        };
+        let (tip, applied) = wl.catch_up_after_seed(&store, 101);
+        assert_eq!((tip, applied), (101, 0));
+        assert!(wl.live.contains_key(&(fund_hash, 0)), "the funded coin is untouched");
+        assert!(!wl.spent.contains_key(&(fund_hash, 0)));
+        assert!(!wl.live.contains_key(&(rival_hash, 0)), "no coin of the other branch");
+        assert_eq!(wl.balance(), 3_000_000);
+    }
+
+    /// (2026-11-28 SEED CATCH-UP) No body at the seeded tip (store walked
+    /// back under it meanwhile): nothing to link onto, the view stays exactly
+    /// as the seed built it.
+    #[test]
+    fn seed_catch_up_without_an_anchor_leaves_the_view_as_seeded() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let sk = SecretKey::from_slice(&[57u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::signing_only(), &sk);
+        let script = tri7_core::spend::script_pubkey_p2pkh(&pk.serialize());
+        let mut wl = wallet_live_with(&[pk.serialize().to_vec()], vec![]);
+        let fund = fund_block([7u8; 32], 1_700_000_100, 3_000_000, script.clone());
+        let fund_hash = fund.vtx[0].hash();
+        wl.apply_block(&fund, 101);
+        wl.reset_undo_after_reseed(101);
+        // the store has h102+ but no longer answers h101
+        let mint = stake_block(fund.hash(), 1_700_000_200, (fund_hash, 0), 3_000_400, script.clone());
+        let store = move |h: u64| if h == 102 { Some(mint.clone()) } else { None };
+        let (tip, applied) = wl.catch_up_after_seed(&store, 101);
+        assert_eq!((tip, applied), (101, 0));
+        assert!(wl.live.contains_key(&(fund_hash, 0)));
+        assert_eq!(wl.balance(), 3_000_000);
+        assert!(wl.undo.is_empty(), "nothing was applied, so nothing was journaled");
     }
 
     /// (item 54) FAIL TOWARD THE RESEED: no journal coverage = refusal, never
