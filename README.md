@@ -5,6 +5,8 @@
 > (clone -> install Rust -> one build command). Everything needed is in this
 > repository.
 
+**Project home:** <https://cryptographic-triangles.org>
+
 A from-scratch Rust reimplementation of the Triangles full-node client:
 bit-exact chain replay, PoS staking, native JSON-RPC, P2P (clearnet/Tor/I2P),
 secure messaging (smsg), and a desktop GUI wallet carrying the original
